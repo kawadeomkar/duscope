@@ -1,0 +1,5 @@
+-- duscope index schema, index_version 2: the DDL of the SQLite file each scan writes.
+--
+-- Empty until P2-IDX-01 adds the tables and their indexes; docs/index-format.md
+-- describes every column. A new nullable column is a minor version, and a change
+-- of meaning is a major one.

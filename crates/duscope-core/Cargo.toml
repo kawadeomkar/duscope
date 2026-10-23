@@ -11,5 +11,10 @@ homepage.workspace = true
 [dependencies]
 duscope-walk.workspace = true
 
+[dev-dependencies]
+cargo_metadata.workspace = true
+schemars.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true

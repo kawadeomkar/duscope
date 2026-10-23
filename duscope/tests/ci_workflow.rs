@@ -35,6 +35,7 @@ const REQUIRED_CHECKS: &[&str] = &[
     "msrv (stable)",
     "deny",
     "docs",
+    "schemas",
     "size (macos-26)",
     "size (ubuntu-24.04)",
     "build-time",

@@ -25,7 +25,11 @@ mktree = { path = "tests/fixtures/mktree" }
 # Dev-dependencies. 0.x crates are pinned with `=`; crates at 1.0 or later take
 # the caret range with Cargo.lock as the real pin.
 cargo_metadata = "=0.23.1"
+# Default features off: they fetch remote `$ref`s over HTTP (reqwest, rustls).
+jsonschema = { version = "=0.60.0", default-features = false }
+schemars = { version = "1.2.3", default-features = false, features = ["derive"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 sha2 = { version = "=0.11.1", default-features = false }
 tempfile = "3.27.0"
 toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }

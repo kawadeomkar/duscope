@@ -29,14 +29,18 @@ yanked = "deny"
 ignore = []
 
 [licenses]
+# MIT-0 and Zlib since DEV-2: jsonschema's tree needs them (borrow-or-share is
+# MIT-0, foldhash is Zlib).
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "BSD-3-Clause",
     "ISC",
     "OFL-1.1",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    "Zlib",
 ]
 # This list is the policy, not an inventory, so a licence no crate uses yet is fine.
 unused-allowed-license = "allow"

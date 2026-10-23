@@ -11,8 +11,8 @@
 #
 # Required checks (branch protection on main, applied from docs/github-settings.md):
 # fmt; clippy and test on the three runners; the test locale leg on the three
-# runners; msrv (pinned) and msrv (stable); deny; docs; size on macos-26 and
-# ubuntu-24.04; build-time; repro; changelog. Not required: intel-mac (best
+# runners; msrv (pinned) and msrv (stable); deny; docs; schemas; size on macos-26
+# and ubuntu-24.04; build-time; repro; changelog. Not required: intel-mac (best
 # effort) and size-comment (it only posts the size).
 
 name: CI
@@ -258,6 +258,35 @@ jobs:
       # Added by later packages:
       # - name: duscope man renders                  # P1: `duscope man | mandoc -T lint` is clean
       # - name: Envelope fixtures validate          # P2: `duscope schema --envelope <verb>` against JSON Schema 2020-12
+
+  schemas:
+    name: schemas
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --profile minimal && rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check that Cargo.lock is current
+        run: cargo fetch --locked
+      # The drift test is a unit test of duscope-core: the envelope types derive
+      # schemars::JsonSchema only under cfg(test), which keeps schemars out of the
+      # binary, and cfg(test) does not reach the library an integration test links.
+      - name: The files under schemas/ equal the schemas derived from their types (x-* stripped)
+        run: |
+          count=$(cargo test --locked -p duscope-core --lib -- --list schema_drift:: | grep -c ': test$' || true)
+          (( count > 0 )) || { echo "::error title=schemas::duscope-core has no schema_drift:: unit tests"; exit 1; }
+          cargo test --locked -p duscope-core --lib -- schema_drift::
+      - name: schemars and jsonschema stay dev-dependencies
+        run: cargo test --locked -p duscope-core --test schema_drift
+      - name: Every file passes JSON Schema 2020-12, with valid property names and $id
+        run: cargo test --locked -p duscope --test schemas
+      # Added by P2-CLI-01: every historical envelope golden validates against the current schema.
 
   size:
     name: size (${{ matrix.os }})

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "placeholder.schema.json",
+  "title": "PlaceholderEnvelope",
+  "description": "A stand-in for the envelope types, for the schema drift test until phase 2.",
+  "type": "object",
+  "properties": {
+    "ok": {
+      "description": "Whether the command succeeded.",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "description": "The version of the envelope schema.",
+      "type": "string"
+    },
+    "entries": {
+      "description": "The rows.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PlaceholderEntry"
+      }
+    },
+    "returned_count": {
+      "description": "The number of rows in `entries`.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "next_cursor": {
+      "description": "Where the next page starts, or null on the last page.",
+      "type": ["string", "null"]
+    }
+  },
+  "required": ["ok", "schema_version", "entries", "returned_count", "next_cursor"],
+  "$defs": {
+    "PlaceholderEntry": {
+      "description": "One row of the placeholder envelope.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "The absolute path of the entry.",
+          "type": "string"
+        },
+        "allocated_bytes": {
+          "description": "The bytes the entry occupies on disk.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": ["path", "allocated_bytes"]
+    }
+  }
+}
