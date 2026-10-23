@@ -147,8 +147,9 @@ under [Auditing](#auditing) read it again.
 
 ## Owned by other packages
 
-- [ ] GitHub Pages served from the `gh-pages` branch, for the apt repository:
-  P0-REPO-03.
+- [x] GitHub Pages served from the `gh-pages` branch, for the apt repository:
+  P0-REPO-03. Served at https://kawadeomkar.github.io/duscope/ with HTTPS
+  enforced; the branch holds a placeholder page until apt.yml publishes `/apt`.
 - [ ] Protection for `v*` tags, so that only the author can push a release tag:
   P0-CI-02. GitHub now does this with a tag ruleset.
 
