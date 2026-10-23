@@ -128,9 +128,9 @@ fixtures *args:
 golden *args:
     @echo "golden: not yet implemented (P1-TEST-01)" >&2; exit 1
 
-# Run the hyperfine harness on the seeded trees (P0-BENCH-01)
+# Run the hyperfine harness on the seeded trees (bench/README.md); no arguments: T1, du and diskus, warm
 bench *args:
-    @echo "bench: not yet implemented (P0-BENCH-01)" >&2; exit 1
+    bench/run.sh {{args}}
 
 # Build the .deb packages (P1-PKG-01)
 deb *args:
