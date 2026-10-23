@@ -446,60 +446,11 @@ jobs:
           labelled=$(jq -r '[.labels[].name] | any(. == "no-changelog")' <<<"$pr")
           mapfile -t fragments < <(git diff --name-only --diff-filter=AMR HEAD^1 HEAD -- 'changelog.d/*.md' | grep -vx 'changelog.d/README.md' || true)
 
-          # Every fragment the pull request adds or changes must parse: the
-          # keep-a-changelog sections as '### <Section>' headings, each with '- ' items.
+          # Every fragment the pull request adds or changes must parse. The rule
+          # lives in scripts/changelog.py, the parser release.yml assembles with.
           status=0
           if (( ${#fragments[@]} )); then
-            python3 - "${fragments[@]}" <<'PY' || status=1
-          import re
-          import sys
-
-          SECTIONS = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
-          failed = set()
-
-          def error(path, line, message):
-              failed.add(path)
-              print(f"::error file={path},line={line}::{message}")
-
-          for path in sys.argv[1:]:
-              try:
-                  with open(path, encoding="utf-8") as f:
-                      text = f.read()
-              except (OSError, UnicodeDecodeError) as e:
-                  error(path, 1, f"cannot read the fragment as UTF-8: {e}")
-                  continue
-              section, items = None, {}
-              for n, line in enumerate(text.splitlines(), 1):
-                  if not line.strip():
-                      continue
-                  heading = re.fullmatch(r"### (.+?)\s*", line)
-                  if heading:
-                      section = heading.group(1)
-                      if section not in SECTIONS:
-                          error(path, n, f"unknown section '### {section}': use one of {', '.join(SECTIONS)}")
-                      elif section in items:
-                          error(path, n, f"section '### {section}' appears twice")
-                      items[section] = 0
-                  elif line.startswith("#"):
-                      error(path, n, "only '### <Section>' headings belong in a fragment; release.yml writes the version heading")
-                  elif section is None:
-                      error(path, n, "text before the first '### <Section>' heading")
-                  elif re.match(r"- \S", line):
-                      items[section] += 1
-                  elif re.match(r"\s+\S", line) and items[section]:
-                      pass  # continuation of the item above
-                  else:
-                      error(path, n, "expected a '- ' list item or an indented continuation line")
-              if not items:
-                  error(path, 1, f"no '### <Section>' heading: use one of {', '.join(SECTIONS)}")
-              for name, count in items.items():
-                  if count == 0:
-                      error(path, 1, f"section '### {name}' has no '- ' items")
-              if path not in failed:
-                  print(f"{path}: parses")
-
-          sys.exit(1 if failed else 0)
-          PY
+            python3 scripts/changelog.py check "${fragments[@]}" || status=1
           fi
 
           if [[ $labelled == true ]]; then
