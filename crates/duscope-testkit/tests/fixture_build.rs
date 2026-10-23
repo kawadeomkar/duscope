@@ -80,9 +80,11 @@ fn build_first() -> First {
     }
 }
 
-/// `find <tree> -printf ...` output (raw bytes: Linux names need not be
-/// UTF-8) when the system has GNU find (`find` on Linux, `gfind` on macOS
-/// with findutils), else `None`.
+/// `find <tree> -printf ...` output with its lines sorted bytewise (raw bytes:
+/// Linux names need not be UTF-8) when the system has GNU find (`find` on
+/// Linux, `gfind` on macOS with findutils), else `None`. find lists in readdir
+/// order, which belongs to the filesystem, not to the generator: two builds of
+/// the 100,000-entry directory have listed in different orders on ext4.
 fn gnu_find(env: &TestEnv, tree: &Path) -> Option<Vec<u8>> {
     for program in ["find", "gfind"] {
         let gnu = env
@@ -105,7 +107,15 @@ fn gnu_find(env: &TestEnv, tree: &Path) -> Option<Vec<u8>> {
                 "{program}: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
-            return Some(out.stdout);
+            let mut lines: Vec<&[u8]> = out
+                .stdout
+                .split(|&c| c == b'\n')
+                .filter(|line| !line.is_empty())
+                .collect();
+            lines.sort_unstable();
+            let mut sorted = lines.join(&b'\n');
+            sorted.push(b'\n');
+            return Some(sorted);
         }
     }
     None
@@ -210,7 +220,7 @@ fn p0_test_01_rebuild_lists_identically() {
                     panic!("find -printf lists the second build differently: {diff}");
                 }
                 eprintln!(
-                    "p0_test_01: find -printf listings identical ({} lines, in readdir order)",
+                    "p0_test_01: find -printf listings identical ({} lines, sorted)",
                     a.split(|&c| c == b'\n').count() - 1
                 );
             }
