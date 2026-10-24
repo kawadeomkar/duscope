@@ -20,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The scale of every tree these tests build.
 const SCALE: &str = "0.0002";
@@ -125,6 +125,11 @@ impl Scratch {
     /// `bench/run.sh <args>` with the scratch directories and the stub, the
     /// stub logging its runs to `stub.log`.
     fn harness(&self, args: &[&str]) -> Output {
+        self.harness_with(args, &[])
+    }
+
+    /// [`Scratch::harness`] with these environment variables set.
+    fn harness_with(&self, args: &[&str], vars: &[(&str, &str)]) -> Output {
         let python = python();
         let stub = format!(
             "{} {}",
@@ -144,6 +149,7 @@ impl Scratch {
         if !matches!(args.first(), Some(&"tools")) {
             command.arg("--trees-dir").arg(self.join("trees"));
         }
+        command.envs(vars.iter().copied());
         command.output().unwrap_or_else(|e| {
             panic!("cannot run bench/run.sh: {e}; set PYTHON to a Python 3.9 or later interpreter")
         })
@@ -177,6 +183,11 @@ fn succeeded(output: &Output, what: &str) -> String {
 
 /// A run of du paired with `find` on the scaled T1.
 fn small_run(scratch: &Scratch, extra: &[&str]) -> PathBuf {
+    small_run_with(scratch, extra, &[])
+}
+
+/// [`small_run`] with these environment variables set.
+fn small_run_with(scratch: &Scratch, extra: &[&str], vars: &[(&str, &str)]) -> PathBuf {
     let mut args = vec![
         "--trees",
         "T1",
@@ -192,7 +203,7 @@ fn small_run(scratch: &Scratch, extra: &[&str]) -> PathBuf {
         "1",
     ];
     args.extend_from_slice(extra);
-    let stdout = succeeded(&scratch.harness(&args), "bench/run.sh");
+    let stdout = succeeded(&scratch.harness_with(&args, vars), "bench/run.sh");
     let path = PathBuf::from(stdout.trim());
     assert!(
         path.is_file(),
@@ -573,6 +584,99 @@ fn p0_bench_01_trees_are_deterministic() {
     let output = first.harness(&["verify", "--trees", "T2", "--scale", SCALE]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("DIFFERS FROM its stamp"));
+
+    // A build (as a run does first) does not reuse that tree under its old
+    // digest: the walk disagrees with the stamp, so it is rebuilt.
+    fs::write(tree.join("added-after-the-build"), b"x").unwrap();
+    let output = first.harness(&["build", "--trees", "T2", "--scale", SCALE, "--jobs", "1"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("changed since it was built"), "{stderr}");
+    assert!(!tree.join("added-after-the-build").exists());
+    succeeded(
+        &first.harness(&["verify", "--trees", "T2", "--scale", SCALE]),
+        "verify after the rebuild",
+    );
+}
+
+#[test]
+fn p0_bench_01_trees_dir_must_be_the_harness_own() {
+    let scratch = Scratch::new("trees-dir");
+    let precious = scratch
+        .join("trees")
+        .join(format!("T3-x{SCALE}"))
+        .join("precious");
+    fs::create_dir_all(precious.parent().unwrap()).unwrap();
+    fs::write(&precious, b"not the harness's").unwrap();
+    let output = scratch.harness(&["build", "--trees", "T3", "--scale", SCALE]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("is not a directory of benchmark trees"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(&precious).unwrap(), b"not the harness's");
+}
+
+/// Seconds since the Unix epoch of an RFC 3339 UTC time, `YYYY-MM-DDTHH:MM:SSZ`.
+fn epoch_seconds(time: &str) -> i64 {
+    let field = |range: std::ops::Range<usize>| -> i64 { time[range].parse().unwrap() };
+    let (y, m, d) = (field(0..4), field(5..7), field(8..10));
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    days * 86_400 + field(11..13) * 3_600 + field(14..16) * 60 + field(17..19)
+}
+
+#[test]
+fn p0_bench_01_result_is_named_by_the_utc_date() {
+    assert_eq!(epoch_seconds("2026-10-24T22:30:05Z"), 1_792_881_005);
+    // Fourteen hours ahead of UTC: a local time written with a `Z` would be off
+    // by that much, and so would a file named by the local date.
+    let scratch = Scratch::new("utc");
+    let result = small_run_with(&scratch, &[], &[("TZ", "Pacific/Kiritimati")]);
+    let (_, values) = flatten(&result);
+    let started = value(&values, "started_at").trim_matches('"');
+    assert!(started.ends_with('Z'), "{started}");
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    assert!(
+        (now - epoch_seconds(started)).abs() < 600,
+        "started_at {started} is not the UTC time of the run"
+    );
+    let date = value(&values, "date").trim_matches('"');
+    assert_eq!(date, &started[..10]);
+    assert!(result.ends_with(format!("{date}-{}.json", expected_platform())));
+}
+
+#[test]
+fn p0_bench_01_cold_mode_refuses_an_empty_cache_drop() {
+    let scratch = Scratch::new("cold-empty");
+    let output = scratch.harness(&[
+        "--trees",
+        "T1",
+        "--scale",
+        SCALE,
+        "--competitors",
+        "none",
+        "--mode",
+        "cold",
+        "--cold-cmd",
+        "",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("--cold-cmd is empty"), "{stderr}");
+    assert!(scratch.stub_log().is_empty(), "{:?}", scratch.stub_log());
+    assert!(!scratch.join("results").exists());
 }
 
 #[test]

@@ -19,6 +19,7 @@ import os
 import platform as platform_module
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -100,7 +101,7 @@ def parser() -> argparse.ArgumentParser:
     _tool_options(run, "diskus")
     run.add_argument("--command", action="append", metavar="NAME=CMD", help="also pair this command line with the subject; {tree} is the tree (repeatable)")
     run.add_argument("--mode", choices=("warm", "cold", "both"), default="warm", help="warm caches, cold caches, or both (default warm)")
-    run.add_argument("--cold-cmd", default=os.path.join(BENCH, "drop-caches.sh"), help="the command that drops the caches before each cold run (default bench/drop-caches.sh)")
+    run.add_argument("--cold-cmd", default=shlex.quote(os.path.join(BENCH, "drop-caches.sh")), help="the command that drops the caches before each cold run (default bench/drop-caches.sh)")
     run.add_argument("--runs", type=int, default=10, help="measured runs of each tool in each pair (default 10)")
     run.add_argument("--warmup", type=int, default=2, help="warm-up runs of each tool at the start of each warm pair (default 2)")
     run.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
@@ -325,6 +326,9 @@ def cmd_run(args) -> int:
         raise UsageError(f"--command names clash with pinned tools: {', '.join(clash)}")
     hyperfine = shlex.split(args.hyperfine)
 
+    if "cold" in modes and not args.cold_cmd.strip():
+        raise UsageError("--cold-cmd is empty: a cold run needs the command that drops the caches before every run")
+
     started = time.gmtime()
     hyperfine_version = measure.hyperfine_version(hyperfine)
     if "cold" in modes:
@@ -345,55 +349,59 @@ def cmd_run(args) -> int:
 
     stamps = [trees.build(t, args.trees_dir, args.jobs, log=log) for t in tree_list]
 
-    os.makedirs(os.path.join(BENCH, ".runs"), exist_ok=True)
-    raw_dir = tempfile.mkdtemp(prefix=time.strftime("%Y%m%dT%H%M%SZ-", started), dir=os.path.join(BENCH, ".runs"))
-    failures: Dict[str, str] = {}
-    results: List[Dict[str, object]] = []
-    measured = set()
-    for t in tree_list:
-        path = trees.tree_root(t, args.trees_dir)
-        measure.smoke(subject, path)
-        ready = []
-        for r in others:
-            if r.status != "ready" or r.tool.name in failures:
-                continue
-            try:
-                measure.smoke(r, path)
-                ready.append(r)
-            except measure.MeasureError as e:
-                failures[r.tool.name] = str(e)
-                log(f"{r.tool.name}: failed on {t.name}: {e}")
-        for mode in modes:
-            session = measure.Session(hyperfine, t.name, path, mode, args.runs, args.warmup, args.cold_cmd, raw_dir, log)
-            subject_command = subject.command()
-            if not ready:
-                results.append(measure.row(t.name, mode, subject.tool.name, subject_command, session.alone(subject)))
-                measured.add(subject.tool.name)
-                continue
-            subject_runs: List[measure.Run] = []
-            rows = []
-            for r in ready:
-                if r.tool.name in failures:
+    # hyperfine's per-round exports go to a temporary directory, removed however
+    # the run ends; --keep-raw keeps them under bench/.runs/ instead.
+    raw_parent = os.path.join(BENCH, ".runs") if args.keep_raw else None
+    if raw_parent:
+        os.makedirs(raw_parent, exist_ok=True)
+    raw_dir = tempfile.mkdtemp(prefix=time.strftime("%Y%m%dT%H%M%SZ-", started), dir=raw_parent)
+    try:
+        failures: Dict[str, str] = {}
+        results: List[Dict[str, object]] = []
+        measured = set()
+        for t in tree_list:
+            path = trees.tree_root(t, args.trees_dir)
+            measure.smoke(subject, path)
+            ready = []
+            for r in others:
+                if r.status != "ready" or r.tool.name in failures:
                     continue
                 try:
-                    s_runs, o_runs = session.pair(subject, r)
+                    measure.smoke(r, path)
+                    ready.append(r)
                 except measure.MeasureError as e:
                     failures[r.tool.name] = str(e)
-                    log(f"{r.tool.name}: failed on {t.name} {mode}: {e}")
+                    log(f"{r.tool.name}: failed on {t.name}: {e}")
+            for mode in modes:
+                session = measure.Session(hyperfine, t.name, path, mode, args.runs, args.warmup, args.cold_cmd, raw_dir, log)
+                subject_command = subject.command()
+                if not ready:
+                    results.append(measure.row(t.name, mode, subject.tool.name, subject_command, session.alone(subject)))
+                    measured.add(subject.tool.name)
                     continue
-                subject_runs += s_runs
-                rows.append(measure.row(t.name, mode, r.tool.name, r.command(), o_runs, subject.tool.name, s_runs))
-                measured.add(r.tool.name)
-            if not subject_runs:
-                subject_runs = session.alone(subject)
-            results.append(measure.row(t.name, mode, subject.tool.name, subject_command, subject_runs))
-            results.extend(rows)
-            measured.add(subject.tool.name)
+                subject_runs: List[measure.Run] = []
+                rows = []
+                for r in ready:
+                    if r.tool.name in failures:
+                        continue
+                    try:
+                        s_runs, o_runs = session.pair(subject, r)
+                    except measure.MeasureError as e:
+                        failures[r.tool.name] = str(e)
+                        log(f"{r.tool.name}: failed on {t.name} {mode}: {e}")
+                        continue
+                    subject_runs += s_runs
+                    rows.append(measure.row(t.name, mode, r.tool.name, r.command(), o_runs, subject.tool.name, s_runs))
+                    measured.add(r.tool.name)
+                if not subject_runs:
+                    subject_runs = session.alone(subject)
+                results.append(measure.row(t.name, mode, subject.tool.name, subject_command, subject_runs))
+                results.extend(rows)
+                measured.add(subject.tool.name)
+    finally:
+        if not args.keep_raw:
+            shutil.rmtree(raw_dir, ignore_errors=True)
     finished = time.gmtime()
-    if not args.keep_raw:
-        for name in os.listdir(raw_dir):
-            os.unlink(os.path.join(raw_dir, name))
-        os.rmdir(raw_dir)
 
     def tool_entry(r: tools.Resolved) -> Dict[str, object]:
         name = r.tool.name
@@ -409,6 +417,7 @@ def cmd_run(args) -> int:
             "version": r.version,
             "source": r.source,
             "path": r.path,
+            "built_with": r.built_with,
             "status": status,
             "reason": reason,
         }
