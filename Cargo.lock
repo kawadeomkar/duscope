@@ -170,6 +170,7 @@ dependencies = [
  "duscope-walk",
  "jsonschema",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

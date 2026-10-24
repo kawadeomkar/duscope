@@ -1,0 +1,6 @@
+# The keys whose signatures release.yml's verify-tag job accepts on a v* tag
+# (git verify-tag with gpg.ssh.allowedSignersFile; the format is ALLOWED SIGNERS
+# in ssh-keygen(1)). One line per key: a principal, namespaces="git", the
+# public key. verify-tag reads this file from main as main is at release time,
+# so removing a line revokes that key for every later tag.
+kawadeomkar namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEf30UjQY2kR27HoHkA/sUj0pqYXJGt0BPDXVC0xvXqp
