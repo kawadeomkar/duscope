@@ -28,14 +28,53 @@ use serde_json::Value;
 
 use crate::envelope::PlaceholderEnvelope;
 
-/// Each schema file derived from a type: its path under `schemas/`, and the
-/// schema derived from the type now. P2-CLI-01 replaces the placeholder with
-/// the envelope types, one file per verb.
+/// Each envelope schema file: its path under `schemas/`, and the schema derived
+/// from its type now. P2-CLI-01 replaces the placeholder with the envelope
+/// types, one file per verb. MCP tool output files need no entry here: each
+/// is checked against its verb's envelope (`tool_output_schemas`).
 fn derived_schemas() -> Vec<(&'static str, Value)> {
     vec![(
         "envelope/placeholder.schema.json",
         derive::<PlaceholderEnvelope>(),
     )]
+}
+
+/// The envelope file an MCP tool output file must equal, apart from `$id`. A
+/// tool's `structuredContent` is byte-identical to `duscope <verb> --json`
+/// (P3-MCP-03), and the verb is the tool's name without `duscope_`, with `-`
+/// for `_`: `mcp/duscope_by_type.output.json` is the `by-type` envelope.
+fn tool_envelope(file: &str) -> Option<String> {
+    let tool = file.strip_prefix("mcp/")?.strip_suffix(".output.json")?;
+    let verb = tool.strip_prefix("duscope_")?.replace('_', "-");
+    Some(format!("envelope/{verb}.schema.json"))
+}
+
+/// Each MCP tool output file among `files` with the schema derived for its
+/// verb's envelope, and a problem for each whose envelope has no type, so a
+/// tool package adds its output file without touching this module.
+fn tool_output_schemas(
+    files: &[String],
+    envelopes: &[(&str, Value)],
+) -> (Vec<(String, Value)>, Vec<String>) {
+    let mut schemas = Vec::new();
+    let mut problems = Vec::new();
+    for file in files.iter().filter(|f| f.starts_with("mcp/")) {
+        let envelope = tool_envelope(file);
+        match envelopes
+            .iter()
+            .find(|(name, _)| Some(*name) == envelope.as_deref())
+        {
+            Some((_, derived)) => schemas.push((file.clone(), derived.clone())),
+            None => problems.push(match envelope {
+                Some(envelope) => format!(
+                    "schemas/{file}: its verb's envelope, schemas/{envelope}, has no type in \
+                     derived_schemas()"
+                ),
+                None => format!("schemas/{file}: not named mcp/duscope_<tool>.output.json"),
+            }),
+        }
+    }
+    (schemas, problems)
 }
 
 /// The `schemas/` directory at the repository root.
@@ -155,11 +194,16 @@ fn drift(name: &str, file_text: &str, derived: &Value) -> Vec<String> {
 
 #[test]
 fn p0_repo_05_derived_schemas_equal_their_files() {
-    let mut problems = Vec::new();
-    for (name, derived) in derived_schemas() {
-        let path = schemas_dir().join(name);
+    let envelopes = derived_schemas();
+    let (tool_outputs, mut problems) = tool_output_schemas(&files_derived_from_types(), &envelopes);
+    let all = envelopes
+        .into_iter()
+        .map(|(name, derived)| (name.to_owned(), derived))
+        .chain(tool_outputs);
+    for (name, derived) in all {
+        let path = schemas_dir().join(&name);
         match fs::read_to_string(&path) {
-            Ok(text) => problems.extend(drift(name, &text, &derived)),
+            Ok(text) => problems.extend(drift(&name, &text, &derived)),
             Err(e) => problems.push(format!("{}: {e}", path.display())),
         }
     }
@@ -189,7 +233,8 @@ fn files_derived_from_types() -> Vec<String> {
 
 #[test]
 fn p0_repo_05_every_derived_file_has_its_type() {
-    let registered: BTreeSet<&str> = derived_schemas().iter().map(|(name, _)| *name).collect();
+    let envelopes = derived_schemas();
+    let registered: BTreeSet<&str> = envelopes.iter().map(|(name, _)| *name).collect();
     let files = files_derived_from_types();
     assert!(
         files.iter().any(|f| f.starts_with("envelope/")),
@@ -198,12 +243,71 @@ fn p0_repo_05_every_derived_file_has_its_type() {
     );
     let unregistered: Vec<&String> = files
         .iter()
-        .filter(|f| !registered.contains(f.as_str()))
+        .filter(|f| f.starts_with("envelope/") && !registered.contains(f.as_str()))
         .collect();
     assert!(
         unregistered.is_empty(),
         "these schema files have no type in derived_schemas(), so no drift test covers them: \
          {unregistered:?}"
+    );
+    let (_, problems) = tool_output_schemas(&files, &envelopes);
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn p0_repo_05_tool_outputs_take_their_verbs_envelope() {
+    assert_eq!(
+        tool_envelope("mcp/duscope_by_type.output.json").as_deref(),
+        Some("envelope/by-type.schema.json")
+    );
+    assert_eq!(
+        tool_envelope("mcp/duscope_top.output.json").as_deref(),
+        Some("envelope/top.schema.json")
+    );
+    assert_eq!(tool_envelope("mcp/duscope_top.input.json"), None);
+    assert_eq!(tool_envelope("mcp/top.output.json"), None);
+
+    let envelopes = [("envelope/top.schema.json", derive::<Sample>())];
+    let files = [
+        "envelope/top.schema.json",
+        "mcp/duscope_top.output.json",
+        "mcp/duscope_stale.output.json",
+        "mcp/top.output.json",
+    ]
+    .map(str::to_owned);
+    let (schemas, problems) = tool_output_schemas(&files, &envelopes);
+    assert_eq!(
+        schemas,
+        [("mcp/duscope_top.output.json".to_owned(), derive::<Sample>())]
+    );
+    assert_eq!(
+        problems,
+        [
+            "schemas/mcp/duscope_stale.output.json: its verb's envelope, \
+             schemas/envelope/stale.schema.json, has no type in derived_schemas()",
+            "schemas/mcp/top.output.json: not named mcp/duscope_<tool>.output.json",
+        ]
+    );
+
+    // An output file is its envelope's schema under its own `$id`.
+    let mut file = derive::<Sample>();
+    file["$id"] = Value::from("duscope_top.output.json");
+    assert_eq!(
+        drift(
+            "mcp/duscope_top.output.json",
+            &file.to_string(),
+            &derive::<Sample>()
+        ),
+        Vec::<String>::new()
+    );
+    assert!(
+        !drift(
+            "mcp/duscope_top.output.json",
+            &file.to_string(),
+            &derive::<SampleWithAField>()
+        )
+        .is_empty(),
+        "an output file that lags its envelope's type fails"
     );
 }
 
