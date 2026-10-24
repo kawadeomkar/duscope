@@ -8,6 +8,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -145,10 +146,14 @@ fn first_difference(a: &[u8], b: &[u8]) -> Option<String> {
 fn p0_test_01_tree_builds_within_budget() {
     let _env = TestEnv::new();
     with_first_build(|first| {
-        eprintln!(
-            "p0_test_01: built {} entries in {:.2} s on {} ({}), manifest hash {}",
+        // Written past the test harness's capture, so every CI log shows how
+        // far each runner is from the budget, not only a failing one.
+        let _ = writeln!(
+            std::io::stderr(),
+            "p0_test_01: built {} entries in {:.2} s of the {} s budget on {} ({}), manifest hash {}",
             first.record.entries,
             first.elapsed.as_secs_f64(),
+            BUDGET.as_secs(),
             first.record.platform,
             first.record.filesystem,
             first.record.hash
