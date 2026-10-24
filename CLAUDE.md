@@ -60,9 +60,11 @@ The design is fixed by two documents; read the parts a task cites before writing
 - Golden tests compare `--json`, `--plain` and treemap buffers against duscope/tests/golden/,
   one snapshot per OS where output differs (`@macos` / `@linux` suffix), regenerated on both
   platforms in the same PR; property tests beside the code (proptest); PTY tests in
-  duscope/tests/pty/; fuzz targets in fuzz/. The duscope-testkit crate sets up every test's
-  environment (temp HOME, XDG dirs, DUSCOPE_INDEX_DIR, TZ=UTC, LC_ALL=C.UTF-8, NO_COLOR unset,
-  80x24, DUSCOPE_TEST_NOW); never set those by hand.
+  duscope/tests/pty/; fuzz targets in fuzz/. The duscope-testkit crate sets up the environment
+  of every command a test runs (temp HOME, XDG dirs, DUSCOPE_INDEX_DIR, TZ=UTC, LC_ALL=C.UTF-8,
+  NO_COLOR unset, 80x24, DUSCOPE_TEST_NOW). It cannot change the test process's own
+  environment, so a test calling library code passes those values from the `TestEnv`
+  accessors. Never set them by hand.
 - Tests never touch the network, the real home directory or the user's index directory.
 - Run `just test-pkg <ID>` while working and `just check` before opening the PR; it must be green.
 - Never modify, skip or ignore a test outside your package; report it in the PR instead.

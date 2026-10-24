@@ -73,25 +73,39 @@ fn justfile_recipes() -> BTreeSet<String> {
 }
 
 /// The shell commands a markdown file shows: every line of a fenced code block
-/// and every inline code span outside one.
+/// and every inline code span outside one, with the line it starts on. A code
+/// span may wrap onto the next line (the line break reads as a space) but
+/// never past a blank line or a fence.
 fn commands_in_markdown(text: &str) -> Vec<(usize, String)> {
     let mut commands = Vec::new();
     let mut fenced = false;
+    let mut open: Option<(usize, String)> = None;
     for (number, line) in text.lines().enumerate().map(|(i, l)| (i + 1, l)) {
         if line.trim_start().starts_with("```") {
             fenced = !fenced;
+            open = None;
             continue;
         }
         if fenced {
             commands.push((number, line.to_owned()));
-        } else {
-            // Splitting on backticks puts the code spans at the odd indices.
-            commands.extend(
-                line.split('`')
-                    .skip(1)
-                    .step_by(2)
-                    .map(|span| (number, span.to_owned())),
-            );
+            continue;
+        }
+        if line.trim().is_empty() {
+            open = None;
+            continue;
+        }
+        // Each backtick opens a span or closes the open one; the text before
+        // the line's first backtick continues a span left open above.
+        let mut pieces = line.split('`');
+        if let (Some((_, span)), Some(first)) = (open.as_mut(), pieces.next()) {
+            span.push(' ');
+            span.push_str(first);
+        }
+        for piece in pieces {
+            match open.take() {
+                Some(closed) => commands.push(closed),
+                None => open = Some((number, piece.to_owned())),
+            }
         }
     }
     commands
@@ -395,4 +409,31 @@ fn p0_repo_02_justfile_parser_sees_recipes_not_assignments() {
             "{assignment} is not a recipe: {recipes:?}"
         );
     }
+}
+
+#[test]
+fn p0_repo_02_markdown_code_spans_may_wrap() {
+    let text = "Run `just\ncheck` first, then `just test-pkg P0-REPO-02`.\n\n`unclosed\n\n\
+                prose `just docs`\n```sh\njust size\n```\n";
+    assert_eq!(
+        commands_in_markdown(text),
+        [
+            (1, "just check".to_owned()),
+            (2, "just test-pkg P0-REPO-02".to_owned()),
+            (6, "just docs".to_owned()),
+            (8, "just size".to_owned()),
+        ]
+    );
+    // CLAUDE.md wraps a code span this way: the span after it is still code.
+    let claude = "(`#![cfg_attr(test, allow(clippy::unwrap_used,\n  clippy::expect_used))]` \
+                  at each crate root); no `println!` outside";
+    let spans: Vec<String> = commands_in_markdown(claude)
+        .into_iter()
+        .map(|(_, span)| span)
+        .collect();
+    assert_eq!(
+        spans.last().map(String::as_str),
+        Some("println!"),
+        "{spans:?}"
+    );
 }
