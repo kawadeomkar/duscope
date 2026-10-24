@@ -16,7 +16,7 @@
 //! (`set_var` is unsafe in edition 2024 and races across test threads), so
 //! in-process code takes these values from the accessors instead.
 //!
-//! [`TestEnv::fixtures`] gives the reference tree under `target/fixtures`,
+//! [`TestEnv::fixtures`] gives the reference tree under `target/fixtures.noindex`,
 //! building it first when it is missing or was built from another manifest,
 //! and applies the test modes of its unreadable directories for as long as
 //! any test environment of the process holds it.
@@ -71,6 +71,12 @@ pub fn test_now() -> &'static str {
 
 /// The duscope binary of the current build: beside the `deps/` directory
 /// that holds the running test executable.
+///
+/// Cargo builds that binary only when the run includes the duscope
+/// package's tests (`cargo test --workspace`, `just test`, `cargo test -p
+/// duscope`). A test in another crate run on its own (`cargo test -p
+/// duscope-core`) finds an older build there, or none: [`TestEnv::cmd`]
+/// fails on a missing binary, and such a test is run with the workspace.
 ///
 /// # Panics
 ///
@@ -251,8 +257,19 @@ impl TestEnv {
     }
 
     /// A command for the duscope binary under this environment.
+    ///
+    /// # Panics
+    ///
+    /// When the binary has not been built (see [`duscope_bin`]).
     pub fn cmd(&self) -> Command {
-        self.command(duscope_bin())
+        let bin = duscope_bin();
+        assert!(
+            bin.is_file(),
+            "duscope-testkit: no duscope binary at {}: cargo builds it only when the run \
+             includes the duscope package's tests, so run this test with --workspace",
+            bin.display()
+        );
+        self.command(bin)
     }
 
     /// The reference fixture tree, built first if it is missing or stale.
@@ -342,7 +359,7 @@ impl Fixtures {
         }
     }
 
-    /// The tree's root, `target/fixtures/tree`.
+    /// The tree's root, `target/fixtures.noindex/tree`.
     pub fn root(&self) -> PathBuf {
         self.out.tree()
     }

@@ -1,13 +1,20 @@
-//! The output directory (`target/fixtures`): the tree, its build record,
-//! the build lock and the registry of test processes holding the tree.
+//! The output directory (`target/fixtures.noindex`): the tree, its build
+//! record, the build lock and the registry of test processes holding the tree.
 //!
 //! ```text
-//! target/fixtures/
+//! target/fixtures.noindex/
 //!   tree/          the reference tree tests scan
 //!   record.toml    the build record (manifest hash, skipped cases)
 //!   holders/<pid>  processes holding the test modes (unreadable directories)
 //!   .lock/         the lock serialising builds and test-mode changes
+//!   .mktree        the marker that lets a rebuild replace what is here
 //! ```
+//!
+//! The `.noindex` suffix keeps Spotlight out of the tree on macOS. Its
+//! importers read files soon after they are written, and macOS moves the
+//! atime of a file that is read even when the planned atime lies in the
+//! future: within four minutes of a build, 270 of 400 sampled files had
+//! moved, and none below a `.noindex` directory.
 //!
 //! Unreadable directories are kept readable at rest, so `cargo clean`, `rm
 //! -rf` and CI caches (tar) can always walk the tree, and get their test
@@ -28,6 +35,9 @@ use crate::{Error, Result};
 /// How long to wait for another process's build before giving up.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// The file that marks a directory as a mktree output directory.
+const MARKER: &str = ".mktree";
+
 fn io_err(what: &str, path: &Path, err: &io::Error) -> Error {
     Error::new(format!("{what} {}: {err}", path.display()))
 }
@@ -44,10 +54,10 @@ impl OutDir {
         OutDir { path: path.into() }
     }
 
-    /// `target/fixtures` of this workspace: `$CARGO_TARGET_DIR/fixtures`
-    /// when that is set (relative to the workspace root), else
-    /// `<workspace>/target/fixtures`. `just fixtures` and the test kit both
-    /// use it.
+    /// `target/fixtures.noindex` of this workspace:
+    /// `$CARGO_TARGET_DIR/fixtures.noindex` when that is set (relative to the
+    /// workspace root), else `<workspace>/target/fixtures.noindex`. `just
+    /// fixtures` and the test kit both use it.
     pub fn workspace_default() -> OutDir {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = manifest_dir.ancestors().nth(3).unwrap_or(manifest_dir);
@@ -55,7 +65,7 @@ impl OutDir {
             Some(dir) => workspace.join(dir),
             None => workspace.join("target"),
         };
-        OutDir::new(target.join("fixtures"))
+        OutDir::new(target.join("fixtures.noindex"))
     }
 
     /// The directory itself.
@@ -91,6 +101,32 @@ impl OutDir {
         DirLock::acquire(self.path.join(".lock"))
     }
 
+    /// Makes sure a build may replace what the directory holds: it carries
+    /// the marker, holds a build record (a directory built before the marker
+    /// existed), or holds nothing but the lock. A build deletes `tree/`,
+    /// `holders/` and the `.tmp-*` and `.old-*` entries below it, so `--out`
+    /// naming an unrelated directory must stop here. Called under the lock.
+    fn claim(&self) -> Result<()> {
+        let marker = self.path.join(MARKER);
+        if marker.is_file() {
+            return Ok(());
+        }
+        let entries =
+            fs::read_dir(&self.path).map_err(|err| io_err("read_dir", &self.path, &err))?;
+        let empty = entries
+            .flatten()
+            .all(|e| e.file_name() == MARKER || e.file_name() == ".lock");
+        if !empty && !matches!(self.record(), Ok(Some(_))) {
+            return Err(Error::new(format!(
+                "{} is not a mktree output directory (it holds no {MARKER} and no \
+                 record.toml, and is not empty): pass a new or empty directory",
+                self.path.display()
+            )));
+        }
+        fs::write(&marker, b"mktree output directory\n")
+            .map_err(|err| io_err("write", &marker, &err))
+    }
+
     /// Builds the tree unless the current one was built from the same
     /// manifest hash (or `force` is set). The new tree is built beside the
     /// old one and swapped in; the record is written last, so a tree without
@@ -98,6 +134,7 @@ impl OutDir {
     /// record and whether a build ran.
     pub fn ensure(&self, plan: &Plan, force: bool) -> Result<(Record, bool)> {
         let _lock = self.lock()?;
+        self.claim()?;
         let hash = plan.hash();
         // A record this generator cannot read (another format) means rebuild.
         if !force

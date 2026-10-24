@@ -28,8 +28,9 @@ fn p0_test_01_manifest_hash_is_stable() {
     let hash = plan.hash();
     assert_eq!(
         hash, plan.recorded_hash,
-        "the expanded manifest changed: if the change to the tree is intended, \
-         record the new hash in tests/fixtures/mktree/manifest.toml (its own TEST package)"
+        "the expanded manifest or the builder (src/build.rs) changed: if the change is \
+         intended, record the new hash in tests/fixtures/mktree/manifest.toml (its own TEST \
+         package)"
     );
     assert_eq!(
         mktree::Plan::embedded().unwrap().hash(),
@@ -62,6 +63,31 @@ fn p0_test_01_hash_covers_the_printed_plan() {
     assert_eq!(format!("{digest}\n"), hash);
     assert!(plan.starts_with("mktree expanded manifest, format 1\n"));
     assert!(plan.contains("\ninstant 2037-01-01T00:00:00Z\n"));
+    // How the builder makes entries is not in the manifest, so the hash
+    // covers its source: a change to it rebuilds every tree.
+    let builder = mktree::plan::hex(&Sha256::digest(include_bytes!("../src/build.rs")));
+    assert!(
+        plan.contains(&format!("\nbuilder {builder}\n")),
+        "{}",
+        &plan[..200]
+    );
+}
+
+#[test]
+fn p0_test_01_mktree_refuses_an_unrelated_out_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let precious = dir.path().join("tree/precious.txt");
+    std::fs::create_dir_all(precious.parent().unwrap()).unwrap();
+    std::fs::write(&precious, "not mktree's").unwrap();
+    let out = mktree().arg("--out").arg(dir.path()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("is not a mktree output directory"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&precious).unwrap(), "not mktree's");
+    assert!(!dir.path().join(".mktree").exists());
 }
 
 #[test]

@@ -1,9 +1,11 @@
 # The duscope reference tree, built by `just fixtures` (tests/fixtures/mktree)
-# under target/fixtures/tree and used by every test through duscope-testkit.
+# under target/fixtures.noindex/tree and used by every test through duscope-testkit.
 #
-# A change to this file or to the generator that changes the tree changes the
-# manifest hash below, which a test checks; golden files depend on the tree,
-# so such a change is its own TEST package (plan/SPEC.md, Testing strategy).
+# A change to this file, or to the generator in a way that changes the tree,
+# changes the manifest hash below, which a test checks. The hash also covers
+# the source of the builder (src/build.rs), so any change there records a new
+# hash too. Golden files depend on the tree, so such a change is its own TEST
+# package (plan/SPEC.md, Testing strategy).
 # `mktree --print-plan` prints the expanded manifest the hash covers: diff it
 # to review a change.
 #
@@ -29,7 +31,7 @@
 # case (APFS is case-insensitive by default).
 
 format = 1
-hash = "fdc7f0667018d42ff7cfff01ec9e851acbbae048a6f86c77a83ac06aa31cc850"
+hash = "6e08d75caab47abcda7162fd1bad9da5ff766aeccf90aa73ceaed818c1f1919a"
 instant = "2037-01-01T00:00:00Z"
 
 # Names for generated directories and files (lower-case ASCII only).

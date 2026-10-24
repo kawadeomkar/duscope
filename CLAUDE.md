@@ -32,7 +32,7 @@ The design is fixed by two documents; read the parts a task cites before writing
 - `just check-full` check + advisory database + ignored platform tests (what CI runs)
 - `just test-pkg P2-QRY-06`   the tests of one package (name prefix p2_qry_06)
 - `just test-crate duscope-core`
-- `just fixtures`   build the reference tree under target/fixtures (`--force` rebuilds)
+- `just fixtures`   build the reference tree under target/fixtures.noindex (`--force` rebuilds)
 - `just golden`     regenerate golden files after an intended output change (review the diff)
 - `just bench`      hyperfine harness on the three seeded trees (results in bench/results)
 - `just size`       release build, strip, print the binary size against the budget

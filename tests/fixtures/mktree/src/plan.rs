@@ -17,13 +17,23 @@ use crate::{Error, Result};
 pub const FORMAT: u32 = 1;
 
 /// Version of the generated file content ([`crate::build::content`]).
-/// Bump it when the content changes: compressed sizes depend on it.
+/// Bump it when the content changes: compressed sizes depend on it. (The
+/// hash also covers the source of `build.rs`, where the content is made, so
+/// a forgotten bump still changes the hash.)
 pub const CONTENT_VERSION: u32 = 1;
+
+/// The source of the builder. How entries are made on disk is not in the
+/// manifest, so the hash covers it: a change to the builder rebuilds every
+/// tree and invalidates every cache keyed on the hash.
+const BUILDER_SOURCE: &[u8] = include_bytes!("build.rs");
 
 /// Default atimes fall within this many seconds (one year) before the
 /// instant. Together with an instant later than any real build date, this
-/// keeps every default atime in the real future, where `relatime` leaves it
-/// alone when a scanner lists a directory or reads a `CACHEDIR.TAG`.
+/// keeps every default atime in the real future, where Linux's `relatime`
+/// leaves it alone when a scanner lists a directory or reads a
+/// `CACHEDIR.TAG`. macOS moves the atime of a file that is read even then,
+/// so the tree lives below a `.noindex` directory that Spotlight skips, and
+/// verification reports such reads apart (`Report::read_after_build`).
 pub const ATIME_WINDOW: i64 = 365 * 86_400;
 
 /// What an entry is.
@@ -192,13 +202,15 @@ impl Plan {
         self.cases.iter().enumerate().find(|(_, c)| c.name == name)
     }
 
-    /// The expanded manifest as text: a header, then one tab-separated line
-    /// per entry (path, kind, mode, test mode, mtime, atime, case). This is
-    /// what `mktree --print-plan` prints and what the hash covers.
+    /// The expanded manifest as text: a header (with the SHA-256 of the
+    /// builder's source), then one tab-separated line per entry (path, kind,
+    /// mode, test mode, mtime, atime, case). This is what
+    /// `mktree --print-plan` prints and what the hash covers.
     pub fn text(&self) -> String {
         let mut out = String::with_capacity(self.entries.len() * 80);
         let _ = writeln!(out, "mktree expanded manifest, format {FORMAT}");
         let _ = writeln!(out, "content {CONTENT_VERSION}");
+        let _ = writeln!(out, "builder {}", hex(&Sha256::digest(BUILDER_SOURCE)));
         let _ = writeln!(out, "instant {}", self.instant_text());
         for case in &self.cases {
             let _ = writeln!(out, "case\t{}\t{}", case.name, encode(&case.root));

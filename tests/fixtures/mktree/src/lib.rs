@@ -11,7 +11,7 @@
 //! Every mtime and atime is relative to the manifest's fixed instant, which
 //! tests export as `DUSCOPE_TEST_NOW`.
 //!
-//! [`OutDir::ensure`] builds the tree (`target/fixtures/tree`) and its
+//! [`OutDir::ensure`] builds the tree (`target/fixtures.noindex/tree`) and its
 //! [`Record`]; cases a platform or filesystem cannot build are recorded as
 //! skipped there, with the reason and what stands in for them.
 //!

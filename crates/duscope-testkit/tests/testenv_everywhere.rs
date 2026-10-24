@@ -4,12 +4,13 @@
 //! The rule covers the `.rs` files under the workspace's `tests/`
 //! directories (not the `src/` of a crate kept there, such as mktree's). A
 //! file is in scope when it runs the binary (`CARGO_BIN_EXE_duscope`,
-//! `.cmd()`, `cargo_bin("duscope")`, `Command::new("duscope")`) or reads the
-//! shared fixture tree (`fixtures()`, `target/fixtures`,
-//! `OutDir::workspace_default`); an in-scope file must call `TestEnv::new()`.
-//! Tests that only read repository files or run `cargo metadata` are out of
-//! scope. Exemptions are listed below with their reason, and an exemption
-//! for a file that no longer exists fails the test.
+//! `.cmd()`, `duscope_bin()`, `cargo_bin("duscope")`,
+//! `Command::new("duscope")`) or reads the shared fixture tree
+//! (`fixtures()`, `target/fixtures`, `OutDir::workspace_default`); an
+//! in-scope file must call `TestEnv::new()`. Comment lines count for
+//! neither. Tests that only read repository files or run `cargo metadata`
+//! are out of scope. Exemptions are listed below with their reason, and an
+//! exemption for a file that no longer exists fails the test.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -19,6 +20,7 @@ use std::path::{Path, PathBuf};
 const RUNS_THE_BINARY: &[&str] = &[
     "CARGO_BIN_EXE_duscope",
     ".cmd()",
+    "duscope_bin()",
     "cargo_bin(\"duscope\")",
     "Command::new(\"duscope\")",
 ];
@@ -37,17 +39,28 @@ fn workspace() -> PathBuf {
     manifest_dir.ancestors().nth(2).unwrap().to_owned()
 }
 
+/// A test source without its comment lines (`//`, `///`, `//!`), so a
+/// `TestEnv::new()` mentioned in a comment constructs nothing.
+fn code(source: &str) -> String {
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Whether a test source falls under the rule.
 fn in_scope(source: &str) -> bool {
+    let code = code(source);
     RUNS_THE_BINARY
         .iter()
         .chain(READS_THE_FIXTURES)
-        .any(|p| source.contains(p))
+        .any(|p| code.contains(p))
 }
 
 /// Whether a test source breaks the rule.
 fn violates(source: &str) -> bool {
-    in_scope(source) && !source.contains(CONSTRUCTS)
+    in_scope(source) && !code(source).contains(CONSTRUCTS)
 }
 
 /// The integration-test sources of the workspace, relative to its root.
@@ -119,7 +132,18 @@ fn p0_test_01_grep_rule_classifies_sources() {
     assert!(violates("let out = env.cmd().arg(\"top\").output();"));
     assert!(violates("let tree = fixtures().root();"));
     assert!(violates("let tree = env.fixtures().root();"));
-    assert!(violates("let p = Path::new(\"target/fixtures/tree\");"));
+    assert!(violates(
+        "let p = Path::new(\"target/fixtures.noindex/tree\");"
+    ));
+    assert!(violates(
+        "let out = Command::new(duscope_testkit::duscope_bin()).output();"
+    ));
+    assert!(violates(&format!(
+        "// Construct one with TestEnv::new() first.\n{binary}"
+    )));
+    assert!(!in_scope(
+        "/// Runs `env.cmd()` on the tree.\nfn helper() {}"
+    ));
     assert!(!in_scope("let meta = MetadataCommand::new().exec();"));
     assert!(!in_scope(
         "let text = std::fs::read_to_string(\"CLAUDE.md\");"

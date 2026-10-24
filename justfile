@@ -133,7 +133,7 @@ repro target_dir="target/repro":
     cargo build --release --locked -p duscope --target-dir '{{target_dir}}'
     if command -v sha256sum >/dev/null; then sha256sum '{{target_dir}}/release/duscope'; else shasum -a 256 '{{target_dir}}/release/duscope'; fi
 
-# Build the reference fixture tree under target/fixtures (`--force` rebuilds) and print the manifest hash
+# Build the reference fixture tree under target/fixtures.noindex (`--force` rebuilds) and print the manifest hash
 fixtures *args:
     cargo run --quiet --locked -p mktree -- {{args}}
 
