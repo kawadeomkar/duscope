@@ -67,6 +67,10 @@ once the repository is added as `docs/apt.md` will describe.
 cargo install duscope --locked
 ```
 
+Cargo builds it with its default release settings: duscope's release profile
+(link-time optimisation, symbols stripped) applies only to builds inside this
+repository, so the binary is larger than the prebuilt ones.
+
 ### From source
 
 This works today, and builds the pre-release placeholder. It needs

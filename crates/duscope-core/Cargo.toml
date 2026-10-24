@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme = "README.md"
+include.workspace = true
 
 [dependencies]
 duscope-walk.workspace = true
