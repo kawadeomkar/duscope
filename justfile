@@ -69,11 +69,17 @@ fmt:
 clippy:
     cargo clippy --workspace --all-targets -- -D clippy::all
 
-# cargo deny over the given checks; skipped until deny.toml lands (P0-REPO-04)
+# cargo deny over the given checks; the bans leave dev-dependencies out (deny.toml says why)
 deny *checks="licenses bans sources":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -f deny.toml ]]; then cargo deny check {{checks}}; else echo "deny: no deny.toml yet (P0-REPO-04), skipping: {{checks}}" >&2; fi
+    full=()
+    bans=false
+    for check in {{checks}}; do
+      if [[ $check == bans ]]; then bans=true; else full+=("$check"); fi
+    done
+    if (( ${#full[@]} )); then cargo deny check "${full[@]}"; fi
+    if $bans; then cargo deny --exclude-dev check bans; fi
 
 test:
     cargo test --workspace
