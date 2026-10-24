@@ -156,10 +156,18 @@ under [Auditing](#auditing) read it again.
 ## Changing the required checks
 
 A renamed job, a new matrix entry or a new required job changes the check names.
-Update the PUT above in the same pull request; the `p0_ci_01_*` tests compare it
-with ci.yml. The author runs the PUT again after the merge. Until then, branch
-protection waits on a check name that no job reports any more, and every pull
-request stays blocked.
+Update the PUT above in the same pull request:
+`p0_ci_01_settings_require_exactly_the_required_checks` works out the name each
+job reports from its `name:` and matrix, and fails unless they are exactly the
+checks in the PUT. When the author runs the PUT depends on the change:
+
+- A check is added: after the merge. Until then branch protection does not wait
+  for the new check.
+- A check is renamed or removed: just before merging that pull request. Branch
+  protection waits for every name in the PUT, and the pull request reports only
+  the new names, so with the old settings it could never merge (administrators
+  are included). Other open pull requests then wait on the new names until they
+  are updated with `main`, which `strict` asks of them anyway.
 
 ## Auditing
 
