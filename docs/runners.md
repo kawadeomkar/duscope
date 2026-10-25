@@ -18,22 +18,32 @@ result files to the `bench-results` branch as `<date>-<platform>.json`.
 A result is comparable only with results from the same machine, so a change to
 anything in this table is a new row in the [change log](#change-log).
 
-**TODO: `bench-macos` is not registered yet.** Its setup was deferred on
-2026-10-25. Until it is registered, every nightly run skips it with a notice, and
-from the second night the pinned issue `nightly-bench offline` says so. Gate 0
-needs both runners.
-
 | | `bench-macos` | `bench-linux` |
 | --- | --- | --- |
-| Machine | not registered yet (TODO) | VM `bench-linux` (VMID 101) on the author's Proxmox VE 9.2 host, [below](#bench-linux-a-vm-on-proxmox) |
-| CPU and cores | | 4 vCPUs of an Intel Core i9-10900K (10 cores, 20 threads), CPU type `host`, shared with the host's other VMs |
-| Memory | | 8 GiB, fixed (no ballooning) |
-| OS and kernel | | Ubuntu 24.04.5 LTS, Linux 6.8.0-147-generic |
-| Disk holding `BENCH_HOME` | | a 64 GB virtio-scsi disk (`ssd=1`, `discard=on`, no host cache) on LVM-thin storage on the host's Sabrent NVMe SSD |
-| Filesystem of `BENCH_HOME` | | ext4, the root filesystem (`relatime,discard`) |
-| Free space and inodes | | 58 GB and 8.1 million inodes, with the tools installed and no trees yet |
-| Network | | bridged to the home LAN, DHCP; outbound to the internet only ([Network](#network)) |
-| Power and location | | the Proxmox host, in the author's home |
+| Machine | the author's MacBook Pro (Mac17,8), [below](#bench-macos-the-authors-macbook-pro) | VM `bench-linux` (VMID 101) on the author's Proxmox VE 9.2 host, [below](#bench-linux-a-vm-on-proxmox) |
+| CPU and cores | Apple M5 Pro, 18 cores | 4 vCPUs of an Intel Core i9-10900K (10 cores, 20 threads), CPU type `host`, shared with the host's other VMs |
+| Memory | 48 GiB, shared with the author's own work | 8 GiB, fixed (no ballooning) |
+| OS and kernel | macOS 26.7.2 (25G330), Darwin 25.6.0 | Ubuntu 24.04.5 LTS, Linux 6.8.0-147-generic |
+| Disk holding `BENCH_HOME` | the internal SSD | a 64 GB virtio-scsi disk (`ssd=1`, `discard=on`, no host cache) on LVM-thin storage on the host's Sabrent NVMe SSD |
+| Filesystem of `BENCH_HOME` | APFS, the Data volume | ext4, the root filesystem (`relatime,discard`) |
+| Free space and inodes | 471 GiB; APFS allocates inodes as needed | 58 GB and 8.1 million inodes, with the tools installed and no trees yet |
+| Network | Wi-Fi on the home LAN; not filtered ([Network](#network)) | bridged to the home LAN, DHCP; outbound to the internet only ([Network](#network)) |
+| Power and location | on AC power at the author's home, woken at 03:10 every day | the Proxmox host, in the author's home |
+
+### bench-macos: the author's MacBook Pro
+
+The macOS runner is the author's own laptop, not a dedicated machine, so the
+nightly run competes with nothing only when the laptop is idle, and runs at all
+only when it's plugged in and awake: a night it's asleep, unplugged or away is
+skipped with a notice. `pmset` wakes it at 03:10 every day, and the nightly job
+runs the harness under `caffeinate -is`, which keeps the laptop awake until the
+harness exits. What keeps the runner apart from the author's work:
+
+- `runner` has a group of its own instead of `staff`, so it shares no group with
+  the author, and the author's home folder is owner-only (`chmod 700 ~`).
+- A launchd daemon in the system domain runs the runner as `runner` at boot.
+  GitHub's `svc.sh` installs a LaunchAgent instead, which runs only while
+  `runner` is logged in.
 
 ### bench-linux: a VM on Proxmox
 
@@ -84,11 +94,22 @@ The runner runs as a dedicated, unprivileged user named `runner`, which owns
 nothing outside its home directory and is not an administrator.
 
 ```sh
-# macOS (an account that does not log in by password over the network)
-sudo sysadminctl -addUser runner -fullName "duscope bench runner" -password -
+# macOS: a hidden standard account with a group of its own, not staff; your own
+# home folder becomes owner-only, so runner can't read it
+sudo sysadminctl -addUser runner -fullName "duscope bench runner" -password "$(openssl rand -base64 30)" -home /Users/runner
+sudo createhomedir -c -u runner
+sudo dscl . -create /Users/runner IsHidden 1
+sudo dseditgroup -o create -r "duscope bench runner" runner
+sudo dscl . -create /Users/runner PrimaryGroupID "$(dscl . -read /Groups/runner PrimaryGroupID | awk '{print $2}')"
+sudo chown runner:runner /Users/runner && sudo chmod 750 /Users/runner
+chmod 700 ~
 # Linux
 sudo useradd --create-home --shell /bin/bash runner
 ```
+
+`sudo` keeps the caller's `PATH`, so a script of the author's named like a
+system tool (`install`, say) would run as root in its place; prefix the root
+commands with `env PATH=/usr/bin:/bin:/usr/sbin:/sbin` when that is a risk.
 
 Its only privilege is the cache drop that cold runs need (bench/README.md,
 "Cold runs"): passwordless `sudo` for exactly one command. Install the line for
@@ -155,11 +176,36 @@ cargo on it.
 Then install it as a service that starts at boot:
 
 ```sh
-# macOS: a launchd agent of the runner user, so that user logs in automatically
-# (System Settings → Users & Groups → Automatically log in as: runner)
-./svc.sh install && ./svc.sh start
+# macOS: a launchd daemon that runs the runner as runner at boot, with no login
+cp bin/runsvc.sh runsvc.sh && chmod u+x runsvc.sh                 # as runner
+sudo install -d -o runner -g runner ~runner/Library/Logs/actions.runner.kawadeomkar-duscope.bench-macos
+sudo tee /Library/LaunchDaemons/actions.runner.kawadeomkar-duscope.bench-macos.plist   # the plist below
+sudo launchctl bootstrap system /Library/LaunchDaemons/actions.runner.kawadeomkar-duscope.bench-macos.plist
+sudo pmset repeat wakeorpoweron MTWRFSU 03:10:00                   # awake for the 03:17 run
 # Linux: a systemd unit that runs as runner
 sudo ./svc.sh install runner && sudo ./svc.sh start
+```
+
+The macOS daemon is GitHub's own plist template with `UserName` and
+`GroupName` set and `KeepAlive` on, loaded into the system domain:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key><string>actions.runner.kawadeomkar-duscope.bench-macos</string>
+    <key>ProgramArguments</key><array><string>/Users/runner/actions-runner/runsvc.sh</string></array>
+    <key>UserName</key><string>runner</string>
+    <key>GroupName</key><string>runner</string>
+    <key>WorkingDirectory</key><string>/Users/runner/actions-runner</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>/Users/runner/Library/Logs/actions.runner.kawadeomkar-duscope.bench-macos/stdout.log</string>
+    <key>StandardErrorPath</key><string>/Users/runner/Library/Logs/actions.runner.kawadeomkar-duscope.bench-macos/stderr.log</string>
+    <key>EnvironmentVariables</key><dict><key>ACTIONS_RUNNER_SVC</key><string>1</string></dict>
+  </dict>
+</plist>
 ```
 
 Check that GitHub sees it online, then start a smoke run (T1 at 1% scale, warm
@@ -247,6 +293,10 @@ SSH from the LAN still works, since replies belong to a connection the VM did
 not start. Loading the rules over SSH freezes that one session, whose replies
 conntrack first sees after the rules are in place; open a new one.
 
+`bench-macos` is not filtered: a build script running as `runner` can reach the
+LAN. Holding it to the internet would take a `pf` anchor that blocks `runner`'s
+outbound connections to private addresses.
+
 ## Security
 
 GitHub advises against self-hosted runners on public repositories, because a
@@ -264,8 +314,10 @@ the first two:
 - Workflows from fork pull requests wait for approval (docs/github-settings.md).
 - No secret reaches these machines, and their jobs' `GITHUB_TOKEN` is
   read-only.
-- The runner user is unprivileged, with `sudo` for the cache drop alone. The
-  machines hold nothing else of value; the Mac is not anyone's daily machine.
+- The runner user is unprivileged, with `sudo` for the cache drop alone.
+  `bench-linux` holds nothing else of value. `bench-macos` is the author's own
+  laptop: `runner` shares no group with the author and can't read the author's
+  home folder, but it can reach the LAN.
 
 The runners are not ephemeral: a job could leave files behind for the next one.
 That is acceptable only because nothing but `main`'s code runs on them.
@@ -286,13 +338,14 @@ The run never fails because of it. The workflow's `probe` job, on a
 GitHub-hosted runner, asks the API which runners are online. The bench job of a
 runner that is offline (or missing, or when the API cannot be read) is skipped
 with a notice. When a platform is skipped twice in a row, the probe opens the
-issue `nightly-bench offline` and pins it, or comments on it when it is open;
-the next run with both runners online closes it. A release needs a nightly result
+issue `nightly-bench offline` and pins it, or updates its description, which
+notifies no one, when it is open; the next run with both runners online closes it. A release needs a nightly result
 at most 72 hours old.
 
 To look at a runner: the `gh api .../runners` command above shows its status;
-on the machine, `./svc.sh status` shows the service, and `~/actions-runner/_diag/`
-holds the runner's logs.
+on the machine, `./svc.sh status` (Linux) or `sudo launchctl print
+system/actions.runner.kawadeomkar-duscope.bench-macos` (macOS) shows the
+service, and `~/actions-runner/_diag/` holds the runner's logs.
 
 ## Re-registering a runner
 
@@ -300,7 +353,8 @@ After a reinstall, a move to new hardware, or a runner that stays offline:
 
 ```sh
 gh api -X POST repos/kawadeomkar/duscope/actions/runners/remove-token --jq .token   # the author
-cd ~/actions-runner && ./svc.sh stop && sudo ./svc.sh uninstall   # as runner; plain ./svc.sh uninstall on macOS
+cd ~/actions-runner && sudo ./svc.sh stop && sudo ./svc.sh uninstall   # Linux, as runner
+sudo launchctl bootout system /Library/LaunchDaemons/actions.runner.kawadeomkar-duscope.bench-macos.plist   # macOS
 ./config.sh remove --token <token>
 ```
 
@@ -315,3 +369,4 @@ platform and architecture.
 | --- | --- | --- |
 | 2026-10-25 | `bench-linux` | Registered: a VM on the author's Proxmox host, runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1 |
 | 2026-10-25 | `bench-macos` | Setup deferred (TODO) |
+| 2026-10-25 | `bench-macos` | Registered: the author's MacBook Pro (M5 Pro, 18 cores, 48 GiB, macOS 26.7.2), runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1; a launchd daemon in the system domain; a daily wake at 03:10 |

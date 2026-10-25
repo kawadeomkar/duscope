@@ -394,6 +394,12 @@ fn p0_bench_02_nightly_runs_at_03_17_pacific_on_main_only() {
             script.contains("bench/run.sh run --subject du "),
             "{label} runs the harness with du as the subject"
         );
+        if *platform == "macos" {
+            assert!(
+                script.contains("caffeinate -is bench/run.sh run"),
+                "bench-macos keeps the laptop awake for the whole run"
+            );
+        }
     }
     let publish = job(&jobs, "publish");
     assert!(

@@ -182,7 +182,9 @@ jobs:
           results="$RUNNER_TEMP/bench-results"
           rm -rf "$results"
           status=0
-          file=$(bench/run.sh run --subject du --trees "$TREES" --competitors "$COMPETITORS" \
+          # bench-macos is a laptop that sleeps when idle: caffeinate keeps it awake
+          # until the harness exits.
+          file=$(caffeinate -is bench/run.sh run --subject du --trees "$TREES" --competitors "$COMPETITORS" \
             --mode "$MODE" --scale "$SCALE" --trees-dir "$home/trees" --tools-dir "$home/tools" \
             --results-dir "$results") || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
