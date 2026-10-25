@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -396,108 +397,218 @@ fn p0_doc_01_check_rejects_malformed_fragments() {
     );
 }
 
-/// The Python program the `changelog` job of ci.yml runs on the fragments, cut
-/// out of its heredoc; `None` once the job calls `scripts/changelog.py check`
-/// instead.
-fn ci_fragment_rule() -> Option<String> {
+/// The bash of the check step of ci.yml's `changelog` job, unindented.
+fn ci_changelog_step() -> String {
     let workflow = read(&repo_root().join(".github/workflows/ci.yml"));
     let lines: Vec<&str> = workflow.lines().collect();
-    let job = lines.iter().position(|line| *line == "  changelog:")?;
-    let start = job + 1 + lines[job + 1..].iter().position(|l| l.contains("<<'PY'"))?;
-    let end = start + 1 + lines[start + 1..].iter().position(|l| l.trim() == "PY")?;
-    let body = &lines[start + 1..end];
-    let indent = body
+    let job = lines
         .iter()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.len() - line.trim_start().len())
-        .min()?;
-    let program: Vec<&str> = body
+        .position(|line| *line == "  changelog:")
+        .expect("ci.yml has a changelog job");
+    let run = job
+        + 1
+        + lines[job + 1..]
+            .iter()
+            .position(|line| line.trim() == "run: |")
+            .expect("the changelog job has a `run: |` step");
+    let indent = lines[run].len() - lines[run].trim_start().len() + 2;
+    let body: Vec<&str> = lines[run + 1..]
         .iter()
+        .take_while(|line| line.trim().is_empty() || line.len() - line.trim_start().len() >= indent)
         .map(|line| line.get(indent..).unwrap_or(""))
         .collect();
-    Some(program.join("\n") + "\n")
+    body.join("\n") + "\n"
 }
 
-/// `check` applies exactly the rule of ci.yml's `changelog` job: inside GitHub
-/// Actions it prints the same annotations and exits with the same status on
-/// every fixture fragment, so the job can call the script instead.
+/// A bash of version 4 or later, which the step's `mapfile` needs (the
+/// job runs on ubuntu; macOS ships bash 3.2 as /bin/bash).
+fn bash4() -> Option<OsString> {
+    ["bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash"]
+        .into_iter()
+        .find(|bash| {
+            Command::new(bash)
+                .args(["-c", "(( BASH_VERSINFO[0] >= 4 ))"])
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+        .map(OsString::from)
+}
+
+/// Runs the changelog job's step as GitHub would on a pull request titled
+/// `title`, labelled `labels`, that adds or changes `files` (path, content):
+/// in a repository whose HEAD merges the pull request into its base, with
+/// `gh` answering the pull-request query.
+fn run_changelog_job(
+    bash: &OsString,
+    title: &str,
+    labels: &[&str],
+    files: &[(&str, &str)],
+) -> Output {
+    let scratch = Scratch::new("ci-job");
+    let repo = scratch.path().join("repo");
+    let bin = scratch.path().join("bin");
+    fs::create_dir_all(repo.join("changelog.d")).unwrap();
+    fs::create_dir_all(repo.join("scripts")).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(script(), repo.join("scripts/changelog.py")).unwrap();
+    fs::copy(
+        repo_root().join("changelog.d/README.md"),
+        repo.join("changelog.d/README.md"),
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", describe(&out));
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "base"]);
+    git(&["checkout", "-qb", "pr"]);
+    for (path, content) in files {
+        fs::write(repo.join(path), content).unwrap();
+    }
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "pull request", "--allow-empty"]);
+    git(&["checkout", "-q", "main"]);
+    git(&["merge", "-q", "--no-ff", "-m", "merge", "pr"]);
+
+    let labels: Vec<String> = labels
+        .iter()
+        .map(|l| format!("{{\"name\":\"{l}\"}}"))
+        .collect();
+    let pr = scratch.path().join("pr.json");
+    fs::write(
+        &pr,
+        format!("{{\"title\":{title:?},\"labels\":[{}]}}", labels.join(",")),
+    )
+    .unwrap();
+    let shim = |name: &str, body: String| {
+        let path = bin.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    shim("gh", format!("cat '{}'", pr.display()));
+    shim(
+        "python3",
+        format!("exec '{}' \"$@\"", python().to_string_lossy()),
+    );
+    let path = std::env::join_paths(
+        std::iter::once(bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    Command::new(bash)
+        .args(["--noprofile", "--norc", "-eo", "pipefail", "-c"])
+        .arg(ci_changelog_step())
+        .current_dir(&repo)
+        .env("PATH", path)
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_REPOSITORY", "owner/repo")
+        .env("PR_NUMBER", "1")
+        .env("GH_TOKEN", "unused")
+        .output()
+        .unwrap()
+}
+
+/// A pull request's title, labels and changed files (path, content), with
+/// the exit status and a line of output the changelog job must give it.
+type JobCase<'a> = (
+    &'a str,
+    &'a [&'a str],
+    &'a [(&'a str, &'a str)],
+    i32,
+    &'a str,
+);
+
+/// ci.yml's `changelog` job, run for real: a pull request needs the fragment
+/// its title names or the `no-changelog` label, and every fragment it adds
+/// or changes must parse, label or not.
 #[test]
-fn p0_doc_01_check_matches_the_ci_changelog_rule() {
-    let Some(rule) = ci_fragment_rule() else {
-        let workflow = read(&repo_root().join(".github/workflows/ci.yml"));
-        assert!(
-            workflow.contains("scripts/changelog.py check"),
-            "the changelog job of ci.yml neither embeds the fragment rule nor runs \
-             `scripts/changelog.py check`"
-        );
+fn p0_doc_01_ci_changelog_job_requires_a_fragment_or_the_label() {
+    let Some(bash) = bash4() else {
+        eprintln!("p0_doc_01: no bash 4 or later here, so the changelog job was not run");
         return;
     };
-
-    // Every fixture fragment, valid or not, the README the assembler skips, a
-    // fragment that is not UTF-8, a missing file and the committed fragments,
-    // under short relative names so both programs print the same paths.
-    let scratch = Scratch::new("ci-rule");
-    let mut corpus = Vec::new();
-    let mut add = |name: String, source: &Path| {
-        fs::copy(source, scratch.path().join(&name)).unwrap();
-        corpus.push(name);
-    };
-    for name in markdown_files(&changelog_fixture("malformed")) {
-        add(name.clone(), &changelog_fixture("malformed").join(&name));
-    }
-    for fixture in ["merge", "pending"] {
-        let dir = changelog_fixture(fixture).join("fragments");
-        for name in markdown_files(&dir) {
-            add(format!("{fixture}-{name}"), &dir.join(&name));
-        }
-    }
-    let committed = repo_root().join("changelog.d");
-    for name in markdown_files(&committed) {
-        add(format!("committed-{name}"), &committed.join(&name));
-    }
-    fs::write(scratch.path().join("not-utf8.md"), NOT_UTF8).unwrap();
-    corpus.push("not-utf8.md".to_owned());
-    corpus.push("missing.md".to_owned());
-    let program = scratch.path().join("ci_rule.py");
-    fs::write(&program, rule).unwrap();
-
-    let compare = |args: &[&str]| {
-        let ci = python_run(&program, scratch.path(), args, true);
-        let ours = python_run(
-            &script(),
-            scratch.path(),
-            &[&["check"][..], args].concat(),
-            true,
-        );
+    let valid = "### Added\n\n- A thing.\n";
+    let malformed = "### Nonsense\n\n- A thing.\n";
+    let title = "P0-XYZ-01: Do a thing";
+    let cases: &[JobCase] = &[
+        (title, &[], &[], 1, "add changelog.d/P0-XYZ-01.md"),
+        (
+            title,
+            &["no-changelog"],
+            &[],
+            0,
+            "the no-changelog label is set",
+        ),
+        (
+            title,
+            &[],
+            &[("changelog.d/P0-XYZ-01.md", valid)],
+            0,
+            "changelog: changelog.d/P0-XYZ-01.md found",
+        ),
+        (
+            title,
+            &["no-changelog"],
+            &[("changelog.d/P0-XYZ-01.md", malformed)],
+            1,
+            "::error file=changelog.d/P0-XYZ-01.md",
+        ),
+        (
+            title,
+            &[],
+            &[("changelog.d/P0-XYZ-01.md", malformed)],
+            1,
+            "::error file=changelog.d/P0-XYZ-01.md",
+        ),
+        (
+            "Do a thing",
+            &[],
+            &[("changelog.d/P0-XYZ-01.md", valid)],
+            1,
+            "does not start with '<ID>: '",
+        ),
+        (
+            title,
+            &[],
+            &[("changelog.d/P0-ABC-02.md", valid)],
+            1,
+            "add changelog.d/P0-XYZ-01.md",
+        ),
+        (
+            title,
+            &[],
+            &[("changelog.d/README.md", "# Edited\n")],
+            1,
+            "add changelog.d/P0-XYZ-01.md",
+        ),
+    ];
+    for (title, labels, files, code, says) in cases {
+        let out = run_changelog_job(&bash, title, labels, files);
         assert_eq!(
-            (stdout(&ours), ours.status.code()),
-            (stdout(&ci), ci.status.code()),
-            "scripts/changelog.py check and the ci.yml rule disagree on {args:?}\n\
-             --- ci.yml rule\n{}\n--- changelog.py check\n{}",
-            describe(&ci),
-            describe(&ours)
+            out.status.code(),
+            Some(*code),
+            "{title:?} {labels:?} {files:?}\n{}",
+            describe(&out)
         );
         assert!(
-            ci.stderr.is_empty() && ours.stderr.is_empty(),
-            "neither writes to stderr\n{}\n{}",
-            describe(&ci),
-            describe(&ours)
+            stdout(&out).contains(says),
+            "{title:?} {labels:?} {files:?}: expected {says:?}\n{}",
+            describe(&out)
         );
-        stdout(&ci)
-    };
-
-    let mut parsed = 0;
-    let mut rejected = 0;
-    for name in &corpus {
-        let output = compare(&[name.as_str()]);
-        parsed += usize::from(output.contains(": parses"));
-        rejected += usize::from(output.contains("::error file="));
     }
-    let all: Vec<&str> = corpus.iter().map(String::as_str).collect();
-    compare(&all);
-
-    assert!(
-        parsed >= 5 && rejected >= MALFORMED.len() + 2,
-        "the corpus must exercise both outcomes: {parsed} parsed, {rejected} rejected"
-    );
 }
