@@ -54,6 +54,11 @@ T1_SIZES = (0, 1, 7, 64, 1_024, 4_096, 65_537, 1_048_576)
 # Below this many files a build runs in one process: spawning workers costs more.
 PARALLEL_MIN_FILES = 20_000
 
+# The file that marks a directory as one the harness builds trees in. A build
+# removes `T1`, `T2`, `T3` (and scaled `Tn-xF`) there, so a `--trees-dir`
+# that names an unrelated directory must stop before anything is deleted.
+MARKER = ".duscope-bench-trees"
+
 _DIGEST_MOD = 1 << 128
 _CREATE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
 _UTIME_FD = os.utime in os.supports_fd
@@ -328,16 +333,51 @@ def _remove(path: str) -> None:
             os.unlink(path)
 
 
+def _has_stamp(trees_dir: str) -> bool:
+    """Whether `trees_dir` holds a build stamp (a directory used before the marker existed)."""
+    for name in os.listdir(trees_dir):
+        if name.endswith(".json"):
+            try:
+                with open(os.path.join(trees_dir, name), encoding="utf-8") as f:
+                    if "generator_version" in json.load(f):
+                        return True
+            except (OSError, ValueError, TypeError):
+                continue
+    return False
+
+
+def claim(trees_dir: str) -> None:
+    """Create `trees_dir` if needed and make sure builds may replace trees in it."""
+    marker = os.path.join(trees_dir, MARKER)
+    if os.path.isfile(marker):
+        return
+    os.makedirs(trees_dir, exist_ok=True)
+    if os.listdir(trees_dir) and not _has_stamp(trees_dir):
+        raise TreeError(
+            f"{trees_dir} is not a directory of benchmark trees (it holds no {MARKER} and no "
+            "build stamp, and is not empty): pass a new or empty --trees-dir"
+        )
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("duscope benchmark trees\n")
+
+
 def build(t: Tree, trees_dir: str, jobs: int, force: bool = False, log=None) -> Dict[str, object]:
-    """Build `t` under `trees_dir` unless a matching stamp says it is there; return the stamp."""
+    """Build `t` under `trees_dir` unless a matching stamp says it is there, and a walk of the
+    tree still gives the stamp's digest; return the stamp."""
     say = log or (lambda message: None)
+    root = tree_root(t, trees_dir)
     if not force:
         stamp = read_stamp(t, trees_dir)
         if stamp is not None:
-            say(f"{t.dirname}: up to date ({t.dirs:,} directories, {t.files:,} files)")
-            return stamp
-    os.makedirs(trees_dir, exist_ok=True)
-    root = tree_root(t, trees_dir)
+            try:
+                observed = walk_digest(root)
+            except (OSError, TreeError) as e:
+                observed = f"unreadable ({e})"
+            if observed == stamp["digest"]:
+                say(f"{t.dirname}: up to date ({t.dirs:,} directories, {t.files:,} files)")
+                return stamp
+            say(f"{t.dirname}: changed since it was built (walk {observed}, stamp {stamp['digest']}); rebuilding")
+    claim(trees_dir)
     # The stamp goes first, so an interrupted rebuild never leaves a stale one.
     _remove(stamp_path(t, trees_dir))
     if os.path.lexists(root):
@@ -417,12 +457,17 @@ def walk(root: str) -> Iterator[Tuple[str, int, int, str]]:
                     raise TreeError(f"{entry.path}: not a regular file or directory")
 
 
+def walk_digest(root: str) -> str:
+    """The digest of the tree under `root` as it is now."""
+    total = 0
+    for kind, size, mtime, relative in walk(root):
+        total += record_hash(kind, size, mtime, relative)
+    return format_digest(total)
+
+
 def verify(t: Tree, trees_dir: str) -> Tuple[str, str]:
     """Walk the built tree; return (digest of the walk, digest in the stamp)."""
     stamp = read_stamp(t, trees_dir)
     if stamp is None:
         raise TreeError(f"{t.dirname} is not built under {trees_dir} (run `bench/run.sh build`)")
-    total = 0
-    for kind, size, mtime, relative in walk(tree_root(t, trees_dir)):
-        total += record_hash(kind, size, mtime, relative)
-    return format_digest(total), str(stamp["digest"])
+    return walk_digest(tree_root(t, trees_dir)), str(stamp["digest"])

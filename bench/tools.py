@@ -205,6 +205,7 @@ class Resolved:
     version: Optional[str] = None
     reason: Optional[str] = None
     argv_template: Tuple[str, ...] = ()
+    built_with: Optional[str] = None  # `rustc --version` for a tool built from source
 
     def command(self) -> str:
         """The command line as the result file records it: the tool's name, `{tree}` for the tree."""
@@ -327,16 +328,20 @@ def _install_release(tool: Tool, release: Release, tools_dir: str, log) -> str:
     return binary
 
 
-def _install_cargo(tool: Tool, cargo: Cargo, tools_dir: str, log) -> str:
+def _install_cargo(tool: Tool, cargo: Cargo, tools_dir: str, log) -> Tuple[str, Optional[str]]:
+    """Build the tool from source; return its path and the `rustc --version` that built it."""
     command = ["cargo", "install", "--locked", "--quiet", "--root", os.path.abspath(tools_dir)]
     if cargo.git:
         command += ["--git", str(cargo.git), "--rev", str(cargo.rev), cargo.crate]
     else:
         command += [f"{cargo.crate}@{cargo.version}"]
     # The stable toolchain, as `just setup` uses for its tools: the repository's
-    # rust-toolchain.toml pins 1.88, older than some competitors need.
+    # rust-toolchain.toml pins 1.88, older than some competitors need. Which
+    # stable that is changes over time, so the result file records it.
+    toolchain: List[str] = []
     if shutil.which("rustup"):
-        command = ["rustup", "run", "stable", *command]
+        toolchain = ["rustup", "run", "stable"]
+        command = [*toolchain, *command]
     elif shutil.which("cargo") is None:
         raise ToolError("cargo is needed to build it: install rustup (https://rustup.rs)")
     log(f"building {tool.name} {tool.pinned}: {' '.join(command)}")
@@ -349,7 +354,7 @@ def _install_cargo(tool: Tool, cargo: Cargo, tools_dir: str, log) -> str:
     binary = os.path.join(tools_dir, "bin", tool.name)
     if not os.path.isfile(binary):
         raise ToolError(f"cargo install did not produce {binary}")
-    return binary
+    return binary, first_line([*toolchain, "rustc", "--version"])
 
 
 def resolve(tool: Tool, key: str, tools_dir: str, install: bool, override: Optional[str], log) -> Resolved:
@@ -374,23 +379,28 @@ def resolve(tool: Tool, key: str, tools_dir: str, install: bool, override: Optio
     marker = _read_marker(tools_dir, tool.name)
     if marker and marker.get("pinned") == tool.pinned and os.access(binary, os.X_OK):
         try:
-            return Resolved(tool, "ready", source, binary, check_version(tool, binary))
+            version = check_version(tool, binary)
+            return Resolved(tool, "ready", source, binary, version, built_with=marker.get("rustc"))
         except ToolError:
             pass  # reinstall below
     if not install:
         return Resolved(tool, "failed", source, reason=f"not installed under {tools_dir}")
+    built_with: Optional[str] = None
     try:
         if source == "release":
             path = _install_release(tool, tool.releases[key], tools_dir, log)
         else:
             assert tool.cargo is not None
-            path = _install_cargo(tool, tool.cargo, tools_dir, log)
+            path, built_with = _install_cargo(tool, tool.cargo, tools_dir, log)
         version = check_version(tool, path)
     except (ToolError, OSError, tarfile.TarError) as e:
         return Resolved(tool, "failed", source, reason=str(e))
-    _write_marker(tools_dir, tool.name, {"pinned": str(tool.pinned), "source": source})
-    log(f"{tool.name}: installed {version}")
-    return Resolved(tool, "ready", source, path, version)
+    marker = {"pinned": str(tool.pinned), "source": source}
+    if built_with:
+        marker["rustc"] = built_with
+    _write_marker(tools_dir, tool.name, marker)
+    log(f"{tool.name}: installed {version}" + (f", built with {built_with}" if built_with else ""))
+    return Resolved(tool, "ready", source, path, version, built_with=built_with)
 
 
 def ad_hoc(name: str, command: str) -> Resolved:

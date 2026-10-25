@@ -42,18 +42,18 @@ Options of `run` (most also apply to `build`, `install` and `verify`):
 | `--subject NAME` | `du` | the tool every competitor is paired with |
 | `--competitors LIST` | `diskus` | pinned tools to pair with the subject, `all` or `none` |
 | `--command NAME=CMD` | | also pair an ad-hoc command line with the subject; `{tree}` is the tree (repeatable) |
-| `--tool-path NAME=PATH` | | use this executable for a pinned tool instead of installing it; its version is still checked (repeatable) |
+| `--tool-path NAME=PATH` | | use this executable for a pinned tool instead of installing it; its `--version` must name the pin, except dumac's, which has no version to check and is recorded at its pinned commit (repeatable) |
 | `--mode warm\|cold\|both` | `warm` | page cache warm, dropped before every run, or both |
-| `--cold-cmd CMD` | `bench/drop-caches.sh` | the command that drops the caches before each cold run |
+| `--cold-cmd CMD` | `bench/drop-caches.sh` | the command that drops the caches before each cold run; it may not be empty |
 | `--runs N` | `10` | measured runs of each tool in each pair |
 | `--warmup N` | `2` | unmeasured runs of each tool at the start of each warm pair |
 | `--jobs N` | `4` | processes that create the trees' files |
-| `--trees-dir DIR` | `bench/.trees` | where the trees and their stamps live |
+| `--trees-dir DIR` | `bench/.trees` | where the trees and their stamps live; a new or empty directory, or one the harness built trees in |
 | `--tools-dir DIR` | `bench/.tools` | where the pinned tools install |
 | `--results-dir DIR` | `bench/results` | where the result file goes |
 | `--out FILE` | `<results-dir>/<date>-<platform>.json` | the result file |
 | `--hyperfine CMD` | `hyperfine` | the hyperfine command line |
-| `--keep-raw` | off | keep hyperfine's per-round JSON exports under `bench/.runs/` |
+| `--keep-raw` | off | keep hyperfine's per-round JSON exports under `bench/.runs/`; without it they go to a temporary directory, removed however the run ends |
 
 A self-hosted runner keeps `--trees-dir` and `--tools-dir` outside the checkout, so that a clean
 checkout does not delete them.
@@ -72,9 +72,11 @@ tree. Every mtime (and atime) is 2023-11-14T22:13:20Z plus an even number of sec
 20,000.
 
 - **T1** has the counts of the tree in gdu's README benchmark (100k directories, 400k files).
-  Each directory's parent is chosen uniformly among the directories before it, which gives real
-  trees' skewed fan-out and a depth around ln n (at most about e ln n, some 30 levels); each
-  file lands in a uniformly chosen directory, with a name, one of 16 common extensions, and a
+  Each directory's parent is chosen uniformly among the directories before it (a random
+  recursive tree): fan-out is uneven but small, at most 19 subdirectories and 14 files in any
+  directory, half the directories are leaves, and the depth stays around ln n (26 levels at
+  most). It has no large directory; T3 is the large-directory case. Each file lands in a
+  uniformly chosen directory, with a name, one of 16 common extensions, and a
   size from fdu's "mixed" profile (0 B to 1 MiB). The files are sparse: 56 GB apparent, close to
   gdu's 50 GB, with almost nothing allocated. The harness refuses to build T1 on a filesystem
   that would write the holes out.
@@ -82,17 +84,21 @@ tree. Every mtime (and atime) is 2023-11-14T22:13:20Z plus an even number of sec
   (`explorations/benchmarks` in fdu 0.5.0) with fdu's own seed. One directory per eight
   entries, each directory's parent is directory i / 8 (breadth-first, fan-out 8), files land in
   uniformly chosen directories with fdu's names, extensions, sizes (0 B to 4 KiB, real bytes)
-  and times. At 2,000 and 20,000 entries it is byte-identical to fdu's generator (paths, sizes,
-  mtimes, contents); its directories are `d-<index>-<token>` and files `f-<index>-<token><ext>`
-  rather than names from a real home directory.
+  and times. It was checked against fdu's generator at 2,000 and 20,000 entries (paths, sizes,
+  mtimes, contents); the unit tests pin a few of its directory names and mtimes, not the whole
+  listing. Its directories are `d-<index>-<token>` and files `f-<index>-<token><ext>`, not names
+  from a real home directory: it is fdu's shape, not a home-like tree.
 - **T3** is the flat stress case: 1,000,000 empty files `f0000000` … `f0999999` in its root.
 
 A build writes the tree to `<trees-dir>/<name>` and then a stamp, `<trees-dir>/<name>.json`,
-with the spec, the build time and a digest. A run reuses a tree whose stamp matches its spec and
-the generator version, and rebuilds anything else. The digest is the sum, modulo 2^128, of the
-first 16 bytes of SHA-256 of one line `<kind>\t<size>\t<mtime ns>\t<path>` per entry, so
-`bench/run.sh verify` can recompute it from a walk and catch a tree that changed since it was
-built. `--scale` builds `T1-x0.001` and the like beside the full trees, with every count scaled.
+with the spec, the build time and a digest. The digest is the sum, modulo 2^128, of the first 16
+bytes of SHA-256 of one line `<kind>\t<size>\t<mtime ns>\t<path>` per entry, so a walk can
+recompute it. A run reuses a tree only when its stamp matches its spec and the generator version
+and a walk of the tree still gives the stamp's digest (seconds per million entries), and
+rebuilds anything else: a tree changed or half-deleted since its build is never measured under
+its old digest. `bench/run.sh verify` runs the same walk on its own. The harness marks the trees
+directory with `.duscope-bench-trees` and refuses to build in a directory that holds other
+files, since a build deletes the trees it replaces. `--scale` builds `T1-x0.001` and the like beside the full trees, with every count scaled.
 APFS creates files one at a time however many processes ask, so `--jobs` helps on Linux more
 than on macOS; deleting T2 and T3 there takes minutes too (`rm -rf bench/.trees/T2`).
 
@@ -149,15 +155,17 @@ runner ALL=(root) NOPASSWD: /usr/sbin/sysctl -q vm.drop_caches=3
 ```
 
 The harness runs the command once before building or measuring anything, and stops with an
-error that says what to configure when it fails, so a cold run never silently measures warm
-caches. `purge` drops the unified buffer cache, not every APFS metadata cache; a volume remount
+error that says what to configure when it fails (or when `--cold-cmd` is empty), so a cold run
+never silently measures warm caches. `purge` drops the unified buffer cache, not every APFS metadata cache; a volume remount
 clears more, and `--cold-cmd` takes any command that does it, such as a script that unmounts and
 mounts the volume holding `--trees-dir`.
 
 ## Result file
 
 A run writes `<results-dir>/<date>-<platform>.json`, where `<date>` is the UTC date the run
-started and `<platform>` is `macos` or `linux`; a second run on the same day replaces it. These
+started and `<platform>` is `macos` or `linux`; a second run on the same day replaces it. The
+platform names the OS only: `host.arch` tells an arm64 run from an x86_64 one, and anything that
+compares results (`compare.py`) keys on both. These
 files are not committed to `main`: `bench/.gitignore` ignores them, and the nightly job pushes
 its own to the `bench-results` branch, where `compare.py` reads baselines. Results a package
 means to keep (`thread-sweep-*.json`, `results/1.0/`) have other names and are committed.
@@ -203,6 +211,7 @@ Every field is always present; a field that does not apply is `null`. Times are 
 | `tools[].version` | string or null | what the tool reports, from `--version` |
 | `tools[].source` | string | `system`, `release`, `cargo`, `git`, `path` (`--tool-path`), `command` (`--command`) or `skipped` |
 | `tools[].path` | string or null | the executable |
+| `tools[].built_with` | string or null | for a tool built from source (`cargo`, `git`), the `rustc --version` that built it |
 | `tools[].status` | string | `measured`, `skipped` (not for this platform) or `failed` |
 | `tools[].reason` | string or null | why it was skipped or failed |
 | `results` | array of object | one entry per tree, mode and measured tool, the subject first |

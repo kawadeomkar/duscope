@@ -197,7 +197,10 @@ class Session:
             *self.hyperfine, "--runs", "1", "--warmup", str(warmup), "--style", "none",
             "--metrics", METRICS, "--export-json", export,
         ]
-        if self.mode == "cold" and self.cold_cmd:
+        if self.mode == "cold":
+            # A cold run without a cache drop would measure warm caches.
+            if not (self.cold_cmd or "").strip():
+                raise MeasureError("a cold run needs the command that drops the caches")
             argv += ["--prepare", self.cold_cmd]
         for tool in tools:
             argv += ["--command-name", tool.tool.name, shlex.join(tool.argv(self.tree_path))]
