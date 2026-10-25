@@ -911,6 +911,16 @@ fn p0_bench_02_runners_doc_covers_the_spec_topics() {
     ] {
         assert!(doc.contains(topic), "{RUNNERS_DOC} lacks `{topic}`");
     }
+    // The runner reads `.path` as the value of PATH: a `PATH=` in front makes
+    // the first entry, ~/.cargo/bin with hyperfine in it, a path that is not there.
+    let path_line = doc
+        .lines()
+        .find(|l| l.trim_end().ends_with("> .path"))
+        .expect("docs/runners.md writes the runner's .path");
+    assert!(
+        !path_line.contains("PATH="),
+        "`.path` holds PATH's value, not a `PATH=` line: {path_line}"
+    );
     // The sudo rules are bench/README.md's, which the cache drop relies on.
     let sudoers = |text: &str| -> Vec<String> {
         text.lines()

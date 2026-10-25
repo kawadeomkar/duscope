@@ -145,11 +145,13 @@ cd ~/actions-runner
 ./config.sh --unattended --url https://github.com/kawadeomkar/duscope \
   --token <token> --name bench-macos --labels bench-macos   # bench-linux on the Linux box
 echo "BENCH_HOME=$HOME/duscope-bench" >> .env
-echo "PATH=$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" > .path
+echo "$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" > .path
 ```
 
-The runner reads `.env` and `.path` into every job: `BENCH_HOME` tells the
-workflow where the trees live, and `.path` puts hyperfine and cargo on `PATH`.
+The runner reads `.env` and `.path` into every job: `.env` holds `NAME=value`
+lines, and `BENCH_HOME` tells the workflow where the trees live; `.path` holds
+the value of `PATH` itself, with no `PATH=` in front, and puts hyperfine and
+cargo on it.
 Then install it as a service that starts at boot:
 
 ```sh
