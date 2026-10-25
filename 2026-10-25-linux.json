@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-25",
+  "started_at": "2026-10-25T10:47:28Z",
+  "finished_at": "2026-10-25T10:47:29Z",
+  "platform": "linux",
+  "subject": "du",
+  "host": {
+    "os": "Ubuntu 24.04.5 LTS",
+    "kernel": "Linux 6.8.0-147-generic",
+    "arch": "x86_64",
+    "cpu": "Intel(R) Core(TM) i9-10900K CPU @ 3.70GHz",
+    "logical_cpus": 4,
+    "memory_bytes": 8326934528
+  },
+  "harness": {
+    "commit": "fd2e41ab0283d9a22484f9f9b9c884ccf9f1b416",
+    "hyperfine": "2.0.0",
+    "python": "3.12.3",
+    "runs": 10,
+    "warmup": 2,
+    "cold_command": null
+  },
+  "trees": [
+    {
+      "name": "T1",
+      "shape": "gdu",
+      "seed": "duscope-bench-T1-v1",
+      "scale": 0.01,
+      "dirs": 1000,
+      "files": 4000,
+      "apparent_bytes": 541321629,
+      "digest": "9a97ebe1e6c3049a8affde802c12497f",
+      "filesystem": "ext4",
+      "build_s": 0.112
+    }
+  ],
+  "tools": [
+    {
+      "name": "du",
+      "pinned": null,
+      "version": "du (GNU coreutils) 9.4",
+      "source": "system",
+      "path": "/usr/bin/du",
+      "built_with": null,
+      "status": "measured",
+      "reason": null
+    }
+  ],
+  "results": [
+    {
+      "tree": "T1",
+      "mode": "warm",
+      "tool": "du",
+      "command": "du -sk {tree}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        0.008471686,
+        0.008564111,
+        0.008589635,
+        0.008514683,
+        0.008789409,
+        0.009066428,
+        0.009357441,
+        0.009037754,
+        0.00909213,
+        0.008558051
+      ],
+      "p50_s": 0.008689522,
+      "p95_s": 0.009238051,
+      "mean_s": 0.008804133,
+      "stddev_s": 0.000311121,
+      "min_s": 0.008471686,
+      "max_s": 0.009357441,
+      "user_s": 0.0014156,
+      "system_s": 0.0073186,
+      "peak_rss_bytes": 3276800,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    }
+  ]
+}
