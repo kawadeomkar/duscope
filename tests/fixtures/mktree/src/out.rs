@@ -46,18 +46,30 @@ fn io_err(what: &str, path: &Path, err: &io::Error) -> Error {
 #[derive(Clone, Debug)]
 pub struct OutDir {
     path: PathBuf,
+    /// The directory is mktree's by its name (the workspace default), so a
+    /// build may replace whatever it holds.
+    reserved: bool,
 }
 
 impl OutDir {
     /// An output directory at `path`.
     pub fn new(path: impl Into<PathBuf>) -> OutDir {
-        OutDir { path: path.into() }
+        OutDir {
+            path: path.into(),
+            reserved: false,
+        }
     }
 
     /// `target/fixtures.noindex` of this workspace:
     /// `$CARGO_TARGET_DIR/fixtures.noindex` when that is set (relative to the
     /// workspace root), else `<workspace>/target/fixtures.noindex`. `just
     /// fixtures` and the test kit both use it.
+    ///
+    /// It is reserved for mktree by its name, so a build replaces whatever it
+    /// holds without the marker. A cache of `target/` can keep the tree and
+    /// lose its files: rust-cache, before CI saves `target/`, deletes every
+    /// file it does not take for a build artifact, the marker and the record
+    /// with them, and keeps the directories.
     pub fn workspace_default() -> OutDir {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = manifest_dir.ancestors().nth(3).unwrap_or(manifest_dir);
@@ -65,7 +77,10 @@ impl OutDir {
             Some(dir) => workspace.join(dir),
             None => workspace.join("target"),
         };
-        OutDir::new(target.join("fixtures.noindex"))
+        OutDir {
+            path: target.join("fixtures.noindex"),
+            reserved: true,
+        }
     }
 
     /// The directory itself.
@@ -101,11 +116,12 @@ impl OutDir {
         DirLock::acquire(self.path.join(".lock"))
     }
 
-    /// Makes sure a build may replace what the directory holds: it carries
-    /// the marker, holds a build record (a directory built before the marker
-    /// existed), or holds nothing but the lock. A build deletes `tree/`,
-    /// `holders/` and the `.tmp-*` and `.old-*` entries below it, so `--out`
-    /// naming an unrelated directory must stop here. Called under the lock.
+    /// Makes sure a build may replace what the directory holds: it is the
+    /// workspace default, carries the marker, holds a build record (a
+    /// directory built before the marker existed), or holds nothing but the
+    /// lock. A build deletes `tree/`, `holders/` and the `.tmp-*` and `.old-*`
+    /// entries below it, so `--out` naming an unrelated directory must stop
+    /// here. Called under the lock.
     fn claim(&self) -> Result<()> {
         let marker = self.path.join(MARKER);
         if marker.is_file() {
@@ -116,7 +132,7 @@ impl OutDir {
         let empty = entries
             .flatten()
             .all(|e| e.file_name() == MARKER || e.file_name() == ".lock");
-        if !empty && !matches!(self.record(), Ok(Some(_))) {
+        if !self.reserved && !empty && !matches!(self.record(), Ok(Some(_))) {
             return Err(Error::new(format!(
                 "{} is not a mktree output directory (it holds no {MARKER} and no \
                  record.toml, and is not empty): pass a new or empty directory",
@@ -353,5 +369,88 @@ impl DirLock {
 impl Drop for DirLock {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::Manifest;
+
+    fn small_plan() -> Plan {
+        let text = r#"
+format = 1
+hash = ""
+instant = "2030-01-01T00:00:00Z"
+words = ["alpha"]
+[defaults]
+dir_mode = 0o755
+file_mode = 0o644
+age = "30d"
+[extensions]
+code = ["rs"]
+[[case]]
+name = "c"
+about = "a file and a symlink in nested directories"
+root = "cases/c"
+entries = [
+  { path = "a/b/file", file = "4K" },
+  { path = "link", symlink = "a/b/file" },
+]
+"#;
+        Plan::new(&Manifest::parse(text).unwrap()).unwrap()
+    }
+
+    /// Deletes every regular file below `dir` and keeps the directories and
+    /// symlinks, as rust-cache cleans `target/` before CI saves it.
+    fn strip_files(dir: &Path) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                strip_files(&entry.path());
+            } else if kind.is_file() {
+                fs::remove_file(entry.path()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn p0_test_01_workspace_default_rebuilds_a_tree_stripped_of_its_files() {
+        let plan = small_plan();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("fixtures.noindex");
+        let (first, built) = OutDir::new(&path).ensure(&plan, false).unwrap();
+        assert!(built);
+        let listing = crate::listing(&path.join("tree")).unwrap();
+
+        strip_files(&path);
+        assert!(!path.join(MARKER).exists());
+        assert!(!path.join("record.toml").exists());
+        assert!(path.join("tree/cases/c/a/b").is_dir());
+
+        // Named by `--out`, the directory is refused: it could be anyone's.
+        let err = OutDir::new(&path).ensure(&plan, false).unwrap_err();
+        assert!(
+            err.to_string().contains("is not a mktree output directory"),
+            "{err}"
+        );
+
+        // As the workspace default it is mktree's, and is built again.
+        let reserved = OutDir {
+            path: path.clone(),
+            reserved: true,
+        };
+        let (second, built) = reserved.ensure(&plan, false).unwrap();
+        assert!(built);
+        assert_eq!(second.hash, first.hash);
+        assert_eq!(crate::listing(&reserved.tree()).unwrap(), listing);
+        assert!(path.join(MARKER).is_file());
+    }
+
+    #[test]
+    fn p0_test_01_only_the_workspace_default_is_reserved() {
+        assert!(OutDir::workspace_default().reserved);
+        assert!(!OutDir::new(OutDir::workspace_default().path()).reserved);
     }
 }
