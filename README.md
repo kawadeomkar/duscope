@@ -28,14 +28,25 @@ A short tour of the commands arrives with the first usable release, v0.1.0.
 
 ## Install
 
-None of these channels is live yet.
+GitHub Releases and crates.io carry v0.0.1, the pre-release placeholder. The
+other channels open with the release each one names.
 
-### GitHub Releases (not yet live: from v0.0.1)
+### GitHub Releases
 
 Prebuilt binaries for macOS (Apple silicon and Intel) and Linux (x86_64 and
 arm64, statically linked with musl), built by cargo-dist with build
-attestations, and a shell installer. Each release page on GitHub will give the
-installer command.
+attestations. The shell installer picks the archive for the machine and
+installs `duscope` into `~/.cargo/bin`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/kawadeomkar/duscope/releases/latest/download/duscope-installer.sh | sh
+```
+
+To check a downloaded archive was built by this repository's release workflow:
+
+```sh
+gh attestation verify duscope-aarch64-apple-darwin.tar.xz --repo kawadeomkar/duscope
+```
 
 ### Homebrew (not yet live: from v0.1.0)
 
@@ -61,7 +72,7 @@ A signed apt repository (not yet live: phase 5, before 1.0) will then make it
 `sudo apt install duscope` on Debian 12 and later and Ubuntu 22.04 and later,
 once the repository is added as `docs/apt.md` will describe.
 
-### crates.io (not yet live: from v0.0.1)
+### crates.io
 
 ```sh
 cargo install duscope --locked
