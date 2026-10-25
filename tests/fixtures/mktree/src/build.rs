@@ -3,9 +3,11 @@
 //! The build is deterministic: directories are created in plan order, the
 //! files of each directory by one worker in plan order (so even filesystems
 //! whose `readdir` order follows insertion list them identically on every
-//! run), the special entries after them, and every mode and timestamp is set
-//! explicitly from the plan, never from the umask or the clock. Directory
-//! times are set last, children before parents.
+//! run, and an ext4 directory ends up the same size, which it does not when
+//! its entries are inserted concurrently), the special entries after them,
+//! and every mode and timestamp is set explicitly from the plan, never from
+//! the umask or the clock. Directory times are set last, children before
+//! parents.
 //!
 //! Cases a platform or filesystem cannot build are recorded as skipped with
 //! the reason and what stands in for them, never left silently missing.
@@ -19,7 +21,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, mpsc};
 use std::time::Instant;
 
 use crate::plan::{Entry, Kind, Plan};
@@ -31,6 +33,19 @@ const BATCH: usize = 200;
 
 /// Chunk size for writing generated content.
 const CHUNK: usize = 64 * 1024;
+
+/// A directory with at least this many files is built by a pipeline: its
+/// worker only creates the files, still one by one in plan order, and
+/// helpers write their contents and set their modes and times. Creating is
+/// about half the cost of a file, so the 100,000-entry directory, the
+/// build's longest single job, takes about half as long.
+const PIPELINE_MIN: usize = 4096;
+
+/// Helper threads per pipelined directory.
+const HELPERS: usize = 3;
+
+/// Created files a pipeline holds open while they wait for a helper.
+const IN_FLIGHT: usize = 64;
 
 /// The absolute path of a tree-relative path.
 pub fn abs(root: &Path, rel: &[u8]) -> PathBuf {
@@ -219,7 +234,8 @@ impl Builder<'_> {
     }
 
     /// Regular files, grouped by directory: one worker creates all files of
-    /// a directory in plan order; the biggest directory starts first.
+    /// a directory in plan order (helped by a pipeline in a big directory);
+    /// the biggest directory starts first.
     fn files(&mut self) -> Result<()> {
         let mut groups: BTreeMap<&[u8], Vec<usize>> = BTreeMap::new();
         for (i, e) in self.plan.entries.iter().enumerate() {
@@ -238,6 +254,10 @@ impl Builder<'_> {
                 scope.spawn(|| {
                     let mut buf = Vec::with_capacity(CHUNK);
                     while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        if job.len() >= PIPELINE_MIN {
+                            create_files_pipelined(plan, dest, job, &failed);
+                            continue;
+                        }
                         for &i in job {
                             if let Err(err) = create_file(plan, dest, i, &mut buf) {
                                 let mut failed =
@@ -629,11 +649,64 @@ impl From<io::Error> for Special {
 }
 
 fn create_file(plan: &Plan, dest: &Path, i: usize, buf: &mut Vec<u8>) -> io::Result<()> {
-    let e = &plan.entries[i];
-    let mut f = OpenOptions::new()
+    fill_file(plan, i, open_new(plan, dest, i)?, buf)
+}
+
+/// Creates the files of one directory in plan order on this thread while
+/// `HELPERS` threads fill them, so the order of insertion stays the plan's.
+fn create_files_pipelined(
+    plan: &Plan,
+    dest: &Path,
+    job: &[usize],
+    failed: &Mutex<Vec<(usize, io::Error)>>,
+) {
+    let fail = |i: usize, err: io::Error| {
+        failed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((i, err));
+    };
+    let (created, waiting) = mpsc::sync_channel::<(usize, File)>(IN_FLIGHT);
+    let waiting = Mutex::new(waiting);
+    std::thread::scope(|scope| {
+        for _ in 0..HELPERS {
+            scope.spawn(|| {
+                let mut buf = Vec::with_capacity(CHUNK);
+                loop {
+                    let next = waiting
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .recv();
+                    let Ok((i, f)) = next else { break };
+                    if let Err(err) = fill_file(plan, i, f, &mut buf) {
+                        fail(i, err);
+                    }
+                }
+            });
+        }
+        for &i in job {
+            match open_new(plan, dest, i) {
+                // The helpers outlive the sender, so a send cannot fail.
+                Ok(f) => {
+                    let _ = created.send((i, f));
+                }
+                Err(err) => fail(i, err),
+            }
+        }
+        drop(created);
+    });
+}
+
+fn open_new(plan: &Plan, dest: &Path, i: usize) -> io::Result<File> {
+    OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(abs(dest, &e.path))?;
+        .open(abs(dest, &plan.entries[i].path))
+}
+
+/// Writes the contents of a newly created file and sets its mode and times.
+fn fill_file(plan: &Plan, i: usize, mut f: File, buf: &mut Vec<u8>) -> io::Result<()> {
+    let e = &plan.entries[i];
     match &e.kind {
         Kind::File {
             text: Some(text), ..
