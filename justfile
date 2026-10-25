@@ -108,6 +108,13 @@ size:
 repro target_dir="target/repro":
     #!/usr/bin/env bash
     set -euo pipefail
+    # Cargo splits RUSTFLAGS on whitespace, so the remapped paths cannot hold any.
+    for dir in '{{justfile_directory()}}' "${CARGO_HOME:-$HOME/.cargo}" '{{target_dir}}'; do
+      if [[ $dir == *[[:space:]]* ]]; then
+        echo "repro: '$dir' contains whitespace, which RUSTFLAGS cannot carry; use a path without any" >&2
+        exit 1
+      fi
+    done
     export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
     export CARGO_INCREMENTAL=0
     export RUSTFLAGS="--remap-path-prefix={{justfile_directory()}}=/duscope --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"

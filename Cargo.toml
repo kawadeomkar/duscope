@@ -9,6 +9,10 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kawadeomkar/duscope"
 homepage = "https://github.com/kawadeomkar/duscope"
+# What a published crate ships: its sources, its README and the two licence
+# texts (symlinks to the ones at the root). Tests stay out: they read files of
+# the repository, which a packaged crate does not have.
+include = ["/src", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [workspace.dependencies]
 # The workspace crates, in publish order: each depends only on crates above it.

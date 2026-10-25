@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme = "README.md"
+include.workspace = true
+keywords = ["disk-usage", "du", "treemap", "cli", "mcp"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 duscope-walk.workspace = true
