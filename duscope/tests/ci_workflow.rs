@@ -8,7 +8,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -109,6 +109,100 @@ impl Job {
             }
         }
         pairs
+    }
+
+    /// The combinations of the job's `strategy.matrix`: the cross product of
+    /// its `key: [a, b]` lists, or its `include:` entries (`- key: value`
+    /// with the entry's other keys below); one empty combination without a
+    /// matrix. ci.yml uses no other form, and the parser refuses a mix.
+    fn combinations(&self) -> Vec<BTreeMap<String, String>> {
+        let mut lists: Vec<(String, Vec<String>)> = Vec::new();
+        let mut include: Vec<BTreeMap<String, String>> = Vec::new();
+        let mut matrix_depth = None;
+        let mut include_depth = None;
+        for line in &self.lines {
+            let entry = line.trim();
+            if entry.is_empty() || entry.starts_with('#') {
+                continue;
+            }
+            let depth = line.len() - line.trim_start().len();
+            let Some(matrix) = matrix_depth else {
+                if entry == "matrix:" {
+                    matrix_depth = Some(depth);
+                }
+                continue;
+            };
+            if depth <= matrix {
+                break;
+            }
+            if entry == "include:" {
+                include_depth = Some(depth);
+                continue;
+            }
+            let (key, value) = entry.trim_start_matches("- ").split_once(':').unwrap();
+            let value = value.split(" #").next().unwrap_or_default();
+            let (key, value) = (key.trim().to_owned(), value.trim().to_owned());
+            match include_depth {
+                Some(d) if depth > d => {
+                    if entry.starts_with("- ") {
+                        include.push(BTreeMap::new());
+                    }
+                    include.last_mut().unwrap().insert(key, value);
+                }
+                _ => {
+                    let values = value
+                        .trim_matches(['[', ']'])
+                        .split(',')
+                        .map(|v| v.trim().to_owned())
+                        .filter(|v| !v.is_empty())
+                        .collect();
+                    lists.push((key, values));
+                }
+            }
+        }
+        assert!(
+            lists.is_empty() || include.is_empty(),
+            "job `{}` mixes matrix lists and include, which this parser does not expand",
+            self.id
+        );
+        if !include.is_empty() {
+            return include;
+        }
+        let mut combinations = vec![BTreeMap::new()];
+        for (key, values) in lists {
+            let mut next = Vec::new();
+            for combination in &combinations {
+                for value in &values {
+                    let mut extended = combination.clone();
+                    extended.insert(key.clone(), value.clone());
+                    next.push(extended);
+                }
+            }
+            combinations = next;
+        }
+        combinations
+    }
+
+    /// The check names the job reports: its `name:` with each
+    /// `${{ matrix.<key> }}` filled in, once per matrix combination.
+    fn check_names(&self) -> Vec<String> {
+        let template = job_key(self, "name")
+            .unwrap_or_else(|| panic!("job `{}` has no name: GitHub would make one up", self.id));
+        self.combinations()
+            .iter()
+            .map(|combination| {
+                let mut name = template.to_owned();
+                for (key, value) in combination {
+                    name = name.replace(&format!("${{{{ matrix.{key} }}}}"), value);
+                }
+                assert!(
+                    !name.contains("${{"),
+                    "job `{}`: `{name}` keeps an expression",
+                    self.id
+                );
+                name
+            })
+            .collect()
     }
 }
 
@@ -246,7 +340,9 @@ fn p0_ci_01_token_is_read_only_unless_a_job_widens_it() {
         let writes: Vec<&String> = job
             .lines
             .iter()
-            .filter(|line| line.trim_end().ends_with(": write"))
+            // Block (`contents: write`) and flow (`{ contents: write }`) forms,
+            // and `write-all`.
+            .filter(|line| line.contains(": write") || line.contains("write-all"))
             .collect();
         if job.id == "size-comment" {
             assert_eq!(
@@ -341,27 +437,37 @@ fn p0_ci_01_settings_require_exactly_the_required_checks() {
         "branches must be up to date before merging"
     );
 
-    // Each check names a job of ci.yml, and its matrix values are in that job's matrix.
-    let jobs = jobs(&read(WORKFLOW));
-    for check in REQUIRED_CHECKS {
-        let (id, values) = check.split_once(" (").unwrap_or((check, ""));
-        let job = jobs
-            .iter()
-            .find(|job| job.id == id)
-            .unwrap_or_else(|| panic!("`{check}`: ci.yml has no `{id}` job"));
-        assert!(!OPTIONAL_JOBS.contains(&id), "`{check}` is an optional job");
-        let matrix: BTreeSet<String> = job.matrix().into_iter().map(|(_, value)| value).collect();
-        for value in values
-            .trim_end_matches(')')
-            .split(", ")
-            .filter(|v| !v.is_empty())
-        {
-            assert!(
-                matrix.contains(value),
-                "`{check}`: the `{id}` job's matrix has no value `{value}`: {matrix:?}"
-            );
-        }
-    }
+    // The names the jobs of ci.yml report, from each job's `name:` and matrix,
+    // are exactly the required checks plus the optional jobs' names.
+    let reported: BTreeSet<String> = jobs(&read(WORKFLOW))
+        .iter()
+        .filter(|job| !OPTIONAL_JOBS.contains(&job.id.as_str()))
+        .flat_map(Job::check_names)
+        .collect();
+    let required: BTreeSet<String> = REQUIRED_CHECKS.iter().map(|&c| c.to_owned()).collect();
+    assert_eq!(
+        reported, required,
+        "the check names ci.yml's required jobs report differ from the required checks"
+    );
+}
+
+#[test]
+fn p0_ci_01_check_names_come_from_the_name_and_matrix() {
+    let workflow = "jobs:\n  test:\n    name: test (${{ matrix.os }}, ${{ matrix.leg }})\n    \
+                    strategy:\n      matrix:\n        os: [a, b] # two\n        # comment\n        \
+                    leg: [x, y]\n    runs-on: ${{ matrix.os }}\n  size:\n    name: size \
+                    (${{ matrix.os }})\n    strategy:\n      matrix:\n        include:\n          \
+                    - os: m\n            key: mac\n          - os: u\n            key: ubuntu\n    \
+                    runs-on: ${{ matrix.os }}\n  fmt:\n    name: fmt\n    runs-on: u\n";
+    let names: Vec<Vec<String>> = jobs(workflow).iter().map(Job::check_names).collect();
+    assert_eq!(
+        names,
+        [
+            vec!["test (a, x)", "test (a, y)", "test (b, x)", "test (b, y)"],
+            vec!["size (m)", "size (u)"],
+            vec!["fmt"],
+        ]
+    );
 }
 
 #[test]

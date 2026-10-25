@@ -36,8 +36,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # A new push to a pull request replaces its running CI; runs on main always finish.
+  # A new push to a pull request replaces its running CI. Every other run (a push
+  # to main, the schedule, a dispatch) has a group of its own commit: GitHub keeps
+  # only the newest waiting run of a group, so a group per ref would skip a commit
+  # that reached main while two runs were ahead of it.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
@@ -206,9 +209,7 @@ jobs:
         with:
           tool: cargo-deny@${{ steps.pins.outputs.cargo_deny }}
       - name: just deny advisories licenses bans sources
-        run: |
-          [[ -f deny.toml ]] || echo "::notice title=deny::no deny.toml yet (P0-REPO-04), so cargo deny is skipped; this job checks for real once it lands"
-          just deny advisories licenses bans sources
+        run: just deny advisories licenses bans sources
 
   docs:
     name: docs
@@ -386,6 +387,8 @@ jobs:
       # time, so they happen first and the timed build runs offline.
       - name: Fetch dependencies (not timed)
         run: cargo fetch --locked
+      # `-p duscope`: the binary a user builds. The unpublished test members
+      # (mktree, duscope-testkit) are not part of a release build.
       - name: Cold cargo build --release
         run: |
           start=$(date +%s.%N)
