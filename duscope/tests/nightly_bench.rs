@@ -299,12 +299,66 @@ fn p0_bench_02_secrets_stay_off_the_self_hosted_runners() {
 }
 
 #[test]
-fn p0_bench_02_nightly_runs_at_three_pacific_on_main_only() {
+fn p0_bench_02_only_the_publish_job_can_push() {
+    let workflow = read(NIGHTLY);
+    let top_level: Vec<&str> = workflow
+        .lines()
+        .skip_while(|line| *line != "permissions:")
+        .skip(1)
+        .take_while(|line| line.starts_with(' '))
+        .collect();
+    assert_eq!(
+        top_level,
+        ["  contents: read"],
+        "the workflow-wide token is read-only"
+    );
+    // The probe files the offline issue; publish pushes the results with the
+    // run's GITHUB_TOKEN. Nothing else writes.
+    let expected: BTreeMap<&str, Vec<&str>> = [
+        ("probe", vec!["issues: write"]),
+        ("publish", vec!["contents: write"]),
+    ]
+    .into();
+    for job in jobs(&workflow) {
+        let code = |line: &&String| !line.trim_start().starts_with('#');
+        let writes: Vec<&str> = job
+            .lines
+            .iter()
+            .filter(code)
+            .map(|line| line.trim())
+            .filter(|line| line.ends_with(": write"))
+            .collect();
+        let want = expected.get(job.id.as_str()).cloned().unwrap_or_default();
+        assert_eq!(
+            writes, want,
+            "job `{}` widens the token differently",
+            job.id
+        );
+        // The one secret is the probe's read-only runner token.
+        let secrets: Vec<&str> = job
+            .lines
+            .iter()
+            .filter(code)
+            .filter_map(|line| line.split("secrets.").nth(1))
+            .map(|rest| rest.split([' ', '}']).next().unwrap())
+            .collect();
+        let want: &[&str] = if job.id == "probe" {
+            &["BENCH_RUNNERS_TOKEN"]
+        } else {
+            &[]
+        };
+        assert_eq!(secrets, want, "job `{}` reads other secrets", job.id);
+    }
+}
+
+#[test]
+fn p0_bench_02_nightly_runs_at_03_17_pacific_on_main_only() {
     let workflow = read(NIGHTLY);
     assert_eq!(triggers(&workflow), SELF_HOSTED_TRIGGERS);
+    // 03:17, not 03:00: GitHub delays scheduled runs most at the top of the hour.
     assert!(
-        workflow.contains("    - cron: \"0 3 * * *\"\n      timezone: \"America/Los_Angeles\"\n"),
-        "nightly-bench.yml runs at 03:00 Pacific, daylight saving included"
+        workflow.contains("    - cron: \"17 3 * * *\"\n      timezone: \"America/Los_Angeles\"\n"),
+        "nightly-bench.yml runs at 03:17 Pacific, daylight saving included"
     );
     let jobs = jobs(&workflow);
     let probe = job(&jobs, "probe");
@@ -844,7 +898,7 @@ fn p0_bench_02_runners_doc_covers_the_spec_topics() {
         "## Updates",
         "## When a runner is offline",
         "## Re-registering a runner",
-        "BENCH_RESULTS_TOKEN",
+        "BENCH_RUNNERS_TOKEN",
         "BENCH_HOME",
         "bench-macos",
         "bench-linux",

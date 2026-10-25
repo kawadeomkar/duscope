@@ -11,9 +11,10 @@
 # This workflow has no pull_request trigger, every job on a bench-* label also
 # carries `if: github.event_name != 'pull_request'`, and only main's copy of the
 # workflow reaches the runners (duscope/tests/nightly_bench.rs checks every
-# workflow for these). Secrets stay on GitHub-hosted runners: the probe and the
-# publish job use BENCH_RESULTS_TOKEN, and the bench jobs get no secret and a
-# read-only GITHUB_TOKEN.
+# workflow for these). Tokens stay on GitHub-hosted runners: the probe reads the
+# runners' status with BENCH_RUNNERS_TOKEN (Administration read, nothing else),
+# the publish job pushes with the run's own GITHUB_TOKEN, given contents: write
+# there alone, and the bench jobs get no secret and a read-only GITHUB_TOKEN.
 #
 # An offline runner never fails the run: the probe asks the API which runners
 # are online, the bench job of a runner that is not is skipped with a notice,
@@ -24,7 +25,9 @@ name: Nightly bench
 
 on:
   schedule:
-    - cron: "0 3 * * *"
+    # 03:17, not 03:00: GitHub delays scheduled runs most at the top of the hour,
+    # and under load drops some.
+    - cron: "17 3 * * *"
       timezone: "America/Los_Angeles"
   workflow_dispatch:
     inputs:
@@ -79,7 +82,7 @@ jobs:
       - name: Which bench runners are online
         id: runners
         env:
-          GH_TOKEN: ${{ secrets.BENCH_RESULTS_TOKEN }}
+          GH_TOKEN: ${{ secrets.BENCH_RUNNERS_TOKEN }}
         run: |
           # Each platform's status: online, offline, missing (no runner has the
           # label) or unknown (the API could not be read). Listing runners needs
@@ -88,7 +91,7 @@ jobs:
           if ! runners=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runners" \
               --jq '.runners[] | {status, labels: [.labels[].name]}' 2>"$RUNNER_TEMP/runners.err"); then
             read_ok=false
-            echo "::notice title=nightly-bench::cannot read the runners' status, so no bench job runs (BENCH_RESULTS_TOKEN is missing or lacks Administration read): $(tr '\n' ' ' < "$RUNNER_TEMP/runners.err")"
+            echo "::notice title=nightly-bench::cannot read the runners' status, so no bench job runs (BENCH_RUNNERS_TOKEN is missing or lacks Administration read): $(tr '\n' ' ' < "$RUNNER_TEMP/runners.err")"
           fi
           for platform in macos linux; do
             label="bench-$platform"
@@ -246,6 +249,9 @@ jobs:
     if: ${{ always() && needs.probe.result == 'success' && (needs.bench-macos.result != 'skipped' || needs.bench-linux.result != 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      # The push to bench-results; branch protection keeps the token off main.
+      contents: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         # No artifact when no bench job got as far as a result file.
@@ -254,9 +260,9 @@ jobs:
           pattern: bench-*
           path: ${{ runner.temp }}/results
           merge-multiple: true
+      # The run's GITHUB_TOKEN stays in the checkout's git config for the push.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ secrets.BENCH_RESULTS_TOKEN }}
           fetch-depth: 1
       - name: Commit the result files to bench-results
         run: |

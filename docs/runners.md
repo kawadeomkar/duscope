@@ -7,7 +7,7 @@ phase gates are judged on their numbers, never on GitHub's shared runners, which
 are too noisy for absolute targets. This page describes the machines, how a
 runner is set up, and what keeps a public repository's code off them.
 
-Every night at 03:00 Pacific the workflow runs `bench/run.sh` on both machines
+Every night at 03:17 Pacific the workflow runs `bench/run.sh` on both machines
 (the three trees, the pinned competitors, warm and cold caches) and pushes the
 result files to the `bench-results` branch as `<date>-<platform>.json`.
 [bench/README.md](../bench/README.md) documents the harness and the result file;
@@ -139,23 +139,25 @@ gh api repos/kawadeomkar/duscope/actions/runners --jq '.runners[] | {name, statu
 gh workflow run nightly-bench.yml --repo kawadeomkar/duscope -f trees=T1 -f competitors=none -f mode=warm -f scale=0.01
 ```
 
-## The token and the results branch
+## The tokens and the results branch
 
-`BENCH_RESULTS_TOKEN` is a fine-grained personal access token of the author's,
-for the one repository `kawadeomkar/duscope`, with two permissions: Contents
-read and write (the publish job pushes to `bench-results`) and Administration
-read (the probe lists the runners and their status, which `GITHUB_TOKEN` cannot).
+`BENCH_RUNNERS_TOKEN` is a fine-grained personal access token of the author's,
+for the one repository `kawadeomkar/duscope`, with one permission:
+Administration read. The workflow's `probe` job uses it to list the runners and
+their status, which the run's own `GITHUB_TOKEN` cannot; it can change nothing.
 It expires after a year and is rotated with the other secrets at the first
 release after each anniversary (plan/SPEC.md, "Release checklist").
 
 ```sh
-gh secret set BENCH_RESULTS_TOKEN --repo kawadeomkar/duscope
+gh secret set BENCH_RUNNERS_TOKEN --repo kawadeomkar/duscope
 ```
 
-Only the two GitHub-hosted jobs, `probe` and `publish`, read it; the bench jobs
-on these machines get no secret. A token can push wherever its owner can, and
-branch protection, administrators included, keeps it off `main`; the workflow
-pushes nowhere but `bench-results`.
+The results are pushed by the `publish` job, on a GitHub-hosted runner, with the
+run's own `GITHUB_TOKEN`, which that job alone is given `contents: write` for. It
+expires with the run and needs no rotation, and branch protection, which binds
+it too, keeps it off `main`; the job pushes nowhere but `bench-results`. The
+bench jobs on these machines get no secret, and their `GITHUB_TOKEN` is
+read-only.
 
 The first publish creates `bench-results` as a branch of its own history,
 holding the result files and a README. A ruleset keeps it from being deleted or
