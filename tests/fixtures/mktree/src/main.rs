@@ -10,7 +10,7 @@
 //! ```
 //!
 //! The hash goes to stdout; everything else to stderr. DIR defaults to
-//! `target/fixtures` of the workspace (`$CARGO_TARGET_DIR/fixtures`).
+//! `target/fixtures.noindex` of the workspace (`$CARGO_TARGET_DIR/fixtures.noindex`).
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]

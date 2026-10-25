@@ -3,7 +3,7 @@
 //! identical `find -printf` output where GNU find exists).
 //!
 //! Both tests share one build in a private output directory under
-//! `target/fixtures-tests/`, taken in turn under a lock so the timed build
+//! `target/fixtures-tests.noindex/`, taken in turn under a lock so the timed build
 //! never competes with another build of this binary.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
@@ -61,7 +61,7 @@ fn with_first_build(f: impl FnOnce(&mut First)) {
 fn build_first() -> First {
     let base = OutDir::workspace_default()
         .path()
-        .with_file_name("fixtures-tests");
+        .with_file_name("fixtures-tests.noindex");
     let dir = base.join("p0-test-01");
     mktree::remove_tree(&dir).unwrap();
     let out = OutDir::new(&dir);
