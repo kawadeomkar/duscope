@@ -18,17 +18,46 @@ result files to the `bench-results` branch as `<date>-<platform>.json`.
 A result is comparable only with results from the same machine, so a change to
 anything in this table is a new row in the [change log](#change-log).
 
+**TODO: `bench-macos` is not registered yet.** Its setup was deferred on
+2026-10-25. Until it is registered, every nightly run skips it with a notice, and
+from the second night the pinned issue `nightly-bench offline` says so. Gate 0
+needs both runners.
+
 | | `bench-macos` | `bench-linux` |
 | --- | --- | --- |
-| Machine | to be recorded at registration | to be recorded at registration |
-| CPU and cores | | |
-| Memory | | |
-| OS and kernel | | |
-| Disk holding `BENCH_HOME` | | |
-| Filesystem of `BENCH_HOME` | | |
-| Free space and inodes | | |
-| Network | | |
-| Power and location | | |
+| Machine | not registered yet (TODO) | VM `bench-linux` (VMID 101) on the author's Proxmox VE 9.2 host, [below](#bench-linux-a-vm-on-proxmox) |
+| CPU and cores | | 4 vCPUs of an Intel Core i9-10900K (10 cores, 20 threads), CPU type `host`, shared with the host's other VMs |
+| Memory | | 8 GiB, fixed (no ballooning) |
+| OS and kernel | | Ubuntu 24.04.5 LTS, Linux 6.8.0-147-generic |
+| Disk holding `BENCH_HOME` | | a 64 GB virtio-scsi disk (`ssd=1`, `discard=on`, no host cache) on LVM-thin storage on the host's Sabrent NVMe SSD |
+| Filesystem of `BENCH_HOME` | | ext4, the root filesystem (`relatime,discard`) |
+| Free space and inodes | | 58 GB and 8.1 million inodes, with the tools installed and no trees yet |
+| Network | | bridged to the home LAN, DHCP; outbound to the internet only ([Network](#network)) |
+| Power and location | | the Proxmox host, in the author's home |
+
+### bench-linux: a VM on Proxmox
+
+The Linux runner is a VM on the author's Proxmox host, not a machine of its own,
+so other VMs share its CPU and disk; ratios within a run hold up better than
+absolute times between nights. It was created with
+[claude-on-proxmox](https://github.com/kawadeomkar/claude-on-proxmox)'s
+provision stage alone, with a tag of its own, so that project's configuration
+(Claude Code, cloned repositories, sign-ins) never reaches it and its everyday
+commands do not see it:
+
+```sh
+# in the claude-on-proxmox checkout
+ANSIBLE_ARGS='-e claude_vm_tag=duscope-bench -e vm_cores=4 -e vm_memory_mb=8192 -e vm_disk_size=64G' \
+  just deploy --only provision bench-linux
+# on the Proxmox host: the disk is NVMe-backed, so the guest is told it is an SSD
+qm set 101 --scsi0 local-lvm:vm-101-disk-0,discard=on,size=64G,ssd=1 && qm reboot 101
+```
+
+The same `ANSIBLE_ARGS='-e claude_vm_tag=duscope-bench'` before `just list` or
+`just destroy bench-linux` reaches it. The rest of its setup is this page's: the
+cloud-init user `dev` (the author's SSH key, passwordless sudo) administers it,
+and the runner runs as `runner`. Besides the tools below it has
+`build-essential`, `pkg-config`, `jq` and `nftables` from apt.
 
 The commands that print these facts, run as the runner user:
 
@@ -179,10 +208,42 @@ EOF
 
 Both machines need outbound HTTPS only: to github.com (the runner, the
 checkout, artifact uploads) and, for the competitors, to GitHub release
-downloads, crates.io and static.crates.io. They accept no inbound connection;
-the runner polls GitHub. A wired connection is preferred, since a run downloads
-nothing large after the first night, but a dropped connection fails the job
-mid-run.
+downloads, crates.io and static.crates.io. They accept no inbound connection
+the runner needs; it polls GitHub. A wired connection is preferred, since a
+dropped connection fails the job mid-run.
+
+A runner on a home network must not reach the rest of it: a competitor built
+from crates.io runs its build script on the machine. `bench-linux` refuses new
+outbound connections to private addresses, except DNS, DHCP and NTP, with this
+`/etc/nftables.conf` (owned by root, so the `runner` user cannot change it), and
+has IPv6 turned off in `/etc/sysctl.d/60-duscope-bench.conf`, since the LAN's
+hosts also have global IPv6 addresses that no private-range rule would catch:
+
+```text
+flush ruleset
+
+table inet duscope_egress {
+  set private4 {
+    type ipv4_addr
+    flags interval
+    elements = { 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 }
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+    oif "lo" accept
+    ct state established,related accept
+    udp dport { 53, 67, 123 } accept
+    tcp dport 53 accept
+    ip daddr @private4 counter reject with icmpx admin-prohibited
+    meta nfproto ipv6 counter reject with icmpx admin-prohibited
+  }
+}
+```
+
+SSH from the LAN still works, since replies belong to a connection the VM did
+not start. Loading the rules over SSH freezes that one session, whose replies
+conntrack first sees after the rules are in place; open a new one.
 
 ## Security
 
@@ -250,3 +311,5 @@ platform and architecture.
 
 | Date | Runner | Change |
 | --- | --- | --- |
+| 2026-10-25 | `bench-linux` | Registered: a VM on the author's Proxmox host, runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1 |
+| 2026-10-25 | `bench-macos` | Setup deferred (TODO) |

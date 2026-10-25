@@ -451,7 +451,7 @@ case "$1 $2" in
   "api --paginate") answer runners.json ;;
   "issue list") answer issues.json ;;
   "issue create") echo "https://github.com/kawadeomkar/duscope/issues/7" ;;
-  "issue comment"|"issue close"|"issue pin") ;;
+  "issue comment"|"issue close"|"issue edit"|"issue pin") ;;
   api\ *)
     case $2 in
       */actions/workflows/*) answer runs.json ;;
@@ -514,16 +514,22 @@ impl Step {
             .collect()
     }
 
-    /// The `gh` calls that change something: issues opened, commented on,
-    /// closed or pinned.
+    /// The `gh` calls that change something: issues opened, edited,
+    /// commented on, closed or pinned.
     fn writes(&self) -> Vec<String> {
         fs::read_to_string(self.dir.join("gh.log"))
             .unwrap_or_default()
             .lines()
             .filter(|l| {
-                ["issue create", "issue comment", "issue close", "issue pin"]
-                    .iter()
-                    .any(|w| l.starts_with(w))
+                [
+                    "issue create",
+                    "issue comment",
+                    "issue close",
+                    "issue edit",
+                    "issue pin",
+                ]
+                .iter()
+                .any(|w| l.starts_with(w))
             })
             .map(|l| l.split(" --").next().unwrap().to_owned())
             .collect()
@@ -636,8 +642,8 @@ fn p0_bench_02_two_consecutive_skips_open_the_offline_issue() {
                 "issue pin https://github.com/kawadeomkar/duscope/issues/7",
             ],
         ),
-        // ...or comments on it when it is open.
-        ("missing", Some("skipped"), true, &["issue comment 7"]),
+        // ...or, when it is open, updates its description, which notifies no one.
+        ("missing", Some("skipped"), true, &["issue edit 7"]),
         // Both runners online: the open issue is closed.
         (
             "online",

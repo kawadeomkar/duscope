@@ -18,8 +18,9 @@
 #
 # An offline runner never fails the run: the probe asks the API which runners
 # are online, the bench job of a runner that is not is skipped with a notice,
-# and the second consecutive skip opens (or comments on) the pinned issue
-# "nightly-bench offline", which the next run with both runners online closes.
+# and the second consecutive skip opens the pinned issue "nightly-bench
+# offline" (or updates its description), which the next run with both runners
+# online closes.
 
 name: Nightly bench
 
@@ -149,11 +150,13 @@ jobs:
             echo "skipped for the first time in a row:$down; no issue yet"
             exit 0
           fi
-          body="Skipped twice in a row:$again. Not online now:$down. Run: $run_url
+          body="Skipped twice in a row:$again. Not online now:$down. Latest run: $run_url
 
           docs/runners.md says how to check a runner and re-register it. The next run with both runners online closes this issue."
           if [[ -n $issue ]]; then
-            gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "$body"
+            # The description says where things stand; editing it notifies no one,
+            # so a runner that stays away for weeks does not ping every night.
+            gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --body "$body"
           else
             url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body")
             # Pinned, so it heads the issue list; pinning is best effort.
