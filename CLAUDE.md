@@ -3,8 +3,8 @@
 duscope is a Rust disk-usage analyzer: a parallel scanner, a SQLite index with precomputed
 subtree totals, twelve query verbs with one JSON envelope, a terminal treemap, and an MCP server.
 The design is fixed by two documents; read the parts a task cites before writing code:
-- plan/SPEC.md — the work packages, acceptance checks, conventions (the author's export of the
-  spec doc; plan/ is gitignored and present on the author's machines, never in the repository)
+- plan/SPEC.md — the work packages, acceptance checks, conventions (plan/ is gitignored: it
+  lives on the author's machine, never in the repository)
 - plan/PROPOSAL.md — the why; its "Implementation specification" section wins any conflict
 
 ## Invariants (never trade these away in a package)
@@ -79,7 +79,8 @@ The design is fixed by two documents; read the parts a task cites before writing
   pass on the up-to-date branch before it merges.
 - Every user-visible change gets a fragment `changelog.d/<ID>.md` (keep-a-changelog lines under
   `### Added` / `### Changed` / `### Fixed` …). No fragment means the `no-changelog` label, set
-  by the author. Never edit CHANGELOG.md directly; release.yml assembles it.
+  by the author. Never edit CHANGELOG.md directly: the `REL: vX.Y.Z` pull request assembles
+  it with scripts/changelog.py before the release is tagged.
 
 ## Pull requests
 - One package per PR. Title `P2-IDX-04: <package title>`. Body from the template: what was
@@ -101,4 +102,4 @@ index, queries, envelope types) · crates/duscope-treemap (layout, static render
 crates/duscope-tui (interactive viewer) · crates/duscope-mcp (stdio JSON-RPC layer) ·
 crates/duscope-testkit (test environment, dev only) · duscope (the binary: clap, output layer,
 verbs) · schemas/ · tests/ · bench/ · fuzz/ · docs/ (public documentation) · plan/ (gitignored
-exports) · debian/ · changelog.d/ · .github/workflows/
+spec) · debian/ · changelog.d/ · .github/workflows/
