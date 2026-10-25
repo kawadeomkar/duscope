@@ -10,7 +10,7 @@ change adds a fragment, `changelog.d/<ID>.md`, in the format given in
 `scripts/changelog.py` assembles the fragments into the version's dated section
 and deletes them.
 
-## [0.0.1] - Unreleased
+## [0.0.1] - 2026-10-25
 
 The phase-0 placeholder release. The binary only prints its version. The release
 reserves the name on crates.io and starts the clocks that the Homebrew and
@@ -32,3 +32,17 @@ least 30 days old.
 <!-- Later channels add the date they count from as another line of the list
      above. At release, scripts/changelog.py dates this heading and adds the
      assembled sections below these notes. -->
+
+### Added
+
+- Release archives on GitHub for macOS (arm64 and x86_64) and Linux (arm64 and
+  x86_64, statically linked with musl), each with a build attestation that
+  `gh attestation verify` checks, and a shell installer.
+- The duscope crates on crates.io, so `cargo install duscope --locked` installs
+  the release.
+- `README.md`: what duscope is, its pre-release status, and each install
+  channel with the release that opens it.
+- `SECURITY.md`: how to report a vulnerability privately, through GitHub's
+  private vulnerability reporting, with the 90-day disclosure window.
+- The `duscope` binary as a pre-release placeholder: `duscope --version` prints the version.
+- Each crate on crates.io ships a README and the MIT and Apache-2.0 licence texts.
