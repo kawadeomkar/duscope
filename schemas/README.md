@@ -28,10 +28,13 @@ Every `.json` file here:
 
 - `duscope/tests/schemas.rs` applies the rules above to every file.
 - `crates/duscope-core/src/schema_drift.rs` is the drift test. Each
-  `envelope/*.schema.json` and `mcp/*.output.json` file must equal the schema
-  `schemars` derives from its Rust type, with `x-*` keywords stripped from both.
-  It is a unit test because the types derive `JsonSchema` only under
-  `cfg(test)`, which keeps `schemars` out of the binary.
+  `envelope/*.schema.json` file must equal the schema `schemars` derives from
+  its Rust type, with `x-*` keywords stripped from both. Each
+  `mcp/duscope_<tool>.output.json` must equal its verb's envelope schema apart
+  from `$id`, because a tool's `structuredContent` is byte-identical to
+  `duscope <verb> --json`; the verb is the tool name with `-` for `_`
+  (`duscope_by_type` is `by-type`). It is a unit test because the types derive
+  `JsonSchema` only under `cfg(test)`, which keeps `schemars` out of the binary.
 - `crates/duscope-core/tests/schema_drift.rs` checks that `schemars` and
   `jsonschema` stay dev-dependencies.
 
@@ -41,5 +44,6 @@ The `schemas` CI job runs all three, and `just test` includes them.
 
 The files are maintained by hand. When a type changes, the drift test fails and
 prints the schema derived from it. Copy the change into the file, keep the
-file's `x-*` keywords, and review the diff. A new file derived from a type also
-gets an entry in `derived_schemas()` in `schema_drift.rs`.
+file's `x-*` keywords, and review the diff. A new envelope file also gets an
+entry in `derived_schemas()` in `schema_drift.rs`; a new MCP output file needs
+none, since the test finds it and checks it against its verb's envelope.
