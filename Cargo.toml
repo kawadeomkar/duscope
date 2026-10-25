@@ -56,3 +56,8 @@ print_stdout = "deny"
 lto = true
 codegen-units = 1
 strip = true
+
+# cargo-dist always builds with a profile named `dist`. It is the release profile
+# unchanged, so the archives hold the binary `just repro` builds for their target.
+[profile.dist]
+inherits = "release"

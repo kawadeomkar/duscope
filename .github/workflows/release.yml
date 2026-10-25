@@ -1,0 +1,413 @@
+# duscope releases (plan/SPEC.md "Versioning, branching and releases", P0-CI-02).
+#
+# A signed `v*` tag on a commit of main runs this workflow:
+#
+#   verify-tag   the tag is signed by a key in .github/allowed_signers (as main has it
+#                now), points at a commit on main, names the workspace version, and its
+#                commit carries the version's dated CHANGELOG.md section
+#   plan         `dist host --steps=create`: what to build (pull requests: `dist plan`)
+#   build-local-artifacts
+#                one archive per target under the `just repro` environment, built
+#                with cargo-auditable and attested
+#   build-global-artifacts
+#                the shell installer and the checksums
+#   host         the GitHub Release, its notes from CHANGELOG.md
+#   publish-crates
+#                the six crates on crates.io, in dependency order
+#   announce     nothing more yet (dist's last phase)
+#
+# Every job needs verify-tag, directly or through plan, and the jobs that use
+# always() still require plan or host to have succeeded, so a tag that fails
+# verification builds, hosts and publishes nothing.
+#
+# This file began as the output of `dist generate` (cargo-dist 0.33.1, configured by
+# dist-workspace.toml) and is maintained by hand from there (`allow-dirty = ["ci"]`):
+# dist's plan-jobs cannot gate its host job, which runs under always(). The changes
+# from dist's output: the verify-tag job, which plan needs; the publish-crates job;
+# the token read-only at the top, widened per job; the tag pattern narrowed to v*;
+# a timeout on every job; cargo-auditable and just installed at pinned versions with
+# checksums (dist installs the latest cargo-auditable); the `just repro` environment
+# for the builds; every action pinned to a commit SHA with its version in a comment.
+# After a dist upgrade, regenerate into a scratch copy and carry these over.
+
+name: Release
+
+on:
+  # Pull requests run verify-tag (nothing to verify) and `dist plan`, which checks
+  # dist-workspace.toml against the workspace.
+  pull_request:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: read
+
+env:
+  # The task runner, at ci.yml's pin.
+  JUST_VERSION: "1.59.0"
+  # Embeds the dependency list in each binary (`cargo auditable`).
+  CARGO_AUDITABLE_VERSION: "0.7.7"
+
+jobs:
+  verify-tag:
+    runs-on: "ubuntu-24.04"
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Nothing to verify
+        if: ${{ github.event_name != 'push' }}
+        run: echo "Not a tag push; release.yml only plans."
+      - name: Verify the tag
+        if: ${{ github.event_name == 'push' }}
+        env:
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          fail() { echo "::error title=verify-tag::$*"; exit 1; }
+          [[ $TAG =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]] || fail "$TAG is not a vMAJOR.MINOR.PATCH tag"
+          version=${BASH_REMATCH[1]}
+
+          # Fetch the tag object itself (a checkout may record an annotated tag as a
+          # lightweight one) and main as it is now.
+          git fetch --no-tags --force origin "+refs/tags/$TAG:refs/tags/$TAG" "+refs/heads/main:refs/remotes/origin/main"
+          [[ $(git cat-file -t "refs/tags/$TAG") == tag ]] || fail "$TAG is a lightweight tag; release tags are made with git tag -s"
+
+          # The signers main lists now, so a key removed from main signs no later release.
+          git show refs/remotes/origin/main:.github/allowed_signers > "$RUNNER_TEMP/allowed_signers"
+          git -c gpg.ssh.allowedSignersFile="$RUNNER_TEMP/allowed_signers" verify-tag "refs/tags/$TAG" ||
+            fail "$TAG is not signed by a key in .github/allowed_signers on main"
+
+          commit=$(git rev-parse "refs/tags/$TAG^{commit}")
+          git merge-base --is-ancestor "$commit" refs/remotes/origin/main || fail "$TAG points at $commit, which is not on main"
+          [[ $(git rev-parse HEAD) == "$commit" ]] || fail "the checkout is $(git rev-parse HEAD), not the tagged commit $commit"
+
+          # Every crate the release ships carries the tag's version, and Cargo.lock agrees.
+          others=$(cargo metadata --locked --format-version 1 | jq -r --arg v "$version" '
+            .workspace_members as $members
+            | .packages[] | select(.id as $id | $members | index($id))
+            | select(.publish != []) | select(.version != $v) | "\(.name) \(.version)"')
+          [[ -z $others ]] || fail "$TAG names $version, but these crates have another version: $(echo $others)"
+
+          # The REL commit assembled the changelog.d fragments into the version's section.
+          grep -Eq "^## \[${version//./\\.}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md ||
+            fail "CHANGELOG.md has no dated section for $version; run scripts/changelog.py assemble $version before tagging"
+          fragments=$(find changelog.d -type f -name '*.md' ! -name README.md | sort)
+          [[ -z $fragments ]] || fail "changelog.d still holds fragments ($(echo $fragments)); assemble them before tagging"
+          echo "$TAG: signed by an allowed signer, on main, version $version, changelog assembled"
+
+  # Run 'dist plan' (or host) to determine what tasks we need to do
+  plan:
+    needs:
+      - verify-tag
+    runs-on: "ubuntu-24.04"
+    timeout-minutes: 10
+    outputs:
+      val: ${{ steps.plan.outputs.manifest }}
+      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
+      tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
+      publishing: ${{ !github.event.pull_request }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install dist
+        # we specify bash to get pipefail; it guards against the `curl` command
+        # failing. otherwise `sh` won't catch that `curl` returned non-0
+        shell: bash
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.33.1/cargo-dist-installer.sh | sh"
+      - name: Cache dist
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/dist
+      # sure would be cool if github gave us proper conditionals...
+      # so here's a doubly-nested ternary-via-truthiness to try to provide the best possible
+      # functionality based on whether this is a pull_request, and whether it's from a fork.
+      # (PRs run on the *source* but secrets are usually on the *target* -- that's *good*
+      # but also really annoying to build CI around when it needs secrets to work right.)
+      - id: plan
+        run: |
+          dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          echo "dist ran successfully"
+          cat plan-dist-manifest.json
+          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: "Upload dist-manifest.json"
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-plan-dist-manifest
+          path: plan-dist-manifest.json
+
+  # Build and packages all the platform-specific things
+  build-local-artifacts:
+    name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
+    # Let the initial task tell us to not run (currently very blunt)
+    needs:
+      - plan
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    strategy:
+      fail-fast: false
+      # Target platforms/runners are computed by dist in create-release.
+      # Each member of the matrix has the following arguments:
+      #
+      # - runner: the github runner
+      # - dist-args: cli flags to pass to dist
+      # - install-dist: expression to run to install dist on the runner
+      #
+      # Typically there will be:
+      # - 1 "global" task that builds universal installers
+      # - N "local" tasks that build each platform's binaries and platform-specific installers
+      matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    container: ${{ matrix.container && matrix.container.image || null }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+    # Attests the archives (Sigstore through the OIDC token).
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Rust non-interactively if not already installed
+        if: ${{ matrix.container }}
+        run: |
+          if ! command -v cargo > /dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          fi
+      - name: Install dist
+        run: ${{ matrix.install_dist.run }}
+      # Get the dist-manifest
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Install cargo-auditable and just
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-auditable@${{ env.CARGO_AUDITABLE_VERSION }},just@${{ env.JUST_VERSION }}
+      - name: Install dependencies
+        run: |
+          ${{ matrix.packages_install }}
+      - name: Use the reproducible build environment
+        # SOURCE_DATE_EPOCH, CARGO_INCREMENTAL and the RUSTFLAGS path remapping that
+        # `just repro` builds with; dist adds its own flags to these RUSTFLAGS.
+        shell: bash
+        run: just repro-env target | tee -a "$GITHUB_ENV"
+      - name: Build artifacts
+        run: |
+          # Actually do builds and make zips and whatnot
+          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          echo "dist ran successfully"
+      - name: Attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: "target/distrib/*${{ join(matrix.targets, ', ') }}*"
+      - id: cargo-dist
+        name: Post-build
+        # We force bash here just because github makes it really hard to get values up
+        # to "real" actions without writing to env-vars, and writing to env-vars has
+        # inconsistent syntax between shell and powershell.
+        shell: bash
+        run: |
+          # Parse out what we just built and upload it to scratch storage
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: "Upload artifacts"
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-build-local-${{ join(matrix.targets, '_') }}
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
+
+  # Build and package all the platform-agnostic(ish) things
+  build-global-artifacts:
+    needs:
+      - plan
+      - build-local-artifacts
+    runs-on: "ubuntu-24.04"
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install cached dist
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/
+      - run: chmod +x ~/.cargo/bin/dist
+      # Get all the local artifacts for the global tasks to use (for e.g. checksums)
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - id: cargo-dist
+        shell: bash
+        run: |
+          dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" > dist-manifest.json
+          echo "dist ran successfully"
+
+          # Parse out what we just built and upload it to scratch storage
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: "Upload artifacts"
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-build-global
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
+
+  # Determines if we should publish/announce
+  host:
+    needs:
+      - plan
+      - build-local-artifacts
+      - build-global-artifacts
+    # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: "ubuntu-24.04"
+    timeout-minutes: 10
+    # Creates the GitHub Release.
+    permissions:
+      contents: write
+    outputs:
+      val: ${{ steps.host.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install cached dist
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/
+      - run: chmod +x ~/.cargo/bin/dist
+      # Fetch artifacts from scratch-storage
+      - name: Fetch artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - id: host
+        shell: bash
+        run: |
+          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
+          echo "artifacts uploaded and released successfully"
+          cat dist-manifest.json
+          echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: "Upload dist-manifest.json"
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Overwrite the previous copy
+          name: artifacts-dist-manifest
+          path: dist-manifest.json
+      # Create a GitHub Release while uploading all files to it
+      - name: "Download GitHub Artifacts"
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Cleanup
+        run: |
+          # Remove the granular manifests
+          rm -f artifacts/*-dist-manifest.json
+      - name: Create GitHub Release
+        env:
+          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
+          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
+          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
+          RELEASE_COMMIT: "${{ github.sha }}"
+        run: |
+          # Write and read notes from a file to avoid quoting breaking things
+          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+
+          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+
+  # Publish the crates to crates.io after the GitHub Release, each crate after the
+  # crates it depends on. A rerun skips the versions already published.
+  publish-crates:
+    needs:
+      - plan
+      - host
+    runs-on: "ubuntu-24.04"
+    timeout-minutes: 30
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Publish to crates.io
+        shell: bash
+        run: |
+          version=${TAG#v}
+          # Whether crates.io's sparse index lists the version (names of four or more
+          # characters live at /<first two>/<next two>/<name>).
+          published() {
+            curl --proto '=https' --tlsv1.2 -fsS "https://index.crates.io/${1:0:2}/${1:2:2}/$1" 2>/dev/null |
+              grep -q "\"vers\":\"$2\""
+          }
+          for crate in duscope-walk duscope-core duscope-treemap duscope-tui duscope-mcp duscope; do
+            if published "$crate" "$version"; then
+              echo "$crate $version is already on crates.io"
+              continue
+            fi
+            cargo publish --locked -p "$crate"
+            # cargo publish waits for the index too, but gives up after a minute.
+            for _ in $(seq 60); do published "$crate" "$version" && break; sleep 5; done
+            published "$crate" "$version" || { echo "::error::$crate $version did not reach the crates.io index"; exit 1; }
+          done
+
+  announce:
+    needs:
+      - plan
+      - host
+      - publish-crates
+    # use "always() && ..." to allow us to wait for all publish jobs while
+    # still allowing individual publish jobs to skip themselves (for prereleases).
+    # "host" however must run to completion, no skipping allowed!
+    if: ${{ always() && needs.host.result == 'success' && (needs.publish-crates.result == 'skipped' || needs.publish-crates.result == 'success') }}
+    runs-on: "ubuntu-24.04"
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive

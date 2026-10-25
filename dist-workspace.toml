@@ -1,0 +1,33 @@
+[workspace]
+members = ["cargo:."]
+
+# cargo-dist builds the release archives, the shell installer and the GitHub
+# Release; .github/workflows/release.yml runs it on a verified v* tag.
+[dist]
+cargo-dist-version = "0.33.1"
+ci = "github"
+installers = ["shell"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+]
+install-path = "CARGO_HOME"
+install-updater = false
+github-attestations = true
+cargo-auditable = true
+# Build only the duscope package, as `just repro` does, not the whole workspace.
+precise-builds = true
+pr-run-mode = "plan"
+# release.yml is maintained by hand from dist's output: its header lists the changes.
+allow-dirty = ["ci"]
+
+# The runner each target builds on. Both macOS targets build on Apple silicon
+# (x86_64 cross-compiles there); each musl target builds natively.
+[dist.github-custom-runners]
+global = "ubuntu-24.04"
+aarch64-apple-darwin = "macos-26"
+x86_64-apple-darwin = "macos-26"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
+x86_64-unknown-linux-musl = "ubuntu-24.04"

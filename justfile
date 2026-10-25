@@ -114,6 +114,15 @@ size:
 repro target_dir="target/repro":
     #!/usr/bin/env bash
     set -euo pipefail
+    env_lines=$('{{just_executable()}}' --justfile '{{justfile()}}' repro-env '{{target_dir}}')
+    while IFS= read -r line; do export "$line"; done <<< "$env_lines"
+    cargo build --release --locked -p duscope --target-dir '{{target_dir}}'
+    if command -v sha256sum >/dev/null; then sha256sum '{{target_dir}}/release/duscope'; else shasum -a 256 '{{target_dir}}/release/duscope'; fi
+
+# The environment of the reproducible build as KEY=value lines: repro builds under it, and release.yml's cargo-dist builds too
+repro-env target_dir="target/repro":
+    #!/usr/bin/env bash
+    set -euo pipefail
     # Cargo splits RUSTFLAGS on whitespace, so the remapped paths cannot hold any.
     for dir in '{{justfile_directory()}}' "${CARGO_HOME:-$HOME/.cargo}" '{{target_dir}}'; do
       if [[ $dir == *[[:space:]]* ]]; then
@@ -121,17 +130,16 @@ repro target_dir="target/repro":
         exit 1
       fi
     done
-    export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
-    export CARGO_INCREMENTAL=0
-    export RUSTFLAGS="--remap-path-prefix={{justfile_directory()}}=/duscope --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+    echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
+    echo "CARGO_INCREMENTAL=0"
+    rustflags="--remap-path-prefix={{justfile_directory()}}=/duscope --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
     if [[ $(uname -s) == Darwin ]]; then
       # ld64 records each object file's absolute path in the binary (its UUID survives
       # stripping), so drop the target directory from those paths.
       mkdir -p '{{target_dir}}'
-      RUSTFLAGS+=" -C link-arg=-Wl,-oso_prefix,$(cd '{{target_dir}}' && pwd -P)/"
+      rustflags+=" -C link-arg=-Wl,-oso_prefix,$(cd '{{target_dir}}' && pwd -P)/"
     fi
-    cargo build --release --locked -p duscope --target-dir '{{target_dir}}'
-    if command -v sha256sum >/dev/null; then sha256sum '{{target_dir}}/release/duscope'; else shasum -a 256 '{{target_dir}}/release/duscope'; fi
+    echo "RUSTFLAGS=$rustflags"
 
 # Build the reference fixture tree under target/fixtures.noindex (`--force` rebuilds) and print the manifest hash
 fixtures *args:

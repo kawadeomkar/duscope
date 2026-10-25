@@ -16,7 +16,7 @@ under [Auditing](#auditing) read it again.
 - [x] Administrators are included (`enforce_admins`), so nobody bypasses the rules.
 - [x] Linear history is required.
 - [x] Force pushes and deletion of `main` are blocked.
-- [ ] Required status checks, with "Require branches to be up to date before
+- [x] Required status checks, with "Require branches to be up to date before
   merging" (`strict`). The checks are the jobs of
   [ci.yml](../.github/workflows/ci.yml) that the spec marks required:
   - `fmt`
@@ -36,8 +36,7 @@ under [Auditing](#auditing) read it again.
   settings above unchanged. `app_id` 15368 is GitHub Actions, so only a workflow
   run can report these checks.
 
-  Unticked until the PUT is run again: P0-REPO-05 added `schemas`, and the
-  other 19 checks are already applied.
+  Applied with all 20 checks, `schemas` included, on 2026-10-25.
 
   ```sh
   gh api -X PUT repos/kawadeomkar/duscope/branches/main/protection --input - <<'EOF'
@@ -150,8 +149,26 @@ under [Auditing](#auditing) read it again.
 - [x] GitHub Pages served from the `gh-pages` branch, for the apt repository:
   P0-REPO-03. Served at https://kawadeomkar.github.io/duscope/ with HTTPS
   enforced; the branch holds a placeholder page until apt.yml publishes `/apt`.
-- [ ] Protection for `v*` tags, so that only the author can push a release tag:
-  P0-CI-02. GitHub now does this with a tag ruleset.
+- [x] Protection for `v*` tags (P0-CI-02): a tag ruleset under which only a
+  repository administrator, the author, may create, move or delete a `v*` tag.
+  Tags are never moved or deleted (a pulled release burns its number), and the
+  `GITHUB_TOKEN` cannot create one. release.yml's `verify-tag` job checks the
+  signature as well, so a tag pushed past the rule still releases nothing.
+  `actor_id` 5 is the built-in admin role. Applied on 2026-10-24 as ruleset
+  25776511, "Release tags".
+
+  ```sh
+  gh api -X POST repos/kawadeomkar/duscope/rulesets --input - <<'EOF'
+  {
+    "name": "Release tags",
+    "target": "tag",
+    "enforcement": "active",
+    "conditions": { "ref_name": { "include": ["refs/tags/v*"], "exclude": [] } },
+    "rules": [{ "type": "creation" }, { "type": "update" }, { "type": "deletion" }],
+    "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }]
+  }
+  EOF
+  ```
 
 ## Changing the required checks
 
