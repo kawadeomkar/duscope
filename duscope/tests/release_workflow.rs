@@ -525,10 +525,14 @@ impl Sandbox {
         let home = dir.join("home");
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(dir.join("runner-temp")).unwrap();
+        // No automatic maintenance: receive-pack would start a detached `git
+        // maintenance run --auto` in origin.git that is still running when the
+        // test clones it.
         fs::write(
             dir.join("gitconfig"),
             "[user]\n\tname = Release Test\n\temail = release-test@example.invalid\n\
-             [init]\n\tdefaultBranch = main\n[advice]\n\tdetachedHead = false\n",
+             [init]\n\tdefaultBranch = main\n[advice]\n\tdetachedHead = false\n\
+             [maintenance]\n\tauto = false\n[receive]\n\tautogc = false\n",
         )
         .unwrap();
         // HOME and the git configuration are private; cargo keeps its
@@ -703,8 +707,13 @@ impl Sandbox {
         let tag_ref = format!("refs/tags/{tag}");
         sb.git(&work, &["push", "-q", "origin", "main", &tag_ref]);
 
-        // The runner's checkout: a clone at the tagged commit.
-        sb.git(&sb.dir, &["clone", "-q", &origin, ci.to_str().unwrap()]);
+        // The runner's checkout: a clone at the tagged commit, fetched through
+        // upload-pack as actions/checkout fetches. A local clone copies
+        // origin.git's object files instead, and one vanished mid-copy on CI.
+        sb.git(
+            &sb.dir,
+            &["clone", "-q", "--no-local", &origin, ci.to_str().unwrap()],
+        );
         sb.git(&ci, &["checkout", "-q", "--detach", &tag_ref]);
         let script = job(&jobs(&read(WORKFLOW)), "verify-tag").step_script("Verify the tag");
         let path = sb.dir.join("verify-tag.sh");
