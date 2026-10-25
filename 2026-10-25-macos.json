@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-25",
+  "started_at": "2026-10-25T12:57:08Z",
+  "finished_at": "2026-10-25T12:58:46Z",
+  "platform": "macos",
+  "subject": "du",
+  "host": {
+    "os": "macOS 26.7.2 (25G330)",
+    "kernel": "Darwin 25.6.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "logical_cpus": 18,
+    "memory_bytes": 51539607552
+  },
+  "harness": {
+    "commit": "f2b6220be7f87cd82a86f15582e1916620344e81",
+    "hyperfine": "2.0.0",
+    "python": "3.9.6",
+    "runs": 10,
+    "warmup": 2,
+    "cold_command": "/Users/runner/actions-runner/_work/duscope/duscope/bench/drop-caches.sh"
+  },
+  "trees": [
+    {
+      "name": "T1",
+      "shape": "gdu",
+      "seed": "duscope-bench-T1-v1",
+      "scale": 1.0,
+      "dirs": 100000,
+      "files": 400000,
+      "apparent_bytes": 55836716489,
+      "digest": "9762826403df6c7f0d30b21ee1c3f240",
+      "filesystem": "apfs",
+      "build_s": 24.479
+    }
+  ],
+  "tools": [
+    {
+      "name": "du",
+      "pinned": null,
+      "version": null,
+      "source": "system",
+      "path": "/usr/bin/du",
+      "built_with": null,
+      "status": "measured",
+      "reason": null
+    }
+  ],
+  "results": [
+    {
+      "tree": "T1",
+      "mode": "warm",
+      "tool": "du",
+      "command": "du -sk {tree}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.854217708,
+        2.872438417,
+        2.8656195,
+        2.852459792,
+        2.802840792,
+        2.819440917,
+        2.980328542,
+        2.928938875,
+        2.845629375,
+        2.81745
+      ],
+      "p50_s": 2.85333875,
+      "p95_s": 2.957203192,
+      "mean_s": 2.863936392,
+      "stddev_s": 0.05403948,
+      "min_s": 2.802840792,
+      "max_s": 2.980328542,
+      "user_s": 0.0985982,
+      "system_s": 2.7524121,
+      "peak_rss_bytes": 1523712,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    },
+    {
+      "tree": "T1",
+      "mode": "cold",
+      "tool": "du",
+      "command": "du -sk {tree}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.948238292,
+        2.964280709,
+        2.920609292,
+        2.934078167,
+        2.919885417,
+        2.913415834,
+        3.873738583,
+        3.853834875,
+        3.060229583,
+        2.912195542
+      ],
+      "p50_s": 2.94115823,
+      "p95_s": 3.864781914,
+      "mean_s": 3.130050629,
+      "stddev_s": 0.389183982,
+      "min_s": 2.912195542,
+      "max_s": 3.873738583,
+      "user_s": 0.1022792,
+      "system_s": 2.8654396,
+      "peak_rss_bytes": 1523712,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    }
+  ]
+}
