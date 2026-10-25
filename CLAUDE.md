@@ -2,9 +2,9 @@
 
 duscope is a Rust disk-usage analyzer: a parallel scanner, a SQLite index with precomputed
 subtree totals, twelve query verbs with one JSON envelope, a terminal treemap, and an MCP server.
-The design is fixed by two documents; read the parts a task cites before writing code:
-- plan/SPEC.md — the work packages, acceptance checks, conventions (the author's export of the
-  spec doc; plan/ is gitignored and present on the author's machines, never in the repository)
+The design lives in two documents; read the parts a task cites before writing code:
+- plan/SPEC.md — the work packages, acceptance checks, conventions, kept in step with what was
+  built (plan/ is gitignored: the author's machine holds it, with a local git history)
 - plan/PROPOSAL.md — the why; its "Implementation specification" section wins any conflict
 
 ## Invariants (never trade these away in a package)
@@ -84,16 +84,31 @@ The design is fixed by two documents; read the parts a task cites before writing
 ## Pull requests
 - One package per PR. Title `P2-IDX-04: <package title>`. Body from the template: what was
   done, each acceptance check with its result here and the CI link for the other platform,
-  anything the spec did not cover and how it was decided, the changelog fragment, and last a
-  `Tracker: <ID> In review — <one-line status>` line (`Blocked` on a deviation draft).
+  anything the spec did not cover and how it was decided, the spec changes the work needs, the
+  changelog fragment, and last a `Tracker: <ID> In review — <one-line status>` line (`Blocked`
+  on a deviation draft).
 - Commits: `<ID>: imperative summary`, then a body that says what and why. A
   `Co-Authored-By: Claude <model> <noreply@anthropic.com>` trailer is fine; never put a
   `Claude-Session:` trailer or a link to a Claude Code session in any file, commit or PR.
 - Do not widen a package. If the spec is wrong, incomplete or impossible, push your tests, open
   a draft PR titled `<ID>: BLOCKED — proposed deviation` with the proposed entry (finding,
-  evidence, proposal row revised, packages affected, change), and stop.
+  evidence, proposal row revised, packages affected, change), and stop. The author decides.
 - A package has a Size (S: one session, M: a few, L: the ceiling). If yours is clearly larger
   than its size, stop and propose a split in the PR.
+
+## Updating the spec
+- plan/ is the only copy of SPEC.md and PROPOSAL.md: no export replaces it. Change them only
+  for work that has merged, or for a decision the author has taken, never for your own
+  unapproved deviation. Commit each change in plan/'s own repository (`git -C plan commit`,
+  no remote), titled `DEV-<n>: <summary>`.
+- A PR whose work departs from the spec drafts the edits under "Spec changes" in its body, so
+  they are reviewed with the code. Once the author says it merged, apply them with the merge
+  commit: rewrite the SPEC.md text to say what was built, put `(DEV-<n>)` after it, and add the
+  row to SPEC.md's Deviation log (finding and reason, rows revised, packages, change, who
+  decided, Status `implemented in #<PR>, <commit>`). A fix that changes no design (a count, a
+  path, a name) gets a row too, its finding starting `Correction:`.
+- Never rewrite PROPOSAL.md's body: append a dated entry to the "Changelog" section at its end
+  (what changed against the proposal, why, the DEV row, the PR and the commit).
 
 ## Repository map
 crates/duscope-walk (scanner, platform providers, FFI) · crates/duscope-core (arena, accounting,
@@ -101,4 +116,4 @@ index, queries, envelope types) · crates/duscope-treemap (layout, static render
 crates/duscope-tui (interactive viewer) · crates/duscope-mcp (stdio JSON-RPC layer) ·
 crates/duscope-testkit (test environment, dev only) · duscope (the binary: clap, output layer,
 verbs) · schemas/ · tests/ · bench/ · fuzz/ · docs/ (public documentation) · plan/ (gitignored
-exports) · debian/ · changelog.d/ · .github/workflows/
+spec, own history) · debian/ · changelog.d/ · .github/workflows/

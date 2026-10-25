@@ -44,6 +44,16 @@ Does this pull request deviate from the specification? Answer one of:
 
 No.
 
+## Spec changes
+
+<!--
+Where this work departs from plan/SPEC.md or plan/PROPOSAL.md, the edits to make once it
+merges: the SPEC.md text as it should read, its Deviation log row (DEV-<n>, or a correction),
+and the entry for PROPOSAL.md's changelog when the proposal changes. Or "None."
+-->
+
+None.
+
 ## Changelog
 
 <!--

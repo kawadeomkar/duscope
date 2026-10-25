@@ -111,8 +111,9 @@ from one of the templates.
 Open the pull request with `gh pr create --base main`, titled `<ID>: <package title>`. The
 template asks for what was done; each acceptance check with its result on macOS and on Linux
 (the local run, and the CI run for the other platform); anything the specification did not
-cover and how it was decided; whether the change deviates from the specification; the
-changelog fragment; and, as the last line, the `Tracker:` line.
+cover and how it was decided; whether the change deviates from the specification; the edits
+the specification needs once it merges, which the maintainer's copy then takes; the changelog
+fragment; and, as the last line, the `Tracker:` line.
 
 If the specification is wrong, incomplete or impossible, push the tests you have, open a draft
 pull request titled `<ID>: BLOCKED — proposed deviation` whose body holds the proposed entry

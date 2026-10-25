@@ -302,6 +302,7 @@ fn p0_repo_02_pull_request_template_asks_for_every_section() {
         "## Acceptance",
         "## Not covered by the spec",
         "## Deviation",
+        "## Spec changes",
         "## Changelog",
         "macOS",
         "Linux",
