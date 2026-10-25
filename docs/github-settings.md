@@ -6,7 +6,7 @@ settings. Each unticked item carries the exact command that applies it: the auth
 runs the command and ticks the item. An item owned by another package names that
 package instead.
 
-The state below was read from the live repository on 2026-10-22. The commands
+The state below was read from the live repository on 2026-10-25. The commands
 under [Auditing](#auditing) read it again.
 
 ## Branch protection on `main`
@@ -166,6 +166,23 @@ under [Auditing](#auditing) read it again.
     "conditions": { "ref_name": { "include": ["refs/tags/v*"], "exclude": [] } },
     "rules": [{ "type": "creation" }, { "type": "update" }, { "type": "deletion" }],
     "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }]
+  }
+  EOF
+  ```
+
+- [x] Protection for the `bench-results` branch (P0-BENCH-02): a branch ruleset
+  under which nobody, administrators included, may delete the branch or rewrite its
+  history. The nightly benchmark job only adds commits to it, so its pushes pass.
+  Applied on 2026-10-25 as ruleset 25818907, "bench-results".
+
+  ```sh
+  gh api -X POST repos/kawadeomkar/duscope/rulesets --input - <<'EOF'
+  {
+    "name": "bench-results",
+    "target": "branch",
+    "enforcement": "active",
+    "conditions": { "ref_name": { "include": ["refs/heads/bench-results"], "exclude": [] } },
+    "rules": [{ "type": "deletion" }, { "type": "non_fast_forward" }]
   }
   EOF
   ```
