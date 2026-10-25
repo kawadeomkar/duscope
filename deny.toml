@@ -1,6 +1,6 @@
 # cargo-deny policy for duscope. DEPENDENCIES.md explains the rules and has one
-# row per crate. `just check` runs `cargo deny check licenses bans sources`;
-# `just check-full` (what CI runs) adds `advisories`.
+# row per crate. `just check` checks the licences, the sources and the bans
+# (`just deny`); `just check-full` (what CI runs) adds `advisories`.
 
 [graph]
 # The platforms duscope builds for: the four release targets, plus glibc Linux
@@ -16,10 +16,11 @@ targets = [
 ]
 # Both Cargo features (`system-sqlite`, `pixels`) are shipped configurations.
 all-features = true
-# Dev-dependencies of the workspace crates are left out of every check, so
-# test-only crates such as rmcp (and the tokio under it) pass the bans.
-# duscope/tests/dependencies.rs checks their licences against the list below.
-exclude-dev = true
+# Dev-dependencies stay in the graph, so the licence, source and advisory
+# checks hold test-only crates too: their build scripts and proc-macros run on
+# every developer machine and CI runner. `just deny` runs the bans alone with
+# `--exclude-dev`, which exempts test-only crates such as rmcp (and the tokio
+# under it) from the ban list and the one-version rule, and from nothing else.
 
 [advisories]
 # The RustSec database. Vulnerabilities and unmaintained crates fail by default;

@@ -1,5 +1,5 @@
-//! P0-REPO-04: `DEPENDENCIES.md` against `cargo metadata`, and the licences of the
-//! dev-only crates, which `deny.toml`'s `[graph] exclude-dev` hides from `cargo deny`.
+//! P0-REPO-04: `DEPENDENCIES.md` against `cargo metadata`, the licences of the
+//! dev-only crates, and the one exemption dev-only crates get from `cargo deny`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -435,4 +435,49 @@ fn p0_repo_04_dev_only_crates_pass_the_licence_allow_list() {
         "dev-only crates whose licence is not on deny.toml's [licenses] allow list:\n{}",
         refused.join("\n")
     );
+}
+
+#[test]
+fn p0_repo_04_dev_dependencies_are_exempt_from_the_bans_only() {
+    let code = |text: &str| -> Vec<String> {
+        text.lines()
+            .map(|line| line.split_once('#').map_or(line, |(code, _)| code).trim())
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    assert!(
+        !code(&read("deny.toml"))
+            .iter()
+            .any(|line| line.starts_with("exclude-dev")),
+        "deny.toml's [graph] exclude-dev takes dev-dependencies out of every check, \
+         not only the bans"
+    );
+    let justfile = read("justfile");
+    let recipe: Vec<String> = justfile
+        .lines()
+        .skip_while(|line| !line.starts_with("deny "))
+        .take_while(|line| line.starts_with("deny ") || line.starts_with("    "))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        recipe.first().is_some_and(|l| l.contains("bans")),
+        "the deny recipe's default checks include the bans: {recipe:?}"
+    );
+    let runs: Vec<&String> = recipe.iter().filter(|l| l.contains("cargo deny")).collect();
+    assert!(
+        !runs.is_empty(),
+        "the deny recipe runs no cargo deny: {recipe:?}"
+    );
+    for run in runs {
+        if run.contains("--exclude-dev") {
+            let checks: Vec<&str> = run
+                .split_once(" check ")
+                .map_or("", |(_, rest)| rest)
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .filter(|word| !word.is_empty() && *word != "fi")
+                .collect();
+            assert_eq!(checks, ["bans"], "{run}");
+        }
+    }
 }

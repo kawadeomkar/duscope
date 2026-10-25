@@ -15,13 +15,13 @@ Every external crate a workspace crate depends on directly has a row here. The r
 - **Licences.** MIT, MIT-0, Apache-2.0, BSD-3-Clause, ISC, OFL-1.1, Unicode-3.0, Unicode-DFS-2016 and Zlib (`[licenses]` in `deny.toml`). MIT-0 and Zlib were added by DEV-2 for jsonschema's dependencies.
 - **Never added.** tokio, rmcp, resvg, jaq-core, reqwest, hyper, openssl, objc2-core-services, catppuccin, supports-color, terminal_size, ansi_colours, directories, notify and fsevent-sys (`[bans]` in `deny.toml`, each with its reason).
 - **Graph.** One version of each crate (`multiple-versions = "deny"`), from crates.io only (`[sources]`), with no open RustSec advisory (`[advisories]`).
-- **Dev-dependencies** are held to the licence list but are exempt from the bans and the graph rules, because `[graph] exclude-dev` takes them out of every `cargo deny` check. That exemption lets rmcp serve as the MCP conformance oracle in tests without entering the binary.
+- **Dev-dependencies** are held to the licence list, crates.io as the only source and the advisory database like every other crate, but are exempt from the bans and the one-version rule: `just deny` runs `cargo deny --exclude-dev check bans`. That exemption lets rmcp serve as the MCP conformance oracle in tests without entering the binary.
 - **Budgets.** With a new crate, the stripped release binary must stay at 8 MB or less and a cold `cargo build --release` at 90 s or less. Both are CI jobs.
 - **Updates.** Dependabot opens one grouped pull request a month for cargo and one for GitHub Actions. Each lands as a `DEPS: <yyyy-mm>` commit once `just check`, `cargo deny`, the budgets and the benchmark regression job pass.
 
 ## Checks
 
-- `just check` runs `cargo deny check licenses bans sources`. `just check-full` (what CI runs) adds `advisories`.
+- `just check` runs `just deny`: `cargo deny check licenses sources`, then `cargo deny --exclude-dev check bans`. `just check-full` (what CI runs) adds `advisories`.
 - `just test-pkg P0-REPO-04` runs `duscope/tests/dependencies.rs`. It checks that each table lists exactly the crates `cargo metadata` reports for it, with the manifests' pins, and that every 0.x pin is exact.
 - The same test checks the licence of every crate that only dev-dependencies pull in. `exclude-dev` takes those crates out of every `cargo deny` check, so the test holds them to the `[licenses]` list itself.
 
