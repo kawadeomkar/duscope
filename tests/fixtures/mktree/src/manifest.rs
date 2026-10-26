@@ -136,7 +136,8 @@ pub struct EntrySpec {
     pub test_mode: Option<u32>,
     /// Instant minus mtime (default `[defaults] age`).
     pub age: Option<String>,
-    /// Instant minus atime (default: halfway between mtime and the instant).
+    /// Instant minus atime (default: halfway between mtime and the instant,
+    /// at most a year before it; half the age after a future mtime).
     pub atime: Option<String>,
     /// Nanoseconds added to the mtime.
     pub nanos: Option<u32>,
@@ -210,8 +211,10 @@ pub fn decode(text: &str) -> Result<Vec<u8>> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
+            // Two hex digits exactly: from_str_radix alone would take "+F".
             let hex = bytes
                 .get(i + 1..i + 3)
+                .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
                 .and_then(|h| std::str::from_utf8(h).ok())
                 .and_then(|h| u8::from_str_radix(h, 16).ok())
                 .ok_or_else(|| Error::new(format!("bad %-escape in {text:?}")))?;
@@ -266,6 +269,13 @@ mod tests {
         let raw = b"a b\tc\n%\xff\xc3\xa9/x";
         assert_eq!(encode(raw), "a%20b%09c%0A%25%FF%C3%A9/x");
         assert_eq!(decode(&encode(raw)).unwrap(), raw);
+    }
+
+    #[test]
+    fn p0_test_01_escapes_take_two_hex_digits() {
+        for bad in ["%+F", "%-1", "% F", "%F", "%"] {
+            assert!(decode(bad).is_err(), "{bad:?} decoded");
+        }
     }
 
     #[test]

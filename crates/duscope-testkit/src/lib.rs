@@ -326,15 +326,14 @@ impl Fixtures {
             )
         };
         let plan = Plan::embedded().map_err(fail)?;
+        // ensure rebuilds a tree recorded for another kind of process, so
+        // the record's flag holds for this one.
         let (record, _) = out.ensure(&plan, false).map_err(fail)?;
-        let probe = out.path().join(format!(".probe-{}", std::process::id()));
-        let unreadable_effective = mktree::build::mode_000_denies(&probe).map_err(fail)?;
-        let _ = fs::remove_dir_all(&probe);
         Ok(Fixtures {
             out,
             plan,
+            unreadable_effective: record.unreadable_effective,
             record,
-            unreadable_effective,
             holders: Mutex::new(0),
         })
     }

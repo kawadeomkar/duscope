@@ -60,9 +60,12 @@ impl OutDir {
         }
     }
 
-    /// `target/fixtures.noindex` of this workspace:
-    /// `$CARGO_TARGET_DIR/fixtures.noindex` when that is set (relative to the
-    /// workspace root), else `<workspace>/target/fixtures.noindex`. `just
+    /// `fixtures.noindex` in cargo's target directory for this workspace:
+    /// the ancestor of the running executable (mktree, or a test binary in
+    /// `deps/`) that holds cargo's `CACHEDIR.TAG`, so `CARGO_TARGET_DIR`,
+    /// `--target-dir` and `[build] target-dir` all count. An executable
+    /// outside a target directory falls back to `$CARGO_TARGET_DIR`
+    /// (relative to the workspace root), else `<workspace>/target`. `just
     /// fixtures` and the test kit both use it.
     ///
     /// It is reserved for mktree by its name, so a build replaces whatever it
@@ -71,12 +74,20 @@ impl OutDir {
     /// file it does not take for a build artifact, the marker and the record
     /// with them, and keeps the directories.
     pub fn workspace_default() -> OutDir {
-        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workspace = manifest_dir.ancestors().nth(3).unwrap_or(manifest_dir);
-        let target = match std::env::var_os("CARGO_TARGET_DIR") {
-            Some(dir) => workspace.join(dir),
-            None => workspace.join("target"),
-        };
+        let built_in = std::env::current_exe().ok().and_then(|exe| {
+            exe.ancestors()
+                .skip(1)
+                .find(|dir| dir.join("CACHEDIR.TAG").is_file())
+                .map(Path::to_path_buf)
+        });
+        let target = built_in.unwrap_or_else(|| {
+            let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let workspace = manifest_dir.ancestors().nth(3).unwrap_or(manifest_dir);
+            match std::env::var_os("CARGO_TARGET_DIR") {
+                Some(dir) => workspace.join(dir),
+                None => workspace.join("target"),
+            }
+        });
         OutDir {
             path: target.join("fixtures.noindex"),
             reserved: true,
@@ -129,9 +140,9 @@ impl OutDir {
         }
         let entries =
             fs::read_dir(&self.path).map_err(|err| io_err("read_dir", &self.path, &err))?;
-        let empty = entries
-            .flatten()
-            .all(|e| e.file_name() == MARKER || e.file_name() == ".lock");
+        let empty = entries.flatten().all(|e| {
+            e.file_name() == MARKER || e.file_name() == ".lock" || e.file_name() == ".lock-takeover"
+        });
         if !self.reserved && !empty && !matches!(self.record(), Ok(Some(_))) {
             return Err(Error::new(format!(
                 "{} is not a mktree output directory (it holds no {MARKER} and no \
@@ -144,18 +155,27 @@ impl OutDir {
     }
 
     /// Builds the tree unless the current one was built from the same
-    /// manifest hash (or `force` is set). The new tree is built beside the
-    /// old one and swapped in; the record is written last, so a tree without
-    /// a matching record is never mistaken for a finished one. Returns the
-    /// record and whether a build ran.
+    /// manifest hash by a process that mode 000 stops as it stops this one
+    /// (or `force` is set). The new tree is built beside the old one and
+    /// swapped in; the record is written last, so a tree without a matching
+    /// record is never mistaken for a finished one. Returns the record and
+    /// whether a build ran.
     pub fn ensure(&self, plan: &Plan, force: bool) -> Result<(Record, bool)> {
         let _lock = self.lock()?;
         self.claim()?;
         let hash = plan.hash();
-        // A record this generator cannot read (another format) means rebuild.
+        let probe = self.path.join(format!(".tmp-{}-probe", std::process::id()));
+        let unreadable_effective = crate::build::mode_000_denies(&probe)?;
+        let _ = fs::remove_dir(&probe);
+        // A record this generator cannot read (another format) means
+        // rebuild. So does one whose unreadable cases were built for another
+        // kind of process (root built the tree a user tests, or the reverse):
+        // they would be marked built where they cannot work, or skipped
+        // where they do.
         if !force
             && let Ok(Some(record)) = self.record()
             && record.hash == hash
+            && record.unreadable_effective == unreadable_effective
             && self.tree().is_dir()
         {
             return Ok((record, false));
@@ -199,36 +219,54 @@ impl OutDir {
         Ok(())
     }
 
-    /// Registers this process as a holder and applies the test modes.
+    /// Registers this process as a holder and applies the test modes. Beside
+    /// another live holder the tree is armed already, so only the test modes
+    /// are applied: restoring the modes at rest first, as [`arm`] does, would
+    /// open the unreadable directories under that holder's tests.
     pub fn hold(&self, plan: &Plan) -> Result<()> {
         let _lock = self.lock()?;
+        let others = self.other_live_holders();
         let holders = self.holders();
         fs::create_dir_all(&holders).map_err(|err| io_err("create", &holders, &err))?;
         let me = holders.join(std::process::id().to_string());
         fs::write(&me, b"").map_err(|err| io_err("write", &me, &err))?;
-        arm(&self.tree(), plan)
+        if others > 0 {
+            apply_test_modes(&self.tree(), plan)
+        } else {
+            arm(&self.tree(), plan)
+        }
     }
 
     /// Unregisters this process; restores the modes at rest when no live
     /// holder remains.
     pub fn release(&self, plan: &Plan) -> Result<()> {
         let _lock = self.lock()?;
-        let holders = self.holders();
-        let _ = fs::remove_file(holders.join(std::process::id().to_string()));
+        let _ = fs::remove_file(self.holders().join(std::process::id().to_string()));
+        if self.other_live_holders() == 0 {
+            disarm(&self.tree(), plan)?;
+        }
+        Ok(())
+    }
+
+    /// The live holders other than this process; forgets the dead ones.
+    /// Called under the lock.
+    fn other_live_holders(&self) -> usize {
+        let me = std::process::id().to_string();
         let mut live = 0;
-        if let Ok(entries) = fs::read_dir(&holders) {
+        if let Ok(entries) = fs::read_dir(self.holders()) {
             for entry in entries.flatten() {
-                if alive(&entry.file_name().to_string_lossy()) {
+                let pid = entry.file_name().to_string_lossy().into_owned();
+                if pid == me {
+                    continue;
+                }
+                if alive(&pid) {
                     live += 1;
                 } else {
                     let _ = fs::remove_file(entry.path());
                 }
             }
         }
-        if live == 0 {
-            disarm(&self.tree(), plan)?;
-        }
-        Ok(())
+        live
     }
 
     /// Applies the test modes without registering a holder (`mktree --arm`).
@@ -251,6 +289,11 @@ impl OutDir {
 /// applies the test modes from the bottom up.
 pub fn arm(root: &Path, plan: &Plan) -> Result<()> {
     disarm(root, plan)?;
+    apply_test_modes(root, plan)
+}
+
+/// Applies the test modes of `plan` from the bottom up, nothing else.
+fn apply_test_modes(root: &Path, plan: &Plan) -> Result<()> {
     for e in plan.entries.iter().rev() {
         if let Some(mode) = e.test_mode {
             let path = abs(root, &e.path);
@@ -336,8 +379,7 @@ impl DirLock {
                     return Ok(DirLock { path });
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                    if DirLock::stale(&path) {
-                        let _ = fs::remove_dir_all(&path);
+                    if DirLock::stale(&path) && DirLock::take_over(&path) {
                         continue;
                     }
                     if Instant::now() > deadline {
@@ -357,13 +399,39 @@ impl DirLock {
         match fs::read_to_string(path.join("pid")) {
             Ok(pid) => !alive(pid.trim()),
             // Created but the pid not yet written: stale only if old.
-            Err(_) => fs::symlink_metadata(path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| SystemTime::now().duration_since(t).ok())
-                .is_some_and(|age| age > Duration::from_secs(10)),
+            Err(_) => older_than(path, Duration::from_secs(10)),
         }
     }
+
+    /// Removes the stale lock at `path`, under a second lock beside it, if
+    /// it is still stale there; returns whether it was removed. Two waiters
+    /// that both found the owner dead would otherwise both remove the lock,
+    /// the second one removing the lock the first had just taken. A takeover
+    /// lasts a moment, so a takeover lock left by a waiter that died is
+    /// removed once it is old.
+    fn take_over(path: &Path) -> bool {
+        let mut name = path.file_name().unwrap_or_default().to_owned();
+        name.push("-takeover");
+        let guard = path.with_file_name(name);
+        if fs::create_dir(&guard).is_ok() {
+            let removed = DirLock::stale(path) && fs::remove_dir_all(path).is_ok();
+            let _ = fs::remove_dir(&guard);
+            return removed;
+        }
+        if older_than(&guard, Duration::from_secs(10)) {
+            let _ = fs::remove_dir(&guard);
+        }
+        false
+    }
+}
+
+/// Whether `path` was last modified more than `age` ago.
+fn older_than(path: &Path, age: Duration) -> bool {
+    fs::symlink_metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .is_some_and(|elapsed| elapsed > age)
 }
 
 impl Drop for DirLock {
@@ -452,5 +520,131 @@ entries = [
     fn p0_test_01_only_the_workspace_default_is_reserved() {
         assert!(OutDir::workspace_default().reserved);
         assert!(!OutDir::new(OutDir::workspace_default().path()).reserved);
+    }
+
+    #[test]
+    fn p0_test_01_workspace_default_lies_in_cargos_target_directory() {
+        let path = OutDir::workspace_default().path().to_path_buf();
+        let target = path.parent().unwrap();
+        assert_eq!(path.file_name().unwrap(), "fixtures.noindex");
+        assert!(
+            target.join("CACHEDIR.TAG").is_file(),
+            "{}",
+            target.display()
+        );
+        let exe = std::env::current_exe().unwrap();
+        assert!(
+            exe.starts_with(target),
+            "{} is not where this test was built ({})",
+            path.display(),
+            exe.display()
+        );
+    }
+
+    /// Two directories that close while a test holds the tree.
+    fn armed_plan() -> Plan {
+        let text = r#"
+format = 1
+hash = ""
+instant = "2030-01-01T00:00:00Z"
+words = ["alpha"]
+[defaults]
+dir_mode = 0o755
+file_mode = 0o644
+age = "30d"
+[extensions]
+code = ["rs"]
+[[case]]
+name = "c"
+about = "two directories with a test mode"
+root = "cases/c"
+entries = [
+  { path = "a", dir = true, test_mode = 0o000 },
+  { path = "b", dir = true, test_mode = 0o000 },
+]
+"#;
+        Plan::new(&Manifest::parse(text).unwrap()).unwrap()
+    }
+
+    /// A process other than this one, alive until dropped.
+    struct OtherProcess(std::process::Child);
+
+    impl Drop for OtherProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn p0_test_01_holding_beside_a_live_holder_never_restores_the_modes() {
+        let plan = armed_plan();
+        let temp = tempfile::tempdir().unwrap();
+        let out = OutDir::new(temp.path().join("out"));
+        out.ensure(&plan, false).unwrap();
+        let other = OtherProcess(Command::new("sleep").arg("60").spawn().unwrap());
+        fs::create_dir_all(out.holders()).unwrap();
+        fs::write(out.holders().join(other.0.id().to_string()), b"").unwrap();
+        arm(&out.tree(), &plan).unwrap();
+
+        // With b gone, applying the modes fails part way: a pass restoring
+        // the modes at rest would already have opened a under the other
+        // holder.
+        fs::remove_dir(out.tree().join("cases/c/b")).unwrap();
+        assert!(out.hold(&plan).is_err());
+        let a = out.tree().join("cases/c/a");
+        assert_eq!(fs::symlink_metadata(&a).unwrap().mode() & 0o7777, 0o000);
+        drop(other);
+        remove_tree(out.path()).unwrap();
+    }
+
+    #[test]
+    fn p0_test_01_ensure_rebuilds_a_tree_recorded_under_other_privileges() {
+        let plan = small_plan();
+        let temp = tempfile::tempdir().unwrap();
+        let out = OutDir::new(temp.path().join("out"));
+        let (first, built) = out.ensure(&plan, false).unwrap();
+        assert!(built);
+        assert!(!out.ensure(&plan, false).unwrap().1);
+
+        // As if root had built the tree this process tests, or the reverse.
+        let text = fs::read_to_string(out.record_path()).unwrap();
+        let flag = |v: bool| format!("unreadable_effective = {v}");
+        let flipped = text.replace(
+            &flag(first.unreadable_effective),
+            &flag(!first.unreadable_effective),
+        );
+        assert_ne!(flipped, text);
+        fs::write(out.record_path(), flipped).unwrap();
+        let (second, built) = out.ensure(&plan, false).unwrap();
+        assert!(
+            built,
+            "a record that disagrees with this process was reused"
+        );
+        assert_eq!(second.unreadable_effective, first.unreadable_effective);
+    }
+
+    #[test]
+    fn p0_test_01_lock_takeover_spares_a_live_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let lock = temp.path().join(".lock");
+        let me = std::process::id().to_string();
+
+        // A waiter that found the lock stale, too late: another waiter has
+        // taken it over since, and its owner is alive.
+        fs::create_dir(&lock).unwrap();
+        fs::write(lock.join("pid"), &me).unwrap();
+        assert!(!DirLock::take_over(&lock));
+        assert_eq!(fs::read_to_string(lock.join("pid")).unwrap(), me);
+
+        // A lock whose owner has died is removed, once.
+        let mut dead = Command::new("true").spawn().unwrap();
+        dead.wait().unwrap();
+        fs::write(lock.join("pid"), dead.id().to_string()).unwrap();
+        assert!(DirLock::take_over(&lock));
+        assert!(!lock.exists());
+        assert!(!DirLock::take_over(&lock));
+        let _held = DirLock::acquire(lock.clone()).unwrap();
+        assert_eq!(fs::read_to_string(lock.join("pid")).unwrap(), me);
     }
 }

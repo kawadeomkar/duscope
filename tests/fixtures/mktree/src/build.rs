@@ -107,6 +107,13 @@ fn spawn_error(err: &io::Error) -> String {
     }
 }
 
+/// Whether a file of `size` bytes with `allocated` bytes on disk is stored
+/// compressed: in less than half its size, which the generated text reaches
+/// with every filesystem compressor.
+fn stored_compressed(allocated: u64, size: u64) -> bool {
+    allocated * 2 < size.max(1)
+}
+
 /// The first line of a command's stderr, for skip reasons.
 fn stderr_line(out: &Output) -> String {
     let text = String::from_utf8_lossy(&out.stderr);
@@ -396,7 +403,7 @@ impl Builder<'_> {
         {
             Ok(out) if out.status.success() => {
                 let allocated = fs::symlink_metadata(path)?.blocks() * 512;
-                if allocated * 2 < size.max(1) {
+                if stored_compressed(allocated, size) {
                     return Ok((true, "ditto --hfsCompression".to_owned()));
                 }
                 reasons.push(format!(
@@ -425,15 +432,23 @@ impl Builder<'_> {
         let mut f = OpenOptions::new().write(true).truncate(true).open(path)?;
         write_generated(&mut f, &e.path, size, &mut Vec::new())?;
         if flagged {
-            // ext4 keeps the flag (statx reports STATX_ATTR_COMPRESSED)
-            // without compressing; btrfs compresses.
-            return Ok((
-                true,
-                format!(
-                    "chattr +c (the compressed attribute is set; {} decides whether data is compressed)",
-                    self.filesystem
-                ),
+            // btrfs compresses at writeback, so the allocation is read after
+            // a sync. ext4 keeps the flag (statx reports
+            // STATX_ATTR_COMPRESSED) and stores the data as it is.
+            f.sync_all()?;
+            drop(f);
+            let allocated = fs::symlink_metadata(path)?.blocks() * 512;
+            if stored_compressed(allocated, size) {
+                return Ok((true, format!("chattr +c on {}", self.filesystem)));
+            }
+            reasons.push(format!(
+                "chattr +c set the compressed attribute, but {} left {allocated} of {size} bytes allocated",
+                self.filesystem
             ));
+            // The fallback is a plain file, without the attribute.
+            fs::remove_file(path)?;
+            let mut f = File::create(path)?;
+            write_generated(&mut f, &e.path, size, &mut Vec::new())?;
         }
         Ok((false, reasons.join("; ")))
     }
