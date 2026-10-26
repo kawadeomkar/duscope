@@ -4,8 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
-use std::process::Command;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use cargo_metadata::{DependencyKind, Metadata, MetadataCommand, Package};
 
@@ -177,11 +178,68 @@ fn p0_repo_01_published_crates_ship_a_readme_and_both_licences() {
     }
 }
 
+/// The path of `program` on `PATH`, or a panic that names it and how to get
+/// it: a missing tool would otherwise surface as `Os { code: 2 }` from the
+/// `output().unwrap()` of its first command.
+fn tool(program: &str, how: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| dir.join(program))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("install {program}: {how}"))
+}
+
+/// `just` on this workspace's justfile.
+fn just() -> Command {
+    let mut command = Command::new(tool(
+        "just",
+        "just, the task runner (CONTRIBUTING.md, Prerequisites)",
+    ));
+    command
+        .arg("--justfile")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../justfile"));
+    command
+}
+
+#[test]
+fn p0_repo_01_test_pkg_quotes_the_id() {
+    // The script `just test-pkg` would run, up to the filter it builds.
+    let dry = just()
+        .args(["--dry-run", "test-pkg", "P9-X'Y-01"])
+        .output()
+        .unwrap();
+    let script = String::from_utf8_lossy(&dry.stderr);
+    let head = script
+        .lines()
+        .take_while(|line| !line.starts_with("count="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(head.contains("filter="), "{script}");
+    let mut bash = Command::new("bash")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = format!("{head}\nprintf '%s' \"$filter\"\n");
+    bash.stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = bash.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{script}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "p9_x'y_01_");
+}
+
 #[test]
 fn p0_repo_01_repro_refuses_a_path_with_whitespace() {
-    let output = Command::new("just")
-        .arg("--justfile")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../justfile"))
+    let output = just()
         .arg("repro")
         .env("CARGO_HOME", "/nonexistent/cargo home")
         .output()

@@ -32,12 +32,13 @@ setup:
     rustup toolchain install stable nightly --profile minimal
     case "$(uname -s)" in
       Darwin)
-        # GNU du (installed as gdu) for the du parity checks; mandoc and xmllint ship with macOS.
-        brew install coreutils ;;
+        # GNU du (installed as gdu) for the du parity checks, and bash 4 or later for the test
+        # that runs ci.yml's changelog job (macOS ships 3.2); mandoc, xmllint and jq ship with macOS.
+        brew install coreutils bash ;;
       Linux)
         sudo=""; [[ $(id -u) -eq 0 ]] || sudo=sudo
         $sudo apt-get update -qq
-        $sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential mandoc lintian libxml2-utils reprepro ;;
+        $sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential mandoc lintian libxml2-utils reprepro jq ;;
       *) echo "setup: unsupported platform $(uname -s)" >&2; exit 1 ;;
     esac
     installed=$(rustup run stable cargo install --list)
@@ -90,7 +91,7 @@ test:
 test-pkg id:
     #!/usr/bin/env bash
     set -euo pipefail
-    filter='{{replace(lowercase(id), "-", "_")}}_'
+    filter={{quote(replace(lowercase(id), "-", "_") + "_")}}
     count=$(cargo test --workspace --quiet -- --list "$filter" | grep -c ': test$' || true)
     [[ $count -gt 0 ]] || { echo "test-pkg: no test named ${filter}*" >&2; exit 1; }
     cargo test --workspace -- "$filter"
