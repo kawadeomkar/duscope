@@ -30,17 +30,27 @@ def result(
     tool: str = "du",
     subject: str = "du",
     tree: str = "T1",
+    cpu: Optional[str] = "Apple M5 Pro",
+    cpus: int = 18,
+    ratios: Optional[Dict[str, float]] = None,
 ) -> dict:
-    """A result file with `tool`'s p50 on `tree` in each mode of `p50`, trimmed to
-    the fields compare.py reads."""
+    """A result file with `tool`'s p50 on `tree` in each mode of `p50`, and for
+    each `mode/competitor` in `ratios` the competitor's entry with that
+    `subject_ratio_p50`, trimmed to the fields compare.py reads."""
+    pairs = [
+        {"tree": tree, "mode": key.split("/")[0], "tool": key.split("/")[1], "paired_with": tool,
+         "p50_s": 1.0, "subject_ratio_p50": value}
+        for key, value in (ratios or {}).items()
+    ]
     return {
         "schema_version": 1,
         "started_at": started_at,
         "platform": platform,
         "subject": subject,
-        "host": {"arch": arch},
+        "host": {"arch": arch, "cpu": cpu, "logical_cpus": cpus},
         "trees": [{"name": tree, "digest": digest}],
-        "results": [{"tree": tree, "mode": mode, "tool": tool, "p50_s": value} for mode, value in p50.items()],
+        "results": [{"tree": tree, "mode": mode, "tool": tool, "p50_s": value} for mode, value in p50.items()]
+        + pairs,
     }
 
 
@@ -108,6 +118,32 @@ class Compare(unittest.TestCase):
         code, out = self.run_compare([current, *others, *same])
         self.assertEqual(code, 1, out)
         self.assertIn("over 2 results", out)
+
+    def test_p0_bench_02_absolute_baselines_need_the_same_cpu(self):
+        others = self.baselines([0.5] * 3, cpu="Apple M4") + self.baselines([0.5] * 3, cpus=10)
+        current = self.write(result({"warm": 1.0}, started_at="2026-10-25T10:00:00Z"))
+        code, out = self.run_compare([current, *others])
+        self.assertEqual(code, 0, out)
+        self.assertIn("no baseline", out)
+
+    def test_p0_bench_02_ratios_compare_across_cpus_of_a_kind(self):
+        # Five earlier runs on another CPU, du at 1.0x diskus: their absolute
+        # times do not count here, their ratios do.
+        base = self.baselines([0.5] * 5, cpu="Intel Xeon", cpus=4, ratios={"warm/diskus": 1.0})
+        for ratio, want in [(1.10, 0), (1.30, 1)]:
+            current = self.write(
+                result({"warm": 1.0}, started_at="2026-10-25T10:00:00Z", ratios={"warm/diskus": ratio})
+            )
+            code, out = self.run_compare([current, *base])
+            self.assertEqual(code, want, out)
+            self.assertIn("T1 warm du: no baseline", out)
+            self.assertIn(f"T1 warm du/diskus: ratio {ratio:.3f} against a median of 1.000 over 5 results", out)
+        # Another platform's ratios do not count.
+        linux = self.baselines([0.5] * 5, platform="linux", ratios={"warm/diskus": 0.5})
+        current = self.write(result({"warm": 1.0}, started_at="2026-10-25T10:00:00Z", ratios={"warm/diskus": 1.3}))
+        code, out = self.run_compare([current, *linux])
+        self.assertEqual(code, 0, out)
+        self.assertIn("T1 warm du/diskus: no baseline", out)
 
     def test_p0_bench_02_each_mode_is_checked(self):
         base = [
