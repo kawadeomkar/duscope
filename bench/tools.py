@@ -78,7 +78,10 @@ def _tarballs(repo: str, tag: str, stem: str, binary: str, targets: Dict[str, Tu
 
 
 # The competitors are pinned as plan/PROPOSAL.md's 1.0 acceptance targets list
-# them. The release digests are the SHA-256 GitHub records for each asset.
+# them, except ncdu: 2.9.2 has no prebuilt binary, so it is pinned at 2.9.1, the
+# last release with static Linux builds. The release digests are the SHA-256
+# GitHub records for each asset, and for ncdu's those of the archives on its
+# site.
 PINS: Dict[str, Tool] = {
     "du": Tool(
         "du", None, ("du", "-sk", "{tree}"), system="/usr/bin/du",
@@ -139,13 +142,17 @@ PINS: Dict[str, Tool] = {
             }.items()
         },
     ),
+    # Static builds for Linux only: macOS has no prebuilt ncdu, and building one
+    # needs Zig with the ncurses headers.
     "ncdu": Tool(
-        "ncdu", "2.9.2", ("ncdu", "-0", "-o", "/dev/null", "{tree}"),
-        skip=(
-            "ncdu 2.9.2 publishes no prebuilt binary (the static Linux builds stop at "
-            "2.9.1) and building it needs Zig 0.15 with the ncurses and zstd headers; "
-            "pass --tool-path ncdu=PATH to measure a 2.9.2 build"
-        ),
+        "ncdu", "2.9.1", ("ncdu", "-0", "-o", "/dev/null", "{tree}"),
+        releases={
+            key: Release(f"https://dev.yorhel.nl/download/ncdu-2.9.1-{target}.tar.gz", sha, "ncdu")
+            for key, (target, sha) in {
+                "linux-x86_64": ("linux-x86_64", "0c6c84b3f763c33baa051c8327f0e736f46f33a8cc061bb951d24517a8c5d73e"),
+                "linux-aarch64": ("linux-aarch64", "5bf4a37e8b5e1ecc6863475dc800c6a0d73b9cd1452e37d744edd3df0b58dac0"),
+            }.items()
+        },
     ),
     "fdu": Tool(
         "fdu", "0.5.0", ("fdu", "{tree}"),
@@ -191,7 +198,7 @@ def source_for(tool: Tool, key: str) -> Tuple[str, Optional[str]]:
         return "git", None
     if tool.cargo:
         return "cargo", None
-    return "skipped", f"{tool.name} {tool.pinned} has no build for {key}"
+    return "skipped", f"{tool.name} {tool.pinned} has no build for {key}; pass --tool-path {tool.name}=PATH to measure one"
 
 
 @dataclass
