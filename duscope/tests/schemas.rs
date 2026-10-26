@@ -161,10 +161,10 @@ fn problems(name: &str, text: &str) -> Vec<String> {
             errors.push(error);
         }
     }
-    if errors.is_empty() {
-        if let Err(e) = jsonschema::draft202012::new(&schema) {
-            problem(format!("does not compile as a validator: {e}"));
-        }
+    if errors.is_empty()
+        && let Err(e) = jsonschema::draft202012::new(&schema)
+    {
+        problem(format!("does not compile as a validator: {e}"));
     }
     errors.into_iter().for_each(&mut problem);
     let mut names = Vec::new();
