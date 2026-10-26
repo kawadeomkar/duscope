@@ -758,3 +758,100 @@ fn p0_bench_01_just_bench_runs_the_harness() {
         "bench/run.sh must be executable"
     );
 }
+
+/// Puts an executable `name` holding `script` in `bin`.
+fn stub(bin: &Path, name: &str, script: &str) {
+    let path = bin.join(name);
+    fs::write(&path, script).unwrap();
+    let mut mode = fs::metadata(&path).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+    fs::set_permissions(&path, mode).unwrap();
+}
+
+/// `bench/drop-caches.sh --remount`, on a stand-in macOS: `uname`, `id`,
+/// `sudo`, `hdiutil` and `mount` are stubs, the last listing the image's
+/// volume at the mount point when it is attached.
+#[test]
+fn p0_bench_01_macos_cold_runs_remount_the_trees_disk_image() {
+    let scratch = Scratch::new("remount");
+    let bin = scratch.join("bin");
+    let mnt = scratch.join("mnt");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&mnt).unwrap();
+    let mnt_real = fs::canonicalize(&mnt).unwrap();
+    let calls = scratch.join("calls.log");
+    let recorder = |name: &str| format!("#!/bin/sh\necho \"{name} $*\" >> \"$CALLS\"\n");
+    stub(&bin, "uname", "#!/bin/sh\necho Darwin\n");
+    stub(&bin, "id", "#!/bin/sh\necho 501\n");
+    stub(&bin, "sudo", &recorder("sudo"));
+    stub(&bin, "hdiutil", &recorder("hdiutil"));
+    stub(
+        &bin,
+        "mount",
+        "#!/bin/sh\n[ -z \"$MOUNTED\" ] || echo \"/dev/disk9s1 on $MOUNTED (apfs, local, journaled)\"\n",
+    );
+    let run = |args: &[&str], mounted: Option<&Path>| -> (Output, Vec<String>) {
+        let _ = fs::remove_file(&calls);
+        let mut path = OsString::from(bin.as_os_str());
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap());
+        let out = Command::new(bench("drop-caches.sh"))
+            .args(args)
+            .env("PATH", path)
+            .env("CALLS", &calls)
+            .env("MOUNTED", mounted.map(Path::as_os_str).unwrap_or_default())
+            .output()
+            .unwrap();
+        let logged = fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        (out, logged)
+    };
+    let image = "/Users/runner/duscope-bench/trees.sparsebundle";
+    let m = mnt.to_str().unwrap();
+    let purge = "sudo -n /usr/sbin/purge".to_owned();
+    let attach =
+        format!("hdiutil attach -quiet -nobrowse -noverify -noautoopen -mountpoint {m} {image}");
+
+    // Attached: detached, purged, attached again.
+    let (out, logged) = run(&["--remount", image, m], Some(&mnt_real));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        logged,
+        [
+            format!("hdiutil detach -quiet {m}"),
+            purge.clone(),
+            attach.clone()
+        ]
+    );
+    // Not attached, as after a reboot: purged and attached.
+    let (out, logged) = run(&["--remount", image, m], None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(logged, [purge.clone(), attach]);
+    // Without --remount, the purge alone; a short --remount is refused.
+    assert_eq!(run(&[], None).1, [purge]);
+    let (out, logged) = run(&["--remount", image], None);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(logged.is_empty());
+
+    // Linux drops every cache: --remount is refused there.
+    stub(&bin, "uname", "#!/bin/sh\necho Linux\n");
+    let (out, logged) = run(&["--remount", image, m], None);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(logged.is_empty());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--remount is for a macOS disk image"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

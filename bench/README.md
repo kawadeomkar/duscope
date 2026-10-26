@@ -112,18 +112,20 @@ than on macOS; deleting T2 and T3 there takes minutes too (`rm -rf bench/.trees/
 | `pdu` | `0.24.0` | `pdu {tree}` | release binary on x86_64; crates.io build on arm64 |
 | `dust` | `1.2.6` | `dust -d0 {tree}` | release binary, all four platforms |
 | `gdu` | `5.38.0` | `gdu -npc {tree}` | release binary, all four platforms |
-| `ncdu` | `2.9.2` | `ncdu -0 -o /dev/null {tree}` | skipped: no prebuilt 2.9.2; pass `--tool-path` |
+| `ncdu` | `2.9.1` | `ncdu -0 -o /dev/null {tree}` | static release binary on Linux; skipped on macOS (no prebuilt binary): pass `--tool-path` |
 | `fdu` | `0.5.0` | `fdu {tree}` | crates.io build |
 | `dumac` | `1ffbe3c38d1066c45cac9b4ec1e31eb74edc1076` | `dumac {tree}` | build of that commit, macOS only |
 
-The versions are the ones plan/PROPOSAL.md's 1.0 acceptance targets pin. Release archives are
+The versions are the ones plan/PROPOSAL.md's 1.0 acceptance targets pin, except ncdu's: 2.9.2 has
+no prebuilt binary, so the harness pins 2.9.1, the last release with static Linux builds, from
+ncdu's own site. Release archives are
 checked against the SHA-256 digests in `tools.py` before anything is unpacked; crates.io builds
 run `cargo install --locked` on the stable toolchain, and cargo checks the crates' checksums.
 Nothing installs outside `--tools-dir`, and the download requests carry no identity beyond the
 user agent `duscope-bench`. The commands are those of gdu's README benchmark where the tool
 appears there, and otherwise the plain invocation; every tool runs at its default thread count.
-A tool that cannot run on a platform (dumac on Linux) or cannot be installed by the script
-(ncdu 2.9.2) is listed in the result file as skipped, with the reason.
+A tool that cannot run on a platform (dumac on Linux) or has no build the script can install there
+(ncdu on macOS) is listed in the result file as skipped, with the reason.
 
 `bench/run.sh tools` prints the same table per platform; a test keeps the two in step.
 
@@ -157,9 +159,16 @@ runner ALL=(root) NOPASSWD: /usr/sbin/sysctl -q vm.drop_caches=3
 
 The harness runs the command once before building or measuring anything, and stops with an
 error that says what to configure when it fails (or when `--cold-cmd` is empty), so a cold run
-never silently measures warm caches. `purge` drops the unified buffer cache, not every APFS metadata cache; a volume remount
-clears more, and `--cold-cmd` takes any command that does it, such as a script that unmounts and
-mounts the volume holding `--trees-dir`.
+never silently measures warm caches.
+
+`purge` drops the unified buffer cache, not APFS's metadata caches: with `purge` alone, `du` on T1
+took 2.94 s cold against 2.85 s warm on the Mac. So the macOS bench runner keeps its trees on an
+APFS disk image (a sparse bundle it owns) and passes `--cold-cmd 'bench/drop-caches.sh --remount
+IMAGE MOUNTPOINT'`, which detaches the image when it is attached, purges, and attaches it again.
+Detaching drops the volume's metadata caches; the purge in between drops the image's own blocks
+from the cache of the volume it is stored on. `hdiutil` needs no root for an image its user owns.
+Both tools of a pair read through the image alike, so the ratios the gates use compare like with
+like. `--cold-cmd` takes any other command too.
 
 ## Result file
 

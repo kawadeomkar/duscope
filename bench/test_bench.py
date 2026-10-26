@@ -205,7 +205,10 @@ class Tools(unittest.TestCase):
             self.assertIn("{tree}", tool.args, tool.name)
             for key, release in tool.releases.items():
                 self.assertIn(key, tools.PLATFORMS)
-                self.assertTrue(release.url.startswith("https://github.com/"), release.url)
+                self.assertTrue(
+                    release.url.startswith(("https://github.com/", "https://dev.yorhel.nl/download/")),
+                    release.url,
+                )
                 self.assertRegex(release.sha256, r"^[0-9a-f]{64}$")
                 self.assertIn(str(tool.pinned), release.url)
             if tool.cargo and tool.cargo.git:
