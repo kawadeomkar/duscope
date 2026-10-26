@@ -131,7 +131,11 @@ line tools, `xcode-select --install`), rustup with the stable toolchain
 (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 --profile minimal`) for the competitors built from source, and hyperfine 2.0.0
 (`cargo install --locked hyperfine@2.0.0`, the version `just setup` pins). The
-harness installs the competitors itself, under `BENCH_HOME`.
+harness installs the competitors itself, under `BENCH_HOME`. After the harness,
+each bench job builds the fixture tree and fails when it takes 30 s or more
+(P0-TEST-01's budget, which shared CI runners only report): rustup installs the
+workspace's pinned toolchain on the first night, and cargo keeps its build under
+`BENCH_HOME/target`.
 
 ### Disks and filesystems
 
@@ -256,7 +260,8 @@ EOF
 
 Both machines need outbound HTTPS only: to github.com (the runner, the
 checkout, artifact uploads) and, for the competitors, to GitHub release
-downloads, crates.io and static.crates.io. They accept no inbound connection
+downloads, crates.io and static.crates.io, and to static.rust-lang.org for the
+pinned toolchain. They accept no inbound connection
 the runner needs; it polls GitHub. A wired connection is preferred, since a
 dropped connection fails the job mid-run.
 
@@ -368,5 +373,4 @@ platform and architecture.
 | Date | Runner | Change |
 | --- | --- | --- |
 | 2026-10-25 | `bench-linux` | Registered: a VM on the author's Proxmox host, runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1 |
-| 2026-10-25 | `bench-macos` | Setup deferred (TODO) |
 | 2026-10-25 | `bench-macos` | Registered: the author's MacBook Pro (M5 Pro, 18 cores, 48 GiB, macOS 26.7.2), runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1; a launchd daemon in the system domain; a daily wake at 03:10 |

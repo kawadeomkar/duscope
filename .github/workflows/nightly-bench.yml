@@ -5,7 +5,9 @@
 # label `bench-macos` and a Linux x86_64 box with `bench-linux`, described in
 # docs/runners.md. Until duscope can scan, `du` is the subject. The result files
 # go to the `bench-results` branch as <date>-<platform>.json, never to main, and
-# bench/compare.py reads baselines from there.
+# bench/compare.py reads baselines from there. Each bench job then holds the
+# fixture tree to P0-TEST-01's 30-second build budget, which these quiet machines
+# can assert and shared CI runners cannot.
 #
 # A public repository's pull requests must never reach a self-hosted machine.
 # This workflow has no pull_request trigger, every job on a bench-* label also
@@ -205,6 +207,27 @@ jobs:
           exit 1
         env:
           STATUS: ${{ steps.harness.outputs.status }}
+      # P0-TEST-01's acceptance check, here because a quiet machine can hold the
+      # fixture tree to its budget and shared CI runners cannot (they report the
+      # time only): the debug build `just fixtures` runs, in under 30 s.
+      - name: Fixture tree within its 30-second budget
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          out="$RUNNER_TEMP/fixtures"
+          rustup toolchain install --profile minimal
+          CARGO_TARGET_DIR="$home/target" caffeinate -is cargo run --quiet --locked -p mktree -- --out "$out" --force
+          ms=$(sed -n 's/^build_ms = //p' "$out/record.toml")
+          rm -rf "$out"
+          if [[ ! $ms =~ ^[0-9]+$ ]]; then
+            echo "::error title=nightly-bench::mktree recorded no build time"
+            exit 1
+          fi
+          if (( ms >= 30000 )); then
+            echo "::error title=nightly-bench::the fixture tree took $ms ms to build, over P0-TEST-01's 30 s budget"
+            exit 1
+          fi
+          echo "the fixture tree built in $ms ms of P0-TEST-01's 30000"
 
   bench-linux:
     name: bench-linux
@@ -246,6 +269,27 @@ jobs:
           exit 1
         env:
           STATUS: ${{ steps.harness.outputs.status }}
+      # P0-TEST-01's acceptance check, here because a quiet machine can hold the
+      # fixture tree to its budget and shared CI runners cannot (they report the
+      # time only): the debug build `just fixtures` runs, in under 30 s.
+      - name: Fixture tree within its 30-second budget
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          out="$RUNNER_TEMP/fixtures"
+          rustup toolchain install --profile minimal
+          CARGO_TARGET_DIR="$home/target" cargo run --quiet --locked -p mktree -- --out "$out" --force
+          ms=$(sed -n 's/^build_ms = //p' "$out/record.toml")
+          rm -rf "$out"
+          if [[ ! $ms =~ ^[0-9]+$ ]]; then
+            echo "::error title=nightly-bench::mktree recorded no build time"
+            exit 1
+          fi
+          if (( ms >= 30000 )); then
+            echo "::error title=nightly-bench::the fixture tree took $ms ms to build, over P0-TEST-01's 30 s budget"
+            exit 1
+          fi
+          echo "the fixture tree built in $ms ms of P0-TEST-01's 30000"
 
   publish:
     name: publish
