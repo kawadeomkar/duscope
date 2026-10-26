@@ -21,11 +21,11 @@ anything in this table is a new row in the [change log](#change-log).
 | | `bench-macos` | `bench-linux` |
 | --- | --- | --- |
 | Machine | the author's MacBook Pro (Mac17,8), [below](#bench-macos-the-authors-macbook-pro) | VM `bench-linux` (VMID 101) on the author's Proxmox VE 9.2 host, [below](#bench-linux-a-vm-on-proxmox) |
-| CPU and cores | Apple M5 Pro, 18 cores | 4 vCPUs of an Intel Core i9-10900K (10 cores, 20 threads), CPU type `host`, shared with the host's other VMs |
+| CPU and cores | Apple M5 Pro, 18 cores | 10 vCPUs of an Intel Core i9-10900K (10 cores, 20 threads), one per core, CPU type `host`, shared with the host's other VMs |
 | Memory | 48 GiB, shared with the author's own work | 8 GiB, fixed (no ballooning) |
 | OS and kernel | macOS 26.7.2 (25G330), Darwin 25.6.0 | Ubuntu 24.04.5 LTS, Linux 6.8.0-147-generic |
 | Disk holding `BENCH_HOME` | the internal SSD | a 64 GB virtio-scsi disk (`ssd=1`, `discard=on`, no host cache) on LVM-thin storage on the host's Sabrent NVMe SSD |
-| Filesystem of `BENCH_HOME` | APFS, the Data volume | ext4, the root filesystem (`relatime,discard`) |
+| Filesystem of `BENCH_HOME` | APFS, the Data volume; the trees on an APFS sparse-bundle disk image inside it ([below](#bench-macos-the-authors-macbook-pro)) | ext4, the root filesystem (`relatime,discard`) |
 | Free space and inodes | 471 GiB; APFS allocates inodes as needed | 58 GB and 8.1 million inodes, with the tools installed and no trees yet |
 | Network | Wi-Fi on the home LAN; not filtered ([Network](#network)) | bridged to the home LAN, DHCP; outbound to the internet only ([Network](#network)) |
 | Power and location | on AC power at the author's home, woken at 03:10 every day | the Proxmox host, in the author's home |
@@ -45,11 +45,24 @@ harness exits. What keeps the runner apart from the author's work:
   GitHub's `svc.sh` installs a LaunchAgent instead, which runs only while
   `runner` is logged in.
 
+The trees live on an APFS disk image, `BENCH_HOME/trees.sparsebundle`, attached
+at `BENCH_HOME/trees-volume`, not on the Data volume itself. `purge` leaves
+APFS's metadata caches warm, so a cold run there measured little more than a
+warm one (`du` on T1: 2.94 s cold, 2.85 s warm); the cold command detaches the
+image, purges, and attaches it again (bench/README.md, "Cold runs"). The nightly
+job creates the image the first night it runs and attaches it after a reboot;
+`runner` owns it, and `hdiutil` needs no root for that. Trees built before the
+image, in `BENCH_HOME/trees`, are no longer read: `sudo rm -rf
+/Users/runner/duscope-bench/trees` frees their 3.6 GiB.
+
 ### bench-linux: a VM on Proxmox
 
 The Linux runner is a VM on the author's Proxmox host, not a machine of its own,
 so other VMs share its CPU and disk; ratios within a run hold up better than
-absolute times between nights. It was created with
+absolute times between nights. It has 10 vCPUs, one per core of the host, so
+P1-BENCH-01's thread sweep can choose a default above 4 (with 4 it could choose
+nothing else); `qm set 101 --cores 10` on the host, then a reboot of the VM,
+set it. It was created with
 [claude-on-proxmox](https://github.com/kawadeomkar/claude-on-proxmox)'s
 provision stage alone, with a tag of its own, so that project's configuration
 (Claude Code, cloned repositories, sign-ins) never reaches it and its everyday
@@ -57,7 +70,7 @@ commands do not see it:
 
 ```sh
 # in the claude-on-proxmox checkout
-ANSIBLE_ARGS='-e claude_vm_tag=duscope-bench -e vm_cores=4 -e vm_memory_mb=8192 -e vm_disk_size=64G' \
+ANSIBLE_ARGS='-e claude_vm_tag=duscope-bench -e vm_cores=10 -e vm_memory_mb=8192 -e vm_disk_size=64G' \
   just deploy --only provision bench-linux
 # on the Proxmox host: the disk is NVMe-backed, so the guest is told it is an SSD
 qm set 101 --scsi0 local-lvm:vm-101-disk-0,discard=on,size=64G,ssd=1 && qm reboot 101
@@ -374,3 +387,5 @@ platform and architecture.
 | --- | --- | --- |
 | 2026-10-25 | `bench-linux` | Registered: a VM on the author's Proxmox host, runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1 |
 | 2026-10-25 | `bench-macos` | Registered: the author's MacBook Pro (M5 Pro, 18 cores, 48 GiB, macOS 26.7.2), runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1; a launchd daemon in the system domain; a daily wake at 03:10 |
+| 2026-10-25 | `bench-linux` | 10 vCPUs, one per core of the host (was 4), for the thread sweep |
+| 2026-10-25 | `bench-macos` | the trees on an APFS disk image, which the cold command remounts around each purge |

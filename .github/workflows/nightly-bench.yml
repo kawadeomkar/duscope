@@ -184,11 +184,25 @@ jobs:
           results="$RUNNER_TEMP/bench-results"
           rm -rf "$results"
           status=0
+          # The trees live on an APFS disk image that the cold command detaches and
+          # attaches around each purge, which alone leaves APFS's metadata cached
+          # (bench/README.md, "Cold runs"). The first night creates the image; a
+          # night after a reboot attaches it, so warm-only runs find the trees too.
+          image="$home/trees.sparsebundle"
+          volume="$home/trees-volume"
+          if [[ ! -d $image ]]; then
+            hdiutil create -quiet -type SPARSEBUNDLE -fs APFS -size 100g -volname duscope-bench-trees "$image"
+          fi
+          mkdir -p "$volume"
+          if [[ $(mount) != *" on $volume ("* ]]; then
+            hdiutil attach -quiet -nobrowse -noverify -noautoopen -mountpoint "$volume" "$image"
+          fi
+          cold="$PWD/bench/drop-caches.sh --remount $(printf %q "$image") $(printf %q "$volume")"
           # bench-macos is a laptop that sleeps when idle: caffeinate keeps it awake
           # until the harness exits.
           file=$(caffeinate -is bench/run.sh run --subject du --trees "$TREES" --competitors "$COMPETITORS" \
-            --mode "$MODE" --scale "$SCALE" --trees-dir "$home/trees" --tools-dir "$home/tools" \
-            --results-dir "$results") || status=$?
+            --mode "$MODE" --scale "$SCALE" --trees-dir "$volume/trees" --tools-dir "$home/tools" \
+            --cold-cmd "$cold" --results-dir "$results") || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
           if [[ -n $file && -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
       # The result file is published even when a tool could not be measured: the

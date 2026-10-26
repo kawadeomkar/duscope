@@ -801,6 +801,84 @@ fn p0_bench_02_bench_runners_hold_the_fixture_tree_to_its_budget() {
     }
 }
 
+#[test]
+fn p0_bench_02_macos_trees_live_on_a_disk_image_the_cold_command_remounts() {
+    let script = job(&jobs(&read(NIGHTLY)), "bench-macos").step_script("Run the harness");
+    let step = Step::new();
+    let calls = step.dir.join("calls.log");
+    let record = |name: &str| format!("#!/usr/bin/env bash\necho \"{name} $*\" >> \"$CALLS\"\n");
+    step.stub("hdiutil", &record("hdiutil"));
+    // caffeinate stands in for the harness run it wraps: one argument a line.
+    step.stub(
+        "caffeinate",
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$STUB_DIR/harness-args\"\n",
+    );
+    step.stub(
+        "mount",
+        "#!/usr/bin/env bash\n[[ -z $MOUNTED ]] || echo \"/dev/disk9s1 on $MOUNTED (apfs, local, journaled)\"\n",
+    );
+    let home = step.dir.join("bench-home");
+    let (image, volume) = (home.join("trees.sparsebundle"), home.join("trees-volume"));
+    let vars = |mounted: &str| -> Vec<(String, String)> {
+        [
+            ("BENCH_HOME", home.to_str().unwrap()),
+            ("CALLS", calls.to_str().unwrap()),
+            ("MOUNTED", mounted),
+            ("TREES", "T1"),
+            ("COMPETITORS", "none"),
+            ("MODE", "cold"),
+            ("SCALE", "1"),
+        ]
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect()
+    };
+    let run = |mounted: &str| -> Vec<String> {
+        let _ = fs::remove_file(&calls);
+        let vars = vars(mounted);
+        let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        succeeded(&step.run(&script, &root(), &vars), "the macOS harness step");
+        fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+
+    // The first night creates the image and attaches it.
+    let logged = run("");
+    assert_eq!(logged.len(), 2, "{logged:?}");
+    assert!(
+        logged[0].starts_with("hdiutil create ") && logged[0].ends_with(image.to_str().unwrap())
+    );
+    assert_eq!(
+        logged[1],
+        format!(
+            "hdiutil attach -quiet -nobrowse -noverify -noautoopen -mountpoint {} {}",
+            volume.display(),
+            image.display()
+        )
+    );
+    let args = fs::read_to_string(step.dir.join("harness-args")).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    let after = |flag: &str| args[args.iter().position(|a| *a == flag).unwrap() + 1];
+    assert_eq!(after("--trees-dir"), volume.join("trees").to_str().unwrap());
+    assert_eq!(
+        after("--cold-cmd"),
+        format!(
+            "{}/bench/drop-caches.sh --remount {} {}",
+            root().display(),
+            image.display(),
+            volume.display()
+        )
+    );
+
+    // A later night finds it, attached or not.
+    fs::create_dir_all(&image).unwrap();
+    assert!(run(volume.to_str().unwrap()).is_empty());
+    assert_eq!(run("").len(), 1);
+}
+
 /// git with a private configuration and no automatic maintenance.
 fn git(step: &Step, cwd: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
