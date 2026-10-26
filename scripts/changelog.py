@@ -114,7 +114,7 @@ def parse_fragment(path: str) -> Fragment:
             fragment.error(
                 n,
                 "only '### <Section>' headings belong in a fragment; "
-                "release.yml writes the version heading",
+                "the release's `scripts/changelog.py assemble` writes the version heading",
             )
         elif section is None:
             fragment.error(n, "text before the first '### <Section>' heading")

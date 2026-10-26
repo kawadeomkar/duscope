@@ -1,7 +1,7 @@
 # Security policy
 
-duscope is pre-release: the binary prints its version and does nothing else
-yet. This policy is a placeholder. P2-SEC-01 replaces it before the MCP server
+duscope is pre-release: the one release, 0.0.1, is a scaffold whose binary
+prints its version and does nothing else. This policy is a placeholder. P2-SEC-01 replaces it before the MCP server
 lands, with the threat model (the untrusted inputs duscope reads and the rule
 for each), the supported versions and the security-release procedure.
 
@@ -26,5 +26,5 @@ is published with the release that fixes the vulnerability, and no later than
 
 ## Supported versions
 
-No version has been released yet. Before 1.0, only the latest minor release
-receives security fixes.
+Only 0.0.1, the scaffold, has been released, and no version receives security
+fixes before 0.1.0. From 0.1.0 until 1.0, only the latest minor release does.

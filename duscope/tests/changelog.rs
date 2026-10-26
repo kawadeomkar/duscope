@@ -538,10 +538,13 @@ type JobCase<'a> = (
 /// or changes must parse, label or not.
 #[test]
 fn p0_doc_01_ci_changelog_job_requires_a_fragment_or_the_label() {
-    let Some(bash) = bash4() else {
-        eprintln!("p0_doc_01: no bash 4 or later here, so the changelog job was not run");
-        return;
-    };
+    // A required check must not pass where it never ran.
+    let bash = bash4().unwrap_or_else(|| {
+        panic!(
+            "install bash 4 or later, which runs the changelog job as GitHub's bash 5 does \
+             (macOS ships bash 3.2: brew install bash)"
+        )
+    });
     let valid = "### Added\n\n- A thing.\n";
     let malformed = "### Nonsense\n\n- A thing.\n";
     let title = "P0-XYZ-01: Do a thing";
