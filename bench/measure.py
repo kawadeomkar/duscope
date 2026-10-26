@@ -193,8 +193,11 @@ class Session:
 
     def _invoke(self, tools: Sequence[Resolved], label: str, warmup: int) -> Dict[str, Run]:
         export = os.path.join(self.raw_dir, f"{self.tree}-{self.mode}-{label}.json")
+        # -N: no shell between hyperfine and the tool. It is hyperfine 2's default,
+        # stated so the measurement never includes a shell's start-up; --prepare
+        # still runs through one.
         argv = [
-            *self.hyperfine, "--runs", "1", "--warmup", str(warmup), "--style", "none",
+            *self.hyperfine, "-N", "--runs", "1", "--warmup", str(warmup), "--style", "none",
             "--metrics", METRICS, "--export-json", export,
         ]
         if self.mode == "cold":

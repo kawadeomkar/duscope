@@ -136,8 +136,9 @@ start with `--warmup` unmeasured runs of each command; before any pair, each too
 the tree so that a failing tool is named before hyperfine starts. With no competitor, the
 subject runs alone for `--runs` rounds.
 
-hyperfine runs the commands without a shell, sends their output to `/dev/null`, and records wall
-clock, user and system CPU time and peak RSS for every run (`--metrics
+hyperfine runs the commands without a shell (`-N`; the cold-run command it runs before each cold
+run goes through one), sends their output to `/dev/null`, and records wall clock, user and system
+CPU time and peak RSS for every run (`--metrics
 time_wall_clock,time_user,time_system,memory_peak_resident`). p50 and p95 interpolate linearly
 between the closest ranks, as NumPy does by default: with ten runs, p95 lies 55% of the way from
 the ninth fastest to the slowest run.
@@ -254,4 +255,6 @@ runners' cold and warm p50s, never on shared CI runners.
 | `measure.py` | hyperfine in interleaved pairs, and the statistics |
 | `drop-caches.sh` | the cold-run cache drop |
 | `test_bench.py` | unit tests, run by `duscope/tests/bench_harness.rs` |
+| `compare.py` | the regression check: a result file against the results before it on the same machine kind and tree |
+| `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |
 | `testdata/` | a real hyperfine 2.0.0 export and the hyperfine stand-in the tests use |
