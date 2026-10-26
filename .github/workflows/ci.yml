@@ -127,6 +127,16 @@ jobs:
       - name: Generate the fr_FR.UTF-8 locale
         if: matrix.leg == 'locale' && runner.os == 'Linux'
         run: sudo locale-gen fr_FR.UTF-8
+      - name: Install bash 4 or later
+        # macOS ships bash 3.2, and the test that runs the changelog job needs 4 or
+        # later; `just setup` installs it the same way.
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew install bash
+          "$(brew --prefix)/bin/bash" --version
       - name: just test
         if: matrix.leg == 'default'
         run: just test
