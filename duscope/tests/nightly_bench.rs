@@ -6,8 +6,9 @@
 //! every workflow under `.github/workflows/`. The probe, the offline-issue and
 //! the publish steps of nightly-bench.yml run for real: the first two against a
 //! stand-in for `gh` that answers from files, the last against a throwaway
-//! origin repository. They need bash, jq and git on PATH, as the runners have
-//! them. The unit tests of bench/compare.py run under the Python that
+//! origin repository; the fixture-budget step, against stand-ins for cargo,
+//! rustup and caffeinate. They need bash, jq and git on PATH, as the runners
+//! have them. The unit tests of bench/compare.py run under the Python that
 //! `bench/run.sh` picks. These tests never run the duscope binary.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
@@ -468,18 +469,53 @@ case "$1 $2" in
 esac
 "#;
 
+/// The path of `program` on `PATH`, or a panic that names it and how to get
+/// it: a missing tool would otherwise surface as `Os { code: 2 }` from the
+/// `output().unwrap()` of its first command.
+fn tool(program: &str, how: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| dir.join(program))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("install {program}: {how}"))
+}
+
+/// The tools the steps and their stand-ins run, each with how to get it.
+const STEP_TOOLS: &[(&str, &str)] = &[
+    ("bash", "bash (apt-get install bash)"),
+    (
+        "jq",
+        "jq (it ships with macOS 15 and later; apt-get install jq)",
+    ),
+    (
+        "git",
+        "git (Xcode's command line tools; apt-get install git)",
+    ),
+];
+
 impl Step {
     fn new() -> Step {
+        for (program, how) in STEP_TOOLS {
+            tool(program, how);
+        }
         let temp = tempfile::tempdir().unwrap();
         let dir = fs::canonicalize(temp.path()).unwrap();
         let bin = dir.join("bin");
         fs::create_dir_all(&bin).unwrap();
-        fs::write(bin.join("gh"), GH_STUB).unwrap();
-        let mut mode = fs::metadata(bin.join("gh")).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
-        fs::set_permissions(bin.join("gh"), mode).unwrap();
         fs::create_dir_all(dir.join("runner-temp")).unwrap();
-        Step { _temp: temp, dir }
+        let step = Step { _temp: temp, dir };
+        step.stub("gh", GH_STUB);
+        step
+    }
+
+    /// Puts an executable `name` holding `script` first on the step's PATH.
+    fn stub(&self, name: &str, script: &str) {
+        let path = self.dir.join("bin").join(name);
+        fs::write(&path, script).unwrap();
+        let mut mode = fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+        fs::set_permissions(&path, mode).unwrap();
     }
 
     fn answer(&self, name: &str, json: &str) {
@@ -701,6 +737,68 @@ fn p0_bench_02_two_consecutive_skips_open_the_offline_issue() {
         log.contains("https://github.com/kawadeomkar/duscope/actions/runs/100"),
         "{log}"
     );
+}
+
+/// A stand-in for `cargo run ... -p mktree -- --out DIR`: writes DIR's
+/// record with `build_ms = $BUILD_MS`, or without one when that is unset.
+const CARGO_STUB: &str = r#"#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "$@"; do
+  if [[ $prev == --out ]]; then out=$arg; fi
+  prev=$arg
+done
+if [[ -z $out ]]; then echo "cargo stub: no --out in: $*" >&2; exit 1; fi
+mkdir -p "$out"
+if [[ -n ${BUILD_MS:-} ]]; then echo "build_ms = $BUILD_MS" > "$out/record.toml"; else : > "$out/record.toml"; fi
+"#;
+
+#[test]
+fn p0_bench_02_bench_runners_hold_the_fixture_tree_to_its_budget() {
+    const STEP: &str = "Fixture tree within its 30-second budget";
+    let jobs = jobs(&read(NIGHTLY));
+    for (label, _) in BENCH_JOBS {
+        let job = job(&jobs, label);
+        // It runs when the harness failed too: the two checks are separate.
+        let at = job
+            .lines
+            .iter()
+            .position(|l| l.trim() == format!("- name: {STEP}"))
+            .unwrap_or_else(|| panic!("job `{label}` has no step `{STEP}`"));
+        assert_eq!(
+            job.lines[at + 1].trim(),
+            "if: ${{ !cancelled() }}",
+            "{label}"
+        );
+        let script = job.step_script(STEP);
+        assert!(script.contains("-p mktree -- --out"), "{label}: {script}");
+
+        let step = Step::new();
+        step.stub("cargo", CARGO_STUB);
+        step.stub("rustup", "#!/usr/bin/env bash\n");
+        step.stub("caffeinate", "#!/usr/bin/env bash\nshift\nexec \"$@\"\n");
+        let home = step.dir.join("bench-home");
+        let home = home.to_str().unwrap();
+        for (ms, within) in [(Some("12345"), true), (Some("30000"), false), (None, false)] {
+            let mut vars = vec![("BENCH_HOME", home)];
+            vars.extend(ms.map(|ms| ("BUILD_MS", ms)));
+            let out = step.run(&script, &root(), &vars);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(
+                out.status.success(),
+                within,
+                "{label}, build_ms {ms:?}: {stdout}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if !within {
+                assert!(
+                    stdout.contains("::error title=nightly-bench::"),
+                    "{label}: {stdout}"
+                );
+            }
+            assert!(!step.dir.join("runner-temp/fixtures").exists());
+        }
+    }
 }
 
 /// git with a private configuration and no automatic maintenance.
