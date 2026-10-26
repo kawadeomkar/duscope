@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import harness
 import measure
@@ -77,7 +78,7 @@ class HyperfineExport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             out = os.path.join(scratch, "stub.json")
             subprocess.run(
-                [sys.executable, STUB, "--runs", "2", "--warmup", "0", "--style", "none",
+                [sys.executable, STUB, "-N", "--runs", "2", "--warmup", "0", "--style", "none",
                  "--metrics", measure.METRICS, "--export-json", out,
                  "--command-name", "true", "true"],
                 check=True,
@@ -172,6 +173,18 @@ class Trees(unittest.TestCase):
             os.utime(os.path.join(root, victim), ns=(0, 0))
             observed, expected = trees.verify(t, scratch)
             self.assertNotEqual(observed, expected)
+
+    def test_p0_bench_01_rebuild_keeps_the_old_tree_where_sparse_files_fail(self):
+        """The sparse probe runs before the previous build is removed."""
+        with tempfile.TemporaryDirectory() as scratch:
+            t = trees.tree("T1", 0.0003)
+            trees.build(t, scratch, jobs=1)
+            refusal = trees.TreeError("this filesystem does not keep sparse files sparse")
+            with mock.patch.object(trees, "_check_sparse", side_effect=refusal):
+                with self.assertRaises(trees.TreeError):
+                    trees.build(t, scratch, jobs=1, force=True)
+            observed, expected = trees.verify(t, scratch)
+            self.assertEqual(observed, expected)
 
     def test_p0_bench_01_parallel_build_equals_serial(self):
         with tempfile.TemporaryDirectory() as scratch:

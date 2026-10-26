@@ -46,6 +46,8 @@ def main() -> int:
         print("hyperfine 2.0.0")
         return 0
     p = argparse.ArgumentParser(prog="hyperfine-stub", allow_abbrev=False)
+    # The harness always passes -N; the stub runs commands without a shell either way.
+    p.add_argument("-N", dest="no_shell", action="store_true", required=True)
     p.add_argument("--runs", type=int, required=True)
     p.add_argument("--warmup", type=int, default=0)
     p.add_argument("--style", choices=("none",), required=True)

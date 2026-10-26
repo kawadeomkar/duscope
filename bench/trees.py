@@ -378,13 +378,15 @@ def build(t: Tree, trees_dir: str, jobs: int, force: bool = False, log=None) -> 
                 return stamp
             say(f"{t.dirname}: changed since it was built (walk {observed}, stamp {stamp['digest']}); rebuilding")
     claim(trees_dir)
+    # Before anything is removed: a filesystem that cannot hold the tree keeps
+    # the previous build.
+    if t.spec.shape == "gdu":
+        _check_sparse(trees_dir)
     # The stamp goes first, so an interrupted rebuild never leaves a stale one.
     _remove(stamp_path(t, trees_dir))
     if os.path.lexists(root):
         say(f"{t.dirname}: removing the previous build")
         _remove(root)
-    if t.spec.shape == "gdu":
-        _check_sparse(trees_dir)
     say(f"{t.dirname}: building {t.dirs:,} directories and {t.files:,} files")
     started = time.monotonic()
     seed = t.spec.seed
