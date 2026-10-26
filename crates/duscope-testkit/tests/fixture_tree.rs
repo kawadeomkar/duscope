@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::Command;
 
 use duscope_testkit::{Status, TestEnv};
@@ -365,6 +365,41 @@ fn p0_test_01_tree_matches_the_manifest() {
         if case.status == Status::Built {
             assert!(case.absent.is_empty(), "{case:?}");
         }
+    }
+}
+
+/// The record says a case was built only when its files really are stored
+/// compressed: a phase-1 test gates allocated < apparent on it.
+#[test]
+fn p0_test_01_compressed_files_recorded_built_take_less_than_their_size() {
+    let env = TestEnv::new();
+    let fixtures = env.fixtures();
+    let case = fixtures.case("compressed");
+    if case.status != Status::Built {
+        eprintln!(
+            "p0_test_01: compressed is skipped here: {} (instead: {})",
+            case.detail, case.fallback
+        );
+        return;
+    }
+    let root = fixtures.root();
+    let files: Vec<_> = fixtures
+        .plan()
+        .entries
+        .iter()
+        .filter(|e| matches!(e.kind, Kind::Compressed { .. }))
+        .collect();
+    assert!(!files.is_empty());
+    for e in files {
+        let meta = fs::symlink_metadata(mktree::build::abs(&root, &e.path)).unwrap();
+        assert!(
+            meta.blocks() * 512 < meta.len(),
+            "{} is recorded compressed but takes {} of its {} bytes ({})",
+            e.display(),
+            meta.blocks() * 512,
+            meta.len(),
+            case.detail
+        );
     }
 }
 

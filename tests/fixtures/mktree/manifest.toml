@@ -23,15 +23,18 @@
 #   `fifo`, `socket`, `many = <n>` (a directory of n empty files) and `chain =
 #   <n>` (n nested directories). Modifiers: `mode`, `test_mode` (applied only
 #   while a test holds the tree), `age` (instant minus mtime; `s h d w y`),
-#   `atime` (instant minus atime; default half the age, at most a year), and
-#   `nanos`. `%XX` in a path writes a raw byte.
+#   `atime` (instant minus atime; default half the age, at most a year, or
+#   half the age after a future mtime), and `nanos`; a hard link takes none of
+#   them (it shares its target's inode), and a modifier the kind does not use
+#   (`data` outside `sparse`, say) is an error. `%XX` in a path writes a raw
+#   byte.
 # - `[[generate]]`: seeded random subtrees (integer arithmetic only, so every
 #   platform expands them identically).
 # Sizes take K, M, G (powers of 1,024). Paths may not differ only in ASCII
 # case (APFS is case-insensitive by default).
 
 format = 1
-hash = "6e08d75caab47abcda7162fd1bad9da5ff766aeccf90aa73ceaed818c1f1919a"
+hash = "4851ac65da00d961d7e45bdfc36c50404b447b03edc5f6c7b01c6b9bdf5091d0"
 instant = "2037-01-01T00:00:00Z"
 
 # Names for generated directories and files (lower-case ASCII only).

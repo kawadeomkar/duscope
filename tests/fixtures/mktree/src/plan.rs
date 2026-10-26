@@ -391,12 +391,18 @@ impl<'m> Expander<'m> {
     /// atime age. The default atime age is half the age, at most
     /// [`ATIME_WINDOW`]: later than the mtime and within the window before
     /// the instant, so a `readdir` or read under `relatime` never moves it.
+    /// A future mtime (a negative age) gets an atime half the age after it,
+    /// later than the mtime too.
     fn times(&self, age: i64, nanos: u32, atime_age: Option<i64>) -> (Stamp, Stamp) {
         let mtime = Stamp {
             secs: self.instant - age,
             nanos,
         };
-        let atime_age = atime_age.unwrap_or_else(|| (age / 2).min(ATIME_WINDOW));
+        let atime_age = atime_age.unwrap_or(if age < 0 {
+            age + age / 2
+        } else {
+            (age / 2).min(ATIME_WINDOW)
+        });
         (mtime, Stamp::secs(self.instant - atime_age))
     }
 
@@ -448,6 +454,33 @@ impl<'m> Expander<'m> {
         ];
         if kinds.iter().filter(|&&k| k).count() != 1 {
             return Err(Error::new("exactly one kind field must be set"));
+        }
+        // A modifier the kind does not use would be dropped without a word,
+        // and the tree would differ from what the manifest says.
+        let (sparse, many, chain) = (
+            spec.sparse.is_some(),
+            spec.many.is_some(),
+            spec.chain.is_some(),
+        );
+        let link = spec.hardlink.is_some();
+        let sparse_only = "applies to sparse entries only";
+        let many_only = "applies to many entries only";
+        let chain_only = "applies to chain entries only";
+        let shares_inode = "does not apply to a hard link, which shares its target's inode";
+        let unused = [
+            ("data", spec.data.is_some() && !sparse, sparse_only),
+            ("prefix", spec.prefix.is_some() && !many, many_only),
+            ("width", spec.width.is_some() && !many, many_only),
+            ("name", spec.name.is_some() && !chain, chain_only),
+            ("leaf", spec.leaf.is_some() && !chain, chain_only),
+            ("leaf_size", spec.leaf_size.is_some() && !chain, chain_only),
+            ("mode", spec.mode.is_some() && link, shares_inode),
+            ("age", spec.age.is_some() && link, shares_inode),
+            ("atime", spec.atime.is_some() && link, shares_inode),
+            ("nanos", spec.nanos.is_some() && link, shares_inode),
+        ];
+        if let Some((field, _, why)) = unused.iter().find(|(_, set, _)| *set) {
+            return Err(Error::new(format!("`{field}` {why}")));
         }
         let resolve = |target: &str| -> Result<Vec<u8>> {
             let raw = decode(target)?;
@@ -925,6 +958,64 @@ entries = [ { path = "link", hardlink = "missing" } ]
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn p0_test_01_plan_refuses_modifiers_the_kind_ignores() {
+        for (entry, field) in [
+            (r#"{ path = "f", file = "1K", data = ["0+1K"] }"#, "data"),
+            (r#"{ path = "f", file = "1K", prefix = "x" }"#, "prefix"),
+            (r#"{ path = "d", dir = true, width = 3 }"#, "width"),
+            (r#"{ path = "d", dir = true, name = "n" }"#, "name"),
+            (r#"{ path = "w", many = 2, leaf = "x" }"#, "leaf"),
+            (r#"{ path = "f", file = "1K", leaf_size = 5 }"#, "leaf_size"),
+            (r#"{ path = "l", hardlink = "orig", age = "1d" }"#, "age"),
+            (
+                r#"{ path = "l", hardlink = "orig", atime = "1d" }"#,
+                "atime",
+            ),
+            (r#"{ path = "l", hardlink = "orig", nanos = 5 }"#, "nanos"),
+            (r#"{ path = "l", hardlink = "orig", mode = 0o600 }"#, "mode"),
+        ] {
+            let err = plan_of(&format!(
+                r#"
+[[case]]
+name = "c"
+about = "x"
+root = "c"
+entries = [ {{ path = "orig", file = "1K" }}, {entry} ]
+"#
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains(&format!("`{field}`")), "{entry}: {err}");
+        }
+    }
+
+    #[test]
+    fn p0_test_01_plan_puts_default_atimes_after_the_mtime() {
+        let plan = plan_of(
+            r#"
+[[case]]
+name = "c"
+about = "x"
+root = "c"
+entries = [
+  { path = "past", file = 1, age = "30d" },
+  { path = "future", file = 1, age = "-30d" },
+]
+"#,
+        )
+        .unwrap();
+        for p in ["c/past", "c/future"] {
+            let e = plan.get(p.as_bytes()).unwrap();
+            assert!(
+                e.atime.secs > e.mtime.secs,
+                "{p}: atime {:?} is not after mtime {:?}",
+                e.atime,
+                e.mtime
+            );
+        }
     }
 
     #[test]
