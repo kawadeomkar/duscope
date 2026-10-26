@@ -142,8 +142,11 @@ jobs:
           grep -Eiq '^fr_FR\.utf-?8$' <<<"$locales" || { echo "::error::fr_FR.UTF-8 is not available on this runner"; exit 1; }
           date
           just test
-      # The fixture tree (P0-TEST-01) is built and cached here by its manifest hash,
-      # and the du parity tests run in this job, once those packages land.
+      # The fixture tree (P0-TEST-01) is built in this job by the tests that use it,
+      # and not cached between runs: actions/cache's tar archive would restore its
+      # sparse files fully allocated, its clones as copies and its compressed files
+      # uncompressed, and drop its socket, so a restored tree would not be the tree
+      # its record describes. The du parity tests run here once P1-TEST-01 lands.
 
   msrv:
     name: msrv (${{ matrix.toolchain }})
@@ -479,7 +482,8 @@ jobs:
           mapfile -t fragments < <(git diff --name-only --diff-filter=AMR HEAD^1 HEAD -- 'changelog.d/*.md' | grep -vx 'changelog.d/README.md' || true)
 
           # Every fragment the pull request adds or changes must parse. The rule
-          # lives in scripts/changelog.py, the parser release.yml assembles with.
+          # lives in scripts/changelog.py, whose `assemble` the REL: vX.Y.Z pull
+          # request runs.
           status=0
           if (( ${#fragments[@]} )); then
             python3 scripts/changelog.py check "${fragments[@]}" || status=1
