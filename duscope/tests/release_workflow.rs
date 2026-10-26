@@ -391,6 +391,91 @@ fn p0_ci_02_dist_builds_the_spec_targets() {
 }
 
 #[test]
+fn p0_ci_02_dist_installs_from_its_pinned_installer() {
+    let workflow = read(WORKFLOW);
+    let env = |name: &str| {
+        workflow_env(&workflow, name).unwrap_or_else(|| panic!("release.yml sets no {name}"))
+    };
+    let (version, sha256) = (env("DIST_VERSION"), env("DIST_INSTALLER_SHA256"));
+    assert!(
+        sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit()),
+        "DIST_INSTALLER_SHA256 is not a SHA-256: {sha256}"
+    );
+    // One dist: the version dist-workspace.toml and the justfile name.
+    let config = read(DIST_CONFIG);
+    assert_eq!(
+        quoted(&dist_value(&config, "cargo-dist-version").unwrap()),
+        [version.as_str()]
+    );
+    assert!(
+        read("justfile").contains(&format!("cargo_dist_version := \"{version}\"")),
+        "the justfile pins another dist than {version}"
+    );
+
+    // Every job that installs dist checks the installer's SHA-256 before it
+    // runs it; the installer checks the archive it downloads.
+    let jobs = jobs(&workflow);
+    let installing: Vec<&Job> = jobs
+        .iter()
+        .filter(|j| j.lines.iter().any(|l| l.trim() == "- name: Install dist"))
+        .collect();
+    assert_eq!(
+        installing.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+        ["plan", "build-local-artifacts"]
+    );
+    for job in installing {
+        let script = job.step_script("Install dist");
+        let at = |needle: &str| {
+            script.find(needle).unwrap_or_else(|| {
+                panic!(
+                    "job `{}`: Install dist has no `{needle}`:\n{script}",
+                    job.id
+                )
+            })
+        };
+        at("/v$DIST_VERSION/cargo-dist-installer.sh");
+        let check = at("$DIST_INSTALLER_SHA256");
+        assert!(check < at("sha256sum -c"));
+        assert!(
+            at("sha256sum -c") < at("sh \"$installer\""),
+            "job `{}` runs the installer before checking it",
+            job.id
+        );
+    }
+    assert!(
+        !workflow.contains("cargo-dist-installer.sh | sh"),
+        "release.yml pipes dist's installer into a shell unchecked"
+    );
+}
+
+#[test]
+fn p0_ci_02_publish_crates_outlasts_its_index_waits() {
+    let jobs = jobs(&read(WORKFLOW));
+    let publish = job(&jobs, "publish-crates");
+    let timeout: u64 = publish
+        .key("timeout-minutes")
+        .and_then(|v| v.parse().ok())
+        .unwrap();
+    let script = publish.step_script("Publish to crates.io");
+    let number_after = |prefix: &str, end: char| -> u64 {
+        let rest = script
+            .split(prefix)
+            .nth(1)
+            .unwrap_or_else(|| panic!("no `{prefix}`"));
+        rest.split(end).next().unwrap().trim().parse().unwrap()
+    };
+    let (tries, pause) = (number_after("$(seq ", ')'), number_after("sleep ", ';'));
+    // Each crate may wait for the index as long as its loop allows; the job
+    // keeps as long again for cargo publish itself.
+    let waits = PUBLISH_ORDER.len() as u64 * tries * pause;
+    assert!(
+        timeout * 60 >= 2 * waits,
+        "publish-crates times out after {timeout} min; its index waits alone can take {} min",
+        waits / 60
+    );
+}
+
+#[test]
 fn p0_ci_02_release_builds_use_the_repro_environment() {
     let jobs = jobs(&read(WORKFLOW));
     let build = job(&jobs, "build-local-artifacts");
@@ -518,8 +603,58 @@ impl Release {
     }
 }
 
+/// The path of `program` on `PATH`, or a panic that names it and how to get
+/// it: a missing tool would otherwise surface as `Os { code: 2 }` from the
+/// `output().unwrap()` of its first command.
+fn tool(program: &str, how: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| dir.join(program))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("install {program}: {how}"))
+}
+
+/// The tools a sandbox runs, each with how to get it, and git's oldest
+/// version with SSH signatures.
+const SANDBOX_TOOLS: &[(&str, &str)] = &[
+    (
+        "git",
+        "git 2.34 or later (Xcode's command line tools; apt-get install git)",
+    ),
+    (
+        "ssh-keygen",
+        "the OpenSSH client (it ships with macOS; apt-get install openssh-client)",
+    ),
+    ("bash", "bash (apt-get install bash)"),
+    (
+        "jq",
+        "jq (it ships with macOS 15 and later; apt-get install jq)",
+    ),
+    ("cargo", "rustup (CONTRIBUTING.md)"),
+];
+const GIT_SSH_SIGNING: (u32, u32) = (2, 34);
+
 impl Sandbox {
     fn new() -> Sandbox {
+        for (program, how) in SANDBOX_TOOLS {
+            tool(program, how);
+        }
+        let version = Command::new("git").arg("--version").output().unwrap();
+        let version = String::from_utf8_lossy(&version.stdout).into_owned();
+        let numbers: Vec<u32> = version
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or_default()
+            .split('.')
+            .take(2)
+            .filter_map(|n| n.parse().ok())
+            .collect();
+        assert!(
+            numbers.len() == 2 && (numbers[0], numbers[1]) >= GIT_SSH_SIGNING,
+            "install git 2.34 or later, for SSH signatures: this is {}",
+            version.trim()
+        );
         let temp = tempfile::tempdir().unwrap();
         let dir = fs::canonicalize(temp.path()).unwrap();
         let home = dir.join("home");

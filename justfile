@@ -13,6 +13,8 @@ cargo_fuzz_version := "0.13.2"
 cargo_llvm_cov_version := "0.9.1"
 cargo_deb_version := "3.8.0"
 cargo_dist_version := "0.33.1"
+# The commit of dist's v0.33.1 tag: a tag can move, a commit cannot.
+cargo_dist_rev := "665cb7d48902a30386857f8f679e1b1942876f06"
 hyperfine_version := "2.0.0"
 
 default:
@@ -50,7 +52,7 @@ setup:
     install cargo-deb {{cargo_deb_version}} cargo-deb@{{cargo_deb_version}}
     install hyperfine {{hyperfine_version}} hyperfine@{{hyperfine_version}}
     # dist releases after 0.32 are published on GitHub only, not on crates.io.
-    install cargo-dist {{cargo_dist_version}} --git https://github.com/axodotdev/cargo-dist --tag v{{cargo_dist_version}} cargo-dist
+    install cargo-dist {{cargo_dist_version}} --git https://github.com/axodotdev/cargo-dist --rev {{cargo_dist_rev}} cargo-dist
     cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
     command -v cargo >/dev/null || echo "setup: put rustup's cargo proxy on PATH (Homebrew: $(brew --prefix 2>/dev/null)/opt/rustup/bin)" >&2
     [[ ":$PATH:" == *":$cargo_bin:"* ]] || echo "setup: add $cargo_bin to PATH for hyperfine and dist" >&2

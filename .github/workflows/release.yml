@@ -26,8 +26,11 @@
 # from dist's output: the verify-tag job, which plan needs; the publish-crates job;
 # the token read-only at the top, widened per job; the tag pattern narrowed to v*;
 # a timeout on every job; cargo-auditable and just installed at pinned versions with
-# checksums (dist installs the latest cargo-auditable); the `just repro` environment
-# for the builds; every action pinned to a commit SHA with its version in a comment.
+# checksums (dist installs the latest cargo-auditable); dist installed by its
+# installer checked against DIST_INSTALLER_SHA256 before it runs, in place of dist's
+# `curl | sh` (the installer checks the archive it downloads); the `just repro`
+# environment for the builds; every action pinned to a commit SHA with its version in
+# a comment.
 # After a dist upgrade, regenerate into a scratch copy and carry these over.
 
 name: Release
@@ -46,6 +49,10 @@ permissions:
 env:
   # The task runner, at ci.yml's pin.
   JUST_VERSION: "1.59.0"
+  # The release builder, at dist-workspace.toml's and the justfile's pin, and the
+  # SHA-256 of its installer, which holds the SHA-256 of every dist archive.
+  DIST_VERSION: "0.33.1"
+  DIST_INSTALLER_SHA256: "a7b3b0812d624a09a534ba272aa8e04c801e56a83d553327a4a8632bc03abb94"
   # Embeds the dependency list in each binary (`cargo auditable`).
   CARGO_AUDITABLE_VERSION: "0.7.7"
 
@@ -118,10 +125,15 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
+        # The installer is checked before it runs; it then checks the dist archive
+        # it downloads (sha256sum is on every runner; the check line needs it too).
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.33.1/cargo-dist-installer.sh | sh"
+        run: |
+          installer="$RUNNER_TEMP/dist-installer.sh"
+          curl --proto '=https' --tlsv1.2 -LsSf -o "$installer" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v$DIST_VERSION/cargo-dist-installer.sh"
+          echo "$DIST_INSTALLER_SHA256  $installer" | sha256sum -c -
+          sh "$installer"
       - name: Cache dist
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -187,8 +199,17 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      # dist's plan gives its unchecked `curl | sh` as matrix.install_dist.
       - name: Install dist
-        run: ${{ matrix.install_dist.run }}
+        # The installer is checked before it runs; it then checks the dist archive
+        # it downloads (sha256sum is on every runner; the check line needs it too).
+        shell: bash
+        run: |
+          installer="$RUNNER_TEMP/dist-installer.sh"
+          curl --proto '=https' --tlsv1.2 -LsSf -o "$installer" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v$DIST_VERSION/cargo-dist-installer.sh"
+          echo "$DIST_INSTALLER_SHA256  $installer" | sha256sum -c -
+          sh "$installer"
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -364,7 +385,9 @@ jobs:
       - plan
       - host
     runs-on: "ubuntu-24.04"
-    timeout-minutes: 30
+    # Six crates, each of which may wait five minutes for the index: as long again
+    # for cargo publish itself.
+    timeout-minutes: 60
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       TAG: ${{ needs.plan.outputs.tag }}
