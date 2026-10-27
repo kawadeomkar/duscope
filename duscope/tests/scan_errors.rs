@@ -133,3 +133,36 @@ fn p1_walk_08_sigint_exits_130_within_200_ms() {
     }
     panic!("no scan was under way when the signal came");
 }
+
+#[test]
+fn p1_walk_08_an_ignored_sigint_is_left_ignored() {
+    let env = TestEnv::new();
+    let tree = env.fixtures().root();
+    duscope(&env).arg("--version").assert().success();
+    // A shell starts a background job with SIGINT ignored; the scan keeps
+    // it so, and a Ctrl-C meant for the foreground does not end it.
+    let child = env
+        .command("sh")
+        .args(["-c", "trap '' INT; exec \"$0\" \"$@\""])
+        .arg(env.cmd().get_program())
+        .args(["scan", "--threads", "1", "--json"])
+        .arg(&tree)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(300));
+    StdCommand::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(envelope["scan"]["file_count"].as_u64() > Some(0));
+}

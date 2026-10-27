@@ -160,6 +160,9 @@ pub trait Provider: Send + Sync {
 #[derive(Debug)]
 pub struct DirHandle {
     id: DirId,
+    /// Its name in its parent's listing (a followed link's own name); the
+    /// root's as given.
+    name: NameRef,
     path: PathBuf,
     depth: u32,
     dev: u64,
@@ -173,6 +176,7 @@ impl DirHandle {
     fn new(id: DirId, path: PathBuf, entry: &Entry, parent: Option<Arc<DirHandle>>) -> DirHandle {
         DirHandle {
             id,
+            name: entry.name.clone(),
             path,
             depth: parent.as_ref().map_or(0, |p| p.depth + 1),
             dev: entry.dev,
@@ -182,18 +186,23 @@ impl DirHandle {
         }
     }
 
-    /// A handle for tests: `path`, `depth` levels below a root it does not
-    /// link to.
+    /// A handle for tests: `path`, `depth` levels below a root, with a
+    /// handle for each directory between them.
     #[cfg(test)]
     pub(crate) fn detached(path: impl Into<PathBuf>, depth: u32) -> DirHandle {
+        let path = path.into();
+        let parent = depth
+            .checked_sub(1)
+            .map(|up| Arc::new(DirHandle::detached(path.parent().unwrap_or(&path), up)));
         DirHandle {
             id: DirId::ROOT,
-            path: path.into(),
+            name: NameRef::from(path.file_name().unwrap_or(path.as_os_str())),
+            path,
             depth,
             dev: 0,
             ino: 0,
             mnt_id: 0,
-            parent: None,
+            parent,
         }
     }
 
@@ -227,8 +236,9 @@ impl DirHandle {
         self.id
     }
 
-    /// The directory's path: the root as given, joined with the names below
-    /// it.
+    /// The directory's path, to open: the root as given joined with the
+    /// names below it; below a link followed under `--follow-symlinks`, the
+    /// link's resolved target joined with the names below that.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -289,7 +299,9 @@ pub fn walk(
 /// Makes SIGINT set `flag`, the [`WalkOptions::cancel`] of the walks it is
 /// given to: a running walk then stops within a directory per worker and
 /// returns [`WalkError::Cancelled`]. A later call replaces the flag.
-pub fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<()> {
+/// Returns `false`, installing nothing, when the process inherited SIGINT
+/// ignored (a background job): Ctrl-C was not meant for it.
+pub fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<bool> {
     platform::cancel_on_interrupt(flag)
 }
 
@@ -598,7 +610,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             (Some((_, Failed::Vanished)), _) => dir_vanished = true,
             (Some((e, Failed::OnParent)), Some(parent)) => errors.push(ScanError {
                 dir: parent.id,
-                name: NameRef::from(dir.path.file_name().unwrap_or(dir.path.as_os_str())),
+                name: dir.name.clone(),
                 errno: e,
             }),
             (Some((e, _)), _) => errno = Some(e),
