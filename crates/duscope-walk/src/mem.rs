@@ -58,6 +58,7 @@ impl MemProvider {
     }
 
     /// The root path.
+    #[must_use]
     pub fn root_path(&self) -> &Path {
         &self.root
     }
@@ -114,6 +115,7 @@ impl MemProvider {
     }
 
     /// The number of entries, the root included.
+    #[must_use]
     pub fn entry_count(&self) -> usize {
         self.nodes.len()
     }

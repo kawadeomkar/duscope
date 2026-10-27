@@ -24,16 +24,19 @@ impl DirId {
     pub const ROOT: DirId = DirId(0);
 
     /// The id with this number.
+    #[must_use]
     pub const fn new(id: u32) -> DirId {
         DirId(id)
     }
 
     /// The id as a number.
+    #[must_use]
     pub const fn get(self) -> u32 {
         self.0
     }
 
     /// The id as an index into a side table.
+    #[must_use]
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -47,16 +50,19 @@ pub struct NameRef(Box<[u8]>);
 
 impl NameRef {
     /// A name holding a copy of these bytes.
+    #[must_use]
     pub fn new(bytes: &[u8]) -> NameRef {
         NameRef(bytes.into())
     }
 
     /// The name's bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
     /// The name as an `OsStr`, for joining onto a path.
+    #[must_use]
     pub fn as_os_str(&self) -> &OsStr {
         OsStr::from_bytes(&self.0)
     }
@@ -109,7 +115,9 @@ pub enum Kind {
 }
 
 /// Whether an entry's blocks may be shared with another entry, for the
-/// hard-link and clone charging of the roll-up.
+/// hard-link and clone charging of the roll-up. A hard-linked file that is
+/// also a clone reports `Clone`: the clone group decides its sharing, and
+/// its `nlink` above 1 still tells the roll-up it is linked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Share {
     /// Nothing is shared.
@@ -200,7 +208,10 @@ pub struct Entry {
     pub ctime_ns: i64,
     /// Hard-link count.
     pub nlink: u32,
-    /// Device id.
+    /// Device id. On macOS it is the volume's own device
+    /// (`FSOPT_RETURN_REALDEV`), which inside a volume group differs from
+    /// the group's shared `st_dev`: a later `(dev, ino)` check against
+    /// `lstat` must read the device the same way.
     pub dev: u64,
     /// Inode number.
     pub ino: u64,
@@ -236,15 +247,20 @@ pub struct VolumeInfo {
     /// Mounted read-only.
     pub read_only: bool,
     /// Whether names differ by case alone; `None` where it cannot be told.
+    /// For a volume the walk did not enter it comes only from the type and
+    /// the mount options (Linux), or is `None` (macOS asks the volume).
     pub case_sensitive: Option<bool>,
     /// Whether names compare normalisation-insensitively (APFS, HFS+).
     pub normalization: Normalization,
     /// The mount options (`noatime`, `relatime`, …), for the
     /// `atime_unreliable` warning.
     pub options: Vec<String>,
-    /// The volume's size in bytes.
+    /// The volume's size in bytes. For a volume the walk did not enter,
+    /// what the platform has without asking a server or a kernel table:
+    /// the kernel's cached sizes on macOS, `statvfs` of a local mount on
+    /// Linux, and 0 for network and kernel mounts on both.
     pub total_bytes: u64,
-    /// Bytes free for an unprivileged user.
+    /// Bytes free for an unprivileged user, read as `total_bytes` is.
     pub free_bytes: u64,
     /// Why the walk did not enter the volume; `None` when it did.
     pub reason: Option<Skip>,
@@ -252,6 +268,7 @@ pub struct VolumeInfo {
 
 impl VolumeInfo {
     /// Whether the walk entered the volume.
+    #[must_use]
     pub fn entered(&self) -> bool {
         self.reason.is_none()
     }
@@ -281,6 +298,7 @@ pub enum VolumeClass {
 
 impl VolumeClass {
     /// The class as the index and the envelope spell it.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             VolumeClass::Local => "local",
@@ -305,6 +323,7 @@ pub enum Normalization {
 
 impl Normalization {
     /// The value as the index spells it.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Normalization::None => "none",
@@ -377,6 +396,7 @@ pub enum Skip {
 
 impl Skip {
     /// The reason as the index and the envelope spell it.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Skip::Firmlinked => "firmlinked",

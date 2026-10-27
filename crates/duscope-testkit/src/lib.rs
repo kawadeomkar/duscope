@@ -91,6 +91,42 @@ pub fn duscope_bin() -> PathBuf {
     dir.join(format!("duscope{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// The variable that makes [`golden`] rewrite golden files instead of
+/// comparing with them, when set to `1` in the test process's environment.
+pub const UPDATE_GOLDEN: &str = "DUSCOPE_TEST_UPDATE_GOLDEN";
+
+/// The directory of the golden files, `duscope/tests/golden/`.
+pub fn golden_dir() -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap_or(Path::new("."));
+    workspace.join("duscope/tests/golden")
+}
+
+/// Compares `actual` with the golden file `name` in [`golden_dir`]. With
+/// [`UPDATE_GOLDEN`]`=1` the file is written instead; review the diff
+/// before committing it.
+///
+/// # Panics
+///
+/// When `actual` differs from the file, or the file cannot be read or
+/// written: it is a test assertion.
+pub fn golden(name: &str, actual: &str) {
+    let path = golden_dir().join(name);
+    if std::env::var_os(UPDATE_GOLDEN).is_some_and(|v| v == "1") {
+        fs::write(&path, actual)
+            .unwrap_or_else(|e| panic!("duscope-testkit: {}: {e}", path.display()));
+        return;
+    }
+    let expected = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("duscope-testkit: {}: {e}", path.display()));
+    assert_eq!(
+        actual, expected,
+        "golden {name} differs; rerun with {UPDATE_GOLDEN}=1 to regenerate"
+    );
+}
+
 /// A test's private environment. Dropping it removes its temporary
 /// directory (restoring permissions first) and releases the fixture tree.
 #[derive(Debug)]
