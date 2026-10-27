@@ -275,25 +275,30 @@ fn p1_core_04_user_tables_merge_over_the_vendored_ones() {
 fn p1_core_04_compiled_cache_rules_match_the_walker_contract() {
     let caches = Caches::vendored();
     let compiled = caches.compile();
-    // Every named rule compiles; the CACHEDIR.TAG rule is the scanner's own.
-    assert_eq!(compiled.len(), caches.rules().len() - 1);
-    for (rule, walk_rule) in caches
-        .rules()
-        .iter()
-        .filter(|r| r.name.is_some())
-        .zip(&compiled)
-    {
+    // The rules confirmed by markers compile: the walker checks a name and
+    // the parent listing, so an ancestor-path rule has nothing to check
+    // (and its name alone would exclude every directory so named), and the
+    // CACHEDIR.TAG rule is the scanner's own.
+    let with_markers = || {
+        caches
+            .rules()
+            .iter()
+            .filter(|r| matches!(r.confirm, Confirm::Markers(_)))
+    };
+    assert_eq!(compiled.len(), with_markers().count());
+    assert!(compiled.iter().all(|r| !r.markers.is_empty()));
+    assert!(!compiled.iter().any(|r| r.name.glob() == "DerivedData"));
+    for (rule, walk_rule) in with_markers().zip(&compiled) {
         assert_eq!(Some(walk_rule.name.glob()), rule.name.as_deref());
         let markers: Vec<String> = walk_rule
             .markers
             .iter()
             .map(|m| m.to_string_lossy().into_owned())
             .collect();
-        match &rule.confirm {
-            Confirm::Markers(expected) => assert_eq!(&markers, expected),
-            Confirm::Under(_) => assert!(markers.is_empty(), "{:?}", rule.name),
-            Confirm::CachedirTag => unreachable!(),
-        }
+        let Confirm::Markers(expected) = &rule.confirm else {
+            unreachable!()
+        };
+        assert_eq!(&markers, expected);
         assert!(
             walk_rule
                 .name
@@ -366,4 +371,51 @@ fn check_theme(text: &str) {
     let age = table["age"].as_array().unwrap();
     assert_eq!(age.len(), 5);
     age.iter().for_each(hex);
+}
+
+#[test]
+fn p1_core_04_errors_point_at_the_line_that_defines_the_key() {
+    // The same key under another table, before the bad one.
+    let text = "[dir]\nPNG = \"media\"\n\n[ext]\nPNG = \"media\"\n";
+    let (line, message) = rules_error(Classes::parse(text, "user.toml"));
+    assert_eq!(line, 5, "{message}");
+    // A single-quoted key.
+    let text = "[ext]\nrs = \"code\"\n'tar.foo.bar' = \"code\"\n";
+    let (line, message) = rules_error(Classes::parse(text, "user.toml"));
+    assert_eq!(line, 3, "{message}");
+    // A table header with a comment.
+    let text = "[ext] # mine\n\n\"tar.foo.bar\" = \"code\"\n";
+    let (line, message) = rules_error(Classes::parse(text, "user.toml"));
+    assert_eq!(line, 3, "{message}");
+}
+
+#[test]
+fn p1_core_04_an_empty_extension_key_is_an_error() {
+    // Files without an extension are `other` (or `binaries` when
+    // executable); no rule can reclassify them all.
+    let (line, message) = rules_error(Classes::parse("[ext]\n\"\" = \"code\"\n", "user.toml"));
+    assert_eq!(line, 2, "{message}");
+}
+
+#[test]
+fn p1_core_04_the_most_specific_directory_rule_wins() {
+    let user = Classes::parse(
+        "[dir]\n\"foo*\" = \"data\"\nfoobar = \"code\"\n\"*/foo*\" = \"media\"\n\"a/foo*\" = \"docs\"\n",
+        "user",
+    )
+    .unwrap();
+    assert_eq!(
+        user.dir_rules().collect::<Vec<_>>(),
+        ["a/foo*", "*/foo*", "foobar", "foo*"]
+    );
+    assert_eq!(user.of_dir(&[b"foobar".as_slice()]), Some(Class::Code));
+    assert_eq!(user.of_dir(&[b"foobaz".as_slice()]), Some(Class::Data));
+    assert_eq!(
+        user.of_dir(&[b"a".as_slice(), b"foobar".as_slice()]),
+        Some(Class::Docs)
+    );
+    assert_eq!(
+        user.of_dir(&[b"b".as_slice(), b"foobar".as_slice()]),
+        Some(Class::Media)
+    );
 }

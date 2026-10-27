@@ -8,13 +8,15 @@ use duscope_walk::{
     Attrs, Boundary, DirId, Entry, Flags, Kind, NameRef, ScanEvent, Share, WalkOptions, walk,
 };
 
-use super::{Arena, CHUNK, Chunked, DirRec, EntryIdx, EntryRec};
+use super::{Arena, CHUNK, Chunked, DirRec, EntryIdx, EntryRec, SharedRec};
 
 #[test]
 fn p1_core_01_records_are_48_bytes() {
     assert_eq!(size_of::<EntryRec>(), 48);
     assert_eq!(size_of::<DirRec>(), 48);
     assert_eq!(size_of::<EntryIdx>(), 4);
+    // A hard-linked or cloned file's identity beside its record.
+    assert_eq!(size_of::<SharedRec>(), 16);
 }
 
 fn walk_into(root: &std::path::Path, attrs: Attrs) -> (Arena, Vec<Entry>) {
@@ -71,7 +73,8 @@ fn p1_core_01_the_arena_holds_what_the_walk_delivered() {
             .iter()
             .filter(|e| e.kind != Kind::Dir && e.nlink > 1)
             .count();
-        assert_eq!(arena.linked().len(), linked);
+        assert_eq!(arena.linked_len(), linked);
+        assert_eq!(arena.linked().count(), linked);
         assert!(linked >= 4, "the fixture's hard-links case");
         for link in arena.linked() {
             let entry = &entries[link.entry.index()];
@@ -81,7 +84,15 @@ fn p1_core_01_the_arena_holds_what_the_walk_delivered() {
             .iter()
             .filter(|e| matches!(e.share, Share::Clone(_)))
             .count();
-        assert_eq!(arena.cloned().len(), clones);
+        assert_eq!(arena.cloned_len(), clones);
+        for (i, clone) in arena.cloned().enumerate() {
+            assert_eq!(arena.cloned_at(i), clone);
+            let entry = &entries[clone.entry.index()];
+            assert_eq!(
+                (clone.dev, Share::Clone(clone.clone_id)),
+                (entry.dev, entry.share)
+            );
+        }
         assert_eq!(
             arena
                 .volumes()
@@ -168,8 +179,9 @@ fn p1_core_01_chunks_never_move() {
 }
 
 /// Pushes a synthetic scan of `dirs` directories of `files` files each, with
-/// names of the length real trees have, and returns the arena.
-fn synthetic(dirs: u32, files: u32) -> Arena {
+/// names of the length real trees have and every file's link count
+/// `nlink`, and returns the arena.
+fn synthetic(dirs: u32, files: u32, nlink: u32) -> Arena {
     let mut arena = Arena::new(Attrs::Basic);
     let mut root = file("root", DirId::ROOT);
     root.kind = Kind::Dir;
@@ -186,8 +198,10 @@ fn synthetic(dirs: u32, files: u32) -> Arena {
         entry.kind = Kind::File;
         entry.dir = None;
         entry.parent = DirId::new(d);
+        entry.nlink = nlink;
         for f in 0..files {
             entry.name = NameRef::from(format!("file-{f:04}.dat").as_str());
+            entry.ino = u64::from(d) << 16 | u64::from(f);
             arena.push(ScanEvent::Entry(entry.clone())).unwrap();
         }
     }
@@ -197,7 +211,7 @@ fn synthetic(dirs: u32, files: u32) -> Arena {
 #[test]
 fn p1_core_01_a_10m_entry_stream_stays_under_1_gb() {
     // 1M directories of 9 files: 10M entries and the root.
-    let arena = synthetic(1_000_000, 9);
+    let arena = synthetic(1_000_000, 9, 1);
     assert_eq!(arena.len(), 10_000_001);
     let bytes = arena.heap_bytes();
     let tenths = bytes * 10 / arena.len();
@@ -207,6 +221,24 @@ fn p1_core_01_a_10m_entry_stream_stays_under_1_gb() {
         tenths % 10
     );
     assert!(bytes < 1 << 30, "{bytes} bytes");
+}
+
+#[test]
+fn p1_core_01_a_tree_of_hard_links_grows_by_chunks() {
+    // A store of hard links (pnpm, Nix, rsnapshot): every file has a
+    // second link, outside the scan. Each keeps 16 bytes beside its record,
+    // in chunks.
+    let arena = synthetic(100_000, 9, 2);
+    assert_eq!(arena.linked_len(), 900_000);
+    let tenths = arena.heap_bytes() * 10 / arena.len();
+    eprintln!(
+        "hard links: {}.{} bytes per entry",
+        tenths / 10,
+        tenths % 10
+    );
+    assert!(tenths <= 900, "{tenths} tenths of a byte per entry");
+    let link = arena.linked_at(899_999);
+    assert_eq!((link.dev, link.ino), (1, 100_000 << 16 | 8));
 }
 
 /// The arena's bytes per entry over a benchmark tree, when it has been
