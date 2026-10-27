@@ -5,7 +5,8 @@
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use duscope_core::arena::{Arena, DirRec, EntryIdx};
@@ -30,6 +31,8 @@ pub struct Scanned {
     pub summary: WalkSummary,
     /// How long the walk and the roll-up took.
     pub elapsed: Duration,
+    /// The root, symbolic links resolved.
+    pub root: PathBuf,
     /// The root as given.
     pub root_as_given: PathBuf,
     /// When the scan started and finished, Unix nanoseconds.
@@ -92,9 +95,7 @@ fn envelope(
     output: &Output,
 ) -> Envelope<TopEntry> {
     let arena = &scanned.arena;
-    let root = std::fs::canonicalize(&scanned.root_as_given)
-        .or_else(|_| std::path::absolute(&scanned.root_as_given))
-        .unwrap_or_else(|_| scanned.root_as_given.clone());
+    let root = std::path::absolute(&scanned.root).unwrap_or_else(|_| scanned.root.clone());
     let totals = Totals::of(arena, EntryIdx::ROOT);
     let apparent = size_kind == "apparent";
     let root_total = if apparent {
@@ -390,7 +391,7 @@ fn now_ns() -> i64 {
 
 /// Scans the tree `walk_args` names.
 pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failure> {
-    let root = match &walk_args.path {
+    let given = match &walk_args.path {
         Some(path) => path.clone(),
         None => std::env::current_dir().map_err(|e| {
             Failure::new(
@@ -400,7 +401,15 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             )
         })?,
     };
+    // A root given as a symbolic link, or through one, is scanned as the
+    // directory it leads to; the envelope keeps the path as given.
+    let root = std::fs::canonicalize(&given).unwrap_or_else(|_| given.clone());
     let opts = options(walk_args, excludes)?;
+    // Ctrl-C stops the walk; if it has not stopped soon after, the process
+    // ends anyway. Nothing is written before a scan completes.
+    if duscope_walk::cancel_on_interrupt(&opts.cancel).is_ok() {
+        watch_interrupt(Arc::clone(&opts.cancel));
+    }
     let started = Instant::now();
     let started_ns = now_ns();
     let mut arena = Arena::new(opts.attrs);
@@ -412,7 +421,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             push_error = Some(e);
         }
     })
-    .map_err(|e| walk_failure(&root, e))?;
+    .map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
         return Err(Failure::new(Exit::Runtime, "io_error", e.to_string()));
     }
@@ -422,7 +431,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         return Err(Failure::new(
             Exit::Permission,
             "permission_denied",
-            format!("permission denied reading {}", root.display()),
+            format!("permission denied reading {}", given.display()),
         )
         .hint("Run duscope scan on a directory you can read"));
     }
@@ -431,7 +440,8 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         arena,
         summary,
         elapsed: started.elapsed(),
-        root_as_given: root,
+        root,
+        root_as_given: given,
         started_ns,
         finished_ns: now_ns(),
     })
@@ -501,6 +511,35 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
     }
 }
 
+/// How long a walk has to stop after Ctrl-C before the process ends
+/// regardless: the 200 ms the conventions allow, less the time to notice.
+const INTERRUPT_GRACE: Duration = Duration::from_millis(150);
+
+/// Ends the process with exit 130 once `flag` has been set for
+/// [`INTERRUPT_GRACE`], in case the walk is still finishing a directory.
+fn watch_interrupt(flag: Arc<AtomicBool>) {
+    let watcher = thread::Builder::new()
+        .name("interrupt".to_owned())
+        .spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            thread::sleep(INTERRUPT_GRACE);
+            report_interrupt();
+            std::process::exit(i32::from(Exit::Interrupted.code()));
+        });
+    // Without the watcher the walk still stops; it may take longer.
+    drop(watcher);
+}
+
+/// Reports Ctrl-C: one line on stderr, once, whatever the format.
+pub fn report_interrupt() {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if !REPORTED.swap(true, Ordering::SeqCst) {
+        eprintln!("duscope: interrupted");
+    }
+}
+
 /// The errno values the exit codes distinguish; equal on Linux and macOS.
 const ENOENT: i32 = 2;
 const EPERM: i32 = 1;
@@ -514,4 +553,72 @@ fn not_yet(flag: &str, what: &str) -> Failure {
         "not_available",
         format!("{flag} needs {what}, which this version does not have yet"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use clap::Parser;
+    use duscope_core::arena::Arena;
+    use duscope_core::rollup::roll_up;
+    use duscope_walk::{Attrs, MemProvider, WalkOptions, walk_with};
+
+    use super::{ENOENT, Scanned, envelope};
+    use crate::cli::{Cli, Verb};
+    use crate::out::{Format, Output, Units};
+
+    #[test]
+    fn p1_walk_08_a_vanished_file_increments_vanished_count() {
+        let mut tree = MemProvider::new("/t");
+        tree.file("kept", 10)
+            .file("gone", 10)
+            .unstatable("gone", ENOENT);
+        let mut arena = Arena::new(Attrs::Basic);
+        let summary = walk_with(&tree, Path::new("/t"), &WalkOptions::default(), |event| {
+            arena.push(event).unwrap();
+        })
+        .unwrap();
+        roll_up(&mut arena);
+        let scanned = Scanned {
+            arena,
+            summary,
+            elapsed: Duration::ZERO,
+            root: "/t".into(),
+            root_as_given: "/t".into(),
+            started_ns: 0,
+            finished_ns: 0,
+        };
+        let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
+        else {
+            panic!("not scan");
+        };
+        let output = Output {
+            format: Format::Json,
+            color: false,
+            units: Units::default(),
+            null: false,
+            header: false,
+        };
+        let envelope = envelope(
+            &scanned,
+            &args.walk,
+            "scan",
+            None,
+            true,
+            "allocated",
+            &output,
+        );
+        assert_eq!(envelope.scan.vanished_count, 1);
+        assert_eq!(envelope.scan.error_count, 0);
+        let warning = envelope
+            .warnings
+            .iter()
+            .find(|w| w.code == "vanished")
+            .unwrap();
+        assert_eq!(warning.count, Some(1));
+        // The file that vanished is not a row.
+        assert_eq!(envelope.entries.len(), 1);
+    }
 }

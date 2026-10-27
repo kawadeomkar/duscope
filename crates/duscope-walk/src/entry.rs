@@ -332,10 +332,15 @@ pub enum ScanEvent {
         /// Why the directory could not be read.
         errno: Option<i32>,
     },
-    /// `dir` disappeared between being listed and being read.
+    /// Something disappeared between being listed and being read
+    /// (`ENOENT`, `ESTALE`): the entry `name` that `dir` listed, which is not
+    /// delivered; or, with no name, the directory `dir` itself, whose
+    /// `DirClosed` follows with no entries.
     Vanished {
         /// The directory.
         dir: DirId,
+        /// The entry of `dir` that vanished; `None` when `dir` itself did.
+        name: Option<NameRef>,
     },
     /// A volume the walk met.
     Volume(VolumeInfo),

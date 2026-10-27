@@ -37,6 +37,11 @@ fn main() -> ExitCode {
     };
     match verbs::run(cli, &output) {
         Ok(()) => ExitCode::from(Exit::Success.code()),
+        // Ctrl-C is the user's own doing: one line on stderr, no envelope.
+        Err(failure) if failure.exit == Exit::Interrupted => {
+            verbs::report_interrupt();
+            ExitCode::from(failure.exit.code())
+        }
         Err(failure) => {
             output.failure(&failure);
             ExitCode::from(failure.exit.code())

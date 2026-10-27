@@ -42,6 +42,22 @@ pub(crate) fn fallback() -> Option<Box<dyn Provider>> {
     Some(Box::new(fallback::FallbackProvider::default()))
 }
 
+/// Makes SIGINT set `flag`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn cancel_on_interrupt(
+    flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<()> {
+    posix::signal::cancel_on_interrupt(flag)
+}
+
+/// Makes SIGINT set `flag`: not on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn cancel_on_interrupt(
+    _flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
 /// The fallback provider: none is built here.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn fallback() -> Option<Box<dyn Provider>> {
