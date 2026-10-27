@@ -179,6 +179,34 @@ fn p1_core_04_the_vendored_tables_load() {
 }
 
 #[test]
+fn p1_core_04_the_proposal_examples_classify_as_listed() {
+    // The examples column of the proposal's class table.
+    let classes = Classes::vendored();
+    let by_ext = [
+        (Class::Code, ["js", "py", "h", "wasm"].as_slice()),
+        (Class::Media, &["jpg", "heic", "mp4", "mp3"]),
+        (Class::Archives, &["tar.gz", "dmg", "whl", "zip"]),
+        (Class::Data, &["db", "cache", "json", "vmdk", "qcow2"]),
+        (Class::Binaries, &["dylib", "o"]),
+        (Class::Docs, &["log", "eml", "mbox", "txt", "pdf"]),
+    ];
+    for (class, exts) in by_ext {
+        for e in exts {
+            assert_eq!(classes.of_ext(e), Some(class), "{e}");
+        }
+    }
+    let by_dir = [
+        (Class::Code, "p/node_modules"),
+        (Class::Data, "Default/IndexedDB"),
+        (Class::Binaries, "Xcode/DerivedData"),
+        (Class::Binaries, "Frameworks/Sparkle.framework"),
+    ];
+    for (class, dir) in by_dir {
+        assert_eq!(classes.of_dir(&path(dir)), Some(class), "{dir}");
+    }
+}
+
+#[test]
 fn p1_core_04_the_ext_rule() {
     assert_eq!(ext(b"photo-dump.tar.gz"), "tar.gz");
     assert_eq!(ext(b"BACKUP.TAR.ZST"), "tar.zst");

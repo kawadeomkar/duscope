@@ -28,7 +28,8 @@ pub const CACHES_TOML: &str = include_str!("caches.toml");
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
-    /// Source code and what package managers install beside it.
+    /// Source code, WebAssembly modules, and what package managers install
+    /// beside them.
     Code,
     /// Images, video, audio, fonts.
     Media,
@@ -38,7 +39,7 @@ pub enum Class {
     Data,
     /// Compiled objects, libraries, frameworks, symbols.
     Binaries,
-    /// Text, documents, mail, logs meant for reading.
+    /// Text, documents, PDFs, mail and logs.
     Docs,
     /// No extension, an unknown one, and pooled remainders.
     Other,
