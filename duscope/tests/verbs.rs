@@ -275,3 +275,122 @@ fn p1_cli_03_top_reports_the_depth_it_listed_and_takes_a_file_root() {
     let (_, rows) = json(&env, &["tree", &file]);
     assert_eq!(rows["entries"][0]["kind"], "file");
 }
+
+#[test]
+fn p1_cli_03_by_type_merges_a_classes_file_over_the_vendored_one() {
+    let env = TestEnv::new();
+    let tree = env.fixtures().case_root("extensions");
+    let tree = tree.to_str().unwrap();
+    // The class whose examples hold `name`, and its file count.
+    let class_of = |value: &serde_json::Value, name: &str| {
+        value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| {
+                e["largest"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|x| x["path"].as_str().unwrap().ends_with(&format!("/{name}")))
+            })
+            .map(|e| {
+                (
+                    e["class"].as_str().unwrap().to_owned(),
+                    e["file_count"].clone(),
+                )
+            })
+            .unwrap()
+    };
+    let (_, vendored) = json(&env, &["by-type", "--examples", "30", tree]);
+    assert_eq!(class_of(&vendored, "run.sh").0, "code");
+    // A user's table: its rule wins, the vendored rules it does not name
+    // stay.
+    let classes = env.tmp_dir().join("classes.toml");
+    fs::write(&classes, "[ext]\nsh = \"media\"\n").unwrap();
+    let classes = classes.to_str().unwrap();
+    let (_, merged) = json(
+        &env,
+        &["by-type", "--examples", "30", "--classes", classes, tree],
+    );
+    assert_eq!(class_of(&merged, "run.sh").0, "media");
+    assert_eq!(
+        class_of(&merged, "PHOTO.JPG"),
+        ("media".to_owned(), 3.into())
+    );
+    assert_eq!(class_of(&merged, "a.tar.gz").0, "archives");
+    // A malformed table is a usage error naming the file and the line.
+    let bad = env.tmp_dir().join("bad.toml");
+    fs::write(&bad, "[ext]\nsh = \"media\"\nrs = \"sideways\"\n").unwrap();
+    let out = duscope(&env)
+        .args(["by-type", "--json", "--classes"])
+        .arg(&bad)
+        .arg(tree)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "usage");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(message.contains("bad.toml:3:"), "{message}");
+}
+
+#[test]
+fn p1_cli_03_date_filters_are_reported_and_a_missing_zone_warns() {
+    let env = TestEnv::new();
+    let tree = env.fixtures().case_root("timestamps");
+    let tree = tree.to_str().unwrap();
+    let (_, value) = json(
+        &env,
+        &[
+            "top",
+            "--files",
+            "--since",
+            "2020-01-01",
+            "--until",
+            "2036-12-31T00:00:00Z",
+            "--time",
+            "ctime",
+            tree,
+        ],
+    );
+    assert_eq!(
+        value["query"]["filters"],
+        serde_json::json!([
+            "--since=2020-01-01",
+            "--until=2036-12-31T00:00:00Z",
+            "--time=ctime"
+        ])
+    );
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    // Without zoneinfo for the local zone, a YYYY-MM-DD date is read as
+    // UTC midnight and tz_unavailable says so; RFC 3339 needs no zone.
+    let out = duscope(&env)
+        .env("TZ", "Nowhere/Bogus")
+        .args(["top", "--files", "--json", "--since", "2020-01-01", tree])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let codes: Vec<&str> = envelope["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["tz_unavailable"]);
+    let out = duscope(&env)
+        .env("TZ", "Nowhere/Bogus")
+        .args([
+            "top",
+            "--files",
+            "--json",
+            "--since",
+            "2020-01-01T00:00:00Z",
+            tree,
+        ])
+        .output()
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["warnings"], serde_json::json!([]));
+}
