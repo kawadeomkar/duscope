@@ -157,8 +157,9 @@ pub struct WalkSummary {
     pub threads: usize,
 }
 
-/// Walks `root` with this platform's provider, delivering every entry to
-/// `sink`. [`walk_with`] walks with a given provider.
+/// Walks `root` with this platform's provider, or the fallback provider
+/// under [`WalkOptions::fallback`], delivering every entry to `sink`.
+/// [`walk_with`] walks with a given provider.
 ///
 /// Returns [`WalkError::NoProvider`] on a platform other than Linux and
 /// macOS.
@@ -167,7 +168,12 @@ pub fn walk(
     opts: &WalkOptions,
     sink: impl FnMut(ScanEvent),
 ) -> Result<WalkSummary, WalkError> {
-    let provider = platform::native().ok_or(WalkError::NoProvider)?;
+    let provider = if opts.fallback {
+        platform::fallback()
+    } else {
+        platform::native()
+    };
+    let provider = provider.ok_or(WalkError::NoProvider)?;
     walk_with(&*provider, root, opts, sink)
 }
 

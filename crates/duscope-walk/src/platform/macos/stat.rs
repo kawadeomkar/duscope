@@ -44,7 +44,7 @@ pub(super) fn entry_at(
         Err(e) if !bulk::unsupported(&e) => return Err(e),
         Err(_) => {}
     }
-    let stat = ffi::lstat_at(dir, &c_name)?;
+    let stat = posix::lstat_at(dir, &c_name)?;
     Ok(from_stat(name.clone(), &stat))
 }
 
@@ -70,7 +70,7 @@ pub(super) fn entry_of_path(path: &Path, name: NameRef, opts: &WalkOptions) -> i
         Err(e) if !bulk::unsupported(&e) => return Err(e),
         Err(_) => {}
     }
-    let stat = ffi::lstat(&c_path)?;
+    let stat = posix::lstat(&c_path)?;
     Ok(from_stat(name, &stat))
 }
 
@@ -93,7 +93,7 @@ fn decode(buf: &AttrBuf, request: &Request, name: &NameRef) -> io::Result<Option
 }
 
 /// The entry an `lstat` describes.
-pub(super) fn from_stat(name: NameRef, stat: &libc::stat) -> Entry {
+pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat) -> Entry {
     let kind = match stat.st_mode & libc::S_IFMT {
         libc::S_IFDIR => Kind::Dir,
         libc::S_IFREG => Kind::File,

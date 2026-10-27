@@ -12,6 +12,7 @@ use duscope_testkit::TestEnv;
 use super::MacProvider;
 use super::bulk::{self, Decoded, Outcome, Probe, Request};
 use super::ffi;
+use crate::platform::posix;
 use crate::{Boundary, Entry, Flags, Kind, ScanEvent, WalkOptions, walk_with};
 
 /// Every entry of a walk by its path, and the paths of the directories that
@@ -47,7 +48,7 @@ fn walk_paths(
 }
 
 fn lstat(path: &Path) -> libc::stat {
-    ffi::lstat(&CString::new(path.as_os_str().as_bytes()).unwrap()).unwrap()
+    posix::lstat(&CString::new(path.as_os_str().as_bytes()).unwrap()).unwrap()
 }
 
 #[test]
@@ -101,8 +102,8 @@ fn p1_walk_03_every_entry_matches_lstat() {
 }
 
 /// The walk of the fixture tree read three ways: by bulk reads, through the
-/// stat queue as if every directory were I/O-bound, and through the stat
-/// queue as if every bulk read failed with `ENOTSUP`.
+/// stat queue as if every directory were I/O-bound, and through the
+/// fallback provider as if every bulk read failed with `ENOTSUP`.
 fn same_through_the_stat_queue(pretend: Outcome) {
     let env = TestEnv::new();
     let root = env.fixtures().root();
@@ -123,10 +124,17 @@ fn same_through_the_stat_queue(pretend: Outcome) {
         );
     }
     assert_eq!(bulk.len(), queue.len());
-    // Directory ids follow the order the workers found directories in.
+    // Directory ids follow the order the workers found directories in. The
+    // fallback provider reports a directory's st_nlink, which counts its
+    // subdirectories; ATTR_DIR_LINKCOUNT does not.
     let unnumbered = |entry: &Entry| Entry {
         parent: crate::DirId::ROOT,
         dir: entry.dir.map(|_| crate::DirId::ROOT),
+        nlink: if pretend == Outcome::Unsupported && entry.kind == Kind::Dir {
+            0
+        } else {
+            entry.nlink
+        },
         ..entry.clone()
     };
     for (path, entry) in &bulk {
@@ -145,7 +153,7 @@ fn p1_walk_03_the_stat_queue_reads_what_bulk_reads_read() {
 }
 
 #[test]
-fn p1_walk_03_enotsup_rereads_the_directory_by_name() {
+fn p1_walk_03_enotsup_rereads_the_directory_through_the_fallback() {
     same_through_the_stat_queue(Outcome::Unsupported);
 }
 

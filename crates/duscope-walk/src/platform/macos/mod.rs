@@ -1,6 +1,6 @@
 //! The macOS provider: `getattrlistbulk(2)` with the basic attribute list,
-//! and a stat queue for directories the bulk read cannot serve or that wait
-//! on I/O.
+//! a stat queue for directories that wait on I/O, and the fallback provider
+//! for filesystems without bulk reads.
 
 mod bulk;
 mod ffi;
@@ -8,6 +8,9 @@ mod stat;
 #[cfg(test)]
 mod tests;
 mod volume;
+
+pub(super) use stat::from_stat;
+pub(super) use volume::of as volume;
 
 use std::cell::RefCell;
 use std::fs;
@@ -19,6 +22,7 @@ use std::sync::Once;
 use bulk::{Decoded, Outcome};
 use ffi::AttrBuf;
 
+use crate::platform::fallback::FallbackProvider;
 use crate::platform::posix;
 use crate::{DirHandle, Entry, NameRef, Provider, ScanError, VolumeInfo, WalkOptions};
 
@@ -93,9 +97,13 @@ impl Provider for MacProvider {
         };
         match outcome {
             Outcome::Done => {}
+            // The fallback provider reads a filesystem without bulk reads.
+            Outcome::Unsupported => {
+                return FallbackProvider.read_dir_split(dir, opts, out, errs, later);
+            }
             // Listed by name alone; the stat queue reads every entry, on
             // every worker.
-            Outcome::Unsupported | Outcome::IoBound => {
+            Outcome::IoBound => {
                 for entry in fs::read_dir(dir.path())? {
                     later.push(NameRef::from(entry?.file_name().as_os_str()));
                 }

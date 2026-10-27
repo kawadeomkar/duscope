@@ -4,6 +4,8 @@
 
 mod dents;
 mod statx;
+
+pub(super) use statx::from_stat;
 #[cfg(test)]
 mod tests;
 
@@ -138,7 +140,7 @@ impl Provider for LinuxProvider {
 /// mount id `statx` reports (5.8), else by the longest mount point the
 /// path's real path starts with; sizes from `statvfs`, free bytes being
 /// `f_bavail × f_frsize`.
-fn volume(path: &Path) -> io::Result<VolumeInfo> {
+pub(super) fn volume(path: &Path) -> io::Result<VolumeInfo> {
     let c_path = posix::c_path(path)?;
     let stx = statx::statx(None, &c_path, statx::BASIC)?;
     let entry = statx::entry(NameRef::new(b""), &stx);

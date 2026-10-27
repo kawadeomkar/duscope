@@ -1,9 +1,10 @@
 //! Calls both platforms make the same way: opening a directory to read and
 //! raising the descriptor limit.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Once;
@@ -90,8 +91,8 @@ pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
 
 /// `statvfs(3)` of the filesystem holding `path`.
 #[cfg(target_os = "linux")]
-pub(crate) fn statvfs(path: &std::ffi::CStr) -> io::Result<libc::statvfs> {
-    let mut buf = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+pub(crate) fn statvfs(path: &CStr) -> io::Result<libc::statvfs> {
+    let mut buf = MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: `path` is NUL-terminated and `buf` is writable for one
     // `struct statvfs`.
     if unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) } != 0 {
@@ -99,4 +100,45 @@ pub(crate) fn statvfs(path: &std::ffi::CStr) -> io::Result<libc::statvfs> {
     }
     // SAFETY: statvfs succeeded, so it filled the struct.
     Ok(unsafe { buf.assume_init() })
+}
+
+/// Retries a call that returns -1 with `errno` on `EINTR`.
+fn retry(mut call: impl FnMut() -> libc::c_int) -> io::Result<()> {
+    loop {
+        if call() == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// `fstatat(2)` of `name` in the directory open on `dir`, not following a
+/// final symlink.
+pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `dir` is open for the borrow, `name` is NUL-terminated, and
+    // `stat` is writable for one `struct stat`.
+    retry(|| unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    })?;
+    // SAFETY: fstatat succeeded, so it filled the struct.
+    Ok(unsafe { stat.assume_init() })
+}
+
+/// `lstat(2)` of `path`.
+pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stat` is writable for one
+    // `struct stat`.
+    retry(|| unsafe { libc::lstat(path.as_ptr(), stat.as_mut_ptr()) })?;
+    // SAFETY: lstat succeeded, so it filled the struct.
+    Ok(unsafe { stat.assume_init() })
 }
