@@ -23,6 +23,61 @@ const DEFAULT_SIZE: (u16, u16) = (80, 24);
 pub struct Style {
     pack: Pack,
     depth: Depth,
+    glyphs: Glyphs,
+    /// `LS_COLORS`, read when `--color-by lscolors` asks for it.
+    ls_colors: LsColors,
+}
+
+/// The variables the map's look depends on, read once, so the decisions
+/// can be tested with any values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MapEnv {
+    /// `COLORTERM`.
+    colorterm: Option<String>,
+    /// `COLORFGBG`.
+    colorfgbg: Option<String>,
+    /// The first of `LC_ALL`, `LC_CTYPE` and `LANG` that is set and not
+    /// empty.
+    locale: Option<String>,
+    /// `LS_COLORS`.
+    ls_colors: Option<String>,
+}
+
+impl MapEnv {
+    /// Reads the variables through `get` (`std::env::var_os` in the
+    /// binary).
+    fn read(get: impl Fn(&str) -> Option<OsString>) -> MapEnv {
+        let value = |name: &str| get(name).map(|v| v.to_string_lossy().into_owned());
+        MapEnv {
+            colorterm: value("COLORTERM"),
+            colorfgbg: value("COLORFGBG"),
+            locale: ["LC_ALL", "LC_CTYPE", "LANG"]
+                .iter()
+                .find_map(|name| value(name).filter(|v| !v.is_empty())),
+            ls_colors: value("LS_COLORS"),
+        }
+    }
+
+    /// Whether `COLORFGBG` names a light background (`…;7` or `…;15`).
+    fn light_background(&self) -> bool {
+        self.colorfgbg
+            .as_deref()
+            .and_then(|v| v.rsplit(';').next())
+            .is_some_and(|bg| bg == "7" || bg == "15")
+    }
+
+    /// Whether `COLORTERM` promises 24-bit colour.
+    fn truecolor(&self) -> bool {
+        matches!(self.colorterm.as_deref(), Some("truecolor" | "24bit"))
+    }
+
+    /// Whether the locale speaks UTF-8.
+    fn utf8(&self) -> bool {
+        self.locale.as_deref().is_some_and(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("utf-8") || v.contains("utf8")
+        })
+    }
 }
 
 /// The map's style for `args`: refuses `--treemap pixels` (`not_compiled`)
@@ -38,23 +93,36 @@ pub fn style(args: &ScanArgs, output: &Output) -> Result<Style, Failure> {
             "Install with cargo install duscope --features pixels, or run duscope scan --treemap always for the cell map",
         ));
     }
-    // The theme is read (and a bad one refused) even when colour is off.
-    let themed = theme(args.theme.as_ref())?;
-    let pack = if output.color {
-        themed
-    } else {
-        named("no-color")
-    };
+    let env = MapEnv::read(|name| std::env::var_os(name));
+    decide(args.theme.as_ref(), output.color, &env)
+}
+
+/// The style from `--theme`, whether what people read is coloured, and
+/// the environment: the theme is read (and a bad one refused) even when
+/// colour is off, which draws with `no-color`; the colour depth follows
+/// the pack and `COLORTERM`, the glyphs the locale.
+fn decide(theme_arg: Option<&OsString>, color: bool, env: &MapEnv) -> Result<Style, Failure> {
+    let themed = theme(theme_arg, env)?;
+    let pack = if color { themed } else { named("no-color") };
     let depth = if pack.shades {
         Depth::None
     } else if pack.name == "terminal-native" {
         Depth::Ansi16
-    } else if env_is("COLORTERM", &["truecolor", "24bit"]) {
+    } else if env.truecolor() {
         Depth::TrueColor
     } else {
         Depth::Ansi256
     };
-    Ok(Style { pack, depth })
+    Ok(Style {
+        pack,
+        depth,
+        glyphs: if env.utf8() {
+            Glyphs::Unicode
+        } else {
+            Glyphs::Ascii
+        },
+        ls_colors: ls_colors(env.ls_colors.as_deref().unwrap_or_default()),
+    })
 }
 
 /// Draws the treemap of `scanned` in `style`.
@@ -65,8 +133,12 @@ pub fn draw(
     style: &Style,
 ) -> Result<(), Failure> {
     let (columns, rows) = duscope_walk::terminal_size().unwrap_or(DEFAULT_SIZE);
-    let Style { pack, depth } = style;
-    let depth = *depth;
+    let Style {
+        pack,
+        depth,
+        glyphs,
+        ls_colors,
+    } = style;
     let classes = Classes::vendored();
     let size = scan::size_kind(&args.walk);
     let opts = PaintOpts {
@@ -76,15 +148,9 @@ pub fn draw(
             Some(ColorByArg::Folder) => ColorBy::Folder,
             Some(ColorByArg::Level) => ColorBy::Level,
             Some(ColorByArg::Age) => ColorBy::Age,
-            Some(ColorByArg::Lscolors) => {
-                ColorBy::LsColors(ls_colors(&std::env::var("LS_COLORS").unwrap_or_default()))
-            }
+            Some(ColorByArg::Lscolors) => ColorBy::LsColors(ls_colors.clone()),
         },
-        glyphs: if utf8_locale() {
-            Glyphs::Unicode
-        } else {
-            Glyphs::Ascii
-        },
+        glyphs: *glyphs,
         depth: args.depth,
         min_tile: match args.min_tile {
             None | Some(MinTile::One) => 1,
@@ -115,7 +181,7 @@ pub fn draw(
         ),
     };
     let buffer = frame(&view, &opts, &footer, columns, rows);
-    emit_bytes(buffer.to_ansi(depth).as_bytes())
+    emit_bytes(buffer.to_ansi(*depth).as_bytes())
 }
 
 /// Each class's share of the scan, largest first, `other` last.
@@ -147,9 +213,13 @@ fn legend(
 
 /// The pack `--theme` names, or the theme file it names; without one, the
 /// light pack on a light terminal (`COLORFGBG`) and Mocha otherwise.
-fn theme(arg: Option<&OsString>) -> Result<Pack, Failure> {
+fn theme(arg: Option<&OsString>, env: &MapEnv) -> Result<Pack, Failure> {
     let Some(arg) = arg else {
-        return Ok(named(if light_background() { "light" } else { "mocha" }));
+        return Ok(named(if env.light_background() {
+            "light"
+        } else {
+            "mocha"
+        }));
     };
     let text = arg.to_string_lossy();
     if let Some(pack) = Pack::named(&text) {
@@ -170,31 +240,6 @@ fn theme(arg: Option<&OsString>) -> Result<Pack, Failure> {
 
 fn named(name: &str) -> Pack {
     Pack::named(name).unwrap_or_else(Pack::mocha)
-}
-
-/// Whether `COLORFGBG` names a light background (`…;7` or `…;15`).
-fn light_background() -> bool {
-    std::env::var("COLORFGBG")
-        .ok()
-        .and_then(|v| v.rsplit(';').next().map(str::to_owned))
-        .is_some_and(|bg| bg == "7" || bg == "15")
-}
-
-/// Whether variable `name` is one of `values`.
-fn env_is(name: &str, values: &[&str]) -> bool {
-    std::env::var(name).is_ok_and(|v| values.contains(&v.as_str()))
-}
-
-/// Whether the locale speaks UTF-8 (`LC_ALL`, then `LC_CTYPE`, then
-/// `LANG`; the first one set decides).
-fn utf8_locale() -> bool {
-    ["LC_ALL", "LC_CTYPE", "LANG"]
-        .iter()
-        .find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
-        .is_some_and(|v| {
-            let v = v.to_ascii_lowercase();
-            v.contains("utf-8") || v.contains("utf8")
-        })
 }
 
 /// What `--color-by lscolors` reads of `LS_COLORS`: `ex=` and every
@@ -264,8 +309,20 @@ fn from_256(n: u8) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{foreground, from_256, ls_colors};
-    use duscope_treemap::cells::Color;
+    use std::ffi::OsString;
+
+    use super::{MapEnv, decide, foreground, from_256, ls_colors};
+    use duscope_treemap::cells::{Color, Depth};
+    use duscope_treemap::paint::Glyphs;
+
+    /// The environment of `vars`, as the binary would read it.
+    fn env(vars: &[(&str, &str)]) -> MapEnv {
+        MapEnv::read(|name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| OsString::from(v))
+        })
+    }
 
     #[test]
     fn p1_map_02_ls_colors_codes_become_colours() {
@@ -301,5 +358,74 @@ mod tests {
         let later = ls_colors("*.png=31:*png=32");
         assert_eq!(later.of(b"a.png", None), Some(Color::Ansi(2)));
         assert_eq!(ls_colors(""), super::LsColors::default());
+    }
+
+    #[test]
+    fn p1_map_02_colorfgbg_picks_the_light_pack_on_a_light_background() {
+        let pack = |vars: &[(&str, &str)]| decide(None, true, &env(vars)).unwrap().pack.name;
+        // `fg;bg`: a background of 7 or 15 is light.
+        assert_eq!(pack(&[("COLORFGBG", "0;15")]), "light");
+        assert_eq!(pack(&[("COLORFGBG", "0;default;7")]), "light");
+        assert_eq!(pack(&[("COLORFGBG", "15;0")]), "mocha");
+        assert_eq!(pack(&[]), "mocha");
+        assert_eq!(pack(&[("COLORFGBG", "garbage")]), "mocha");
+        assert_eq!(pack(&[("COLORFGBG", "")]), "mocha");
+        // --theme wins over the background; without colour, no-color.
+        let dracula = OsString::from("dracula");
+        let light = env(&[("COLORFGBG", "0;15")]);
+        assert_eq!(
+            decide(Some(&dracula), true, &light).unwrap().pack.name,
+            "dracula"
+        );
+        assert_eq!(
+            decide(Some(&dracula), false, &light).unwrap().pack.name,
+            "no-color"
+        );
+    }
+
+    #[test]
+    fn p1_map_02_colorterm_and_the_pack_set_the_colour_depth() {
+        let depth = |theme: Option<&str>, color: bool, vars: &[(&str, &str)]| {
+            let theme = theme.map(OsString::from);
+            decide(theme.as_ref(), color, &env(vars)).unwrap().depth
+        };
+        assert_eq!(
+            depth(None, true, &[("COLORTERM", "truecolor")]),
+            Depth::TrueColor
+        );
+        assert_eq!(
+            depth(None, true, &[("COLORTERM", "24bit")]),
+            Depth::TrueColor
+        );
+        assert_eq!(depth(None, true, &[("COLORTERM", "yes")]), Depth::Ansi256);
+        assert_eq!(depth(None, true, &[]), Depth::Ansi256);
+        let truecolor = [("COLORTERM", "truecolor")];
+        assert_eq!(
+            depth(Some("terminal-native"), true, &truecolor),
+            Depth::Ansi16
+        );
+        assert_eq!(depth(Some("no-color"), true, &truecolor), Depth::None);
+        assert_eq!(depth(None, false, &truecolor), Depth::None);
+    }
+
+    #[test]
+    fn p1_map_02_a_locale_without_utf8_draws_ascii() {
+        let glyphs = |vars: &[(&str, &str)]| decide(None, true, &env(vars)).unwrap().glyphs;
+        assert_eq!(glyphs(&[("LANG", "en_US.UTF-8")]), Glyphs::Unicode);
+        assert_eq!(glyphs(&[("LC_CTYPE", "de_DE.utf8")]), Glyphs::Unicode);
+        // LC_ALL, then LC_CTYPE, then LANG: the first set and not empty.
+        assert_eq!(
+            glyphs(&[("LC_ALL", "C"), ("LANG", "en_US.UTF-8")]),
+            Glyphs::Ascii
+        );
+        assert_eq!(
+            glyphs(&[("LC_ALL", ""), ("LC_CTYPE", "C.UTF-8"), ("LANG", "C")]),
+            Glyphs::Unicode
+        );
+        assert_eq!(glyphs(&[("LANG", "POSIX")]), Glyphs::Ascii);
+        assert_eq!(glyphs(&[]), Glyphs::Ascii);
+        // LS_COLORS is read with the rest.
+        let style = decide(None, true, &env(&[("LS_COLORS", "ex=32")])).unwrap();
+        assert_eq!(style.ls_colors.executable, Some(Color::Ansi(2)));
     }
 }

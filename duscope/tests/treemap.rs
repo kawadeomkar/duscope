@@ -429,3 +429,86 @@ fn p1_map_02_theme_help_names_every_pack() {
     let names = duscope_treemap::packs::NAMES.join("|");
     assert!(help.contains(&names), "{names} not in:\n{help}");
 }
+
+#[test]
+fn p1_map_02_below_60x12_only_the_summary_is_drawn() {
+    let env = TestEnv::new();
+    let root = env.fixtures().path("home");
+    let (arena, rollup) = scan_tree(&root);
+    let view = ArenaView::new(&arena, &rollup, root.clone());
+    let classes = Classes::vendored();
+    let mocha = Pack::named("mocha").unwrap();
+    let footer = Footer {
+        summary: "<summary>".to_owned(),
+        next: "<next>".to_owned(),
+        ..Footer::default()
+    };
+    let opts = opts(&mocha, &classes, Glyphs::Unicode);
+    for (w, h) in [(59u16, 12u16), (60, 11), (20, 5)] {
+        let buffer = frame(&view, &opts, &footer, w, h);
+        assert_eq!((buffer.width(), buffer.height()), (w, 1), "{w}x{h}");
+        let text = buffer.to_ansi(duscope_treemap::cells::Depth::None);
+        assert_eq!(text.trim_end(), "<summary>", "{w}x{h}");
+    }
+    // From 60×12 the map takes rows − 5 and the four footer rows follow,
+    // leaving the prompt's row.
+    let buffer = frame(&view, &opts, &footer, 60, 12);
+    assert_eq!((buffer.width(), buffer.height()), (60, 11));
+    let text = buffer.to_ansi(duscope_treemap::cells::Depth::None);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[8].trim_end(), "<summary>");
+    assert_eq!(lines[10].trim_end(), "<next>");
+}
+
+#[test]
+fn p1_map_02_color_by_folder_level_and_age_use_the_cycle_and_the_ramp() {
+    use std::time::{Duration, SystemTime};
+
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("colours");
+    fs::create_dir_all(root.join("a")).unwrap();
+    let mib = 1u64 << 20;
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+    let day = Duration::from_secs(86_400);
+    // a/f is two days old, g four hundred.
+    for (name, size, age) in [("a/f", 8 * mib, 2 * day), ("g", 4 * mib, 400 * day)] {
+        let file = fs::File::create(root.join(name)).unwrap();
+        file.set_len(size).unwrap();
+        file.set_modified(now - age).unwrap();
+    }
+    let (arena, rollup) = scan_tree(&root);
+    let view = ArenaView::new(&arena, &rollup, root.clone());
+    let classes = Classes::vendored();
+    let mocha = Pack::named("mocha").unwrap();
+    let base = mocha.roles.base;
+    let now_ns = 2_000_000_000 * 1_000_000_000;
+    // The colours of a 40×10 map, with or without the sibling tint.
+    let painted = |color_by: ColorBy| {
+        let opts = PaintOpts {
+            color_by,
+            now: now_ns,
+            ..opts(&mocha, &classes, Glyphs::Unicode)
+        };
+        let buffer = duscope_treemap::paint::paint(&view, &opts, 40, 10);
+        let cells: Vec<Color> = (0..10)
+            .flat_map(|y| (0..40).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let cell = buffer.get(x, y).unwrap();
+                [cell.fg, cell.bg]
+            })
+            .collect();
+        move |color: Color| cells.contains(&color) || cells.contains(&color.mix(base, 20))
+    };
+    // Folder: a's files take the first top-level folder's colour, g the
+    // second's.
+    let has = painted(ColorBy::Folder);
+    assert!(has(mocha.cycle[0]) && has(mocha.cycle[1]));
+    // Level: g at depth 1, a/f at depth 2.
+    let has = painted(ColorBy::Level);
+    assert!(has(mocha.cycle[1]) && has(mocha.cycle[2]));
+    assert!(!has(mocha.cycle[0]));
+    // Age: a week old at most, and older than a year.
+    let has = painted(ColorBy::Age);
+    assert!(has(mocha.age[1]) && has(mocha.age[4]));
+    assert!(!has(mocha.age[0]) && !has(mocha.age[2]) && !has(mocha.age[3]));
+}
