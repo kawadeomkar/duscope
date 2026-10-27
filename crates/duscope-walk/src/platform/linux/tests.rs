@@ -361,7 +361,7 @@ fn p1_walk_06_mount_classes() {
 fn p1_walk_06_the_fallback_root_has_a_mount_id() {
     let env = TestEnv::new();
     let root = env.fixtures().root();
-    let entry = crate::platform::fallback::FallbackProvider
+    let entry = crate::platform::fallback::FallbackProvider::default()
         .root(&root, &WalkOptions::default())
         .unwrap();
     assert_ne!(entry.mnt_id, 0);
@@ -369,7 +369,9 @@ fn p1_walk_06_the_fallback_root_has_a_mount_id() {
 
 #[test]
 fn p1_walk_06_mount_info_reads_the_mount_table() {
-    let info = super::mounts::mount_info(Path::new("/proc")).unwrap();
+    let info = super::mounts::Mounts::default()
+        .mount_info(Path::new("/proc"))
+        .unwrap();
     assert_eq!(info.class, crate::VolumeClass::Kernel);
     assert_eq!((info.total_bytes, info.free_bytes), (0, 0));
 }

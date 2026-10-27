@@ -307,3 +307,94 @@ fn p1_walk_06_macos_an_exfat_image_is_crossed_and_confined() {
     assert!(!confined.paths.contains(&root.join("exfat/inside")));
     assert_eq!(confined.summary.mounts_excluded, 1);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "bind-mounts and remounts as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p1_walk_06_linux_mount_ids_hold_for_same_device_binds_and_reused_ids() {
+    let env = TestEnv::new();
+    if !platform_tests() {
+        return;
+    }
+    let uid = env.command("id").arg("-u").output().unwrap();
+    if String::from_utf8_lossy(&uid.stdout).trim() != "0" {
+        eprintln!("skipped: mounting needs root");
+        return;
+    }
+    let root = env.tmp_dir().join("platform-ids");
+    for dir in ["src", "plain", "tmpfs"] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    fs::write(root.join("src/inside"), b"bound").unwrap();
+    run(
+        &env,
+        "mount",
+        &[&"-t", &"tmpfs", &"tmpfs", &root.join("tmpfs")],
+    );
+    let _tmpfs = Mounted {
+        env: &env,
+        points: vec![root.join("tmpfs")],
+    };
+    let seen = walk_root(&root, &WalkOptions::default());
+    assert!(
+        seen.volumes
+            .iter()
+            .any(|v| v.mount_point == root.join("tmpfs"))
+    );
+
+    // A sibling bind-mounted on the same device is a mount of its own, also
+    // where statx reports no mount id: the fallback provider looks it up by
+    // path, as kernels before 5.8 need.
+    fs::create_dir_all(root.join("plain/twin")).unwrap();
+    run(
+        &env,
+        "mount",
+        &[&"--bind", &root.join("src"), &root.join("plain/twin")],
+    );
+    let _twin = Mounted {
+        env: &env,
+        points: vec![root.join("plain/twin")],
+    };
+    for fallback in [false, true] {
+        let opts = WalkOptions {
+            one_file_system: true,
+            fallback,
+            ..WalkOptions::default()
+        };
+        let seen = walk_root(&root, &opts);
+        assert_eq!(
+            seen.skipped.get(&root.join("plain/twin")),
+            Some(&Skip::OneFileSystem),
+            "fallback {fallback}"
+        );
+        assert!(
+            !seen.paths.contains(&root.join("plain/twin/inside")),
+            "fallback {fallback}"
+        );
+    }
+
+    // A mount id freed by an unmount goes to the next mount at once; a later
+    // walk in the same process classifies the new mount, not the old one.
+    run(&env, "umount", &[&root.join("tmpfs")]);
+    fs::create_dir_all(root.join("kernel")).unwrap();
+    run(
+        &env,
+        "mount",
+        &[&"-t", &"proc", &"proc", &root.join("kernel")],
+    );
+    let _proc = Mounted {
+        env: &env,
+        points: vec![root.join("kernel")],
+    };
+    let seen = walk_root(&root, &WalkOptions::default());
+    assert_eq!(seen.skipped.get(&root.join("kernel")), Some(&Skip::Kernel));
+    let kernel = seen
+        .volumes
+        .iter()
+        .find(|v| v.mount_point == root.join("kernel"))
+        .unwrap();
+    assert_eq!(
+        (kernel.fs_type.as_str(), kernel.class),
+        ("proc", VolumeClass::Kernel)
+    );
+}

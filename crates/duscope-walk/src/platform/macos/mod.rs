@@ -161,23 +161,21 @@ impl Provider for MacProvider {
                 if opts.clones {
                     self.clones_unavailable.store(true, Ordering::Relaxed);
                 }
-                return FallbackProvider.read_dir_split(dir, opts, out, errs, later);
+                return FallbackProvider::default().read_dir_split(dir, opts, out, errs, later);
             }
             // Listed by name alone; the stat queue reads every entry, on
             // every worker.
             Outcome::IoBound => {
-                for entry in fs::read_dir(dir.path())? {
-                    later.push(NameRef::from(entry?.file_name().as_os_str()));
-                }
+                later.extend(posix::list_names(fd.as_fd())?);
                 return Ok(());
             }
             // Each child is listed as an entry that cannot be read, as `du`
             // and the stat queue report them.
             Outcome::Unsearchable => {
-                for entry in fs::read_dir(dir.path())? {
+                for name in posix::list_names(fd.as_fd())? {
                     errs.push(ScanError {
                         dir: dir.id(),
-                        name: NameRef::from(entry?.file_name().as_os_str()),
+                        name,
                         errno: libc::EACCES,
                     });
                 }
