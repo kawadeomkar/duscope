@@ -5,12 +5,14 @@
   boxes or gutter groups, and files are tiles labelled with their name and
   size where they fit. What is too small to draw is pooled into a
   `+N small` tile. A legend of the file classes, the totals, the first
-  warning and the next commands follow the map.
+  warning and the next commands follow the map; further warnings follow
+  on stderr.
 - `--treemap auto|never|always|pixels`: `always` draws at 80×24 when stdout
   is not a terminal, and `pixels` reports `not_compiled` in this build.
-  `--depth` caps how deep the map is drawn, `--min-tile 1|2|4` raises the
-  smallest tile drawn, and `--pool-files` gathers each directory's files
-  into one tile.
+  `--depth` caps how deep the map is drawn (a folder at the cap keeps its
+  box and title, so `--depth 1` draws one titled box per top-level
+  entry), `--min-tile 1|2|4` raises the smallest tile drawn, and
+  `--pool-files` gathers each directory's files into one tile.
 - `--theme mocha|tokyo-night|dracula|gruvbox|light|terminal-native|no-color`,
   or the path of a TOML theme file (`docs/rules.md`), also through
   `DUSCOPE_THEME`. Without one, a light terminal (`COLORFGBG`) gets the
