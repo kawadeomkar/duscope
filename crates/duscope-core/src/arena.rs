@@ -104,10 +104,23 @@ struct FullRec {
     btime_ns: i64,
     uid: u32,
     gid: u32,
+    /// [`FullRec::ABSENT`]'s `u32::MAX` when the entry came without full
+    /// attributes; `st_mode` fits 16 bits on both platforms, so no real
+    /// mode is that.
     mode: u32,
 }
 
 impl FullRec {
+    /// The record of an entry delivered without full attributes in a full
+    /// scan: read back as `None`, never as owner 0 and a 1970 access time.
+    const ABSENT: FullRec = FullRec {
+        atime_ns: 0,
+        btime_ns: i64::MIN,
+        uid: 0,
+        gid: 0,
+        mode: u32::MAX,
+    };
+
     fn new(full: &FullAttrs) -> FullRec {
         FullRec {
             atime_ns: full.atime_ns,
@@ -118,14 +131,14 @@ impl FullRec {
         }
     }
 
-    fn get(self) -> FullAttrs {
-        FullAttrs {
+    fn get(self) -> Option<FullAttrs> {
+        (self.mode != FullRec::ABSENT.mode).then_some(FullAttrs {
             atime_ns: self.atime_ns,
             btime_ns: (self.btime_ns != i64::MIN).then_some(self.btime_ns),
             mode: self.mode,
             uid: self.uid,
             gid: self.gid,
-        }
+        })
     }
 }
 
@@ -434,16 +447,7 @@ impl Arena {
             rec.depth = depth;
         }
         if self.attrs == Attrs::Full {
-            let rec = entry.full.as_ref().map_or(
-                FullRec {
-                    atime_ns: 0,
-                    btime_ns: i64::MIN,
-                    uid: 0,
-                    gid: 0,
-                    mode: 0,
-                },
-                FullRec::new,
-            );
+            let rec = entry.full.as_ref().map_or(FullRec::ABSENT, FullRec::new);
             self.full.push(rec);
         }
         if idx == 0 {
@@ -531,9 +535,10 @@ impl Arena {
             .unwrap_or_else(|| panic!("no entry {idx:?}"))
     }
 
-    /// The `--attrs full` attributes of `idx`; `None` in a basic scan.
+    /// The `--attrs full` attributes of `idx`; `None` in a basic scan, and
+    /// for an entry the walk delivered without them in a full scan.
     pub fn full(&self, idx: EntryIdx) -> Option<FullAttrs> {
-        self.full.get(idx.index()).map(|rec| rec.get())
+        self.full.get(idx.index()).and_then(|rec| rec.get())
     }
 
     /// The directory record of `dir`.

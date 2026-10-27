@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use duscope_testkit::TestEnv;
 use duscope_walk::{
-    Attrs, Boundary, DirId, Entry, Flags, Kind, NameRef, ScanEvent, Share, WalkOptions, walk,
+    Attrs, Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, ScanEvent, Share, WalkOptions,
+    walk,
 };
 
 use super::{Arena, CHUNK, Chunked, DirRec, EntryIdx, EntryRec, SharedRec};
@@ -142,6 +143,44 @@ fn p1_core_01_depths_and_closes_are_recorded() {
         DirRec::UNREADABLE
     );
     assert_eq!(arena.unreadable().get(&DirId::new(2)), Some(&13));
+}
+
+#[test]
+fn p1_core_01_an_entry_without_full_attributes_reads_as_none() {
+    // In a full scan, an entry the walk delivered without the full set is
+    // not collected (NULL in the index), not owner 0 at the epoch.
+    let full = FullAttrs {
+        atime_ns: 5,
+        btime_ns: None,
+        mode: 0o40755,
+        uid: 501,
+        gid: 20,
+    };
+    let mut arena = Arena::new(Attrs::Full);
+    let mut root = file("root", DirId::ROOT);
+    root.kind = Kind::Dir;
+    root.dir = Some(DirId::ROOT);
+    root.full = Some(full);
+    arena.push(ScanEvent::Entry(root)).unwrap();
+    arena
+        .push(ScanEvent::Entry(file("bare", DirId::ROOT)))
+        .unwrap();
+    let mut zeros = file("zeros", DirId::ROOT);
+    zeros.full = Some(FullAttrs {
+        atime_ns: 0,
+        btime_ns: None,
+        mode: 0,
+        uid: 0,
+        gid: 0,
+    });
+    arena.push(ScanEvent::Entry(zeros.clone())).unwrap();
+    assert_eq!(arena.full(EntryIdx::ROOT), Some(full));
+    assert_eq!(arena.full(EntryIdx(1)), None);
+    assert_eq!(arena.full(EntryIdx(2)), zeros.full, "real zeros stay facts");
+    // A basic scan has none at all.
+    let mut basic = Arena::new(Attrs::Basic);
+    basic.push(ScanEvent::Entry(zeros)).unwrap();
+    assert_eq!(basic.full(EntryIdx::ROOT), None);
 }
 
 fn file(name: &str, parent: DirId) -> Entry {
