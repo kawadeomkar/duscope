@@ -9,7 +9,6 @@
 //! FUSE) have none.
 
 use std::ffi::CString;
-use std::fs;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
@@ -18,13 +17,17 @@ use crate::platform::posix;
 use crate::{DirHandle, Entry, NameRef, Provider, STAT_BATCH, ScanError, VolumeInfo, WalkOptions};
 
 #[cfg(target_os = "linux")]
-use super::linux::{from_stat, mount_info, volume};
+use super::linux::{Mounts, from_stat};
 #[cfg(target_os = "macos")]
 use super::macos::{from_stat, mount_info, volume};
 
 /// The fallback provider.
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct FallbackProvider;
+#[derive(Debug, Default)]
+pub(crate) struct FallbackProvider {
+    /// The mount table, read for this walk: `stat` reports no mount id.
+    #[cfg(target_os = "linux")]
+    mounts: Mounts,
+}
 
 impl Provider for FallbackProvider {
     fn read_dir(
@@ -54,14 +57,11 @@ impl Provider for FallbackProvider {
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        let mut names = Vec::new();
-        for entry in fs::read_dir(dir.path())? {
-            names.push(NameRef::from(entry?.file_name().as_os_str()));
-        }
+        let mut names = posix::list_names(fd.as_fd())?;
         if names.len() > STAT_BATCH {
             later.extend(names.drain(STAT_BATCH..));
         }
-        read_names(fd.as_fd(), dir, &names, opts, out, errs);
+        self.read_names(fd.as_fd(), dir, &names, opts, out, errs);
         Ok(())
     }
 
@@ -74,7 +74,7 @@ impl Provider for FallbackProvider {
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        read_names(fd.as_fd(), dir, names, opts, out, errs);
+        self.read_names(fd.as_fd(), dir, names, opts, out, errs);
         Ok(())
     }
 
@@ -84,10 +84,22 @@ impl Provider for FallbackProvider {
         true
     }
 
+    #[cfg(target_os = "linux")]
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.mounts.volume(path)
+    }
+
+    #[cfg(target_os = "macos")]
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
         volume(path)
     }
 
+    #[cfg(target_os = "linux")]
+    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.mounts.mount_info(path)
+    }
+
+    #[cfg(target_os = "macos")]
     fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
         mount_info(path)
     }
@@ -98,7 +110,7 @@ impl Provider for FallbackProvider {
         let mut entry = from_stat(name, &posix::lstat(&posix::c_path(path)?)?, opts.attrs);
         #[cfg(target_os = "linux")]
         {
-            entry.mnt_id = super::linux::mnt_id_of(path);
+            entry.mnt_id = self.mounts.mnt_id_of(path);
         }
         Ok(entry)
     }
@@ -114,32 +126,37 @@ impl Provider for FallbackProvider {
     }
 }
 
-/// Reads `names` in the directory open on `fd`: an entry or an error each.
-fn read_names(
-    fd: BorrowedFd<'_>,
-    dir: &DirHandle,
-    names: &[NameRef],
-    opts: &WalkOptions,
-    out: &mut Vec<Entry>,
-    errs: &mut Vec<ScanError>,
-) {
-    for name in names {
-        let stat = CString::new(name.as_bytes())
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
-            .and_then(|c_name| posix::lstat_at(fd, &c_name));
-        match stat {
-            Ok(stat) => {
-                #[allow(unused_mut)] // only Linux fills in the mount id
-                let mut entry = from_stat(name.clone(), &stat, opts.attrs);
-                #[cfg(target_os = "linux")]
-                super::linux::fill_mnt_id(&mut entry, dir);
-                out.push(entry);
+impl FallbackProvider {
+    /// Reads `names` in the directory open on `fd`: an entry or an error each.
+    // Only Linux reads the mount table.
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_self))]
+    fn read_names(
+        &self,
+        fd: BorrowedFd<'_>,
+        dir: &DirHandle,
+        names: &[NameRef],
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) {
+        for name in names {
+            let stat = CString::new(name.as_bytes())
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+                .and_then(|c_name| posix::lstat_at(fd, &c_name));
+            match stat {
+                Ok(stat) => {
+                    #[allow(unused_mut)] // only Linux fills in the mount id
+                    let mut entry = from_stat(name.clone(), &stat, opts.attrs);
+                    #[cfg(target_os = "linux")]
+                    self.mounts.fill_mnt_id(&mut entry, dir);
+                    out.push(entry);
+                }
+                Err(e) => errs.push(ScanError {
+                    dir: dir.id(),
+                    name: name.clone(),
+                    errno: e.raw_os_error().unwrap_or(crate::EIO),
+                }),
             }
-            Err(e) => errs.push(ScanError {
-                dir: dir.id(),
-                name: name.clone(),
-                errno: e.raw_os_error().unwrap_or(crate::EIO),
-            }),
         }
     }
 }
@@ -223,6 +240,9 @@ mod tests {
             }
         }
         if cfg!(target_os = "macos") {
+            // stat names no volume, so the fallback's mount id is the
+            // device; the bulk read's is the volume's fsid.
+            entry.mnt_id = 0;
             // ATTR_DIR_LINKCOUNT counts a directory's hard links (1 on
             // APFS); st_nlink also counts its subdirectories.
             if entry.kind == Kind::Dir {
@@ -253,7 +273,7 @@ mod tests {
         };
         let native = crate::platform::native().unwrap();
         let native = seen(&*native, &root, &opts);
-        let fallback = seen(&FallbackProvider, &root, &opts);
+        let fallback = seen(&FallbackProvider::default(), &root, &opts);
         assert!(native.entries.len() > 100_000);
         assert_eq!(native.entries.len(), fallback.entries.len());
         for (path, entry) in &native.entries {

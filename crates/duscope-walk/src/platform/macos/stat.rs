@@ -115,13 +115,18 @@ pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat, attrs: At
         ctime_ns: time(stat.st_ctime, stat.st_ctime_nsec),
         nlink: u32::from(stat.st_nlink),
         dev: bulk::dev(stat.st_dev),
+        // stat names no volume; the device stands in.
+        mnt_id: bulk::dev(stat.st_dev),
         ino: stat.st_ino,
         bsd_flags: stat.st_flags,
         ext_flags: None,
         clone_id: None,
         full: (attrs == Attrs::Full).then(|| FullAttrs {
             atime_ns: time(stat.st_atime, stat.st_atime_nsec),
-            btime_ns: Some(time(stat.st_birthtime, stat.st_birthtime_nsec)),
+            // macOS reports a birth time of 0 where the filesystem keeps
+            // none (devfs, autofs, some network and FUSE volumes).
+            btime_ns: (stat.st_birthtime != 0 || stat.st_birthtime_nsec != 0)
+                .then(|| time(stat.st_birthtime, stat.st_birthtime_nsec)),
             mode: u32::from(stat.st_mode),
             uid: stat.st_uid,
             gid: stat.st_gid,
