@@ -133,6 +133,16 @@ impl DirPattern {
         })
     }
 
+    /// The sort key that puts the most specific pattern first.
+    fn specificity(&self) -> (std::cmp::Reverse<usize>, usize) {
+        let globbed = self
+            .source
+            .split('/')
+            .filter(|part| part.contains(['*', '?', '[', '{', '\\']))
+            .count();
+        (std::cmp::Reverse(self.components.len()), globbed)
+    }
+
     /// Whether the last components of `path` match, the last against the
     /// last.
     fn matches(&self, path: &[&[u8]]) -> bool {
@@ -178,10 +188,11 @@ impl Classes {
     pub fn parse(text: &str, file: &str) -> Result<Classes, CoreError> {
         let parsed: ClassesFile = toml::from_str(text).map_err(|e| toml_error(text, file, &e))?;
         for key in parsed.ext.keys() {
-            if ext(format!("x.{key}").as_bytes()) != *key {
+            if key.is_empty() || ext(format!("x.{key}").as_bytes()) != *key {
                 return Err(rule_error(
                     text,
                     file,
+                    "ext",
                     key,
                     format!("{key:?} is not an extension duscope's ext rule can produce"),
                 ));
@@ -189,10 +200,13 @@ impl Classes {
         }
         let mut dir = Vec::with_capacity(parsed.dir.len());
         for (key, class) in parsed.dir {
-            let pattern =
-                DirPattern::new(&key).map_err(|message| rule_error(text, file, &key, message))?;
+            let pattern = DirPattern::new(&key)
+                .map_err(|message| rule_error(text, file, "dir", &key, message))?;
             dir.push((pattern, class));
         }
+        // The most specific rule is tried first: more path components, then
+        // fewer globbed ones; the sort is stable, so keys break ties.
+        dir.sort_by_key(|(pattern, _)| pattern.specificity());
         Ok(Classes {
             ext: parsed.ext,
             dir,
@@ -480,21 +494,22 @@ impl Caches {
     }
 
     /// The rules as the scanner takes them for `--exclude-caches`: a name
-    /// and the markers it looks for in the directory's parent listing. A
-    /// rule confirmed by an ancestor path compiles to its name alone (the
-    /// one such rule, `DerivedData`, is Xcode's); the `CACHEDIR.TAG` rule is
-    /// the scanner's own check and compiles to nothing.
+    /// and the markers it looks for in the directory's parent listing. Only
+    /// rules confirmed by markers compile. A rule confirmed by an ancestor
+    /// path (the one such rule, `DerivedData`, is Xcode's) has no marker the
+    /// walker could check, and its name alone would exclude every directory
+    /// so named; the `CACHEDIR.TAG` rule is the scanner's own check.
     pub fn compile(&self) -> Vec<duscope_walk::CacheRule> {
         self.rules
             .iter()
             .filter_map(|rule| {
-                let name = Glob::new(rule.name.as_deref()?).ok()?;
-                let markers = match &rule.confirm {
-                    Confirm::Markers(markers) => markers.iter().map(OsString::from).collect(),
-                    Confirm::Under(_) => Vec::new(),
-                    Confirm::CachedirTag => return None,
+                let Confirm::Markers(markers) = &rule.confirm else {
+                    return None;
                 };
-                Some(duscope_walk::CacheRule { name, markers })
+                Some(duscope_walk::CacheRule {
+                    name: Glob::new(rule.name.as_deref()?).ok()?,
+                    markers: markers.iter().map(OsString::from).collect(),
+                })
             })
             .collect()
     }
@@ -514,14 +529,20 @@ fn toml_error(text: &str, file: &str, error: &toml::de::Error) -> CoreError {
     }
 }
 
-/// An invalid rule keyed `key`, with the line of its first occurrence.
-fn rule_error(text: &str, file: &str, key: &str, message: String) -> CoreError {
-    let quoted = format!("\"{key}\"");
+/// An invalid rule keyed `key` in the table `[section]`, with the line that
+/// defines it.
+fn rule_error(text: &str, file: &str, section: &str, key: &str, message: String) -> CoreError {
+    let header = format!("[{section}]");
+    let mut current = String::new();
     let line = text
         .lines()
         .position(|line| {
-            let line = line.trim_start();
-            line.starts_with(&quoted) || line.split(['=', ' ']).next() == Some(key)
+            let line = line.split('#').next().unwrap_or_default().trim();
+            if line.starts_with('[') {
+                current = line.replace(' ', "");
+                return false;
+            }
+            current == header && key_of(line) == Some(key)
         })
         .map_or(1, |index| index + 1);
     CoreError::Rules {
@@ -529,6 +550,16 @@ fn rule_error(text: &str, file: &str, key: &str, message: String) -> CoreError {
         line,
         message,
     }
+}
+
+/// The key a `key = value` line defines: bare, or in double or single
+/// quotes (escapes are not read).
+fn key_of(line: &str) -> Option<&str> {
+    let (quote, rest) = match line.chars().next()? {
+        q @ ('"' | '\'') => (q, &line[1..]),
+        _ => return line.split(['=', ' ', '\t']).next(),
+    };
+    rest.split(quote).next()
 }
 
 #[cfg(test)]
