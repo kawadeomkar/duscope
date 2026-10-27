@@ -98,6 +98,8 @@ fn parked(mut open: impl FnMut() -> libc::c_int) -> io::Result<OwnedFd> {
     let mut parked = Duration::ZERO;
     let mut pause = Duration::from_millis(1);
     loop {
+        #[cfg(test)]
+        calls::other();
         let fd = open();
         if fd >= 0 {
             // SAFETY: `fd` was just returned by `open` and is owned by
@@ -238,8 +240,9 @@ fn set_errno(value: libc::c_int) {
     }
 }
 
-/// Per-thread counts of the calls that read entries, for the tests that
-/// count them: bulk reads, and reads of one entry.
+/// Per-thread counts of the system calls the providers make, for the tests
+/// that count them: bulk reads, reads of one entry, and every other call
+/// a walk makes per directory (opening it, duplicating its descriptor).
 #[cfg(test)]
 // Only the macOS tests count bulk reads.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -249,6 +252,7 @@ pub(crate) mod calls {
     thread_local! {
         pub(crate) static BULK: Cell<usize> = const { Cell::new(0) };
         pub(crate) static ENTRY: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static OTHER: Cell<usize> = const { Cell::new(0) };
     }
 
     pub(crate) fn bulk() {
@@ -259,9 +263,17 @@ pub(crate) mod calls {
         ENTRY.with(|n| n.set(n.get() + 1));
     }
 
-    /// This thread's counts so far: (bulk, entry).
-    pub(crate) fn now() -> (usize, usize) {
-        (BULK.with(Cell::get), ENTRY.with(Cell::get))
+    pub(crate) fn other() {
+        OTHER.with(|n| n.set(n.get() + 1));
+    }
+
+    /// This thread's counts so far: (bulk, entry, other).
+    pub(crate) fn now() -> (usize, usize, usize) {
+        (
+            BULK.with(Cell::get),
+            ENTRY.with(Cell::get),
+            OTHER.with(Cell::get),
+        )
     }
 }
 

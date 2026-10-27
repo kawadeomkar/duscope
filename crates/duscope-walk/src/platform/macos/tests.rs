@@ -568,10 +568,10 @@ fn p1_walk_03_an_unsearchable_directory_lists_its_children_as_errors() {
 }
 
 /// Counts the calls the wrapped provider makes on the walk's threads:
-/// (bulk reads, reads of one entry).
+/// (bulk reads, reads of one entry, other calls).
 struct Counting<'a> {
     inner: &'a MacProvider,
-    calls: std::sync::Mutex<(usize, usize)>,
+    calls: std::sync::Mutex<(usize, usize, usize)>,
 }
 
 impl Counting<'_> {
@@ -582,6 +582,7 @@ impl Counting<'_> {
         let mut calls = self.calls.lock().unwrap();
         calls.0 += after.0 - before.0;
         calls.1 += after.1 - before.1;
+        calls.2 += after.2 - before.2;
         result
     }
 }
@@ -671,7 +672,7 @@ fn p1_walk_05_full_attrs_add_no_calls_per_entry() {
     let count = |attrs| {
         let provider = Counting {
             inner: &MacProvider::new(),
-            calls: std::sync::Mutex::new((0, 0)),
+            calls: std::sync::Mutex::new((0, 0, 0)),
         };
         // One worker: the probe, which can send a directory to the stat
         // queue depending on how busy the machine is, runs only with more.
@@ -683,15 +684,17 @@ fn p1_walk_05_full_attrs_add_no_calls_per_entry() {
         walk_with(&provider, &root, &opts, |_| {}).unwrap();
         provider.calls.into_inner().unwrap()
     };
-    let (basic_bulk, basic_entry) = count(crate::Attrs::Basic);
-    let (full_bulk, full_entry) = count(crate::Attrs::Full);
+    let (basic_bulk, basic_entry, basic_other) = count(crate::Attrs::Basic);
+    let (full_bulk, full_entry, full_other) = count(crate::Attrs::Full);
     // The same reads of single entries (the root, mount points, records
-    // that lack an attribute). Records grow by 44 bytes under --attrs full,
-    // so a big directory takes a few more bulk refills of the same 64 KiB
-    // buffer, and no call of any other kind.
+    // that lack an attribute) and the same opens. Records grow by 44 bytes
+    // under --attrs full, so a big directory takes a few more refills of
+    // the same 64 KiB buffer: 0.4% more on the fixture tree, bounded here
+    // at 5%, which no call per entry could stay under.
     assert_eq!(full_entry, basic_entry);
+    assert_eq!(full_other, basic_other);
     assert!(
-        basic_bulk <= full_bulk && full_bulk * 2 <= basic_bulk * 3,
+        basic_bulk <= full_bulk && full_bulk * 100 <= basic_bulk * 105,
         "bulk reads: {basic_bulk} basic, {full_bulk} full"
     );
 }
