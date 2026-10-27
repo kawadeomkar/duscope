@@ -1,7 +1,7 @@
 //! P1-CORE-03: hard links and clones charged once, `du` parity, and the
 //! same ids charged by every scan of an unchanged tree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use duscope_testkit::TestEnv;
@@ -9,6 +9,8 @@ use duscope_walk::{
     Attrs, Boundary, DirId, Entry, Flags, Kind, NameRef, Normalization, ScanEvent, Share,
     VolumeClass, VolumeInfo, WalkOptions, walk,
 };
+
+use proptest::prelude::*;
 
 use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::rollup::{RollUp, roll_up};
@@ -315,4 +317,483 @@ fn p1_core_03_charging_a_tree_of_hard_links_keeps_4_bytes_a_link() {
             .hardlinks(&arena)
             .all(|g| g.sites.len() == 2 && arena.entry(g.sites[0]).parent == DirId::new(1))
     );
+}
+
+/// A path below the root, as components.
+type PathParts = Vec<Vec<u8>>;
+
+/// A node of a random tree for the order-independence property: what the
+/// walk would report for it.
+#[derive(Debug, Clone)]
+struct Node {
+    path: PathParts,
+    dir: bool,
+    apparent: u64,
+    allocated: u64,
+    mtime: i64,
+    dev: u64,
+    ino: u64,
+    nlink: u32,
+    share: Share,
+    flags: Flags,
+}
+
+/// A random tree: node `i` hangs below one of the directories before it,
+/// and `what` makes it a directory, a plain file, a link of one of four
+/// inodes on two devices (the same inode numbers on both), a clone that
+/// shares every block or no longer does, a link of one of two cloned
+/// inodes, or a file that may share blocks without a clone id.
+fn shared_tree(picks: &[(u16, u8, u16, u8)]) -> Vec<Node> {
+    let mut nodes = vec![Node {
+        path: Vec::new(),
+        dir: true,
+        apparent: 64,
+        allocated: 4096,
+        mtime: 1,
+        dev: 7,
+        ino: 1,
+        nlink: 1,
+        share: Share::None,
+        flags: Flags::empty(),
+    }];
+    let mut dirs = vec![0usize];
+    for (i, &(pick, what, size, group)) in picks.iter().enumerate() {
+        let parent = dirs[usize::from(pick) % dirs.len()];
+        let mut path = nodes[parent].path.clone();
+        // Names sort by their first letter, unique by their index.
+        let mut name = vec![b'a' + u8::try_from(size % 5).unwrap()];
+        name.extend(format!("-{i}").bytes());
+        path.push(name);
+        let size = u64::from(size);
+        let g = u64::from(group % 4);
+        let plain = Node {
+            path,
+            dir: false,
+            apparent: size,
+            allocated: size.div_ceil(512) * 512,
+            mtime: i64::try_from(size).unwrap() - 300,
+            dev: 7,
+            ino: 100 + i as u64,
+            nlink: 1,
+            share: Share::None,
+            flags: Flags::empty(),
+        };
+        let node = match what % 8 {
+            0 | 1 => Node {
+                dir: true,
+                apparent: 64,
+                allocated: 4096,
+                ..plain
+            },
+            2 => plain,
+            3 => Node {
+                dev: 7 + g % 2,
+                ino: 1_000_000 + g / 2,
+                nlink: 4,
+                share: Share::Hardlink,
+                apparent: 1000 * (g + 1),
+                allocated: 4096 * (g + 1),
+                ..plain
+            },
+            4 => Node {
+                share: Share::Clone(1 + g % 3),
+                flags: Flags::MAY_SHARE | Flags::SHARES_ALL,
+                ..plain
+            },
+            5 => Node {
+                share: Share::Clone(1 + g % 3),
+                flags: Flags::MAY_SHARE,
+                ..plain
+            },
+            6 => {
+                // One inode per clone group 1 and 2; every link of an inode
+                // has its sizes and flags.
+                let c = g % 2;
+                let flags = if c == 0 {
+                    Flags::MAY_SHARE | Flags::SHARES_ALL
+                } else {
+                    Flags::MAY_SHARE
+                };
+                Node {
+                    ino: 2_000_000 + c,
+                    nlink: 3,
+                    share: Share::Clone(1 + c),
+                    flags,
+                    apparent: 7000,
+                    allocated: 8192 * (c + 1),
+                    ..plain
+                }
+            }
+            _ => Node {
+                share: Share::MayShare,
+                flags: Flags::MAY_SHARE,
+                ..plain
+            },
+        };
+        if node.dir {
+            dirs.push(nodes.len());
+        }
+        nodes.push(node);
+    }
+    nodes
+}
+
+fn node_entry(node: &Node, parent: DirId, dir: Option<DirId>) -> Entry {
+    Entry {
+        name: NameRef::new(node.path.last().map_or(b"root".as_slice(), Vec::as_slice)),
+        parent,
+        dir,
+        kind: if node.dir { Kind::Dir } else { Kind::File },
+        apparent: node.apparent,
+        allocated: node.allocated,
+        mtime_ns: node.mtime,
+        ctime_ns: node.mtime,
+        nlink: node.nlink,
+        dev: node.dev,
+        ino: node.ino,
+        mnt_id: 7,
+        share: node.share,
+        boundary: Boundary::None,
+        flags: node.flags,
+        full: None,
+    }
+}
+
+/// The walk's events for `nodes`. With seed 0 directories are read in
+/// order and children delivered sorted; otherwise any directory whose
+/// entry is out may be read next and its children come shuffled, with
+/// directory ids handed out in delivery order, as workers would.
+fn shared_events(nodes: &[Node], seed: u64) -> Vec<ScanEvent> {
+    let mut children: BTreeMap<PathParts, Vec<usize>> = BTreeMap::new();
+    for (i, node) in nodes.iter().enumerate().skip(1) {
+        let parent = node.path[..node.path.len() - 1].to_vec();
+        children.entry(parent).or_default().push(i);
+    }
+    let mut rng = seed;
+    // xorshift64: `next(n)` is below n.
+    let mut next = |n: usize| {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        usize::try_from(rng % n as u64).unwrap()
+    };
+    let mut out = vec![ScanEvent::Entry(node_entry(
+        &nodes[0],
+        DirId::ROOT,
+        Some(DirId::ROOT),
+    ))];
+    let mut ids = 1u32;
+    let mut pending = vec![(0usize, DirId::ROOT)];
+    while !pending.is_empty() {
+        let pick = if seed == 0 { 0 } else { next(pending.len()) };
+        let (node, dir) = pending.remove(pick);
+        let mut kids = children.get(&nodes[node].path).cloned().unwrap_or_default();
+        if seed != 0 {
+            for i in (1..kids.len()).rev() {
+                kids.swap(i, next(i + 1));
+            }
+        }
+        for kid in kids {
+            let id = nodes[kid].dir.then(|| {
+                let id = DirId::new(ids);
+                ids += 1;
+                pending.push((kid, id));
+                id
+            });
+            out.push(ScanEvent::Entry(node_entry(&nodes[kid], dir, id)));
+        }
+        out.push(ScanEvent::DirClosed { dir, errno: None });
+    }
+    out
+}
+
+/// A directory's fields after charging: `cum_apparent`, `cum_allocated`,
+/// `max_mtime_ns`, `n_files`, `n_dirs`, the upper-bound flag and
+/// `du_compatible`.
+type DirTotals = (u64, u64, i64, u32, u32, bool, u64);
+
+/// A hard-link or clone group: its device, its inode number or clone id,
+/// and its members, lowest pre-order id first.
+type Group<T> = (u64, u64, Vec<T>);
+
+/// What charging decided, by path, so scans delivered in different orders
+/// compare.
+#[derive(Debug, PartialEq, Eq)]
+struct ByPath {
+    /// Each hard-linked inode's sites; the first is charged.
+    links: Vec<Group<PathParts>>,
+    /// Each clone group's members, and whether each is charged.
+    clones: Vec<Group<(PathParts, bool)>>,
+    uncharged: BTreeSet<PathParts>,
+    dirs: BTreeMap<PathParts, DirTotals>,
+}
+
+/// A rolled-up stream with each entry's path, by scan-order index.
+struct Rolled<'a> {
+    arena: Arena,
+    rollup: RollUp,
+    paths: Vec<PathParts>,
+    node_of: BTreeMap<&'a PathParts, &'a Node>,
+}
+
+impl Rolled<'_> {
+    fn new(nodes: &[Node], stream: Vec<ScanEvent>) -> Rolled<'_> {
+        let mut arena = Arena::new(Attrs::Basic);
+        for event in stream {
+            arena.push(event).unwrap();
+        }
+        let rollup = roll_up(&mut arena);
+        let mut dir_paths: BTreeMap<DirId, PathParts> = BTreeMap::new();
+        let mut paths = Vec::with_capacity(arena.len());
+        for view in arena.entries() {
+            let path = if view.idx == EntryIdx::ROOT {
+                Vec::new()
+            } else {
+                let mut p = dir_paths[&view.parent].clone();
+                p.push(view.name.to_vec());
+                p
+            };
+            if let Some(dir) = view.dir {
+                dir_paths.insert(dir, path.clone());
+            }
+            paths.push(path);
+        }
+        let node_of = nodes.iter().map(|n| (&n.path, n)).collect();
+        Rolled {
+            arena,
+            rollup,
+            paths,
+            node_of,
+        }
+    }
+
+    fn node(&self, i: usize) -> &Node {
+        self.node_of[&self.paths[i]]
+    }
+
+    fn paths_of(&self, members: &[usize]) -> Vec<PathParts> {
+        members.iter().map(|&i| self.paths[i].clone()).collect()
+    }
+
+    /// `members` ordered by pre-order id.
+    fn by_id(&self, mut members: Vec<usize>) -> Vec<usize> {
+        members.sort_by_key(|&i| self.rollup.id_of(idx(i)));
+        members
+    }
+}
+
+fn idx(i: usize) -> EntryIdx {
+    EntryIdx::from_raw(u32::try_from(i).unwrap())
+}
+
+/// What charging should decide, worked out from the tree: a later link of
+/// an inode (by pre-order id) is linked away; a later member of a clone
+/// group, links away left out, is uncharged when it shares every block and
+/// marks its ancestors an upper bound when it does not; so does a file that
+/// may share blocks without a group.
+struct Model {
+    inodes: BTreeMap<(u64, u64), Vec<usize>>,
+    groups: BTreeMap<(u64, u64), Vec<usize>>,
+    linked_away: BTreeSet<usize>,
+    clone_uncharged: BTreeSet<usize>,
+    uncharged: BTreeSet<usize>,
+    markers: Vec<usize>,
+}
+
+impl Model {
+    fn new(rolled: &Rolled<'_>) -> Model {
+        let mut inodes: BTreeMap<(u64, u64), Vec<usize>> = BTreeMap::new();
+        for i in 0..rolled.paths.len() {
+            let node = rolled.node(i);
+            if !node.dir && node.nlink > 1 {
+                inodes.entry((node.dev, node.ino)).or_default().push(i);
+            }
+        }
+        let inodes: BTreeMap<_, _> = inodes
+            .into_iter()
+            .map(|(key, v)| (key, rolled.by_id(v)))
+            .collect();
+        let linked_away: BTreeSet<usize> = inodes.values().flat_map(|v| v[1..].to_vec()).collect();
+        let mut groups: BTreeMap<(u64, u64), Vec<usize>> = BTreeMap::new();
+        let mut markers = Vec::new();
+        for i in 0..rolled.paths.len() {
+            let node = rolled.node(i);
+            match node.share {
+                Share::Clone(id) if !linked_away.contains(&i) => {
+                    groups.entry((node.dev, id)).or_default().push(i);
+                }
+                Share::MayShare => markers.push(i),
+                _ => {}
+            }
+        }
+        let groups: BTreeMap<_, _> = groups
+            .into_iter()
+            .map(|(key, v)| (key, rolled.by_id(v)))
+            .collect();
+        let mut clone_uncharged = BTreeSet::new();
+        for members in groups.values() {
+            for &m in &members[1..] {
+                if rolled.node(m).flags.contains(Flags::SHARES_ALL) {
+                    clone_uncharged.insert(m);
+                } else {
+                    markers.push(m);
+                }
+            }
+        }
+        let uncharged = linked_away.union(&clone_uncharged).copied().collect();
+        Model {
+            inodes,
+            groups,
+            linked_away,
+            clone_uncharged,
+            uncharged,
+            markers,
+        }
+    }
+}
+
+/// Rolls up a stream, checks the charging against the model and every
+/// directory's totals against sums over its subtree, and returns the
+/// decisions by path.
+fn charged_by_path(nodes: &[Node], stream: Vec<ScanEvent>) -> ByPath {
+    let rolled = Rolled::new(nodes, stream);
+    let model = Model::new(&rolled);
+    let (arena, charges, paths) = (&rolled.arena, rolled.rollup.charges(), &rolled.paths);
+    for (i, path) in paths.iter().enumerate() {
+        assert_eq!(
+            charges.charged(idx(i)),
+            !model.uncharged.contains(&i),
+            "{path:?}"
+        );
+    }
+    let links: Vec<Group<PathParts>> = charges
+        .hardlinks(arena)
+        .map(|g| {
+            let sites: Vec<usize> = g.sites.iter().map(|s| s.index()).collect();
+            (g.dev, g.ino, rolled.paths_of(&sites))
+        })
+        .collect();
+    let expected: Vec<Group<PathParts>> = model
+        .inodes
+        .iter()
+        .map(|(&(dev, ino), v)| (dev, ino, rolled.paths_of(v)))
+        .collect();
+    assert_eq!(links, expected, "hard-link sites, lowest id first");
+    let clones: Vec<Group<(PathParts, bool)>> = charges
+        .clones(arena)
+        .map(|g| {
+            let members = g
+                .members
+                .iter()
+                .map(|&m| (paths[m.index()].clone(), charges.charged(m)))
+                .collect();
+            (g.dev, g.clone_id, members)
+        })
+        .collect();
+    let members: Vec<Group<PathParts>> = clones
+        .iter()
+        .map(|(dev, id, m)| (*dev, *id, m.iter().map(|(p, _)| p.clone()).collect()))
+        .collect();
+    let expected: Vec<Group<PathParts>> = model
+        .groups
+        .iter()
+        .map(|(&(dev, id), v)| (dev, id, rolled.paths_of(v)))
+        .collect();
+    assert_eq!(members, expected, "clone groups, lowest id first");
+    ByPath {
+        links,
+        clones,
+        uncharged: model.uncharged.iter().map(|&i| paths[i].clone()).collect(),
+        dirs: checked_dirs(nodes, &rolled, &model),
+    }
+}
+
+/// Every directory's totals, checked against sums over its subtree; and
+/// the root's against the tree's distinct inodes.
+fn checked_dirs(
+    nodes: &[Node],
+    rolled: &Rolled<'_>,
+    model: &Model,
+) -> BTreeMap<PathParts, DirTotals> {
+    let (arena, charges, paths) = (&rolled.arena, rolled.rollup.charges(), &rolled.paths);
+    let mut dirs = BTreeMap::new();
+    for (i, path) in paths.iter().enumerate() {
+        let Some(dir) = arena.entry(idx(i)).dir else {
+            continue;
+        };
+        let inside: Vec<usize> = (0..paths.len())
+            .filter(|&j| paths[j].starts_with(path))
+            .collect();
+        let sum = |leave_out: &BTreeSet<usize>, size: fn(&Node) -> u64| {
+            inside
+                .iter()
+                .filter(|j| !leave_out.contains(j))
+                .map(|&j| size(rolled.node(j)))
+                .sum::<u64>()
+        };
+        let rec = arena.dir(dir);
+        let du = charges.du_compatible(arena, dir);
+        assert_eq!(
+            rec.cum_apparent,
+            sum(&model.linked_away, |n| n.apparent),
+            "cum_apparent of {path:?}"
+        );
+        assert_eq!(
+            rec.cum_allocated,
+            sum(&model.uncharged, |n| n.allocated),
+            "cum_allocated of {path:?}"
+        );
+        assert_eq!(
+            du,
+            sum(&model.linked_away, |n| n.allocated),
+            "du_compatible of {path:?}"
+        );
+        let upper = rec.flags & DirRec::UPPER_BOUND != 0;
+        let marked = model.markers.iter().any(|&m| m != i && inside.contains(&m));
+        assert_eq!(upper, marked, "upper bound of {path:?}");
+        let totals = (
+            rec.cum_apparent,
+            rec.cum_allocated,
+            rec.max_mtime_ns,
+            rec.n_files,
+            rec.n_dirs,
+            upper,
+            du,
+        );
+        dirs.insert(path.clone(), totals);
+    }
+    // The root holds each inode's blocks once: du counts every (dev, ino)
+    // once, and cum_allocated also leaves out the clones that share all
+    // their blocks.
+    let mut distinct: BTreeMap<(u64, u64), u64> = BTreeMap::new();
+    for node in nodes {
+        distinct.insert((node.dev, node.ino), node.allocated);
+    }
+    let distinct: u64 = distinct.values().sum();
+    let cloned_away: u64 = model
+        .clone_uncharged
+        .iter()
+        .map(|&i| rolled.node(i).allocated)
+        .sum();
+    assert_eq!(charges.du_compatible(arena, DirId::ROOT), distinct);
+    assert_eq!(arena.dir(DirId::ROOT).cum_allocated, distinct - cloned_away);
+    dirs
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn p1_core_03_charging_is_independent_of_delivery_order(
+        picks in prop::collection::vec(
+            (any::<u16>(), any::<u8>(), 1u16..5000, any::<u8>()),
+            0..200,
+        ),
+        seed in 1u64..u64::MAX,
+    ) {
+        let nodes = shared_tree(&picks);
+        let sorted = charged_by_path(&nodes, shared_events(&nodes, 0));
+        let shuffled = charged_by_path(&nodes, shared_events(&nodes, seed));
+        prop_assert_eq!(sorted, shuffled);
+    }
 }

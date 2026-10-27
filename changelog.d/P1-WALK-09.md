@@ -3,7 +3,9 @@
 - `scan --exclude GLOB` and `--exclude-from FILE` leave out what matches,
   matched against paths below the root. A pattern starting with `/` is
   anchored at the root, any other matches at every depth, `*` stays within
-  a component and `**` crosses them.
+  a component and `**` crosses them, and a trailing `/` matches
+  directories only. Patterns match names case-sensitively, also on a
+  case-insensitive volume.
 - `--ignore-from FILE` reads gitignore-syntax files, negations
   (`!keep.log`), anchors and directory-only patterns included.
 - `--exclude-caches` keeps the scan out of cache directories: a name from

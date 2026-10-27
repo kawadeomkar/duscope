@@ -72,6 +72,8 @@ regenerable_by = "unknown"
 
 **At scan time.** `scan --exclude-caches` passes each rule confirmed by `markers` to the scanner as a name and its markers. A rule confirmed by `under` is reported by `caches` but not excluded at scan time: the scanner checks a directory's parent listing, not its ancestors' path. The `CACHEDIR.TAG` rule is the scanner's own check: it reads the first 43 bytes of the tag.
 
+So `caches` and `scan --exclude-caches` can disagree on a nested cache. Take `monorepo/tools/scratch/node_modules` with `package.json` in `monorepo/` and none in `scratch/`: `caches` reports it, because the marker is in an ancestor, but `scan --exclude-caches` enters it, because the marker is not in its parent.
+
 ## User theme files
 
 `--theme PATH` (or `DUSCOPE_THEME=PATH`) loads a theme from a TOML file. Every colour is `#rrggbb`. The file has four parts:

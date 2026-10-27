@@ -79,6 +79,30 @@ fn p1_walk_08_a_root_given_as_a_symlink_is_resolved() {
 }
 
 #[test]
+fn p1_walk_08_a_root_link_that_leads_nowhere_fails() {
+    let env = TestEnv::new();
+    let links = env.fixtures().case_root("symlinks");
+    // Dangling: not found (exit 3), as a missing path is.
+    let out = duscope(&env)
+        .args(["scan", "--json"])
+        .arg(links.join("dangling"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let error: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "scan_not_found");
+    // A link to itself: a runtime error, not a scan of the link.
+    let out = duscope(&env)
+        .args(["scan", "--json"])
+        .arg(links.join("self"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "io_error");
+}
+
+#[test]
 fn p1_walk_08_sigint_exits_130_within_200_ms() {
     let env = TestEnv::new();
     let tree = env.fixtures().root();

@@ -12,7 +12,9 @@ The design is fixed by two documents; read the parts a task cites before writing
   nullable field marked `platforms`, never a verb or flag that exists on one OS.
 - Linux and macOS are both first-class: every change builds, tests and benchmarks on both.
 - The scanner never follows symlinks by default, never reads file contents (the 43-byte
-  CACHEDIR.TAG check and explain's FIEMAP ioctl are the only exceptions), never writes.
+  CACHEDIR.TAG check and explain's FIEMAP ioctl are the only exceptions, beside the two system
+  tables that describe the layout: macOS's /usr/share/firmlinks and Linux's
+  /proc/self/mountinfo), never writes.
 - Indexes are immutable snapshots: a rescan writes a new file; nothing edits an index in place.
 - Names are bytes (BLOB in the index); the envelope adds name_raw only for invalid UTF-8.
 - The envelope changes additively only; every list verb's rows are `entries` plus the shared

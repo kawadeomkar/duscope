@@ -39,6 +39,7 @@ gix-ignore = { version = "=0.24.1", default-features = false }
 jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 globset = { version = "=0.4.20", default-features = false }
 libc = "=0.2.191"
+log = "=0.4.34"
 thiserror = "2.0.21"
 
 # Dev-dependencies. 0.x crates are pinned with `=`; crates at 1.0 or later take

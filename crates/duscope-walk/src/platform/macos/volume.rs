@@ -29,10 +29,14 @@ pub(in crate::platform) fn of(path: &Path) -> io::Result<VolumeInfo> {
 /// without asking the volume anything, so its case sensitivity is left
 /// unknown; a path that is not a mount point (a firmlink) is read with
 /// `statfs`. The walk fills in the device.
-pub(in crate::platform) fn mount_info(path: &Path) -> io::Result<VolumeInfo> {
+pub(in crate::platform) fn mount_info(path: &Path, dev: u64) -> io::Result<VolumeInfo> {
     let mounted = ffi::mounted_volumes()?;
     let target = path.as_os_str().as_bytes();
-    match mounted.iter().find(|fs| c_chars(&fs.f_mntonname) == target) {
+    // By identity first: the walk may reach a mount point by another path
+    // (a root holding `..`, or /System/Volumes/Data/Volumes/X for
+    // /Volumes/X), and a statfs of it there could block on a dead server.
+    let by_dev = mounted.iter().find(|fs| ffi::fsid_dev(fs) == dev);
+    match by_dev.or_else(|| mounted.iter().find(|fs| c_chars(&fs.f_mntonname) == target)) {
         Some(fs) => Ok(describe(fs, 0)),
         None => of(path),
     }

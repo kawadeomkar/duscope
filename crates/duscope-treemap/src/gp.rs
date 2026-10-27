@@ -21,27 +21,30 @@ enum Node {
 /// Lays out `items` (`(weight, id)`) by bisection in `area`: a tile per
 /// item, in the order given. A tile may come out zero units wide or tall;
 /// [`crate::layout`] pools those.
+#[must_use]
 pub fn layout_gp(items: &[(u64, usize)], area: Rect) -> Vec<(usize, Rect)> {
     let mut rects = vec![Rect::new(area.x, area.y, 0, 0); items.len()];
     if items.is_empty() {
         return Vec::new();
     }
-    // The balanced tree: nodes[..items.len()] are the leaves.
-    let mut nodes: Vec<(Node, u64)> = items
+    // The balanced tree: nodes[..items.len()] are the leaves. Weights add
+    // up in u128, so even u64::MAX items keep their proportions.
+    let mut nodes: Vec<(Node, u128)> = items
         .iter()
         .enumerate()
-        .map(|(i, &(w, _))| (Node::Leaf(i), w))
+        .map(|(i, &(w, _))| (Node::Leaf(i), u128::from(w)))
         .collect();
     // Smallest weight first, then the oldest node: ties pair in order.
-    let mut heap: BinaryHeap<Reverse<(u64, usize)>> = nodes
+    let mut heap: BinaryHeap<Reverse<(u128, usize)>> = nodes
         .iter()
         .enumerate()
         .map(|(i, &(_, w))| Reverse((w, i)))
         .collect();
     while let (Some(Reverse((w1, first))), Some(Reverse((w2, second)))) = (heap.pop(), heap.pop()) {
         let pair = nodes.len();
-        nodes.push((Node::Pair { first, second }, w1.saturating_add(w2)));
-        heap.push(Reverse((w1.saturating_add(w2), pair)));
+        let weight = w1.saturating_add(w2);
+        nodes.push((Node::Pair { first, second }, weight));
+        heap.push(Reverse((weight, pair)));
     }
     let mut stack = vec![(nodes.len() - 1, area)];
     while let Some((node, rect)) = stack.pop() {
@@ -64,16 +67,18 @@ pub fn layout_gp(items: &[(u64, usize)], area: Rect) -> Vec<(usize, Rect)> {
 
 /// Cuts `rect` for a first child of weight `part` out of `whole`: the first
 /// child's rectangle (right or bottom), then the second's.
-fn cut(rect: Rect, part: u64, whole: u64) -> (Rect, Rect) {
+fn cut(rect: Rect, part: u128, whole: u128) -> (Rect, Rect) {
     let share = |extent: u16| -> u16 {
         let extent = u128::from(extent);
         let size = if whole == 0 {
             extent.div_ceil(2)
         } else {
-            (extent * u128::from(part) + u128::from(whole) / 2) / u128::from(whole)
+            // `part` is at most `whole`: the product overflows only past
+            // 2^47 items of u64::MAX each, and saturates there.
+            extent.saturating_mul(part).saturating_add(whole / 2) / whole
         };
         // At most `extent`, which fits.
-        u16::try_from(size).unwrap_or(u16::MAX)
+        u16::try_from(size.min(extent)).unwrap_or(u16::MAX)
     };
     if rect.w > rect.h {
         let w1 = share(rect.w);

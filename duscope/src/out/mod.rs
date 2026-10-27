@@ -14,7 +14,9 @@ mod units;
 use std::borrow::Cow;
 use std::io::{IsTerminal, Write as _};
 
-use duscope_core::envelope::{ByTypeEntry, Envelope, StaleEntry, TopEntry, TreeEntry, Warning};
+use duscope_core::envelope::{
+    ByTypeEntry, Envelope, ErrorEnvelope, StaleEntry, TopEntry, TreeEntry, Warning,
+};
 use serde::Serialize;
 
 pub use args::{ColorWhen, FormatArg, OutputArgs};
@@ -113,8 +115,13 @@ impl Output {
             Some(TreemapWhen::Never) | None => Format::Table,
             Some(_) => Format::Treemap,
         };
-        let format = format::decide(explicit, env, tty, human)
-            .map_err(|message| Failure::new(Exit::Usage, "usage", message))?;
+        let format = match format::decide(explicit, env, tty, human)
+            .map_err(|message| Failure::new(Exit::Usage, "usage", message))?
+        {
+            // Only scan draws a treemap; the list verbs show their table.
+            Format::Treemap if treemap.is_none() => Format::Table,
+            format => format,
+        };
         let color = if args.no_color {
             Some(ColorWhen::Never)
         } else {
@@ -393,13 +400,28 @@ impl Output {
     /// Reports a failure: the error envelope on stdout under JSON, two
     /// lines on stderr otherwise.
     pub fn failure(&self, failure: &Failure) {
-        if self.is_json() {
-            let envelope = format::error_envelope(failure);
-            // The exit code still reports the failure if stdout is gone.
-            let _ = emit(|out| format::json(out, &envelope));
-        } else {
-            to_stderr(failure);
+        self.report(
+            failure,
+            |envelope| emit(|out| format::json(out, envelope)),
+            to_stderr,
+        );
+    }
+
+    /// Reports `failure` through `write` (the envelope to stdout) or
+    /// `fallback` (stderr). An envelope that cannot be written (a full
+    /// disk, a quota: the stdout that just failed) falls back to stderr, so
+    /// the message is not lost; a closed pipe stays quiet, and the exit code
+    /// reports the failure either way.
+    fn report(
+        &self,
+        failure: &Failure,
+        write: impl FnOnce(&ErrorEnvelope) -> Result<(), Failure>,
+        fallback: impl FnOnce(&Failure),
+    ) {
+        if self.is_json() && write(&format::error_envelope(failure)).is_ok() {
+            return;
         }
+        fallback(failure);
     }
 }
 
@@ -431,8 +453,9 @@ pub fn to_stderr(failure: &Failure) {
 #[cfg(test)]
 mod tests {
     use super::format::EnvVars;
-    use super::{Format, Output, OutputArgs};
+    use super::{Format, FormatArg, Output, OutputArgs};
     use crate::cli::TreemapWhen;
+    use crate::verbs::{Exit, Failure};
 
     #[test]
     fn p1_cli_02_scan_draws_a_treemap_on_a_terminal_and_the_flags_win() {
@@ -456,5 +479,89 @@ mod tests {
         assert_eq!(piped.format, Format::Treemap);
         let piped = Output::decide_with(&none, Some(TreemapWhen::Auto), &env, false).unwrap();
         assert_eq!(piped.format, Format::Plain);
+    }
+
+    #[test]
+    fn p1_cli_02_a_list_verb_asked_for_a_treemap_shows_its_table() {
+        let treemap = OutputArgs {
+            format: Some(FormatArg::Treemap),
+            ..OutputArgs::default()
+        };
+        for tty in [true, false] {
+            let decided = Output::decide_with(&treemap, None, &EnvVars::default(), tty).unwrap();
+            assert_eq!(decided.format, Format::Table);
+        }
+        let env = EnvVars {
+            duscope_format: Some("treemap".to_owned()),
+            ..EnvVars::default()
+        };
+        let none = OutputArgs::default();
+        assert_eq!(
+            Output::decide_with(&none, None, &env, false)
+                .unwrap()
+                .format,
+            Format::Table
+        );
+        // scan still draws it.
+        assert_eq!(
+            Output::decide_with(
+                &treemap,
+                Some(TreemapWhen::Auto),
+                &EnvVars::default(),
+                false
+            )
+            .unwrap()
+            .format,
+            Format::Treemap
+        );
+    }
+
+    #[test]
+    fn p1_cli_02_a_failure_stdout_cannot_take_reaches_stderr() {
+        let json = Output::decide_with(
+            &OutputArgs {
+                json: true,
+                ..OutputArgs::default()
+            },
+            None,
+            &EnvVars::default(),
+            false,
+        )
+        .unwrap();
+        let table =
+            Output::decide_with(&OutputArgs::default(), None, &EnvVars::default(), true).unwrap();
+        let failure = Failure::new(Exit::Runtime, "io_error", "cannot write the output: full");
+        let full = || {
+            Err(Failure::new(
+                Exit::Runtime,
+                "io_error",
+                "cannot write the output: No space left on device",
+            ))
+        };
+        // Under JSON the envelope goes to stdout; when that fails, the
+        // failure goes to stderr instead of nowhere.
+        let reported = |output: &Output, write_ok: bool| {
+            let mut written = None;
+            let mut fallen_back = None;
+            output.report(
+                &failure,
+                |envelope| {
+                    written = Some(envelope.error.code);
+                    if write_ok { Ok(()) } else { full() }
+                },
+                |f| fallen_back = Some(f.message.clone()),
+            );
+            (written, fallen_back)
+        };
+        assert_eq!(reported(&json, true), (Some("io_error"), None));
+        assert_eq!(
+            reported(&json, false),
+            (Some("io_error"), Some(failure.message.clone()))
+        );
+        // The human formats write to stderr only.
+        assert_eq!(
+            reported(&table, true),
+            (None, Some(failure.message.clone()))
+        );
     }
 }
