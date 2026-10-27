@@ -1,34 +1,48 @@
-//! The `duscope` binary. Until the command-line interface lands (P1-CLI-01) it
-//! is a pre-release placeholder that answers `--version` and nothing else.
+//! The `duscope` binary: the command line, the verbs, and the exit codes.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-use std::io::{self, Write};
+mod cli;
+mod verbs;
+
 use std::process::ExitCode;
 
+use clap::Parser;
+
+use cli::Cli;
+
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
-    match (args.next(), args.next()) {
-        (Some(arg), None) if arg == "--version" => print_version(),
-        _ => {
-            eprintln!(
-                "duscope {} is a pre-release placeholder: only `duscope --version` is implemented",
-                env!("CARGO_PKG_VERSION")
-            );
-            ExitCode::from(2)
+    // clap exits on its own for --help, --version (0) and usage errors (2).
+    let cli = Cli::parse();
+    match verbs::run(cli) {
+        Ok(()) => ExitCode::from(verbs::Exit::Success.code()),
+        Err(failure) => {
+            eprintln!("duscope: {}", failure.message);
+            if let Some(hint) = &failure.hint {
+                eprintln!("hint: {hint}");
+            }
+            ExitCode::from(failure.exit.code())
         }
     }
 }
 
-/// Writes the version line to stdout; a closed pipe exits 0 quietly.
-fn print_version() -> ExitCode {
-    let mut stdout = io::stdout().lock();
-    let written =
-        writeln!(stdout, "duscope {}", env!("CARGO_PKG_VERSION")).and_then(|()| stdout.flush());
-    match written {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+#[cfg(test)]
+mod tests {
+    use crate::verbs::Exit;
+
+    #[test]
+    fn p1_cli_01_the_exit_code_table() {
+        let table = [
+            (Exit::Success, 0),
+            (Exit::Runtime, 1),
+            (Exit::Usage, 2),
+            (Exit::NotFound, 3),
+            (Exit::Permission, 4),
+            (Exit::Interrupted, 130),
+        ];
+        for (exit, code) in table {
+            assert_eq!(exit.code(), code, "{exit:?}");
+        }
     }
 }
