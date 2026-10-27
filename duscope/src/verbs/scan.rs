@@ -415,6 +415,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     // it leads to; the envelope keeps the path as given beside it.
     let cwd = std::env::current_dir().unwrap_or_default();
     let ResolvedPath { real: root, .. } = resolve_path(&cwd, &given);
+    unresolved_link(&root, &given)?;
     let mut opts = options(walk_args, excludes)?;
     // Ctrl-C stops the walk; if it has not stopped soon after, the process
     // ends anyway. Nothing is written before a scan completes.
@@ -572,6 +573,27 @@ pub fn report_interrupt() {
     static REPORTED: AtomicBool = AtomicBool::new(false);
     if !REPORTED.swap(true, Ordering::SeqCst) {
         crate::out::stderr_line("duscope: interrupted");
+    }
+}
+
+/// The failure of a root that is still a symbolic link once resolved: one
+/// that leads nowhere (exit 3) or into a loop (a runtime error), where
+/// scanning the link itself would report a few bytes as a success.
+fn unresolved_link(root: &Path, given: &Path) -> Result<(), Failure> {
+    let is_link = std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink());
+    match std::fs::metadata(root) {
+        Err(e) if is_link && e.kind() == io::ErrorKind::NotFound => Err(Failure::new(
+            Exit::NotFound,
+            "scan_not_found",
+            format!("{} is a symbolic link to nothing", given.display()),
+        )
+        .hint("Check where the link points, or scan the directory it should lead to")),
+        Err(e) if is_link => Err(Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!("cannot follow {}: {e}", given.display()),
+        )),
+        _ => Ok(()),
     }
 }
 

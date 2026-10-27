@@ -245,19 +245,17 @@ fn p1_cli_01_a_root_that_is_not_a_directory() {
     assert_eq!(out.status.code(), Some(0), "{footer}");
     assert!(footer.contains(" · 1 files · 0 dirs · "), "{footer}");
     assert!(out.stdout.is_empty());
-    // A symbolic link to a directory, and one that leads nowhere, are
-    // scanned without a crash.
-    for link in ["to-dir", "dangling"] {
-        let out = duscope(&env)
-            .arg("scan")
-            .arg(links.join(link))
-            .output()
-            .unwrap();
-        let footer = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(out.status.code(), Some(0), "{link}: {footer}");
-        assert_eq!(footer.lines().count(), 1, "{link}: {footer}");
-        assert!(footer.contains(" allocated · "), "{link}: {footer}");
-    }
+    // A symbolic link to a directory is scanned without a crash. (One that
+    // leads nowhere is an error: p1_walk_08_a_root_link_that_leads_nowhere_fails.)
+    let out = duscope(&env)
+        .arg("scan")
+        .arg(links.join("to-dir"))
+        .output()
+        .unwrap();
+    let footer = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{footer}");
+    assert_eq!(footer.lines().count(), 1, "{footer}");
+    assert!(footer.contains(" allocated · "), "{footer}");
 }
 
 #[test]
