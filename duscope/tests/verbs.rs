@@ -418,8 +418,22 @@ fn p1_cli_03_by_type_plain_carries_the_share_of_the_root() {
         lines.next(),
         Some("allocated_bytes\tapparent_bytes\tpct_of_root\tfile_count\tclass")
     );
-    let shares: f64 = lines
-        .map(|line| line.split('\t').nth(2).unwrap().parse::<f64>().unwrap())
-        .sum();
-    assert!((shares - 100.0).abs() < 1.0, "{text}");
+    // Each class's share is its bytes over the root's total, which also
+    // holds the directories' own blocks (4 KiB each on ext4, none on APFS).
+    let scan = duscope(&env)
+        .args(["scan", "--json"])
+        .arg(env.fixtures().case_root("extensions"))
+        .output()
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&scan.stdout).unwrap();
+    let total = envelope["scan"]["total_allocated_bytes"].as_f64().unwrap();
+    for line in lines {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let bytes: f64 = fields[0].parse().unwrap();
+        let share: f64 = fields[2].parse().unwrap();
+        assert!(
+            (share - bytes * 100.0 / total).abs() < 0.1,
+            "{line}\n{text}"
+        );
+    }
 }
