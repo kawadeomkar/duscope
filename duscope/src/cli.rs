@@ -239,6 +239,8 @@ pub struct ScanArgs {
     pub treemap: Option<TreemapWhen>,
 
     /// What colours the treemap's tiles
+    ///
+    /// lscolors takes LS_COLORS' *suffix= and ex= (with --attrs full) entries
     #[arg(long, value_enum, value_name = "BY", help_heading = "Output")]
     pub color_by: Option<ColorBy>,
 
@@ -425,7 +427,7 @@ pub enum ColorBy {
     Level,
     /// Age
     Age,
-    /// LS_COLORS
+    /// LS_COLORS, else file class
     Lscolors,
 }
 

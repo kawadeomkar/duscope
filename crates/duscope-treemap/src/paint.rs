@@ -27,7 +27,7 @@
 //! bytes are charged elsewhere (a later hard link, a clone) weighs nothing.
 
 use duscope_core::query::{Node, SizeKind, TreeView, children, classify};
-use duscope_core::rules::{Class, Classes, ext};
+use duscope_core::rules::{Class, Classes};
 
 use crate::cells::{Cell, CellBuffer, Color, lay_out};
 use crate::packs::Pack;
@@ -45,8 +45,42 @@ pub enum ColorBy {
     Level,
     /// The newest modification time, through the pack's age ramp.
     Age,
-    /// `LS_COLORS`' extension colours, the class colour where it has none.
-    LsColors(Vec<(String, Color)>),
+    /// `LS_COLORS`' colours for files, the class colour where it has none
+    /// and for folders.
+    LsColors(LsColors),
+}
+
+/// What `--color-by lscolors` takes from `LS_COLORS`: the colour of
+/// executable files (`ex=`) and of names ending in a suffix (`*suffix=`,
+/// `*.tar.gz=` among them). Folders, and the other keys, keep the pack's
+/// colours.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LsColors {
+    /// `ex=`: a file with an execute bit, when the scan collected modes.
+    pub executable: Option<Color>,
+    /// `*suffix=`, lower-cased, in the order given: as in GNU `ls`, the
+    /// last one that matches wins, and case does not matter.
+    pub suffixes: Vec<(String, Color)>,
+}
+
+impl LsColors {
+    /// The colour `ls` gives a file named `name` with `mode`: `ex=` for an
+    /// executable (which `ls` checks before the suffixes), else the last
+    /// suffix the name ends with.
+    #[must_use]
+    pub fn of(&self, name: &[u8], mode: Option<u32>) -> Option<Color> {
+        if let Some(color) = self.executable
+            && mode.is_some_and(|m| m & 0o111 != 0)
+        {
+            return Some(color);
+        }
+        let name = name.to_ascii_lowercase();
+        self.suffixes
+            .iter()
+            .rev()
+            .find(|(suffix, _)| name.ends_with(suffix.as_bytes()))
+            .map(|&(_, color)| color)
+    }
 }
 
 /// The characters a map is drawn with.
@@ -282,13 +316,10 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
             ColorBy::Folder => pack.cycle[folder.unwrap_or(0) % pack.cycle.len()],
             ColorBy::Level => pack.cycle[depth as usize % pack.cycle.len()],
             ColorBy::Age => pack.age[age_step(self.opts.now, node.max_mtime_ns)],
-            ColorBy::LsColors(table) => {
-                let suffix = ext(node.name);
-                table
-                    .iter()
-                    .find(|(e, _)| *e == suffix)
-                    .map_or_else(|| pack.class(class), |&(_, c)| c)
-            }
+            ColorBy::LsColors(_) if node.is_dir() => pack.class(class),
+            ColorBy::LsColors(table) => table
+                .of(node.name, node.mode)
+                .unwrap_or_else(|| pack.class(class)),
         };
         let color = self.tinted(base, order % 2 == 1);
         self.fill(rect, color, clamp_depth(depth));

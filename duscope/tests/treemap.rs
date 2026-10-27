@@ -13,8 +13,9 @@ use duscope_core::query::{ArenaView, ByTypeQuery, Filters, SizeKind, by_type};
 use duscope_core::rollup::roll_up;
 use duscope_core::rules::{Class, Classes};
 use duscope_testkit::TestEnv;
+use duscope_treemap::cells::Color;
 use duscope_treemap::packs::Pack;
-use duscope_treemap::paint::{ColorBy, Footer, Glyphs, PaintOpts, frame};
+use duscope_treemap::paint::{ColorBy, Footer, Glyphs, LsColors, PaintOpts, frame};
 use duscope_walk::{Attrs, WalkOptions, walk};
 
 fn duscope(env: &TestEnv) -> Command {
@@ -367,4 +368,55 @@ fn p1_map_02_a_terminal_taller_than_the_units_hold_is_capped() {
     let opts = opts(&mocha, &classes, Glyphs::Unicode);
     let buffer = duscope_treemap::paint::paint(&view, &opts, 1, u16::MAX);
     assert_eq!(buffer.height(), u16::MAX / 2);
+}
+
+#[test]
+fn p1_map_02_ls_colors_paint_executables_and_suffixes_but_not_folders() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("ls");
+    fs::create_dir_all(root.join("x.png")).unwrap();
+    let mib = 1u64 << 20;
+    for (name, size) in [
+        ("x.png/data.bin", 8 * mib),
+        ("tool", 4 * mib),
+        ("pic.png", 2 * mib),
+    ] {
+        fs::File::create(root.join(name))
+            .unwrap()
+            .set_len(size)
+            .unwrap();
+    }
+    fs::set_permissions(root.join("tool"), fs::Permissions::from_mode(0o755)).unwrap();
+    // Modes are collected with --attrs full.
+    let mut arena = Arena::new(Attrs::Full);
+    let walk_opts = WalkOptions {
+        attrs: Attrs::Full,
+        ..WalkOptions::default()
+    };
+    walk(&root, &walk_opts, |event| arena.push(event).unwrap()).unwrap();
+    let rollup = roll_up(&mut arena);
+    let view = ArenaView::new(&arena, &rollup, root.clone());
+    let classes = Classes::vendored();
+    let mocha = Pack::named("mocha").unwrap();
+    let (green, red) = (Color::Ansi(2), Color::Ansi(1));
+    let opts = PaintOpts {
+        color_by: ColorBy::LsColors(LsColors {
+            executable: Some(green),
+            suffixes: vec![("png".to_owned(), red)],
+        }),
+        depth: Some(1),
+        ..opts(&mocha, &classes, Glyphs::Unicode)
+    };
+    let buffer = duscope_treemap::paint::paint(&view, &opts, 40, 10);
+    let cells: Vec<Color> = (0..10)
+        .flat_map(|y| (0..40).map(move |x| (x, y)))
+        .map(|(x, y)| buffer.get(x, y).unwrap().bg)
+        .collect();
+    assert!(cells.contains(&green), "the executable takes ex=");
+    assert!(cells.contains(&red), "pic.png takes *png=");
+    // x.png/, the largest tile on the left, is a folder: the pack's colour.
+    let folder = buffer.get(2, 8).unwrap().bg;
+    assert!(matches!(folder, Color::Rgb(..)), "{folder:?}");
 }

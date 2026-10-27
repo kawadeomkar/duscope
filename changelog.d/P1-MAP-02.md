@@ -17,6 +17,10 @@
   light pack and anything else gets Catppuccin Mocha. Colours are 24-bit
   when `COLORTERM` says so and quantised to 256 colours otherwise.
 - `--color-by type|folder|level|age|lscolors` chooses what colours the
-  tiles. Under `NO_COLOR` or `--color never`, tiles are `░▒▓█` shades with
+  tiles. `lscolors` reads the `*suffix=` entries of `LS_COLORS` (`*.png`,
+  `*.tar.gz`, `*README`) and `ex=` for executables (under `--attrs full`,
+  which collects modes); folders and files no entry matches keep their
+  file-class colour, and the other keys (`di=`, `ln=`, `fi=`, …) are not
+  read. Under `NO_COLOR` or `--color never`, tiles are `░▒▓█` shades with
   the class letter in each label, and terminals without UTF-8 get `+-|`
   borders and `#=-+` shades.

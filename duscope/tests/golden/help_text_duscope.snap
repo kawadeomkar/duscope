@@ -96,13 +96,15 @@ Output:
 
       --color-by <BY>
           What colours the treemap's tiles
+          
+          lscolors takes LS_COLORS' *suffix= and ex= (with --attrs full) entries
 
           Possible values:
           - type:     File class
           - folder:   Top-level folder
           - level:    Depth
           - age:      Age
-          - lscolors: LS_COLORS
+          - lscolors: LS_COLORS, else file class
 
       --theme <THEME>
           The colours: a theme name (mocha, dracula, …) or a theme file

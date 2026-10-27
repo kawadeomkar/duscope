@@ -8,7 +8,7 @@ use duscope_core::query::{self, ByTypeQuery, Filters, TreeView, timegrammar};
 use duscope_core::rules::{Class, Classes};
 use duscope_treemap::cells::{Color, Depth};
 use duscope_treemap::packs::Pack;
-use duscope_treemap::paint::{ColorBy, Footer, Glyphs, PaintOpts, frame};
+use duscope_treemap::paint::{ColorBy, Footer, Glyphs, LsColors, PaintOpts, frame};
 
 use super::scan::{self, Scanned};
 use super::{Exit, Failure};
@@ -76,7 +76,9 @@ pub fn draw(
             Some(ColorByArg::Folder) => ColorBy::Folder,
             Some(ColorByArg::Level) => ColorBy::Level,
             Some(ColorByArg::Age) => ColorBy::Age,
-            Some(ColorByArg::Lscolors) => ColorBy::LsColors(ls_colors()),
+            Some(ColorByArg::Lscolors) => {
+                ColorBy::LsColors(ls_colors(&std::env::var("LS_COLORS").unwrap_or_default()))
+            }
         },
         glyphs: if utf8_locale() {
             Glyphs::Unicode
@@ -195,19 +197,25 @@ fn utf8_locale() -> bool {
         })
 }
 
-/// `LS_COLORS`' extension colours (`*.tar=01;31`): the colour of each
-/// extension, from its 8, 16, 256 or 24-bit foreground code.
-fn ls_colors() -> Vec<(String, Color)> {
-    let Ok(spec) = std::env::var("LS_COLORS") else {
-        return Vec::new();
-    };
-    spec.split(':')
-        .filter_map(|entry| {
-            let (pattern, codes) = entry.split_once('=')?;
-            let ext = pattern.strip_prefix("*.")?.to_ascii_lowercase();
-            Some((ext, foreground(codes)?))
-        })
-        .collect()
+/// What `--color-by lscolors` reads of `LS_COLORS`: `ex=` and every
+/// `*suffix=` entry with a foreground colour (8, 16, 256 or 24-bit). The
+/// other keys (`di=`, `ln=`, `fi=`, …) are left to the pack.
+fn ls_colors(spec: &str) -> LsColors {
+    let mut table = LsColors::default();
+    for entry in spec.split(':') {
+        let Some((pattern, codes)) = entry.split_once('=') else {
+            continue;
+        };
+        let Some(color) = foreground(codes) else {
+            continue;
+        };
+        if pattern == "ex" {
+            table.executable = Some(color);
+        } else if let Some(suffix) = pattern.strip_prefix('*').filter(|s| !s.is_empty()) {
+            table.suffixes.push((suffix.to_ascii_lowercase(), color));
+        }
+    }
+    table
 }
 
 /// The foreground colour in an SGR code list.
@@ -256,7 +264,7 @@ fn from_256(n: u8) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{foreground, from_256};
+    use super::{foreground, from_256, ls_colors};
     use duscope_treemap::cells::Color;
 
     #[test]
@@ -267,5 +275,31 @@ mod tests {
         assert_eq!(foreground("38;2;1;2;3"), Some(Color::Rgb(1, 2, 3)));
         assert_eq!(foreground("01"), None);
         assert_eq!(from_256(244), Color::Rgb(128, 128, 128));
+    }
+
+    #[test]
+    fn p1_map_02_ls_colors_takes_executables_and_suffixes() {
+        let table = ls_colors(
+            "di=01;34:ln=01;36:ex=01;32:*.png=38;5;196:*.TXT=01;34:*.tar.gz=01;31:*README=33:*.bad=01:*=31",
+        );
+        assert_eq!(table.executable, Some(Color::Ansi(2)));
+        let red = Color::Rgb(255, 0, 0);
+        assert_eq!(table.of(b"photo.png", None), Some(red));
+        // Case does not matter, and a longer suffix is a suffix like any.
+        assert_eq!(table.of(b"notes.txt", None), Some(Color::Ansi(4)));
+        assert_eq!(table.of(b"src.tar.gz", None), Some(Color::Ansi(1)));
+        assert_eq!(table.of(b"README", None), Some(Color::Ansi(3)));
+        assert_eq!(table.of(b"FOO_README", None), Some(Color::Ansi(3)));
+        // ex= comes before the suffixes for a file with an execute bit;
+        // without a mode (a basic scan) a file is not known to be one.
+        assert_eq!(table.of(b"run.png", Some(0o755)), Some(Color::Ansi(2)));
+        assert_eq!(table.of(b"run.png", Some(0o644)), Some(red));
+        assert_eq!(table.of(b"run", None), None);
+        // An entry without a foreground colour, or an empty suffix, is
+        // left out; the last matching suffix wins.
+        assert_eq!(table.of(b"x.bad", None), None);
+        let later = ls_colors("*.png=31:*png=32");
+        assert_eq!(later.of(b"a.png", None), Some(Color::Ansi(2)));
+        assert_eq!(ls_colors(""), super::LsColors::default());
     }
 }
