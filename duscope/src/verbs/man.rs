@@ -1,7 +1,8 @@
 //! `man`: the manual page, in roff. `clap_mangen` writes the name,
 //! synopsis, description and options from the clap tree, so a new flag
 //! cannot miss the page; the sections `clap` knows nothing of (ENVIRONMENT,
-//! EXIT STATUS, FILES, EXAMPLES) are written by hand beside this file.
+//! EXIT STATUS, FILES, EXAMPLES, CAVEATS) are written by hand beside this
+//! file.
 //! Hidden (test-only) flags are left out.
 //!
 //! Each flag is described once: the scan and output flags `duscope` itself
@@ -23,11 +24,12 @@ use crate::out::emit_bytes;
 const DATE: &str = "2026-10-27";
 
 /// The hand-written sections, in order.
-const SECTIONS: [&str; 4] = [
+const SECTIONS: [&str; 5] = [
     include_str!("man/environment.roff"),
     include_str!("man/exit-status.roff"),
     include_str!("man/files.roff"),
     include_str!("man/examples.roff"),
+    include_str!("man/caveats.roff"),
 ];
 
 /// The help heading of the filters the list verbs share.
@@ -275,6 +277,7 @@ mod tests {
                 "EXIT STATUS",
                 "FILES",
                 "EXAMPLES",
+                "CAVEATS",
                 "VERSION",
             ]
         );

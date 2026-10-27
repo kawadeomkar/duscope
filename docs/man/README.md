@@ -12,6 +12,7 @@ The sections clap knows nothing of are written by hand in roff, in `duscope/src/
 | `exit-status.roff` | EXIT STATUS: the exit codes of the conventions |
 | `files.roff` | FILES: theme files, classes tables, ignore and pattern files |
 | `examples.roff` | EXAMPLES |
+| `caveats.roff` | CAVEATS: where duscope differs from what a `du` user expects (`-x` inside a macOS volume group, `--exclude-caches` markers, case-sensitive patterns) |
 
 They live beside the code rather than in this directory because the published crate ships only its `src/`, and the page is built into the binary. `duscope/src/verbs/man.rs` checks that every visible flag appears in the page and no hidden one does. `mandoc -T lint` checks the roff.
 
