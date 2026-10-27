@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::Duration;
 
@@ -98,14 +98,49 @@ impl Provider for CancelAfter<'_> {
     }
 }
 
+/// Holds each thread's first pass until `threads` threads have passed, or
+/// ten seconds have gone by. A test proves that work reached that many
+/// workers without relying on timing, and a worker that never comes fails
+/// the test's assertion instead of hanging it.
+pub(crate) struct Gate {
+    threads: usize,
+    seen: Mutex<HashSet<ThreadId>>,
+    all: Condvar,
+}
+
+impl Gate {
+    pub(crate) fn new(threads: usize) -> Gate {
+        Gate {
+            threads,
+            seen: Mutex::new(HashSet::new()),
+            all: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn pass(&self) {
+        let mut seen = self.seen.lock().unwrap();
+        if seen.insert(thread::current().id()) {
+            self.all.notify_all();
+            let wait = self
+                .all
+                .wait_timeout_while(seen, Duration::from_secs(10), |seen| {
+                    seen.len() < self.threads
+                });
+            drop(wait.unwrap());
+        }
+    }
+}
+
 /// Lists the first `keep` children of every directory and leaves the rest
-/// for stat batches, recording which threads read the batches. With
-/// `fail_stats`, every batch fails as if its directory had vanished.
+/// for stat batches, recording which threads read the batches. Each
+/// worker's first batch waits at `gate`. With `fail_stats`, every batch
+/// fails as if its directory had vanished.
 struct Splitting<'a> {
     inner: &'a MemProvider,
     keep: usize,
     fail_stats: bool,
     batches: Mutex<Vec<(usize, ThreadId)>>,
+    gate: Gate,
 }
 
 impl Provider for Splitting<'_> {
@@ -147,8 +182,7 @@ impl Provider for Splitting<'_> {
             .lock()
             .unwrap()
             .push((names.len(), thread::current().id()));
-        // Long enough for idle workers to steal the other batches.
-        thread::sleep(Duration::from_millis(2));
+        self.gate.pass();
         if self.fail_stats {
             return Err(io::Error::from_raw_os_error(2));
         }
@@ -479,6 +513,7 @@ fn p1_walk_03_a_wide_directory_is_read_in_batches_by_several_workers() {
         keep: 100,
         fail_stats: false,
         batches: Mutex::new(Vec::new()),
+        gate: Gate::new(4),
     };
     let opts = WalkOptions {
         threads: 4,
@@ -503,7 +538,7 @@ fn p1_walk_03_a_wide_directory_is_read_in_batches_by_several_workers() {
     );
     assert!(batches.iter().all(|&(len, _)| len <= STAT_BATCH));
     let threads: HashSet<ThreadId> = batches.iter().map(|&(_, thread)| thread).collect();
-    assert!(threads.len() > 1, "one worker read every batch");
+    assert_eq!(threads.len(), 4, "every worker read some of the batches");
 }
 
 #[test]
@@ -517,6 +552,7 @@ fn p1_walk_03_a_failed_stat_batch_records_every_name() {
         keep: 0,
         fail_stats: true,
         batches: Mutex::new(Vec::new()),
+        gate: Gate::new(1),
     };
     let opts = WalkOptions {
         threads: 2,

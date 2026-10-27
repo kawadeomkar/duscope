@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::thread::{self, ThreadId};
-use std::time::Duration;
 
 use duscope_testkit::TestEnv;
 
 use super::{LinuxProvider, Mount, dents, parse_mountinfo};
+use crate::tests::Gate;
 use crate::{
     DirHandle, DirId, Entry, Kind, NameRef, Provider, STAT_BATCH, ScanError, ScanEvent, VolumeInfo,
     WalkOptions, walk_with,
@@ -125,6 +125,8 @@ fn p1_walk_02_one_statx_per_entry() {
 struct Threads<'a> {
     inner: &'a LinuxProvider,
     batches: Mutex<Vec<(usize, ThreadId)>>,
+    /// Each worker's first batch waits here until every worker has one.
+    gate: Gate,
 }
 
 impl Provider for Threads<'_> {
@@ -161,9 +163,7 @@ impl Provider for Threads<'_> {
             .lock()
             .unwrap()
             .push((names.len(), thread::current().id()));
-        // A batch of empty files is quick on a warm cache; this keeps the
-        // other workers in the race for the rest.
-        thread::sleep(Duration::from_millis(1));
+        self.gate.pass();
         self.inner.stat_names(dir, names, opts, out, errs)
     }
 
@@ -181,11 +181,12 @@ fn p1_walk_02_a_wide_directory_is_read_by_every_worker() {
     let env = TestEnv::new();
     let root = env.fixtures().case_root("wide-directory");
     let inner = LinuxProvider::new();
+    let workers = 4;
     let provider = Threads {
         inner: &inner,
         batches: Mutex::new(Vec::new()),
+        gate: Gate::new(workers),
     };
-    let workers = 4;
     let opts = WalkOptions {
         threads: workers,
         ..WalkOptions::default()
