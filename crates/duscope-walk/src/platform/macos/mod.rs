@@ -106,7 +106,9 @@ impl MacProvider {
 }
 
 /// The firmlinks of the System volume (`/usr/share/firmlinks`: a source
-/// path and its place on the Data volume per line).
+/// path and its place on the Data volume per line). This system table and
+/// Linux's `/proc/self/mountinfo` are the only files the scanner reads
+/// beside the `CACHEDIR.TAG` check: they describe the layout, not the data.
 fn firmlinks() -> &'static [PathBuf] {
     static FIRMLINKS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     FIRMLINKS.get_or_init(|| {
