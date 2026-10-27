@@ -357,6 +357,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "termlens",
+ "toml",
 ]
 
 [[package]]

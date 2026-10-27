@@ -5,18 +5,18 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use duscope_core::arena::Arena;
-use duscope_core::query::{ArenaView, ByTypeQuery, Filters, SizeKind, by_type};
+use duscope_core::query::{ArenaView, ByTypeQuery, Filters, Node, SizeKind, TreeView, by_type};
 use duscope_core::rollup::roll_up;
 use duscope_core::rules::{Class, Classes};
 use duscope_testkit::TestEnv;
 use duscope_treemap::cells::Color;
 use duscope_treemap::packs::Pack;
 use duscope_treemap::paint::{ColorBy, Footer, Glyphs, LsColors, PaintOpts, frame};
-use duscope_walk::{Attrs, WalkOptions, walk};
+use duscope_walk::{Attrs, Flags, Kind, WalkOptions, walk};
 
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
@@ -511,4 +511,166 @@ fn p1_map_02_color_by_folder_level_and_age_use_the_cycle_and_the_ramp() {
     let has = painted(ColorBy::Age);
     assert!(has(mocha.age[1]) && has(mocha.age[4]));
     assert!(!has(mocha.age[0]) && !has(mocha.age[2]) && !has(mocha.age[3]));
+}
+
+/// The proposal's mockup tree (`tests/fixtures/mockup.toml`) as a view:
+/// the root, then each tile as a directory holding one file of its class.
+struct MockupView {
+    root: PathBuf,
+    /// Each entry in pre-order: name, whether a directory, size.
+    entries: Vec<(Vec<u8>, bool, u64)>,
+}
+
+impl TreeView for MockupView {
+    fn len(&self) -> u32 {
+        u32::try_from(self.entries.len()).unwrap()
+    }
+
+    fn node(&self, id: u32) -> Node<'_> {
+        let (name, dir, size) = &self.entries[id as usize];
+        let last = self.len() - 1;
+        // The root (0), the tiles' directories (odd) and their files (even).
+        let (parent, depth, last_id) = match id {
+            0 => (0, 0, last),
+            _ if id % 2 == 1 => (0, 1, id + 1),
+            _ => (id - 1, 2, id),
+        };
+        Node {
+            id,
+            parent,
+            depth,
+            name,
+            kind: if *dir { Kind::Dir } else { Kind::File },
+            allocated: *size,
+            apparent: *size,
+            file_count: if id == 0 { u64::from(last / 2) } else { 1 },
+            dir_count: u64::from(*dir),
+            mtime_ns: 0,
+            max_mtime_ns: 0,
+            ctime_ns: 0,
+            atime_ns: None,
+            btime_ns: None,
+            mode: None,
+            nlink: 1,
+            charged: true,
+            linked_away: false,
+            flags: Flags::empty(),
+            upper_bound: false,
+            unreadable: false,
+            files_end: if id == 0 { 0 } else { last_id },
+            last_id,
+        }
+    }
+
+    fn root_path(&self) -> &Path {
+        &self.root
+    }
+
+    fn full_attrs(&self) -> bool {
+        false
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Mockup {
+    root: PathBuf,
+    canvas: MockCanvas,
+    tile: Vec<MockTile>,
+}
+
+#[derive(serde::Deserialize)]
+struct MockCanvas {
+    columns: u16,
+    rows: u16,
+}
+
+#[derive(serde::Deserialize)]
+struct MockTile {
+    name: String,
+    bytes: u64,
+    class: String,
+    rect: [u16; 4],
+}
+
+#[test]
+fn p1_map_02_depth_1_paints_the_mockups_eleven_titled_boxes() {
+    let text = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/mockup.toml"
+    ))
+    .unwrap();
+    let mockup: Mockup = toml::from_str(&text).unwrap();
+    // A file of each tile's class: an extension the classes table gives
+    // it, or none for other.
+    let file = |class: &str| -> &[u8] {
+        match class {
+            "code" => b"main.rs",
+            "media" => b"clip.mp4",
+            "archives" => b"a.zip",
+            "data" => b"store.db",
+            "binaries" => b"lib.o",
+            "docs" => b"notes.pdf",
+            _ => b"blob",
+        }
+    };
+    let total = mockup.tile.iter().map(|t| t.bytes).sum();
+    let mut entries = vec![(b"alex".to_vec(), true, total)];
+    for tile in &mockup.tile {
+        entries.push((tile.name.as_bytes().to_vec(), true, tile.bytes));
+        entries.push((file(&tile.class).to_vec(), false, tile.bytes));
+    }
+    let view = MockupView {
+        root: mockup.root.clone(),
+        entries,
+    };
+    let classes = Classes::vendored();
+    let mocha = Pack::named("mocha").unwrap();
+    let opts = PaintOpts {
+        depth: Some(1),
+        size: SizeKind::Allocated,
+        ..opts(&mocha, &classes, Glyphs::Unicode)
+    };
+    let (w, h) = (mockup.canvas.columns, mockup.canvas.rows);
+    let buffer = duscope_treemap::paint::paint(&view, &opts, w, h);
+    let ch = |x: u16, y: u16| buffer.get(x, y).unwrap().ch;
+    assert_eq!(mockup.tile.len(), 11);
+    for (order, tile) in mockup.tile.iter().enumerate() {
+        let [x, y, tw, th] = tile.rect;
+        // The box's whole cell rows inside its half-cell rectangle.
+        let (top, bottom) = (y.div_ceil(2), y.midpoint(th) - 1);
+        let (right, name) = (x + tw - 1, &tile.name);
+        assert_eq!(
+            [ch(x, top), ch(right, top), ch(x, bottom), ch(right, bottom)],
+            ['┌', '┐', '└', '┘'],
+            "{name}"
+        );
+        // The title on the top border: ` name · size `, or the name cut.
+        let title = buffer.get(x + 3, top).unwrap();
+        assert_eq!(Some(title.ch), name.chars().next(), "{name}");
+        assert!(title.bold, "{name}");
+        // Filled with its class's colour, every second box tinted.
+        let class = Class::ALL
+            .into_iter()
+            .find(|c| c.as_str() == tile.class)
+            .unwrap();
+        let mut inside = mocha.class(class);
+        if order % 2 == 1 {
+            inside = inside.mix(mocha.roles.base, 20);
+        }
+        assert_eq!(buffer.get(x + 1, top + 1).unwrap().bg, inside, "{name}");
+    }
+    // Where ` name · size ` is wider than the box less 6, the name alone.
+    let row: String = (0..w).map(|x| ch(x, 0)).collect();
+    assert!(row.contains("┌─ dev/target ──"), "{row}");
+    assert!(row.contains("┌─ Movies ──"), "{row}");
+    // Twice as wide, the whole title fits.
+    let wide = duscope_treemap::paint::paint(&view, &opts, 2 * w, h);
+    let row: String = (0..2 * w).map(|x| wide.get(x, 0).unwrap().ch).collect();
+    assert!(row.contains("┌─ dev/target · 61G ─"), "{row}");
+    // --depth 0 draws as --depth 1.
+    let zero = PaintOpts {
+        depth: Some(0),
+        ..opts.clone()
+    };
+    assert_eq!(duscope_treemap::paint::paint(&view, &zero, w, h), buffer);
 }

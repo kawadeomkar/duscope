@@ -14,6 +14,10 @@
 //!   the rest;
 //! - smaller: a leaf in the colour of the class holding most of its bytes.
 //!
+//! At the `--depth` cap a folder does not open: a box keeps its outline
+//! (and at depth 1 its title, so `--depth 1` draws the proposal's mockup),
+//! filled as a leaf; anything smaller is a leaf.
+//!
 //! Border colours step overlay1, surface2, surface1 by depth. Leaves fill
 //! their tile with their colour, every second sibling mixed 20% toward the
 //! base. A leaf of at least 5 columns is labelled `  name `, and one of at
@@ -103,7 +107,10 @@ pub struct PaintOpts<'a> {
     pub color_by: ColorBy,
     /// The characters.
     pub glyphs: Glyphs,
-    /// `--depth`: folders at this depth are painted as leaves.
+    /// `--depth`: folders at this depth do not open. One large enough for
+    /// a box keeps its outline (and at depth 1 its title), filled as a
+    /// leaf in place of its children; a smaller one is a leaf. 0 counts as
+    /// 1, as `top --depth 0` lists depth 1.
     pub depth: Option<u32>,
     /// `--min-tile`: the smallest tile side drawn, in units.
     pub min_tile: u16,
@@ -164,7 +171,7 @@ pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u
         if root.is_dir() {
             painter.block(&root, area, 0, None);
         } else {
-            painter.leaf(&root, area, 1, 0, None);
+            painter.leaf(&root, area, 1, 0, None, true);
         }
     }
     painter.compose(h)
@@ -224,10 +231,11 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
                 Item::Entry(id) => {
                     let node = self.view.node(id);
                     let folder = folder.or((depth == 0).then_some(order));
-                    if node.is_dir() && self.opts.depth.is_none_or(|cap| node.depth < cap) {
-                        self.folder(&node, tile.rect, folder, tint);
+                    if node.is_dir() {
+                        let open = self.opts.depth.is_none_or(|cap| node.depth < cap.max(1));
+                        self.folder(&node, tile.rect, folder, tint, open);
                     } else {
-                        self.leaf(&node, tile.rect, node.depth, order, folder);
+                        self.leaf(&node, tile.rect, node.depth, order, folder, true);
                     }
                 }
                 Item::Files(dir_id, count) => {
@@ -248,8 +256,16 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
     }
 
     /// Paints directory `node` in `rect`: a box, a gutter group or a leaf,
-    /// by its size in cells.
-    fn folder(&mut self, node: &Node<'_>, rect: Rect, folder: Option<usize>, tint: bool) {
+    /// by its size in cells. A folder that does not `open` (at the
+    /// `--depth` cap) keeps its box, filled as a leaf, or is a leaf.
+    fn folder(
+        &mut self,
+        node: &Node<'_>,
+        rect: Rect,
+        folder: Option<usize>,
+        tint: bool,
+        open: bool,
+    ) {
         let (top, rows) = cell_rows(rect);
         let cols = rect.w;
         let depth = node.depth;
@@ -277,8 +293,13 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
                 cols.saturating_sub(2),
                 rows.saturating_sub(2) * 2,
             );
-            self.block(node, inner, depth, folder);
-        } else if cols >= 3 && rows >= 2 {
+            if open {
+                self.block(node, inner, depth, folder);
+            } else {
+                // The title names a depth-1 box already.
+                self.leaf(node, inner, depth, usize::from(tint), folder, depth > 1);
+            }
+        } else if open && cols >= 3 && rows >= 2 {
             let crust = self.opts.pack.roles.crust;
             self.fill(
                 Rect::new(rect.x, rect.y, rect.w, 1),
@@ -294,11 +315,12 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
             self.block(node, inner, depth, folder);
         } else {
             let order = usize::from(tint);
-            self.leaf(node, rect, depth, order, folder);
+            self.leaf(node, rect, depth, order, folder, true);
         }
     }
 
-    /// Paints `node` as one tile: a file, or a folder too small to open.
+    /// Paints `node` as one tile, labelled when `labelled`: a file, or a
+    /// folder too small to open or at the `--depth` cap.
     fn leaf(
         &mut self,
         node: &Node<'_>,
@@ -306,6 +328,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         depth: u32,
         order: usize,
         folder: Option<usize>,
+        labelled: bool,
     ) {
         let class = if node.is_dir() {
             self.dominant(node.id, false)
@@ -325,6 +348,9 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         };
         let color = self.tinted(base, order % 2 == 1);
         self.fill(rect, color, clamp_depth(depth));
+        if !labelled {
+            return;
+        }
         let mut name = String::from_utf8_lossy(node.name).into_owned();
         if node.is_dir() {
             name.push('/');
