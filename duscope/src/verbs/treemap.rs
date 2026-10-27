@@ -164,7 +164,12 @@ pub fn draw(
     };
     let view = scanned.view();
     let block = scan::scan_block(scanned, &args.walk, size);
-    let root = view.root_path().display().to_string();
+    // The next commands name the tree as it was given, unless it is the
+    // current directory.
+    let here = std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .is_ok_and(|cwd| cwd == scanned.root);
+    let root = (!here).then(|| scanned.root_as_given.to_string_lossy().into_owned());
     // A terminal without UTF-8 gets ASCII separators.
     let dot = match opts.glyphs {
         Glyphs::Unicode => "·",
@@ -176,12 +181,48 @@ pub fn draw(
         warning: scan::warnings(scanned)
             .first()
             .map(|w| format!("warning: {}", w.message)),
-        next: format!(
-            "next: duscope top {root} --depth 2 {dot} duscope by-type {root} {dot} duscope stale {root}"
-        ),
+        next: next_line(root.as_deref(), dot, columns),
     };
     let buffer = frame(&view, &opts, &footer, columns, rows);
     emit_bytes(buffer.to_ansi(*depth).as_bytes())
+}
+
+/// The `next` line: `top`, `by-type` and `stale` of the same tree, each
+/// with `root` (shell-quoted) when the tree is not the current directory;
+/// the ones after the first that do not fit in `width` columns are left
+/// out rather than cut.
+fn next_line(root: Option<&str>, dot: &str, width: u16) -> String {
+    let arg = root
+        .map(|r| format!(" {}", shell_quote(r)))
+        .unwrap_or_default();
+    let commands = [
+        format!("duscope top --depth 2{arg}"),
+        format!("duscope by-type{arg}"),
+        format!("duscope stale{arg}"),
+    ];
+    let mut line = format!("next: {}", commands[0]);
+    for command in &commands[1..] {
+        let more = format!(" {dot} {command}");
+        if line.chars().count() + more.chars().count() > usize::from(width) {
+            break;
+        }
+        line.push_str(&more);
+    }
+    line
+}
+
+/// `text` as one word for a POSIX shell: as it is when it holds only
+/// characters no shell treats specially, single-quoted otherwise.
+fn shell_quote(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./_-".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
 }
 
 /// Each class's share of the scan, largest first, `other` last.
@@ -311,7 +352,7 @@ fn from_256(n: u8) -> Color {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{MapEnv, decide, foreground, from_256, ls_colors};
+    use super::{MapEnv, decide, foreground, from_256, ls_colors, next_line, shell_quote};
     use duscope_treemap::cells::{Color, Depth};
     use duscope_treemap::paint::Glyphs;
 
@@ -427,5 +468,30 @@ mod tests {
         // LS_COLORS is read with the rest.
         let style = decide(None, true, &env(&[("LS_COLORS", "ex=32")])).unwrap();
         assert_eq!(style.ls_colors.executable, Some(Color::Ansi(2)));
+    }
+
+    #[test]
+    fn p1_map_02_next_commands_are_runnable_and_fit() {
+        // In the scanned directory, no path is needed.
+        assert_eq!(
+            next_line(None, "·", 80),
+            "next: duscope top --depth 2 · duscope by-type · duscope stale"
+        );
+        // Elsewhere the path as given, quoted for the shell.
+        assert_eq!(
+            next_line(Some("../my photos"), "-", 120),
+            "next: duscope top --depth 2 '../my photos' - duscope by-type '../my photos' - duscope stale '../my photos'"
+        );
+        // What does not fit is left out, never cut; the first stays.
+        let long = "/Volumes/Archive/projects/2026/clients";
+        let line = next_line(Some(long), "·", 80);
+        assert_eq!(line, format!("next: duscope top --depth 2 {long}"));
+        assert_eq!(
+            next_line(None, "·", 50),
+            "next: duscope top --depth 2 · duscope by-type"
+        );
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote("/tmp/a-b_c.d"), "/tmp/a-b_c.d");
+        assert_eq!(shell_quote(""), "''");
     }
 }
