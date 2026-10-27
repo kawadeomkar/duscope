@@ -126,13 +126,17 @@ fn firmlinks() -> &'static [PathBuf] {
 /// Where the Data volume is mounted in the boot volume group.
 const DATA_MOUNT: &str = "/System/Volumes/Data";
 
-/// The device of the Data volume: the one the firmlinks lead to.
+/// The device of the Data volume: the one the firmlinks lead to, read
+/// the way entries read theirs (`FSOPT_RETURN_REALDEV`), so the two compare
+/// on one definition of a device. `lstat` would give the volume group's
+/// shared `st_dev`, which matches the Data volume's only by coincidence.
 fn data_volume() -> Option<u64> {
     static DATA: OnceLock<Option<u64>> = OnceLock::new();
     *DATA.get_or_init(|| {
+        let opts = WalkOptions::default();
         firmlinks().iter().find_map(|source| {
-            let stat = posix::lstat(&posix::c_path(source).ok()?).ok()?;
-            Some(bulk::dev(stat.st_dev))
+            let name = NameRef::from(source.file_name()?);
+            Some(stat::entry_of_path(source, name, &opts).ok()?.dev)
         })
     })
 }

@@ -253,7 +253,8 @@ mod tests {
         }
         if cfg!(target_os = "macos") {
             // stat names no volume, so the fallback's mount id is the
-            // device; the bulk read's is the volume's fsid.
+            // volume group's shared device; the bulk read's is the
+            // volume's own device (FSOPT_RETURN_REALDEV).
             entry.mnt_id = 0;
             // ATTR_DIR_LINKCOUNT counts a directory's hard links (1 on
             // APFS); st_nlink also counts its subdirectories.
