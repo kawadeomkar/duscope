@@ -65,6 +65,19 @@ pub(crate) fn cancel_on_interrupt(
     posix::signal::cancel_on_interrupt(flag)
 }
 
+/// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn cachedir_tag(dir: &std::path::Path) -> bool {
+    posix::cachedir_tag(dir)
+}
+
+/// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`: not read on
+/// this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn cachedir_tag(_dir: &std::path::Path) -> bool {
+    false
+}
+
 /// Blocks until SIGINT arrives (`true`) or [`stand_down_interrupt`] is
 /// called (`false`).
 #[cfg(any(target_os = "linux", target_os = "macos"))]

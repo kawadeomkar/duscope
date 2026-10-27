@@ -177,6 +177,14 @@ pub trait Provider: Send + Sync {
         Ok((real, entry))
     }
 
+    /// Whether the directory at `dir` holds a valid `CACHEDIR.TAG` (the
+    /// 43-byte signature, in a regular file that is not a link), for
+    /// `--exclude-caches`. The default reads the file system, the one read of
+    /// a file's contents the scanner makes.
+    fn cachedir_tag(&self, dir: &Path) -> bool {
+        platform::cachedir_tag(dir)
+    }
+
     /// The workers a walk runs when [`WalkOptions::threads`] is 0: twice the
     /// logical CPUs, clamped to 4..=32, until the phase-1 thread sweep sets
     /// each platform's default.
@@ -724,7 +732,17 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         let listing = self
             .excludes
             .as_ref()
-            .filter(|e| e.wants_listing())
+            .filter(|e| {
+                // Only when a child directory could be a cache by its name.
+                e.wants_listing()
+                    && e.may_mark(
+                        entries
+                            .iter()
+                            .filter(|entry| entry.kind == Kind::Dir)
+                            .map(|entry| &entry.name)
+                            .chain(later.iter()),
+                    )
+            })
             .map(|_| {
                 let names = entries.iter().map(|e| e.name.clone());
                 let names = names.chain(errors.iter().map(|e| e.name.clone()));
@@ -905,7 +923,10 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     skip = self.decide(dir, entry, &path, &mut adopted.volumes);
                     // The tag is read only in a directory the walk would
                     // enter, so a skipped mount is never touched.
-                    if skip.is_none() && self.excludes.as_ref().is_some_and(|ex| ex.tagged(&path)) {
+                    if skip.is_none()
+                        && self.excludes.as_ref().is_some_and(Excludes::wants_tags)
+                        && self.provider.cachedir_tag(&path)
+                    {
                         adopted.excluded += 1;
                         for volume in &mut adopted.volumes[met..] {
                             volume.reason = Some(Skip::ExcludedCache);
