@@ -26,7 +26,7 @@
 //! control characters shown as escapes (`\x1b`); a file whose
 //! bytes are charged elsewhere (a later hard link, a clone) weighs nothing.
 
-use duscope_core::query::{Node, SizeKind, TreeView, children, root_dirs};
+use duscope_core::query::{Node, SizeKind, TreeView, children, classify};
 use duscope_core::rules::{Class, Classes, ext};
 
 use crate::cells::{Cell, CellBuffer, Color, lay_out};
@@ -134,46 +134,11 @@ pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u
     painter.compose(h)
 }
 
-/// Each entry's class: a directory's is that of the outermost directory
-/// rule above or at it (`Other` when none), the directories above the root
-/// included as `by-type` reads them, a file's that rule's or its
-/// extension's.
+/// Each entry's class by pre-order id, as `by-type` reads it
+/// ([`classify`]), so the tiles agree with the legend.
 fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Class> {
-    let n = view.len() as usize;
-    let mut out = vec![Class::Other; n];
-    if n == 0 {
-        return out;
-    }
-    let root = view.node(0);
-    let (mut components, above) = root_dirs(classes, view.root_path());
-    let mut open: Vec<(u32, Option<Class>)> = vec![(u32::MAX, above)];
-    for id in 0..=root.last_id {
-        let node = view.node(id);
-        while open.last().is_some_and(|&(last, _)| id > last) {
-            open.pop();
-            components.pop();
-        }
-        let inherited = open.last().and_then(|&(_, class)| class);
-        if node.is_dir() {
-            components.push(node.name);
-            let class = inherited.or_else(|| classes.of_dir(&components));
-            open.push((node.last_id, class));
-            out[id as usize] = class.unwrap_or(Class::Other);
-            continue;
-        }
-        out[id as usize] = inherited.unwrap_or_else(|| {
-            let suffix = ext(node.name);
-            if suffix.is_empty() {
-                if node.mode.is_some_and(|m| m & 0o111 != 0) {
-                    Class::Binaries
-                } else {
-                    Class::Other
-                }
-            } else {
-                classes.of_ext(&suffix).unwrap_or(Class::Other)
-            }
-        });
-    }
+    let mut out = vec![Class::Other; view.len() as usize];
+    classify(view, classes, |node, class| out[node.id as usize] = class);
     out
 }
 

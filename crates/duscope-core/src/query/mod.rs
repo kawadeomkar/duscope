@@ -23,7 +23,7 @@ use crate::CoreError;
 use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::rollup::RollUp;
 
-pub use by_type::{ByTypeQuery, by_type, root_dirs};
+pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
 /// The regular expressions `--regex` takes, matched against path bytes.
 pub use regex::bytes::Regex;
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
