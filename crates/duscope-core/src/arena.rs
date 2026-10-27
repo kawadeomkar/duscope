@@ -291,6 +291,16 @@ pub struct Linked {
     pub ino: u64,
 }
 
+/// A hard-linked or cloned file's identity as the arena stores it: 16
+/// bytes, the device an index into the arena's device table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SharedRec {
+    entry: u32,
+    dev: u32,
+    /// The inode number, or the clone id.
+    key: u64,
+}
+
 /// A clone group member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cloned {
@@ -324,9 +334,12 @@ pub struct Arena {
     names: Names,
     /// `--attrs full` records, parallel to `entries` when collected.
     full: Chunked<FullRec>,
-    linked: Vec<Linked>,
-    cloned: Vec<Cloned>,
-    may_share: Vec<EntryIdx>,
+    linked: Chunked<SharedRec>,
+    cloned: Chunked<SharedRec>,
+    may_share: Chunked<EntryIdx>,
+    /// The devices `linked` and `cloned` name, by index.
+    devices: Vec<u64>,
+    device_index: HashMap<u64, u32>,
     crossings: Vec<Crossing>,
     unreadable: HashMap<DirId, i32>,
     skipped: HashMap<DirId, Skip>,
@@ -346,9 +359,11 @@ impl Arena {
             dirs: Chunked::default(),
             names: Names::default(),
             full: Chunked::default(),
-            linked: Vec::new(),
-            cloned: Vec::new(),
-            may_share: Vec::new(),
+            linked: Chunked::default(),
+            cloned: Chunked::default(),
+            may_share: Chunked::default(),
+            devices: Vec::new(),
+            device_index: HashMap::new(),
             crossings: Vec::new(),
             unreadable: HashMap::new(),
             skipped: HashMap::new(),
@@ -435,18 +450,22 @@ impl Arena {
             self.root_mnt_id = entry.mnt_id;
         }
         if !is_dir && entry.nlink > 1 {
-            self.linked.push(Linked {
-                entry: index,
-                dev: entry.dev,
-                ino: entry.ino,
+            let dev = self.device(entry.dev)?;
+            self.linked.push(SharedRec {
+                entry: index.get(),
+                dev,
+                key: entry.ino,
             });
         }
         match entry.share {
-            Share::Clone(clone_id) => self.cloned.push(Cloned {
-                entry: index,
-                dev: entry.dev,
-                clone_id,
-            }),
+            Share::Clone(clone_id) => {
+                let dev = self.device(entry.dev)?;
+                self.cloned.push(SharedRec {
+                    entry: index.get(),
+                    dev,
+                    key: clone_id,
+                });
+            }
             Share::MayShare => self.may_share.push(index),
             Share::None | Share::Hardlink => {}
         }
@@ -537,19 +556,83 @@ impl Arena {
         (0..self.entries.len()).map(|i| self.entry(EntryIdx(u32::try_from(i).unwrap_or(u32::MAX))))
     }
 
-    /// Hard-linked non-directories with their `(dev, ino)`.
-    pub fn linked(&self) -> &[Linked] {
-        &self.linked
+    /// The index of `dev` in the device table, added when new.
+    fn device(&mut self, dev: u64) -> Result<u32, CoreError> {
+        if let Some(&index) = self.device_index.get(&dev) {
+            return Ok(index);
+        }
+        let index = u32::try_from(self.devices.len())
+            .map_err(|_| CoreError::ArenaFull("more than 4 Gi devices"))?;
+        self.devices.push(dev);
+        self.device_index.insert(dev, index);
+        Ok(index)
     }
 
-    /// Clone group members.
-    pub fn cloned(&self) -> &[Cloned] {
-        &self.cloned
+    /// Hard-linked non-directories with their `(dev, ino)`, in scan order.
+    pub fn linked(&self) -> impl Iterator<Item = Linked> + '_ {
+        self.linked.iter().map(|rec| self.as_linked(rec))
+    }
+
+    /// How many hard-linked non-directories there are.
+    pub fn linked_len(&self) -> usize {
+        self.linked.len()
+    }
+
+    /// The `index`th hard-linked non-directory, in scan order.
+    ///
+    /// # Panics
+    ///
+    /// When there are not that many.
+    pub fn linked_at(&self, index: usize) -> Linked {
+        self.as_linked(
+            self.linked
+                .get(index)
+                .unwrap_or_else(|| panic!("no link {index}")),
+        )
+    }
+
+    fn as_linked(&self, rec: &SharedRec) -> Linked {
+        Linked {
+            entry: EntryIdx(rec.entry),
+            dev: self.devices[rec.dev as usize],
+            ino: rec.key,
+        }
+    }
+
+    /// Clone group members, in scan order.
+    pub fn cloned(&self) -> impl Iterator<Item = Cloned> + '_ {
+        self.cloned.iter().map(|rec| self.as_cloned(rec))
+    }
+
+    /// How many clone group members there are.
+    pub fn cloned_len(&self) -> usize {
+        self.cloned.len()
+    }
+
+    /// The `index`th clone group member, in scan order.
+    ///
+    /// # Panics
+    ///
+    /// When there are not that many.
+    pub fn cloned_at(&self, index: usize) -> Cloned {
+        self.as_cloned(
+            self.cloned
+                .get(index)
+                .unwrap_or_else(|| panic!("no clone {index}")),
+        )
+    }
+
+    fn as_cloned(&self, rec: &SharedRec) -> Cloned {
+        Cloned {
+            entry: EntryIdx(rec.entry),
+            dev: self.devices[rec.dev as usize],
+            clone_id: rec.key,
+        }
     }
 
     /// Files whose blocks may be shared without a clone id.
-    pub fn may_share(&self) -> &[EntryIdx] {
-        &self.may_share
+    pub fn may_share(&self) -> impl Iterator<Item = EntryIdx> + '_ {
+        self.may_share.iter().copied()
     }
 
     /// The root and every directory on a boundary, with its device and
@@ -595,9 +678,10 @@ impl Arena {
             + self.dirs.heap_bytes()
             + self.names.heap_bytes()
             + self.full.heap_bytes()
-            + self.linked.capacity() * size_of::<Linked>()
-            + self.cloned.capacity() * size_of::<Cloned>()
-            + self.may_share.capacity() * size_of::<EntryIdx>()
+            + self.linked.heap_bytes()
+            + self.cloned.heap_bytes()
+            + self.may_share.heap_bytes()
+            + self.devices.capacity() * size_of::<u64>()
             + self.crossings.capacity() * size_of::<Crossing>()
             + self.errors.capacity() * size_of::<ScanError>()
             + self.volumes.capacity() * size_of::<VolumeInfo>()
