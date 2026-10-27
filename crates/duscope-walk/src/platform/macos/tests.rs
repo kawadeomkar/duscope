@@ -1046,3 +1046,29 @@ fn p1_walk_04_the_fallback_provider_turns_dataless_downloads_off() {
         ffi::IOPOL_MATERIALIZE_DATALESS_FILES_OFF
     );
 }
+
+#[test]
+fn p1_bench_02_the_default_follows_the_result_file() {
+    // bench/results/clone-attributes-macos.json decides the --clones
+    // default and drops PRIVATESIZE; the scanner must agree with it.
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bench/results/clone-attributes-macos.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let decided_on = text.contains("\"clones_default\": \"on\"");
+    assert!(decided_on || text.contains("\"clones_default\": \"off\""));
+    assert_eq!(WalkOptions::default().clones, decided_on);
+    for attrs in [crate::Attrs::Basic, crate::Attrs::Full] {
+        let opts = WalkOptions {
+            attrs,
+            clones: true,
+            ..WalkOptions::default()
+        };
+        let request = Request::bulk(&opts);
+        assert_eq!(
+            request.attrs.forkattr & libc::ATTR_CMNEXT_PRIVATESIZE,
+            0,
+            "PRIVATESIZE is not asked for"
+        );
+        assert_ne!(request.attrs.forkattr & libc::ATTR_CMNEXT_CLONEID, 0);
+    }
+}
