@@ -3,7 +3,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -227,21 +226,20 @@ fn p1_cli_01_exit_codes() {
 
 #[test]
 fn p1_cli_01_sigpipe_exits_zero() {
+    // The read end closes before the verb writes its line: the write meets
+    // EPIPE, which the binary ends quietly with success. (`--help` would
+    // not do: clap prints it, and it fits in the pipe's buffer.)
     let env = TestEnv::new();
     let mut child = env
         .cmd()
-        .arg("--help")
+        .arg("scan")
+        .arg(env.fixtures().path("home"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut first = String::new();
-    BufReader::new(child.stdout.take().unwrap())
-        .read_line(&mut first)
-        .unwrap();
-    // The read end closes here, with the rest unread.
+    drop(child.stdout.take());
     let out = child.wait_with_output().unwrap();
-    assert!(!first.is_empty());
     assert_eq!(out.status.code(), Some(0));
     assert!(
         out.stderr.is_empty(),
