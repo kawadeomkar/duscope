@@ -40,6 +40,8 @@ jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-s
 globset = { version = "=0.4.20", default-features = false }
 libc = "=0.2.191"
 thiserror = "2.0.21"
+# Default features off: no `cjk`, whose ambiguous-width variant the map does not use.
+unicode-width = { version = "=0.2.2", default-features = false }
 
 # Dev-dependencies. 0.x crates are pinned with `=`; crates at 1.0 or later take
 # the caret range with Cargo.lock as the real pin.
