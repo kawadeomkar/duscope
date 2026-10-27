@@ -51,6 +51,11 @@ pub struct WalkOptions {
     pub exclude_caches: Vec<CacheRule>,
     /// Set to stop the walk. Workers poll it once per directory.
     pub cancel: Arc<AtomicBool>,
+    /// Read APFS's private size into [`FullAttrs::private_size`] under
+    /// `--attrs full` (a hidden flag until P1-BENCH-02 measures its cost).
+    ///
+    /// [`FullAttrs::private_size`]: crate::FullAttrs::private_size
+    pub private_size: bool,
     /// Read every directory with the fallback provider, `readdir` and
     /// `fstatat`, instead of this platform's own (`--provider fallback`, a
     /// hidden flag for tests).
@@ -70,6 +75,7 @@ impl Default for WalkOptions {
             excludes: GlobSet::empty(),
             exclude_caches: Vec::new(),
             cancel: Arc::default(),
+            private_size: false,
             fallback: false,
         }
     }

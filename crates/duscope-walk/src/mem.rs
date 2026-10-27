@@ -202,6 +202,7 @@ impl Node {
                 mode,
                 uid: 1000,
                 gid: 1000,
+                private_size: None,
             }),
         }
     }

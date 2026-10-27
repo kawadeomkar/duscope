@@ -220,6 +220,9 @@ fn replay(root: &Path, events: &[ScanEvent]) -> (Vec<PathBuf>, HashMap<DirId, Pa
                 assert!(dirs.contains_key(dir), "{dir:?} closed before it was seen");
                 assert!(closed.insert(*dir), "{dir:?} closed twice");
             }
+            ScanEvent::Skipped { dir, .. } => {
+                assert!(dirs.contains_key(dir), "{dir:?} skipped before it was seen");
+            }
             ScanEvent::Error(_) | ScanEvent::Vanished { .. } | ScanEvent::Volume(_) => {}
         }
     }
@@ -284,6 +287,8 @@ proptest! {
                 dirs: u64::from(DIRS),
                 unreadable_dirs: 0,
                 entry_errors: 0,
+                skipped_dirs: 0,
+                clones_unavailable: false,
                 threads,
             });
         }
@@ -533,4 +538,70 @@ fn p1_walk_03_a_failed_stat_batch_records_every_name() {
         .filter(|e| matches!(e, ScanEvent::Error(ScanError { errno: 2, .. })))
         .count();
     assert_eq!(errors, 1);
+}
+
+/// Skips every directory named `skipped`.
+struct Skipping<'a> {
+    inner: &'a MemProvider,
+}
+
+impl Provider for Skipping<'_> {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        assert!(
+            !dir.path().ends_with("skipped"),
+            "a skipped directory was read"
+        );
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn skip(&self, _dir: &DirHandle, entry: &Entry, _opts: &WalkOptions) -> Option<Skip> {
+        (entry.name.as_bytes() == b"skipped").then_some(Skip::Firmlinked)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+}
+
+#[test]
+fn p1_walk_07_a_skipped_directory_is_listed_not_entered() {
+    let mut tree = MemProvider::new("/mem");
+    tree.file("a/skipped/inside", 10).file("a/kept/inside", 10);
+    let provider = Skipping { inner: &tree };
+    let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+    let summary = result.unwrap();
+    let (paths, dirs) = replay(tree.root_path(), &events);
+    assert!(paths.contains(&PathBuf::from("/mem/a/skipped")));
+    assert!(!paths.contains(&PathBuf::from("/mem/a/skipped/inside")));
+    assert!(paths.contains(&PathBuf::from("/mem/a/kept/inside")));
+    assert_eq!(summary.skipped_dirs, 1);
+    // Skipped, then closed with no error, right after its parent's entries.
+    let skipped = id_of(&dirs, "/mem/a/skipped");
+    let at = events
+        .iter()
+        .position(|e| {
+            *e == ScanEvent::Skipped {
+                dir: skipped,
+                reason: Skip::Firmlinked,
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        events[at + 1],
+        ScanEvent::DirClosed {
+            dir: skipped,
+            errno: None
+        }
+    );
+    assert_eq!(Skip::Firmlinked.as_str(), "firmlinked");
 }

@@ -149,6 +149,7 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
             mode: u32::from(stx.stx_mode),
             uid: stx.stx_uid,
             gid: stx.stx_gid,
+            private_size: None,
         }),
     }
 }
@@ -182,6 +183,7 @@ pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat, attrs: At
             mode: stat.st_mode,
             uid: stat.st_uid,
             gid: stat.st_gid,
+            private_size: None,
         }),
     }
 }

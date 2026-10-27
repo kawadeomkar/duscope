@@ -17,6 +17,9 @@ use libc::attrgroup_t;
 use super::ffi::{self, AttrBuf};
 use crate::{Attrs, Boundary, Entry, Flags, FullAttrs, Kind, NameRef, Share, WalkOptions};
 
+/// The filesystem whose entries carry clone ids.
+pub(super) const CLONE_FS: &str = "apfs";
+
 /// The bulk buffer: Apple's `fts` uses 32 KiB, dumac 128 KB.
 pub(super) const BUFFER_BYTES: usize = 64 * 1024;
 
@@ -102,7 +105,12 @@ impl Request {
             bulk: false,
         };
         if opts.clones {
-            request.attrs.forkattr = CLONES;
+            request.attrs.forkattr |= CLONES;
+        }
+        if opts.private_size && opts.attrs == Attrs::Full {
+            request.attrs.forkattr |= libc::ATTR_CMNEXT_PRIVATESIZE;
+        }
+        if request.attrs.forkattr != 0 {
             request.options |= libc::FSOPT_ATTR_CMN_EXTENDED;
         }
         if opts.attrs == Attrs::Full {
@@ -168,6 +176,7 @@ pub(super) struct Record<'a> {
     pub(super) alloc: u64,
     pub(super) len: u64,
     pub(super) data_alloc: u64,
+    pub(super) private_size: u64,
     pub(super) clone_id: u64,
     pub(super) ext_flags: u64,
 }
@@ -189,6 +198,7 @@ pub(super) enum Decoded {
 const COMMON_GROUP: usize = 0;
 const DIR_GROUP: usize = 2;
 const FILE_GROUP: usize = 3;
+const FORK_GROUP: usize = 4;
 
 impl Record<'_> {
     fn has(&self, group: usize, attrs: attrgroup_t) -> bool {
@@ -231,6 +241,11 @@ impl Record<'_> {
         if !complete {
             return Err((name, None));
         }
+        // A firmlink's record describes the link on the System volume; read
+        // by name, it resolves to the directory it shows on the Data volume.
+        if request.bulk && self.flags & ffi::SF_FIRMLINK != 0 {
+            return Err((name, Some(Boundary::Firmlink)));
+        }
         // A bulk read does not cross mounts: a mount point's record describes
         // the directory beneath it, not the mounted root.
         if request.bulk
@@ -251,6 +266,12 @@ impl Record<'_> {
             dev: dev(self.dev),
             ino: self.ino,
             bsd_flags: self.flags,
+            ext_flags: self
+                .has(FORK_GROUP, libc::ATTR_CMNEXT_EXT_FLAGS)
+                .then_some(self.ext_flags),
+            clone_id: self
+                .has(FORK_GROUP, libc::ATTR_CMNEXT_CLONEID)
+                .then_some(self.clone_id),
             full: request.full().then(|| FullAttrs {
                 atime_ns: self.atime.ns(),
                 btime_ns: self
@@ -259,6 +280,9 @@ impl Record<'_> {
                 mode: mode(kind, self.access),
                 uid: self.uid,
                 gid: self.gid,
+                private_size: self
+                    .has(FORK_GROUP, libc::ATTR_CMNEXT_PRIVATESIZE)
+                    .then_some(self.private_size),
             }),
         }))
     }
@@ -313,6 +337,10 @@ pub(super) struct Fields {
     pub(super) ino: u64,
     /// `st_flags` / `ATTR_CMN_FLAGS`.
     pub(super) bsd_flags: u32,
+    /// `ATTR_CMNEXT_EXT_FLAGS` and `ATTR_CMNEXT_CLONEID`, when they were
+    /// asked for (`--clones`) and returned.
+    pub(super) ext_flags: Option<u64>,
+    pub(super) clone_id: Option<u64>,
     /// The `--attrs full` attributes, when they were asked for.
     pub(super) full: Option<FullAttrs>,
 }
@@ -331,6 +359,8 @@ pub(super) fn build(fields: Fields) -> Entry {
         dev,
         ino,
         bsd_flags,
+        ext_flags,
+        clone_id,
         full,
     } = fields;
     // Devices, sockets and pipes hold no blocks of their own.
@@ -338,13 +368,27 @@ pub(super) fn build(fields: Fields) -> Entry {
         Kind::Socket | Kind::Fifo | Kind::Char | Kind::Block => 0,
         _ => allocated,
     };
-    let share = if kind != Kind::Dir && nlink > 1 {
+    let ext = ext_flags.unwrap_or(0);
+    let mut flags = Flags::empty();
+    flags.set(Flags::DATALESS, bsd_flags & ffi::SF_DATALESS != 0);
+    flags.set(Flags::COMPRESSED, bsd_flags & libc::UF_COMPRESSED != 0);
+    flags.set(Flags::SPARSE, ext & ffi::EF_IS_SPARSE != 0);
+    flags.set(Flags::PURGEABLE, ext & ffi::EF_IS_PURGEABLE != 0);
+    flags.set(Flags::MAY_SHARE, ext & ffi::EF_MAY_SHARE_BLOCKS != 0);
+    flags.set(Flags::SHARES_ALL, ext & ffi::EF_SHARES_ALL_BLOCKS != 0);
+    // A clone id names a group only where the blocks may be shared; every
+    // APFS file has one, cloned or not.
+    let share = if kind == Kind::Dir {
+        Share::None
+    } else if flags.contains(Flags::MAY_SHARE) {
+        clone_id
+            .filter(|&id| id != 0)
+            .map_or(Share::MayShare, Share::Clone)
+    } else if nlink > 1 {
         Share::Hardlink
     } else {
         Share::None
     };
-    let mut flags = Flags::empty();
-    flags.set(Flags::DATALESS, bsd_flags & ffi::SF_DATALESS != 0);
     Entry {
         name,
         parent: crate::DirId::ROOT,
@@ -507,6 +551,9 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
         }
     }
     let fork = attrs.forkattr;
+    if fork & libc::ATTR_CMNEXT_PRIVATESIZE != 0 {
+        r.private_size = c.u64()?;
+    }
     if fork & libc::ATTR_CMNEXT_CLONEID != 0 {
         r.clone_id = c.u64()?;
     }

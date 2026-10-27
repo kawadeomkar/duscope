@@ -3,6 +3,10 @@
 //! platform providers, less what only their calls report: the mount id and
 //! the attribute flags on Linux, the clone ids on macOS. macOS reads a
 //! filesystem that refuses bulk reads through it.
+//!
+//! On macOS it reads no clone ids or extended flags, which only
+//! `getattrlist` returns: the filesystems that refuse bulk reads (SMB,
+//! FUSE) have none.
 
 use std::ffi::CString;
 use std::fs;
@@ -74,6 +78,12 @@ impl Provider for FallbackProvider {
         Ok(())
     }
 
+    /// Clone ids are read only on APFS; on Linux, `explain --clones` finds
+    /// shared extents on demand.
+    fn clones_unavailable(&self, _opts: &WalkOptions) -> bool {
+        true
+    }
+
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
         volume(path)
     }
@@ -134,7 +144,8 @@ mod tests {
 
     use super::FallbackProvider;
     use crate::{
-        Boundary, DirId, Entry, Flags, Kind, Provider, ScanEvent, WalkOptions, walk, walk_with,
+        Boundary, DirId, Entry, Flags, Kind, Provider, ScanEvent, Share, WalkOptions, walk,
+        walk_with,
     };
 
     /// What a walk saw: entries by path, scan errors by path, and the
@@ -199,10 +210,23 @@ mod tests {
                 entry.boundary = Boundary::None;
             }
         }
-        if cfg!(target_os = "macos") && entry.kind == Kind::Dir {
-            // ATTR_DIR_LINKCOUNT counts the directory's hard links (1 on
+        if cfg!(target_os = "macos") {
+            // ATTR_DIR_LINKCOUNT counts a directory's hard links (1 on
             // APFS); st_nlink also counts its subdirectories.
-            entry.nlink = 0;
+            if entry.kind == Kind::Dir {
+                entry.nlink = 0;
+            }
+            // stat carries neither clone ids nor the extended flags.
+            entry
+                .flags
+                .remove(Flags::SPARSE | Flags::PURGEABLE | Flags::MAY_SHARE | Flags::SHARES_ALL);
+            if matches!(entry.share, Share::Clone(_) | Share::MayShare) {
+                entry.share = if entry.nlink > 1 {
+                    Share::Hardlink
+                } else {
+                    Share::None
+                };
+            }
         }
         entry
     }

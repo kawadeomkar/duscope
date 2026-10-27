@@ -176,6 +176,11 @@ pub struct FullAttrs {
     pub uid: u32,
     /// Owner group id.
     pub gid: u32,
+    /// The bytes freeing the file would return, its clone-shared blocks
+    /// left out (APFS `ATTR_CMNEXT_PRIVATESIZE`); read only under
+    /// [`WalkOptions::private_size`](crate::WalkOptions::private_size), a
+    /// hidden option until P1-BENCH-02 measures its cost.
+    pub private_size: Option<u64>,
 }
 
 /// One directory entry, as a provider reads it.
@@ -239,6 +244,8 @@ pub struct VolumeInfo {
 /// The first event is the root's entry. After that a directory's entries
 /// arrive after the entry of the directory itself, and its `DirClosed`
 /// arrives after its entries, so the sink always knows an entry's parent.
+/// A directory the walk does not enter gets `Skipped`, then its `DirClosed`,
+/// after its entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanEvent {
     /// An entry.
@@ -260,4 +267,28 @@ pub enum ScanEvent {
     Volume(VolumeInfo),
     /// An entry that was listed but could not be read.
     Error(ScanError),
+    /// `dir` was listed but not entered; its `DirClosed` follows.
+    Skipped {
+        /// The directory.
+        dir: DirId,
+        /// Why it was not entered.
+        reason: Skip,
+    },
+}
+
+/// Why the walk listed a directory without entering it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Skip {
+    /// macOS: the Data volume's mount point, in a scan that reaches the
+    /// volume through its firmlinks.
+    Firmlinked,
+}
+
+impl Skip {
+    /// The reason as the index and the envelope spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Skip::Firmlinked => "firmlinked",
+        }
+    }
 }

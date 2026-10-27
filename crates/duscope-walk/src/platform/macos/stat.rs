@@ -117,12 +117,15 @@ pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat, attrs: At
         dev: bulk::dev(stat.st_dev),
         ino: stat.st_ino,
         bsd_flags: stat.st_flags,
+        ext_flags: None,
+        clone_id: None,
         full: (attrs == Attrs::Full).then(|| FullAttrs {
             atime_ns: time(stat.st_atime, stat.st_atime_nsec),
             btime_ns: Some(time(stat.st_birthtime, stat.st_birthtime_nsec)),
             mode: u32::from(stat.st_mode),
             uid: stat.st_uid,
             gid: stat.st_gid,
+            private_size: None,
         }),
     })
 }

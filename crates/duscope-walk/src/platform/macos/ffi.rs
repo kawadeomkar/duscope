@@ -14,9 +14,17 @@ use libc::{attrgroup_t, c_int};
 /// `ATTR_CMN_ERROR`: a per-entry error in a bulk read (`<sys/attr.h>`).
 pub(super) const ATTR_CMN_ERROR: attrgroup_t = 0x2000_0000;
 
-/// `SF_DATALESS`: a placeholder whose data is not on the disk
+/// `SF_FIRMLINK`: the entry is a firmlink into the Data volume
 /// (`<sys/stat.h>`).
+pub(super) const SF_FIRMLINK: u32 = 0x0080_0000;
+/// `SF_DATALESS`: a placeholder whose data is not on the disk.
 pub(super) const SF_DATALESS: u32 = 0x4000_0000;
+
+/// The extended flags of `ATTR_CMNEXT_EXT_FLAGS` (`<sys/stat.h>`).
+pub(super) const EF_MAY_SHARE_BLOCKS: u64 = 0x0000_0001;
+pub(super) const EF_IS_PURGEABLE: u64 = 0x0000_0008;
+pub(super) const EF_IS_SPARSE: u64 = 0x0000_0010;
+pub(super) const EF_SHARES_ALL_BLOCKS: u64 = 0x0000_0040;
 
 /// The vnode types of `ATTR_CMN_OBJTYPE` (`enum vtype`, `<sys/vnode.h>`).
 pub(super) const VREG: u32 = 1;
@@ -220,5 +228,15 @@ pub(super) fn statfs(path: &CStr) -> io::Result<libc::statfs> {
     // `struct statfs`.
     retry(|| unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) })?;
     // SAFETY: statfs succeeded, so it filled the struct.
+    Ok(unsafe { stat.assume_init() })
+}
+
+/// `fstatfs(2)` of the volume holding the file open on `fd`.
+pub(super) fn fstatfs(fd: BorrowedFd<'_>) -> io::Result<libc::statfs> {
+    let mut stat = MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `fd` is open for the borrow and `stat` is writable for one
+    // `struct statfs`.
+    retry(|| unsafe { libc::fstatfs(fd.as_raw_fd(), stat.as_mut_ptr()) })?;
+    // SAFETY: fstatfs succeeded, so it filled the struct.
     Ok(unsafe { stat.assume_init() })
 }
