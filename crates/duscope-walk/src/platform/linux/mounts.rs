@@ -204,10 +204,15 @@ impl Mounts {
         };
     }
 
-    /// The volume mounted at `path` from its mountinfo line alone, sizes 0:
-    /// the mounted filesystem is not asked anything (`statx` with
-    /// `AT_NO_AUTOMOUNT` and `AT_STATX_DONT_SYNC` reads only what the
-    /// kernel holds).
+    /// The volume mounted at `path` from its mountinfo line, the mounted
+    /// filesystem asked nothing (`statx` with `AT_NO_AUTOMOUNT` and
+    /// `AT_STATX_DONT_SYNC` reads only what the kernel holds); the sizes of
+    /// a quiet class come from `statvfs`, else 0. `path` is the walk's
+    /// path: under a root given with `..` or relatively it is not the
+    /// mount point mountinfo lists, so the lookup by path misses and the
+    /// table is read again, once per mount (the walk keeps each mount's
+    /// answer). It is not resolved here, since resolving it would ask the
+    /// mounted filesystem; the binary resolves the root before the walk.
     pub(in crate::platform) fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
         let c_path = posix::c_path(path)?;
         let stx = statx::statx(None, &c_path, libc::STATX_MNT_ID | libc::STATX_INO)?;
