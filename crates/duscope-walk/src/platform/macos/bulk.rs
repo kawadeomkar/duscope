@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use libc::attrgroup_t;
 
 use super::ffi::{self, AttrBuf};
-use crate::{Boundary, Entry, Flags, Kind, NameRef, Share, WalkOptions};
+use crate::{Attrs, Boundary, Entry, Flags, FullAttrs, Kind, NameRef, Share, WalkOptions};
 
 /// The bulk buffer: Apple's `fts` uses 32 KiB, dumac 128 KB.
 pub(super) const BUFFER_BYTES: usize = 64 * 1024;
@@ -41,6 +41,16 @@ const FILE: attrgroup_t = libc::ATTR_FILE_LINKCOUNT
     | libc::ATTR_FILE_ALLOCSIZE
     | libc::ATTR_FILE_DATALENGTH
     | libc::ATTR_FILE_DATAALLOCSIZE;
+/// The common attributes `--attrs full` adds: creation and access times,
+/// owner, group and permissions. They come in the same records.
+const FULL: attrgroup_t = libc::ATTR_CMN_CRTIME
+    | libc::ATTR_CMN_ACCTIME
+    | libc::ATTR_CMN_OWNERID
+    | libc::ATTR_CMN_GRPID
+    | libc::ATTR_CMN_ACCESSMASK;
+/// Of those, what an entry cannot be built without; a filesystem without
+/// creation times leaves `btime` empty instead.
+const REQUIRED_FULL: attrgroup_t = FULL & !libc::ATTR_CMN_CRTIME;
 /// The extended common attributes `--clones` adds, under
 /// `FSOPT_ATTR_CMN_EXTENDED`.
 const CLONES: attrgroup_t = libc::ATTR_CMNEXT_CLONEID | libc::ATTR_CMNEXT_EXT_FLAGS;
@@ -95,7 +105,15 @@ impl Request {
             request.attrs.forkattr = CLONES;
             request.options |= libc::FSOPT_ATTR_CMN_EXTENDED;
         }
+        if opts.attrs == Attrs::Full {
+            request.attrs.commonattr |= FULL;
+        }
         request
+    }
+
+    /// Whether the request asks for the `--attrs full` set.
+    pub(super) fn full(&self) -> bool {
+        self.attrs.commonattr & FULL == FULL
     }
 
     /// Whether the request asks for extended common attributes, which some
@@ -136,8 +154,13 @@ pub(super) struct Record<'a> {
     pub(super) name: Option<&'a [u8]>,
     pub(super) dev: i32,
     pub(super) objtype: u32,
+    pub(super) crtime: Timespec,
     pub(super) mtime: Timespec,
     pub(super) ctime: Timespec,
+    pub(super) atime: Timespec,
+    pub(super) uid: u32,
+    pub(super) gid: u32,
+    pub(super) access: u32,
     pub(super) flags: u32,
     pub(super) ino: u64,
     pub(super) links: u32,
@@ -204,7 +227,7 @@ impl Record<'_> {
             self.has(DIR_GROUP, REQUIRED_DIR)
         } else {
             self.has(FILE_GROUP, REQUIRED_FILE)
-        };
+        } && (!request.full() || self.has(COMMON_GROUP, REQUIRED_FULL));
         if !complete {
             return Err((name, None));
         }
@@ -228,8 +251,33 @@ impl Record<'_> {
             dev: dev(self.dev),
             ino: self.ino,
             bsd_flags: self.flags,
+            full: request.full().then(|| FullAttrs {
+                atime_ns: self.atime.ns(),
+                btime_ns: self
+                    .has(COMMON_GROUP, libc::ATTR_CMN_CRTIME)
+                    .then(|| self.crtime.ns()),
+                mode: mode(kind, self.access),
+                uid: self.uid,
+                gid: self.gid,
+            }),
         }))
     }
+}
+
+/// An `st_mode`: the type bits of `kind` and the permission bits of
+/// `ATTR_CMN_ACCESSMASK`, which holds only the latter.
+pub(super) fn mode(kind: Kind, access: u32) -> u32 {
+    let format = match kind {
+        Kind::Dir => libc::S_IFDIR,
+        Kind::File => libc::S_IFREG,
+        Kind::Symlink => libc::S_IFLNK,
+        Kind::Socket => libc::S_IFSOCK,
+        Kind::Fifo => libc::S_IFIFO,
+        Kind::Char => libc::S_IFCHR,
+        Kind::Block => libc::S_IFBLK,
+        Kind::Unknown => 0,
+    };
+    u32::from(format) | (access & 0o7777)
 }
 
 /// The kind of a vnode type.
@@ -265,6 +313,8 @@ pub(super) struct Fields {
     pub(super) ino: u64,
     /// `st_flags` / `ATTR_CMN_FLAGS`.
     pub(super) bsd_flags: u32,
+    /// The `--attrs full` attributes, when they were asked for.
+    pub(super) full: Option<FullAttrs>,
 }
 
 /// The entry both readers build from what they read, so the two agree
@@ -281,6 +331,7 @@ pub(super) fn build(fields: Fields) -> Entry {
         dev,
         ino,
         bsd_flags,
+        full,
     } = fields;
     // Devices, sockets and pipes hold no blocks of their own.
     let allocated = match kind {
@@ -311,7 +362,7 @@ pub(super) fn build(fields: Fields) -> Entry {
         share,
         boundary: Boundary::None,
         flags,
-        full: None,
+        full,
     }
 }
 
@@ -395,11 +446,26 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
     if common & libc::ATTR_CMN_OBJTYPE != 0 {
         r.objtype = c.u32()?;
     }
+    if common & libc::ATTR_CMN_CRTIME != 0 {
+        r.crtime = c.timespec()?;
+    }
     if common & libc::ATTR_CMN_MODTIME != 0 {
         r.mtime = c.timespec()?;
     }
     if common & libc::ATTR_CMN_CHGTIME != 0 {
         r.ctime = c.timespec()?;
+    }
+    if common & libc::ATTR_CMN_ACCTIME != 0 {
+        r.atime = c.timespec()?;
+    }
+    if common & libc::ATTR_CMN_OWNERID != 0 {
+        r.uid = c.u32()?;
+    }
+    if common & libc::ATTR_CMN_GRPID != 0 {
+        r.gid = c.u32()?;
+    }
+    if common & libc::ATTR_CMN_ACCESSMASK != 0 {
+        r.access = c.u32()?;
     }
     if common & libc::ATTR_CMN_FLAGS != 0 {
         r.flags = c.u32()?;

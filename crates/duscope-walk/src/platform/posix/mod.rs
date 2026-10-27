@@ -118,6 +118,8 @@ fn retry(mut call: impl FnMut() -> libc::c_int) -> io::Result<()> {
 /// `fstatat(2)` of `name` in the directory open on `dir`, not following a
 /// final symlink.
 pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
+    #[cfg(test)]
+    calls::entry();
     let mut stat = MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `dir` is open for the borrow, `name` is NUL-terminated, and
     // `stat` is writable for one `struct stat`.
@@ -135,10 +137,39 @@ pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::sta
 
 /// `lstat(2)` of `path`.
 pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
+    #[cfg(test)]
+    calls::entry();
     let mut stat = MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `path` is NUL-terminated and `stat` is writable for one
     // `struct stat`.
     retry(|| unsafe { libc::lstat(path.as_ptr(), stat.as_mut_ptr()) })?;
     // SAFETY: lstat succeeded, so it filled the struct.
     Ok(unsafe { stat.assume_init() })
+}
+
+/// Per-thread counts of the calls that read entries, for the tests that
+/// count them: bulk reads, and reads of one entry.
+#[cfg(test)]
+// Only the macOS tests count bulk reads.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod calls {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(crate) static BULK: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static ENTRY: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn bulk() {
+        BULK.with(|n| n.set(n.get() + 1));
+    }
+
+    pub(crate) fn entry() {
+        ENTRY.with(|n| n.set(n.get() + 1));
+    }
+
+    /// This thread's counts so far: (bulk, entry).
+    pub(crate) fn now() -> (usize, usize) {
+        (BULK.with(Cell::get), ENTRY.with(Cell::get))
+    }
 }

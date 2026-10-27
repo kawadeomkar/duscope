@@ -274,3 +274,58 @@ fn p1_walk_02_the_volume_comes_from_mountinfo_and_statvfs() {
     assert!(volume.total_bytes >= volume.free_bytes && volume.total_bytes > 0);
     assert!(!volume.fs_type.is_empty());
 }
+
+#[test]
+fn p1_walk_05_full_attrs_match_lstat() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    let entries = walk_paths(&LinuxProvider::new(), &root, &opts);
+    let ns = |s: i64, n: i64| s * 1_000_000_000 + n;
+    for (path, entry) in &entries {
+        let meta = fs::symlink_metadata(path).unwrap();
+        let full = entry
+            .full
+            .unwrap_or_else(|| panic!("no full attributes: {path:?}"));
+        assert_eq!(full.mode, meta.mode(), "mode {path:?}");
+        assert_eq!(
+            (full.uid, full.gid),
+            (meta.uid(), meta.gid()),
+            "owner {path:?}"
+        );
+        assert_eq!(
+            full.atime_ns,
+            ns(meta.atime(), meta.atime_nsec()),
+            "atime {path:?}"
+        );
+        // std reads the creation time with statx too; None where the
+        // filesystem keeps none.
+        let created = meta.created().ok().map(|time| {
+            let since = time.duration_since(std::time::UNIX_EPOCH).unwrap();
+            i64::try_from(since.as_nanos()).unwrap()
+        });
+        assert_eq!(full.btime_ns, created, "btime {path:?}");
+    }
+    let basic = walk_paths(&LinuxProvider::new(), &root, &WalkOptions::default());
+    assert!(basic.values().all(|entry| entry.full.is_none()));
+}
+
+#[test]
+fn p1_walk_05_full_attrs_add_no_calls() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let count = |attrs| {
+        let provider = LinuxProvider::new();
+        let opts = WalkOptions {
+            attrs,
+            ..WalkOptions::default()
+        };
+        walk_with(&provider, &root, &opts, |_| {}).unwrap();
+        provider.statx_calls.load(Ordering::Relaxed)
+    };
+    // The five attributes are mask bits of the same statx.
+    assert_eq!(count(crate::Attrs::Full), count(crate::Attrs::Basic));
+}

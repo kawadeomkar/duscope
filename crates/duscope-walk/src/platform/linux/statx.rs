@@ -7,7 +7,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::raw::c_int;
 
-use crate::{Boundary, DirId, Entry, Flags, Kind, NameRef, Share, WalkOptions};
+use crate::{Attrs, Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, Share, WalkOptions};
 
 /// The basic mask: type, size, blocks, inode, links, both times and the
 /// mount id (5.8; older kernels leave it out of `stx_mask`).
@@ -19,6 +19,11 @@ pub(super) const BASIC: u32 = libc::STATX_TYPE
     | libc::STATX_MTIME
     | libc::STATX_CTIME
     | libc::STATX_MNT_ID;
+
+/// What `--attrs full` adds: access and creation times, mode, owner and
+/// group, in the same call.
+pub(super) const FULL: u32 =
+    libc::STATX_ATIME | libc::STATX_BTIME | libc::STATX_MODE | libc::STATX_UID | libc::STATX_GID;
 
 /// Never follow a final symlink; on NFS and SMB, take the client's cached
 /// attributes instead of revalidating each entry with the server.
@@ -54,12 +59,19 @@ pub(super) fn entry_at(
     opts: &WalkOptions,
 ) -> io::Result<Entry> {
     let c_name = CString::new(name.as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
-    Ok(entry(name.clone(), &statx(Some(dir), &c_name, mask(opts))?))
+    Ok(entry(
+        name.clone(),
+        &statx(Some(dir), &c_name, mask(opts))?,
+        opts.attrs,
+    ))
 }
 
 /// The mask for `opts`.
-pub(super) fn mask(_opts: &WalkOptions) -> u32 {
-    BASIC
+pub(super) fn mask(opts: &WalkOptions) -> u32 {
+    match opts.attrs {
+        Attrs::Basic => BASIC,
+        Attrs::Full => BASIC | FULL,
+    }
 }
 
 /// The kind of an `st_mode` / `stx_mode`.
@@ -94,8 +106,9 @@ fn share(kind: Kind, nlink: u64) -> Share {
     }
 }
 
-/// The entry a `statx` describes.
-pub(super) fn entry(name: NameRef, stx: &libc::statx) -> Entry {
+/// The entry a `statx` describes, with the `--attrs full` set under
+/// `attrs`. A filesystem without creation times leaves `btime` empty.
+pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
     let kind = kind(u32::from(stx.stx_mode));
     let attribute = |bit: c_int| {
         let bit = u64::from(bit.cast_unsigned());
@@ -130,13 +143,19 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx) -> Entry {
             Boundary::None
         },
         flags,
-        full: None,
+        full: (attrs == Attrs::Full).then(|| FullAttrs {
+            atime_ns: ns(stx.stx_atime),
+            btime_ns: (stx.stx_mask & libc::STATX_BTIME != 0).then(|| ns(stx.stx_btime)),
+            mode: u32::from(stx.stx_mode),
+            uid: stx.stx_uid,
+            gid: stx.stx_gid,
+        }),
     }
 }
 
-/// The entry an `lstat` describes: what `statx` reports, less the mount id
-/// and the attribute flags, which `stat` does not carry.
-pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat) -> Entry {
+/// The entry an `lstat` describes: what `statx` reports, less the mount id,
+/// the attribute flags and the creation time, which `stat` does not carry.
+pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat, attrs: Attrs) -> Entry {
     let kind = kind(stat.st_mode);
     // `st_nlink` is 64-bit on x86_64 and 32-bit on aarch64.
     #[allow(clippy::useless_conversion)]
@@ -157,7 +176,13 @@ pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat) -> Entry 
         share: share(kind, nlink),
         boundary: Boundary::None,
         flags: Flags::empty(),
-        full: None,
+        full: (attrs == Attrs::Full).then(|| FullAttrs {
+            atime_ns: time_ns(stat.st_atime, stat.st_atime_nsec),
+            btime_ns: None,
+            mode: stat.st_mode,
+            uid: stat.st_uid,
+            gid: stat.st_gid,
+        }),
     }
 }
 

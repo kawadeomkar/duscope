@@ -150,6 +150,8 @@ pub(super) fn getattrlistbulk(
     buf: &mut AttrBuf,
     options: u64,
 ) -> io::Result<usize> {
+    #[cfg(test)]
+    crate::platform::posix::calls::bulk();
     let mut attrs = *attrs;
     let len = buf.len();
     let ptr = buf.as_mut_ptr();
@@ -171,6 +173,8 @@ pub(super) fn getattrlistat(
     buf: &mut AttrBuf,
     options: u32,
 ) -> io::Result<()> {
+    #[cfg(test)]
+    crate::platform::posix::calls::entry();
     let mut attrs = *attrs;
     let len = buf.len();
     let ptr = buf.as_mut_ptr();
@@ -197,6 +201,8 @@ pub(super) fn getattrlist(
     buf: &mut AttrBuf,
     options: u32,
 ) -> io::Result<()> {
+    #[cfg(test)]
+    crate::platform::posix::calls::entry();
     let mut attrs = *attrs;
     let len = buf.len();
     let ptr = buf.as_mut_ptr();

@@ -44,7 +44,7 @@ impl Provider for FallbackProvider {
     fn read_dir_split(
         &self,
         dir: &DirHandle,
-        _opts: &WalkOptions,
+        opts: &WalkOptions,
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
         later: &mut Vec<NameRef>,
@@ -57,7 +57,7 @@ impl Provider for FallbackProvider {
         if names.len() > STAT_BATCH {
             later.extend(names.drain(STAT_BATCH..));
         }
-        read_names(fd.as_fd(), dir, &names, out, errs);
+        read_names(fd.as_fd(), dir, &names, opts, out, errs);
         Ok(())
     }
 
@@ -65,12 +65,12 @@ impl Provider for FallbackProvider {
         &self,
         dir: &DirHandle,
         names: &[NameRef],
-        _opts: &WalkOptions,
+        opts: &WalkOptions,
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        read_names(fd.as_fd(), dir, names, out, errs);
+        read_names(fd.as_fd(), dir, names, opts, out, errs);
         Ok(())
     }
 
@@ -78,9 +78,13 @@ impl Provider for FallbackProvider {
         volume(path)
     }
 
-    fn root(&self, path: &Path, _opts: &WalkOptions) -> io::Result<Entry> {
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
         let name = NameRef::from(path.file_name().unwrap_or(path.as_os_str()));
-        Ok(from_stat(name, &posix::lstat(&posix::c_path(path)?)?))
+        Ok(from_stat(
+            name,
+            &posix::lstat(&posix::c_path(path)?)?,
+            opts.attrs,
+        ))
     }
 
     /// The platform provider's default, so the two compare like for like.
@@ -99,6 +103,7 @@ fn read_names(
     fd: BorrowedFd<'_>,
     dir: &DirHandle,
     names: &[NameRef],
+    opts: &WalkOptions,
     out: &mut Vec<Entry>,
     errs: &mut Vec<ScanError>,
 ) {
@@ -107,7 +112,7 @@ fn read_names(
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
             .and_then(|c_name| posix::lstat_at(fd, &c_name));
         match stat {
-            Ok(stat) => out.push(from_stat(name.clone(), &stat)),
+            Ok(stat) => out.push(from_stat(name.clone(), &stat, opts.attrs)),
             Err(e) => errs.push(ScanError {
                 dir: dir.id(),
                 name: name.clone(),
