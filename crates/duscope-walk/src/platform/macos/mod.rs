@@ -13,7 +13,6 @@ pub(super) use stat::from_stat;
 pub(super) use volume::of as volume;
 
 use std::cell::RefCell;
-use std::fs;
 use std::io;
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -104,18 +103,16 @@ impl Provider for MacProvider {
             // Listed by name alone; the stat queue reads every entry, on
             // every worker.
             Outcome::IoBound => {
-                for entry in fs::read_dir(dir.path())? {
-                    later.push(NameRef::from(entry?.file_name().as_os_str()));
-                }
+                later.extend(posix::list_names(fd.as_fd())?);
                 return Ok(());
             }
             // Each child is listed as an entry that cannot be read, as `du`
             // and the stat queue report them.
             Outcome::Unsearchable => {
-                for entry in fs::read_dir(dir.path())? {
+                for name in posix::list_names(fd.as_fd())? {
                     errs.push(ScanError {
                         dir: dir.id(),
-                        name: NameRef::from(entry?.file_name().as_os_str()),
+                        name,
                         errno: libc::EACCES,
                     });
                 }
