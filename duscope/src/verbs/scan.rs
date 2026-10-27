@@ -523,15 +523,32 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
 /// The walk options the flags ask for.
 fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure> {
     let mut globs = GlobSetBuilder::new();
+    // Patterns ending in `/`, which leave out directories only, go to the
+    // gitignore rules, which tell a directory from a file.
+    let mut dirs_only = String::new();
+    let mut add = |pattern: &str, flag: &str| -> Result<(), Failure> {
+        match exclude_pattern(pattern, flag)? {
+            Exclude::Glob(glob) => {
+                globs.add(glob);
+            }
+            Exclude::DirsOnly(line) => {
+                dirs_only.push_str(&line);
+                dirs_only.push('\n');
+            }
+        }
+        Ok(())
+    };
     for pattern in excludes {
-        globs.add(exclude_glob(pattern, "--exclude")?);
+        add(pattern, "--exclude")?;
     }
     for file in &args.exclude_from {
         let text = read_flag_file(file, "--exclude-from")?;
+        // One pattern a line, CRLF or LF; blank lines, `#` comments and the
+        // blanks around a pattern are not part of any pattern.
         for line in String::from_utf8_lossy(&text).lines() {
             let line = line.trim();
             if !line.is_empty() && !line.starts_with('#') {
-                globs.add(exclude_glob(line, "--exclude-from")?);
+                add(line, "--exclude-from")?;
             }
         }
     }
@@ -548,6 +565,12 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
                 format!("--ignore-from {}: {e}", file.display()),
             )
         })?;
+    }
+    // Last, so no negation in an ignore file takes them back.
+    if !dirs_only.is_empty() {
+        ignore
+            .add(dirs_only.as_bytes(), "--exclude")
+            .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--exclude: {e}")))?;
     }
     let exclude_caches = if args.exclude_caches {
         Caches::vendored().compile()
@@ -572,13 +595,24 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
     })
 }
 
+/// An `--exclude` pattern as the walk matches it.
+enum Exclude {
+    /// A glob of paths, directories and files alike.
+    Glob(Glob),
+    /// A pattern that ended in `/`, as a gitignore line that leaves out
+    /// directories only.
+    DirsOnly(String),
+}
+
 /// An `--exclude` pattern as the walk matches it, against paths relative to
 /// the root: a pattern starting with `/` or `./` is anchored at the root;
 /// any other matches at every depth (`*.tmp` matches `a/b/c.tmp`). `*` stays
-/// within a path component and `**` crosses them; a trailing `/` is
-/// dropped. A pattern naming nothing below the root (empty, `/` or `.`) is
-/// a usage error.
-fn exclude_glob(pattern: &str, flag: &str) -> Result<Glob, Failure> {
+/// within a path component and `**` crosses them. A trailing `/` leaves out
+/// directories only (`build/` leaves out a directory named build, not a
+/// file of that name), as in gitignore. A pattern naming nothing below the
+/// root (empty, `/` or `.`) is a usage error.
+fn exclude_pattern(pattern: &str, flag: &str) -> Result<Exclude, Failure> {
+    let dirs_only = pattern.ends_with('/');
     let trimmed = pattern.trim_end_matches('/');
     let (anchored, rest) = match trimmed.strip_prefix("./") {
         Some(rest) => (true, rest),
@@ -592,6 +626,12 @@ fn exclude_glob(pattern: &str, flag: &str) -> Result<Glob, Failure> {
             format!("{flag} {pattern:?}: the pattern names no path below the root"),
         ));
     }
+    if dirs_only {
+        // The same anchoring in gitignore's terms; the prefix also keeps a
+        // leading `!` or `#` from reading as a negation or a comment.
+        let prefix = if anchored { "/" } else { "**/" };
+        return Ok(Exclude::DirsOnly(format!("{prefix}{rest}/")));
+    }
     let glob = if anchored {
         rest.to_owned()
     } else {
@@ -600,6 +640,7 @@ fn exclude_glob(pattern: &str, flag: &str) -> Result<Glob, Failure> {
     GlobBuilder::new(&glob)
         .literal_separator(true)
         .build()
+        .map(Exclude::Glob)
         .map_err(|e| Failure::new(Exit::Usage, "usage", format!("{flag} {pattern:?}: {e}")))
 }
 
