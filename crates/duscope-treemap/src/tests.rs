@@ -41,26 +41,30 @@ fn covers_exactly(layout: &Layout, area: Rect) -> Result<(), String> {
 }
 
 fn items() -> impl Strategy<Value = Vec<(u64, usize)>> {
-    prop::collection::vec(
-        prop_oneof![
-            4 => 1u64..1_000_000_000_000,
-            1 => 0u64..10,
-            // Ratios past what a float's mantissa holds.
-            1 => (1u64 << 55)..(1u64 << 60),
-        ],
-        1..80,
-    )
-    .prop_map(|weights| {
-        weights
-            .into_iter()
-            .enumerate()
-            .map(|(i, w)| (w, i))
-            .collect()
-    })
+    let weight = prop_oneof![
+        8 => 1u64..1_000_000_000_000,
+        2 => 0u64..10,
+        // Ratios past what a float's mantissa holds.
+        2 => (1u64 << 55)..(1u64 << 60),
+        // Sums that saturate a u64.
+        1 => Just(u64::MAX),
+    ];
+    // Mostly a screenful of children, sometimes a crowd.
+    let count = prop_oneof![9 => 1usize..80, 1 => 80usize..2000];
+    count
+        .prop_flat_map(move |n| prop::collection::vec(weight.clone(), n))
+        .prop_map(|weights| {
+            weights
+                .into_iter()
+                .enumerate()
+                .map(|(i, w)| (w, i))
+                .collect()
+        })
 }
 
+/// Areas at an offset, empty ones included.
 fn area() -> impl Strategy<Value = Rect> {
-    (0u16..20, 0u16..20, 1u16..200, 1u16..80).prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    (0u16..20, 0u16..20, 0u16..200, 0u16..80).prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
 }
 
 fn check(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min: u16) -> Result<(), String> {
@@ -129,7 +133,7 @@ proptest! {
     fn p1_map_01_squarify_covers_the_area_in_order(
         items in items(),
         area in area(),
-        min in prop::sample::select(vec![1u16, 2, 4]),
+        min in 1u16..=8,
     ) {
         check(&items, area, Algorithm::Squarify, min).map_err(TestCaseError::fail)?;
     }
@@ -138,7 +142,7 @@ proptest! {
     fn p1_map_01_bisection_covers_the_area_in_order(
         items in items(),
         area in area(),
-        min in prop::sample::select(vec![1u16, 2, 4]),
+        min in 1u16..=8,
     ) {
         check(&items, area, Algorithm::Gp, min).map_err(TestCaseError::fail)?;
     }
@@ -277,5 +281,26 @@ fn p1_map_01_bisection_pools_only_the_tiles_too_small() {
         assert_eq!(laid.tiles.len(), 3, "{algorithm:?}");
         assert_eq!(laid.small.map(|s| s.ids), Some(vec![3]), "{algorithm:?}");
         check(&huge, area, algorithm, 1).unwrap();
+    }
+}
+
+#[test]
+fn p1_map_01_an_area_too_small_pools_every_child() {
+    let items = [(5, 0), (u64::MAX, 1), (0, 2), (7, 3)];
+    for area in [
+        Rect::new(3, 4, 0, 36),
+        Rect::new(3, 4, 80, 0),
+        Rect::new(0, 0, 0, 0),
+        Rect::new(9, 9, 1, 1),
+    ] {
+        for algorithm in [Algorithm::Squarify, Algorithm::Gp] {
+            // --min-tile 8 does not fit in 1×1 either.
+            let laid = layout(&items, area, algorithm, 8);
+            assert_eq!(laid.tiles, [], "{area:?} {algorithm:?}");
+            let small = laid.small.expect("a pool");
+            assert_eq!(small.ids, [1, 3, 0, 2], "{area:?} {algorithm:?}");
+            assert_eq!(small.rect, area);
+            check(&items, area, algorithm, 1).unwrap();
+        }
     }
 }
