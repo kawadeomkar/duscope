@@ -63,7 +63,7 @@ pub struct EntryRec {
 
 /// One directory's record beside its entry: 48 bytes, the cumulative fields
 /// zero until the roll-up.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct DirRec {
     /// Total apparent bytes of the subtree, the directory included.
@@ -72,7 +72,7 @@ pub struct DirRec {
     pub cum_allocated: u64,
     /// The latest mtime in the subtree.
     pub max_mtime_ns: i64,
-    /// The directory's entry.
+    /// The directory's entry; [`DirRec::NO_ENTRY`] until it arrives.
     pub entry: u32,
     /// Non-directories in the subtree.
     pub n_files: u32,
@@ -94,6 +94,28 @@ impl DirRec {
     pub const UPPER_BOUND: u16 = 1;
     /// The directory could not be read.
     pub const UNREADABLE: u16 = 2;
+    /// The `entry` of a directory whose id the arena met before its entry
+    /// (workers number directories as they find them, so a higher id can
+    /// arrive first). A complete walk leaves none; a truncated stream can.
+    pub const NO_ENTRY: u32 = u32::MAX;
+}
+
+impl Default for DirRec {
+    /// A placeholder: no entry yet, every count zero.
+    fn default() -> DirRec {
+        DirRec {
+            cum_apparent: 0,
+            cum_allocated: 0,
+            max_mtime_ns: 0,
+            entry: DirRec::NO_ENTRY,
+            n_files: 0,
+            n_dirs: 0,
+            last_id: 0,
+            files_end: 0,
+            depth: 0,
+            flags: 0,
+        }
+    }
 }
 
 /// The `--attrs full` side record of one entry.
@@ -495,9 +517,20 @@ impl Arena {
         self.entries.is_empty()
     }
 
-    /// Directories, the root included when it is one.
+    /// The directory ids the arena has a record for, the root included when
+    /// it is a directory: one more than the highest id met, which sizes a
+    /// table indexed by [`DirId`]. After a complete walk every one holds its
+    /// directory's entry; after a truncated stream an id whose entry never
+    /// arrived is a placeholder, which [`Arena::has_dir`] reports as absent.
     pub fn dir_count(&self) -> usize {
         self.dirs.len()
+    }
+
+    /// Whether `dir`'s entry is in the arena.
+    pub fn has_dir(&self, dir: DirId) -> bool {
+        self.dirs
+            .get(dir.index())
+            .is_some_and(|rec| rec.entry != DirRec::NO_ENTRY)
     }
 
     /// The attribute set the scan collected.
@@ -545,10 +578,13 @@ impl Arena {
     ///
     /// # Panics
     ///
-    /// When `dir` is not a directory of this arena.
+    /// When `dir` is not a directory of this arena, or its entry never
+    /// arrived ([`Arena::has_dir`] is false): a placeholder must not pass
+    /// for a directory.
     pub fn dir(&self, dir: DirId) -> &DirRec {
         self.dirs
             .get(dir.index())
+            .filter(|rec| rec.entry != DirRec::NO_ENTRY)
             .unwrap_or_else(|| panic!("no directory {dir:?}"))
     }
 

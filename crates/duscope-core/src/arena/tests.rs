@@ -146,6 +146,43 @@ fn p1_core_01_depths_and_closes_are_recorded() {
 }
 
 #[test]
+fn p1_core_01_a_directory_met_before_its_entry_is_a_placeholder() {
+    let dir = |name: &str, id: u32| Entry {
+        dir: Some(DirId::new(id)),
+        kind: Kind::Dir,
+        ..file(name, DirId::ROOT)
+    };
+    let mut arena = Arena::new(Attrs::Basic);
+    arena.push(ScanEvent::Entry(dir("root", 0))).unwrap();
+    // Workers number directories as they find them: 5 can arrive first.
+    arena.push(ScanEvent::Entry(dir("e", 5))).unwrap();
+    // A close for an id whose entry never came (a truncated stream).
+    arena
+        .push(ScanEvent::DirClosed {
+            dir: DirId::new(9),
+            errno: Some(13),
+        })
+        .unwrap();
+    assert_eq!(arena.dir_count(), 10);
+    let present: Vec<u32> = (0..10)
+        .filter(|&id| arena.has_dir(DirId::new(id)))
+        .collect();
+    assert_eq!(present, [0, 5]);
+    assert_eq!(arena.dir(DirId::new(5)).entry, 1);
+    // A placeholder is never read as a directory holding the root's entry.
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| *arena.dir(DirId::new(3))));
+    assert!(read.is_err());
+    assert!(!arena.has_dir(DirId::new(10)));
+    // The ids before 5 fill in as their entries arrive.
+    for (id, name) in (1..5).zip(["a", "b", "c", "d"]) {
+        arena.push(ScanEvent::Entry(dir(name, id))).unwrap();
+    }
+    assert!((0..6).all(|id| arena.has_dir(DirId::new(id))));
+    assert_eq!(arena.dir(DirId::new(3)).entry, 4);
+    assert_eq!(arena.dir(DirId::new(3)).depth, 1);
+}
+
+#[test]
 fn p1_core_01_an_entry_without_full_attributes_reads_as_none() {
     // In a full scan, an entry the walk delivered without the full set is
     // not collected (NULL in the index), not owner 0 at the epoch.
