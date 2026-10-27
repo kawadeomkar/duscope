@@ -1,12 +1,18 @@
 //! `man`: the manual page, in roff. `clap_mangen` writes the name,
-//! synopsis, description and the options of `duscope` and of each verb
-//! from the clap tree, so a new flag cannot miss the page; the sections
-//! `clap` knows nothing of (ENVIRONMENT, EXIT STATUS, FILES, EXAMPLES) are
-//! written by hand beside this file. Hidden (test-only) flags are left out.
+//! synopsis, description and options from the clap tree, so a new flag
+//! cannot miss the page; the sections `clap` knows nothing of (ENVIRONMENT,
+//! EXIT STATUS, FILES, EXAMPLES) are written by hand beside this file.
+//! Hidden (test-only) flags are left out.
+//!
+//! Each flag is described once: the scan and output flags `duscope` itself
+//! takes under SCAN OPTIONS and OUTPUT OPTIONS, the filters the list verbs
+//! share under FILTER OPTIONS, then under VERBS each verb with its usage
+//! and the flags only it takes.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use clap::CommandFactory;
+use clap::{Arg, Command, CommandFactory};
 use clap_mangen::Man;
 
 use super::{Exit, Failure};
@@ -23,6 +29,9 @@ const SECTIONS: [&str; 4] = [
     include_str!("man/files.roff"),
     include_str!("man/examples.roff"),
 ];
+
+/// The help heading of the filters the list verbs share.
+const FILTERS: &str = "Filters";
 
 /// Prints the page.
 pub fn run() -> Result<(), Failure> {
@@ -41,39 +50,130 @@ pub fn page() -> std::io::Result<String> {
     let mut command = Cli::command();
     command.build();
     let man = Man::new(command.clone()).manual("duscope manual");
-    let mut out = Vec::new();
-    man.render_title(&mut out)?;
-    man.render_name_section(&mut out)?;
-    man.render_synopsis_section(&mut out)?;
-    man.render_description_section(&mut out)?;
-    man.render_options_section(&mut out)?;
-    // Each verb: its summary and its own options.
-    for verb in command.get_subcommands().filter(|v| !v.is_hide_set()) {
-        let name = verb.get_name().to_uppercase();
-        out.extend_from_slice(format!(".SH \"{name}\"\n").as_bytes());
+    let mut out = String::new();
+    out += &roff(|w| man.render_title(w))?;
+    out += &roff(|w| man.render_name_section(w))?;
+    out += &roff(|w| man.render_synopsis_section(w))?;
+    out += &roff(|w| man.render_description_section(w))?;
+    // duscope's own flags, a section per heading: SCAN OPTIONS, OUTPUT
+    // OPTIONS.
+    out += &headed(&roff(|w| man.render_options_section(w))?);
+    let verbs: Vec<&Command> = command
+        .get_subcommands()
+        .filter(|v| !v.is_hide_set() && v.get_name() != "help")
+        .collect();
+    // What is described above, by flag: its help text.
+    let mut described: HashMap<String, String> = command
+        .get_arguments()
+        .map(|a| (a.get_id().to_string(), help_of(a)))
+        .collect();
+    // The filters, once, from the first verb that takes them.
+    let takers: Vec<&Command> = verbs
+        .iter()
+        .copied()
+        .filter(|v| v.get_arguments().any(is_filter))
+        .collect();
+    if let Some(first) = takers.first() {
+        let names: Vec<String> = takers.iter().map(|v| v.get_name().to_owned()).collect();
+        let _ = writeln!(
+            out,
+            ".SH \"FILTER OPTIONS\"\nThe verbs {} take these filters.",
+            escape(&list(&names))
+        );
+        let filters = Man::new(only(first, is_filter));
+        out += &bare(&roff(|w| filters.render_options_section(w))?);
+        described.extend(
+            first
+                .get_arguments()
+                .filter(|a| is_filter(a))
+                .map(|a| (a.get_id().to_string(), help_of(a))),
+        );
+    }
+    // Each verb: its summary, its usage and the flags only it takes.
+    out += ".SH VERBS\n";
+    for verb in verbs {
+        let name = format!("duscope {}", verb.get_name());
+        let _ = writeln!(out, ".SS \"{name}\"");
         if let Some(about) = verb.get_about() {
-            out.extend_from_slice(format!("{}\n", escape(&about.to_string())).as_bytes());
+            let _ = writeln!(out, "{}", escape(&about.to_string()));
         }
-        let options = Man::new(
-            verb.clone()
-                .bin_name(format!("duscope {}", verb.get_name())),
-        );
-        options.render_synopsis_section(&mut out)?;
-        let mut flags = Vec::new();
-        options.render_options_section(&mut flags)?;
-        // The verb's options under its own heading.
-        let flags = String::from_utf8_lossy(&flags).replacen(
-            ".SH OPTIONS",
-            &format!(".SS \"{name} OPTIONS\""),
-            1,
-        );
-        out.extend_from_slice(flags.as_bytes());
+        let usage = verb.clone().bin_name(&name).render_usage().to_string();
+        let usage = usage.trim_start_matches("Usage:").trim();
+        let _ = writeln!(out, ".PP\n\\fB{}\\fR", escape(usage));
+        let new = Man::new(only(verb, |a| {
+            described.get(a.get_id().as_str()) != Some(&help_of(a))
+                && !matches!(a.get_id().as_str(), "help" | "version")
+        }));
+        out += &bare(&roff(|w| new.render_options_section(w))?);
     }
     for section in SECTIONS {
-        out.extend_from_slice(section.as_bytes());
+        out += section;
     }
-    man.render_version_section(&mut out)?;
-    Ok(tidy(&String::from_utf8_lossy(&out)))
+    out += &roff(|w| man.render_version_section(w))?;
+    Ok(tidy(&out))
+}
+
+/// What a `clap_mangen` renderer writes.
+fn roff(render: impl FnOnce(&mut Vec<u8>) -> std::io::Result<()>) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    render(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `command` with every flag but those `keep` takes hidden.
+fn only(command: &Command, keep: impl Fn(&Arg) -> bool) -> Command {
+    let hide: Vec<String> = command
+        .get_arguments()
+        .filter(|a| !keep(a))
+        .map(|a| a.get_id().to_string())
+        .collect();
+    hide.iter().fold(command.clone(), |command, id| {
+        command.mut_arg(id, |a| a.hide(true))
+    })
+}
+
+fn is_filter(arg: &Arg) -> bool {
+    arg.get_help_heading() == Some(FILTERS)
+}
+
+fn help_of(arg: &Arg) -> String {
+    arg.get_help().map(ToString::to_string).unwrap_or_default()
+}
+
+/// The options roff of `duscope` itself, each heading `X` a section
+/// `X OPTIONS`.
+fn headed(roff: &str) -> String {
+    let mut out = String::with_capacity(roff.len());
+    for line in roff.lines() {
+        match line.strip_prefix(".SH ") {
+            Some("OPTIONS") | None => out.push_str(line),
+            Some(heading) => {
+                let _ = write!(out, ".SH \"{} OPTIONS\"", heading.trim_matches('"'));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The options roff of one part of the page, without its section
+/// headings: the flags fall under the heading the page gives them.
+fn bare(roff: &str) -> String {
+    let mut out = String::with_capacity(roff.len());
+    for line in roff.lines().filter(|line| !line.starts_with(".SH ")) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// `a, b and c`.
+fn list(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// `clap_mangen`'s roff, made clean under `mandoc -T lint`: the title in
@@ -154,17 +254,36 @@ mod tests {
                 );
             }
         }
-        for section in [
-            "ENVIRONMENT",
-            "EXIT STATUS",
-            "FILES",
-            "EXAMPLES",
-            "TOP OPTIONS",
-        ] {
-            assert!(
-                text.contains(&format!(".SH {section}"))
-                    || text.contains(&format!("\"{section}\"")),
-                "{section}"
+        // Each section once, in order; each verb a subsection of VERBS.
+        let sections: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix(".SH "))
+            .map(|s| s.trim_matches('"'))
+            .collect();
+        assert_eq!(
+            sections,
+            [
+                "NAME",
+                "SYNOPSIS",
+                "DESCRIPTION",
+                "OPTIONS",
+                "SCAN OPTIONS",
+                "OUTPUT OPTIONS",
+                "FILTER OPTIONS",
+                "VERBS",
+                "ENVIRONMENT",
+                "EXIT STATUS",
+                "FILES",
+                "EXAMPLES",
+                "VERSION",
+            ]
+        );
+        for verb in command.get_subcommands().filter(|v| !v.is_hide_set()) {
+            let heading = format!(".SS \"duscope {}\"", verb.get_name());
+            assert_eq!(
+                text.contains(&heading),
+                verb.get_name() != "help",
+                "{heading}"
             );
         }
     }

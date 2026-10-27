@@ -1,6 +1,9 @@
 //! `completions SHELL`: the completion script for bash, zsh, fish, elvish
 //! or `PowerShell`, generated from the clap tree, so a new flag cannot miss
-//! it. Hidden (test-only) flags are left out.
+//! it. Hidden (test-only) flags are left out: `clap_complete` writes them,
+//! so their lines and words are taken out of its script. A flag is taken
+//! out by how it is typed, wherever it appears, so a flag hidden on one
+//! verb is never visible on another (a test holds that).
 
 use clap::CommandFactory;
 use clap_complete::Shell;
@@ -27,20 +30,32 @@ pub fn script(shell: Shell) -> Vec<u8> {
 /// The hidden flags of `command` and its verbs, as they are typed
 /// (`--provider`, `-i`).
 fn hidden_flags(command: &clap::Command) -> Vec<String> {
-    let mut flags: Vec<String> = command
+    let mut flags: Vec<String> = typed(command)
+        .into_iter()
+        .filter(|&(_, hidden)| hidden)
+        .map(|(flag, _)| flag)
+        .collect();
+    flags.sort();
+    flags.dedup();
+    flags
+}
+
+/// Every flag of `command` and its verbs as it is typed, with whether it
+/// is hidden there.
+fn typed(command: &clap::Command) -> Vec<(String, bool)> {
+    let mut flags: Vec<(String, bool)> = command
         .get_arguments()
-        .filter(|arg| arg.is_hide_set())
         .flat_map(|arg| {
             let long = arg.get_long().map(|l| format!("--{l}"));
             let short = arg.get_short().map(|c| format!("-{c}"));
-            long.into_iter().chain(short)
+            long.into_iter()
+                .chain(short)
+                .map(|flag| (flag, arg.is_hide_set()))
         })
         .collect();
     for verb in command.get_subcommands() {
-        flags.extend(hidden_flags(verb));
+        flags.extend(typed(verb));
     }
-    flags.sort();
-    flags.dedup();
     flags
 }
 
@@ -84,10 +99,24 @@ fn strip(shell: Shell, script: &str, hidden: &[String]) -> String {
                     continue;
                 }
             }
-            // `'--provider=[…]:…' \`, which a list of values may continue
-            // over several lines.
+            // `'--provider=[…]:…' \`, with a `(…)` of the flags it
+            // conflicts with and a `*` when it repeats before the flag, and
+            // a list of values that may continue over several lines.
             Shell::Zsh => {
-                if offers("'", &['=', '[', '+', ':', '\'']) {
+                let flag_at = trimmed
+                    .strip_prefix('\'')
+                    .map(|rest| match rest.strip_prefix('(') {
+                        Some(group) => group.split_once(')').map_or(rest, |(_, after)| after),
+                        None => rest,
+                    })
+                    .map(|rest| rest.strip_prefix('*').unwrap_or(rest));
+                let hides = flag_at.is_some_and(|rest| {
+                    hidden.iter().any(|flag| {
+                        rest.strip_prefix(flag.as_str())
+                            .is_some_and(|after| after.starts_with(['=', '[', '+', ':', '\'']))
+                    })
+                });
+                if hides {
                     let mut end = line;
                     while !end.trim_end().ends_with('\\') {
                         match lines.next() {
@@ -98,12 +127,15 @@ fn strip(shell: Shell, script: &str, hidden: &[String]) -> String {
                     continue;
                 }
             }
-            // `-l provider` lines, and the argparse spec fish parses the
-            // command line with: `provider= i/interactive …`.
+            // `-l provider` lines (`-s i` for a flag with only a short
+            // form), and the argparse spec fish parses the command line
+            // with: `provider= i/interactive …`.
             Shell::Fish => {
-                if hidden.iter().any(|flag| {
-                    flag.strip_prefix("--")
-                        .is_some_and(|long| line.contains(&format!(" -l {long} ")))
+                if hidden.iter().any(|flag| match flag.strip_prefix("--") {
+                    Some(long) => line.contains(&format!(" -l {long} ")),
+                    None => flag
+                        .strip_prefix('-')
+                        .is_some_and(|short| line.contains(&format!(" -s {short} "))),
                 }) {
                     continue;
                 }
@@ -139,9 +171,44 @@ fn strip(shell: Shell, script: &str, hidden: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
     use clap_complete::Shell;
 
-    use super::script;
+    use super::{script, strip, typed};
+    use crate::cli::Cli;
+
+    #[test]
+    fn p1_cli_04_no_flag_is_hidden_on_one_verb_and_visible_on_another() {
+        let mut command = Cli::command();
+        command.build();
+        let flags = typed(&command);
+        for (flag, hidden) in &flags {
+            assert!(
+                flags.iter().all(|(other, h)| other != flag || h == hidden),
+                "{flag} is hidden in one place and visible in another"
+            );
+        }
+    }
+
+    #[test]
+    fn p1_cli_04_every_form_of_a_hidden_flag_is_taken_out() {
+        let hidden = ["--secret".to_owned(), "-z".to_owned()];
+        let zsh = "'(--plain)--secret[x]' \\\n'*--secret=[x]:X:_files' \\\n'-z+[x]' \\\n'--secret-not[x]' \\\n";
+        assert_eq!(strip(Shell::Zsh, zsh, &hidden), "'--secret-not[x]' \\\n");
+        let fish = "complete -c d -s z -d 'x'\ncomplete -c d -s y -d 'y'\n";
+        assert_eq!(
+            strip(Shell::Fish, fish, &hidden),
+            "complete -c d -s y -d 'y'\n"
+        );
+    }
+
+    #[test]
+    fn p1_cli_04_theme_completes_the_pack_names() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let text = String::from_utf8(script(shell)).unwrap();
+            assert!(text.contains("tokyo-night"), "{shell}");
+        }
+    }
 
     #[test]
     fn p1_cli_04_completions_leave_hidden_flags_out() {
