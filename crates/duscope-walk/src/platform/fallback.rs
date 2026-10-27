@@ -4,7 +4,6 @@
 //! the attribute flags on Linux, the clone ids on macOS. macOS reads a
 //! filesystem that refuses bulk reads through it.
 
-use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
@@ -49,12 +48,7 @@ impl Provider for FallbackProvider {
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        let mut names = posix::list_names(fd.as_fd())?;
-        if names.len() > STAT_BATCH {
-            later.extend(names.drain(STAT_BATCH..));
-        }
-        read_names(fd.as_fd(), dir, &names, out, errs);
-        Ok(())
+        read_open(fd.as_fd(), dir, out, errs, later)
     }
 
     fn stat_names(
@@ -66,7 +60,7 @@ impl Provider for FallbackProvider {
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        read_names(fd.as_fd(), dir, names, out, errs);
+        read_names(fd.as_fd(), dir, names.iter().cloned(), out, errs);
         Ok(())
     }
 
@@ -90,23 +84,40 @@ impl Provider for FallbackProvider {
     }
 }
 
-/// Reads `names` in the directory open on `fd`: an entry or an error each.
+/// Lists the directory open on `fd` through that descriptor, reads the
+/// first 1,024 entries and leaves the rest in `later`. The macOS provider
+/// calls it with the descriptor its refused bulk read was made on, so the
+/// directory is never opened by path a second time.
+pub(crate) fn read_open(
+    fd: BorrowedFd<'_>,
+    dir: &DirHandle,
+    out: &mut Vec<Entry>,
+    errs: &mut Vec<ScanError>,
+    later: &mut Vec<NameRef>,
+) -> io::Result<()> {
+    let mut names = posix::list_names(fd)?;
+    if names.len() > STAT_BATCH {
+        later.extend(names.drain(STAT_BATCH..));
+    }
+    read_names(fd, dir, names, out, errs);
+    Ok(())
+}
+
+/// Reads `names` in the directory open on `fd`: an entry or an error each,
+/// each name moving into its entry or error.
 fn read_names(
     fd: BorrowedFd<'_>,
     dir: &DirHandle,
-    names: &[NameRef],
+    names: impl IntoIterator<Item = NameRef>,
     out: &mut Vec<Entry>,
     errs: &mut Vec<ScanError>,
 ) {
     for name in names {
-        let stat = CString::new(name.as_bytes())
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
-            .and_then(|c_name| posix::lstat_at(fd, &c_name));
-        match stat {
-            Ok(stat) => out.push(from_stat(name.clone(), &stat)),
+        match posix::with_c_name(name.as_bytes(), |c_name| posix::lstat_at(fd, c_name)) {
+            Ok(stat) => out.push(from_stat(name, &stat)),
             Err(e) => errs.push(ScanError {
                 dir: dir.id(),
-                name: name.clone(),
+                name,
                 errno: e.raw_os_error().unwrap_or(crate::EIO),
             }),
         }
@@ -121,9 +132,12 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
+    use std::os::fd::AsFd;
+
     use duscope_testkit::TestEnv;
 
     use super::FallbackProvider;
+    use crate::platform::posix;
     use crate::{
         Boundary, DirId, Entry, Flags, Kind, Provider, ScanEvent, WalkOptions, walk, walk_with,
     };
@@ -241,5 +255,32 @@ mod tests {
         } else {
             assert!(entries.iter().any(|e| e.kind == Kind::Dir && e.nlink >= 3));
         }
+    }
+
+    #[test]
+    fn p1_walk_04_a_directory_is_listed_through_its_open_descriptor() {
+        // The directory is swapped for another after it was opened: the
+        // listing and every entry still come from the one opened.
+        let env = TestEnv::new();
+        let dir = env.tmp_dir().join("swapped");
+        std::fs::create_dir(&dir).unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        let fd = posix::open_dir(&dir).unwrap();
+        std::fs::rename(&dir, env.tmp_dir().join("moved")).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("c"), "c").unwrap();
+        let handle = crate::DirHandle {
+            id: DirId::ROOT,
+            path: dir,
+            depth: 0,
+        };
+        let (mut out, mut errs, mut later) = (Vec::new(), Vec::new(), Vec::new());
+        super::read_open(fd.as_fd(), &handle, &mut out, &mut errs, &mut later).unwrap();
+        let mut names: Vec<&[u8]> = out.iter().map(|e| e.name.as_bytes()).collect();
+        names.sort_unstable();
+        assert_eq!(names, [b"a", b"b"]);
+        assert!(errs.is_empty() && later.is_empty());
     }
 }

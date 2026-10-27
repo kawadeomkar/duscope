@@ -21,7 +21,7 @@ use std::path::Path;
 use bulk::{Clock, Decoded, Outcome};
 use ffi::AttrBuf;
 
-use crate::platform::fallback::FallbackProvider;
+use crate::platform::fallback;
 use crate::platform::posix;
 use crate::{DirHandle, Entry, NameRef, Provider, ScanError, VolumeInfo, WalkOptions};
 
@@ -119,10 +119,9 @@ impl Provider for MacProvider {
         };
         match outcome {
             Outcome::Done => {}
-            // The fallback provider reads a filesystem without bulk reads.
-            Outcome::Unsupported => {
-                return FallbackProvider.read_dir_split(dir, opts, out, errs, later);
-            }
+            // The fallback reads a filesystem without bulk reads, through
+            // the descriptor already open.
+            Outcome::Unsupported => fallback::read_open(fd.as_fd(), dir, out, errs, later)?,
             // The probed refills' entries are kept; the rest of the
             // directory is listed by name and every worker reads it from
             // the stat queue.
@@ -169,9 +168,12 @@ impl Provider for MacProvider {
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
+        // One answer per batch: a filesystem that refuses attribute reads
+        // refuses them for every name.
+        let mut attrs = true;
         SINGLE.with_borrow_mut(|buf| {
             for name in names {
-                match stat::entry_at(fd.as_fd(), name, opts, buf) {
+                match stat::entry_at(fd.as_fd(), name, opts, buf, &mut attrs) {
                     Ok(entry) => out.push(entry),
                     Err(e) => errs.push(scan_error(dir, name.clone(), &e)),
                 }
@@ -215,7 +217,8 @@ fn take(
             name,
             errno,
         }),
-        Decoded::Restat(name, boundary) => match stat::entry_at(fd, &name, opts, single) {
+        Decoded::Restat(name, boundary) => match stat::entry_at(fd, &name, opts, single, &mut true)
+        {
             Ok(mut entry) => {
                 if let Some(boundary) = boundary {
                     entry.boundary = boundary;
