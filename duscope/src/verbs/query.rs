@@ -100,10 +100,11 @@ pub(super) fn top_envelope(
         size: prepared.size,
     };
     let page = query::top(&prepared.scanned.view(), &q);
+    // The depth the rows were listed at: --depth 0 lists depth 1.
     let listed = if files {
         depth
     } else {
-        Some(depth.unwrap_or(1))
+        Some(depth.unwrap_or(1).max(1))
     };
     Ok(envelope(
         prepared,
