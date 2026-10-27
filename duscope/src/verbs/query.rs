@@ -11,6 +11,7 @@ use duscope_core::query::{
     TopQuery, TreeQuery, TreeView, timegrammar,
 };
 use duscope_core::rules::Classes;
+use duscope_walk::VolumeInfo;
 
 use super::scan::{self, Scanned};
 use super::{Exit, Failure};
@@ -247,20 +248,8 @@ pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
         older_than,
         older,
     ));
-    if args.atime
-        && let Some(option) = prepared.scanned.arena.volumes().first().and_then(|v| {
-            v.options
-                .iter()
-                .find(|o| matches!(o.as_str(), "noatime" | "relatime" | "lazytime"))
-                .cloned()
-        })
-    {
-        warnings.push(Warning {
-            code: "atime_unreliable",
-            message: format!("the volume is mounted {option}, so access times lag reads"),
-            count: None,
-            hint: Some("Rely on stale without --atime, or remount with strictatime".to_owned()),
-        });
+    if args.atime {
+        warnings.extend(atime_unreliable(prepared.scanned.arena.volumes()));
     }
     let (envelope, footer) = envelope(
         prepared,
@@ -509,6 +498,42 @@ fn scan_age(now: i64, finished_ns: i64, older_than: i64, older: &str) -> Option<
     })
 }
 
+/// `atime_unreliable`: the volumes the scan entered that are mounted
+/// `noatime`, `relatime` or `lazytime`, whose access times lag reads.
+fn atime_unreliable(volumes: &[VolumeInfo]) -> Option<Warning> {
+    let lagging: Vec<(&VolumeInfo, &str)> = volumes
+        .iter()
+        .filter(|v| v.entered())
+        .filter_map(|v| {
+            let option = v
+                .options
+                .iter()
+                .find(|o| matches!(o.as_str(), "noatime" | "relatime" | "lazytime"))?;
+            Some((v, option.as_str()))
+        })
+        .collect();
+    let message = match lagging.as_slice() {
+        [] => return None,
+        [(volume, option)] => format!(
+            "{} is mounted {option}, so its access times lag reads",
+            volume.mount_point.display()
+        ),
+        more => format!(
+            "{} volumes the scan entered are mounted noatime, relatime or lazytime, so their access times lag reads",
+            more.len()
+        ),
+    };
+    Some(Warning {
+        code: "atime_unreliable",
+        message,
+        count: Some(lagging.len() as u64),
+        hint: Some(
+            "Run duscope stale without --atime, which judges files by their modification and change times"
+                .to_owned(),
+        ),
+    })
+}
+
 /// The failure an engine error is.
 fn core_failure(error: CoreError) -> Failure {
     match error {
@@ -522,9 +547,12 @@ fn core_failure(error: CoreError) -> Failure {
 
 #[cfg(test)]
 mod tests {
-    use duscope_core::query::timegrammar;
+    use std::path::PathBuf;
 
-    use super::scan_age;
+    use duscope_core::query::timegrammar;
+    use duscope_walk::{Normalization, Skip, VolumeClass, VolumeInfo};
+
+    use super::{atime_unreliable, scan_age};
 
     const HOUR: i64 = 3_600_000_000_000;
 
@@ -542,5 +570,45 @@ mod tests {
         assert!(scan_age(now, now - 17 * 24 * HOUR, window, "180d").is_none());
         // A scan timed on the same clock as the query is never old.
         assert!(scan_age(now, now, window, "180d").is_none());
+    }
+
+    fn volume(mount_point: &str, options: &[&str], reason: Option<Skip>) -> VolumeInfo {
+        VolumeInfo {
+            dev: 1,
+            mnt_id: 1,
+            mount_point: PathBuf::from(mount_point),
+            fs_type: "ext4".to_owned(),
+            class: VolumeClass::Local,
+            read_only: false,
+            case_sensitive: Some(true),
+            normalization: Normalization::None,
+            options: options.iter().map(|&o| o.to_owned()).collect(),
+            total_bytes: 0,
+            free_bytes: 0,
+            reason,
+        }
+    }
+
+    #[test]
+    fn p1_cli_03_atime_unreliable_reads_every_entered_volume() {
+        let strict = volume("/", &["rw", "strictatime"], None);
+        assert!(atime_unreliable(std::slice::from_ref(&strict)).is_none());
+        // A second, noatime volume the scan entered warns, though the
+        // first is fine.
+        let data = volume("/data", &["rw", "noatime"], None);
+        let one = atime_unreliable(&[strict.clone(), data.clone()]).unwrap();
+        assert_eq!(one.code, "atime_unreliable");
+        assert_eq!(one.count, Some(1));
+        assert_eq!(
+            one.message,
+            "/data is mounted noatime, so its access times lag reads"
+        );
+        assert!(!one.hint.unwrap().contains("strictatime"));
+        // A volume the scan did not enter does not count.
+        let skipped = volume("/net", &["relatime"], Some(Skip::Network));
+        let still_one = atime_unreliable(&[strict, data.clone(), skipped]).unwrap();
+        assert_eq!(still_one.count, Some(1));
+        let two = atime_unreliable(&[data, volume("/home", &["relatime"], None)]).unwrap();
+        assert_eq!(two.count, Some(2));
     }
 }
