@@ -538,12 +538,12 @@ fn interrupt_flag() -> Arc<AtomicBool> {
     Arc::clone(FLAG.get_or_init(|| {
         let flag = Arc::new(AtomicBool::new(false));
         let disarmed = Arc::new(AtomicBool::new(false));
-        let (watched, unwatched) = (Arc::clone(&flag), Arc::clone(&disarmed));
+        let (interrupted, stand_down) = (Arc::clone(&flag), Arc::clone(&disarmed));
         let watcher = thread::Builder::new()
             .name("interrupt".to_owned())
             .spawn(move || {
-                while !watched.load(Ordering::Relaxed) {
-                    if unwatched.load(Ordering::Relaxed) {
+                while !interrupted.load(Ordering::Relaxed) {
+                    if stand_down.load(Ordering::Relaxed) {
                         return;
                     }
                     thread::sleep(Duration::from_millis(5));
