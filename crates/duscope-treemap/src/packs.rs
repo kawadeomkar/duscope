@@ -120,6 +120,27 @@ fn roles(
 }
 
 impl Pack {
+    /// Catppuccin Mocha, the default pack.
+    pub fn mocha() -> Pack {
+        Pack {
+            name: "mocha".to_owned(),
+            dark: true,
+            roles: roles(
+                "#1e1e2e", "#181825", "#11111b", "#45475a", "#585b70", "#7f849c", "#a6adc8",
+                "#cdd6f4", "#f9e2af", "#b4befe", "#74c7ec", "#f38ba8", "#a6e3a1",
+            ),
+            classes: rgbs([
+                "#89b4fa", "#f5c2e7", "#fab387", "#94e2d5", "#cba6f7", "#a6e3a1", "#6c7086",
+            ]),
+            cycle: rgbs([
+                "#89b4fa", "#f5c2e7", "#fab387", "#94e2d5", "#cba6f7", "#a6e3a1", "#f9e2af",
+                "#eba0ac", "#74c7ec", "#b4befe",
+            ]),
+            age: rgbs(["#a6e3a1", "#94e2d5", "#f9e2af", "#fab387", "#f38ba8"]),
+            shades: false,
+        }
+    }
+
     /// A built-in pack by name; `catppuccin-mocha`, `gruvbox-dark` and
     /// `no-colour` are accepted too.
     // One literal table per pack.
@@ -132,23 +153,7 @@ impl Pack {
             other => other,
         };
         let pack = match name {
-            "mocha" => Pack {
-                name: name.to_owned(),
-                dark: true,
-                roles: roles(
-                    "#1e1e2e", "#181825", "#11111b", "#45475a", "#585b70", "#7f849c", "#a6adc8",
-                    "#cdd6f4", "#f9e2af", "#b4befe", "#74c7ec", "#f38ba8", "#a6e3a1",
-                ),
-                classes: rgbs([
-                    "#89b4fa", "#f5c2e7", "#fab387", "#94e2d5", "#cba6f7", "#a6e3a1", "#6c7086",
-                ]),
-                cycle: rgbs([
-                    "#89b4fa", "#f5c2e7", "#fab387", "#94e2d5", "#cba6f7", "#a6e3a1", "#f9e2af",
-                    "#eba0ac", "#74c7ec", "#b4befe",
-                ]),
-                age: rgbs(["#a6e3a1", "#94e2d5", "#f9e2af", "#fab387", "#f38ba8"]),
-                shades: false,
-            },
+            "mocha" => Pack::mocha(),
             "tokyo-night" => Pack {
                 name: name.to_owned(),
                 dark: true,

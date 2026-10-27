@@ -167,7 +167,7 @@ fn theme(arg: Option<&OsString>) -> Result<Pack, Failure> {
 }
 
 fn named(name: &str) -> Pack {
-    Pack::named(name).unwrap_or_else(|| Pack::named("mocha").unwrap_or_else(|| unreachable!()))
+    Pack::named(name).unwrap_or_else(Pack::mocha)
 }
 
 /// Whether `COLORFGBG` names a light background (`…;7` or `…;15`).
