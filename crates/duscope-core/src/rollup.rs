@@ -68,7 +68,6 @@ pub fn roll_up(arena: &mut Arena) -> RollUp {
     // subdirectory's subtree in name order. The stack holds subdirectories
     // still to visit, last first.
     let mut stack: Vec<u32> = vec![EntryIdx::ROOT.get()];
-    let mut sorted = Vec::new();
     // Each directory and its own id, for the cumulative pass.
     let mut dirs: Vec<(DirId, u32)> = Vec::with_capacity(arena.dir_count());
     while let Some(raw) = stack.pop() {
@@ -77,26 +76,25 @@ pub fn roll_up(arena: &mut Arena) -> RollUp {
         let Some(dir) = view.dir else {
             continue;
         };
-        sorted.clear();
-        sorted.extend_from_slice(children.of_dir(dir));
-        sorted.sort_unstable_by(|&a, &b| {
-            let (a, b) = (
-                arena.entry(EntryIdx::from_raw(a)),
-                arena.entry(EntryIdx::from_raw(b)),
-            );
-            (a.kind == Kind::Dir, a.name).cmp(&(b.kind == Kind::Dir, b.name))
-        });
-        let files = sorted
+        // Each child's sort key is read once, not twice per comparison:
+        // 24 bytes a child while this directory is numbered.
+        let mut sorted: Vec<(bool, &[u8], u32)> = children
+            .of_dir(dir)
             .iter()
-            .take_while(|&&c| arena.entry(EntryIdx::from_raw(c)).kind != Kind::Dir)
-            .count();
-        for &file in &sorted[..files] {
+            .map(|&child| {
+                let view = arena.entry(EntryIdx::from_raw(child));
+                (view.kind == Kind::Dir, view.name, child)
+            })
+            .collect();
+        sorted.sort_unstable();
+        let files = sorted.partition_point(|&(is_dir, ..)| !is_dir);
+        for &(.., file) in &sorted[..files] {
             number(&mut order, &mut ids, file);
         }
+        stack.extend(sorted[files..].iter().rev().map(|&(.., child)| child));
         let files_end = id + u32::try_from(files).unwrap_or(u32::MAX);
         arena.dir_mut(dir).files_end = files_end;
         dirs.push((dir, id));
-        stack.extend(sorted[files..].iter().rev());
     }
 
     // Each directory starts from its own entry: its sizes, its mtime, its
