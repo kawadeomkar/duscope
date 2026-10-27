@@ -294,6 +294,8 @@ fn p1_walk_06_macos_an_exfat_image_is_crossed_and_confined() {
         (VolumeClass::Foreign, true, Some(false))
     );
     assert_eq!(seen.summary.mounts_excluded, 0);
+    // --clones is on by default and exFAT has no clone ids.
+    assert!(seen.summary.clones_unavailable, "--clones on exFAT");
 
     let opts = WalkOptions {
         one_file_system: true,

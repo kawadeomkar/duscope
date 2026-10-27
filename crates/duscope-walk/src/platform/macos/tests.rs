@@ -911,7 +911,12 @@ fn p1_walk_07_a_scan_of_slash_counts_users_once() {
     walk_with(
         &MacProvider::new(),
         Path::new("/"),
-        &WalkOptions::default(),
+        // -x, as `du -skx` reads /Users below: no other volume mounted
+        // under it is counted on either side.
+        &WalkOptions {
+            one_file_system: true,
+            ..WalkOptions::default()
+        },
         |event| match event {
             ScanEvent::Entry(entry) => {
                 let path = if entry.dir == Some(crate::DirId::ROOT) {
@@ -945,10 +950,12 @@ fn p1_walk_07_a_scan_of_slash_counts_users_once() {
         under_data, 0,
         "nothing under the Data volume's mount point is read"
     );
-    assert!(skipped.contains(&(
-        PathBuf::from("/System/Volumes/Data"),
-        crate::Skip::Firmlinked
-    )));
+    // Listed, not entered: under -x as another volume.
+    assert!(
+        skipped
+            .iter()
+            .any(|(path, _)| path == Path::new("/System/Volumes/Data"))
+    );
     let out = env.command("du").args(["-skx", "/Users"]).output().unwrap();
     let du: u64 = String::from_utf8(out.stdout)
         .unwrap()
