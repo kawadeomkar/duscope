@@ -5,8 +5,8 @@
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -418,20 +418,23 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     unresolved_link(&root, &given)?;
     let mut opts = options(walk_args, excludes)?;
     // Ctrl-C stops the walk; if it has not stopped soon after, the process
-    // ends anyway. Nothing is written before a scan completes.
-    opts.cancel = interrupt_flag();
+    // ends anyway. Nothing is written before a scan completes, and once the
+    // walk is over the result is written whole.
+    let interrupts = Interrupts::arm();
+    opts.cancel = Arc::clone(&interrupts.flag);
     let started = Instant::now();
     let started_ns = now_ns();
     let mut arena = Arena::new(opts.attrs);
     let mut push_error = None;
-    let summary = walk(&root, &opts, |event| {
+    let walked = walk(&root, &opts, |event| {
         if push_error.is_none()
             && let Err(e) = arena.push(event)
         {
             push_error = Some(e);
         }
-    })
-    .map_err(|e| walk_failure(&given, e))?;
+    });
+    drop(interrupts);
+    let summary = walked.map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
         return Err(Failure::new(Exit::Runtime, "io_error", e.to_string()));
     }
@@ -536,36 +539,60 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
 /// a slow machine to notice the flag and end the process.
 const INTERRUPT_GRACE: Duration = Duration::from_millis(100);
 
-/// The process's Ctrl-C flag, set up once. A watcher thread ends the
-/// process with exit 130 once the flag has been set for
-/// [`INTERRUPT_GRACE`], in case the walk is still finishing a directory;
-/// SIGINT sets the flag only once that thread runs. Where SIGINT was
-/// inherited ignored (a background job), or the thread cannot be started,
-/// Ctrl-C keeps its usual effect and the flag is never set.
-fn interrupt_flag() -> Arc<AtomicBool> {
-    static FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
-    Arc::clone(FLAG.get_or_init(|| {
+/// Ctrl-C during a walk. While armed, SIGINT sets `flag`, the walk's
+/// cancellation flag, and a watcher thread ends the process with exit 130
+/// if the walk has not stopped [`INTERRUPT_GRACE`] later; the watcher
+/// blocks until SIGINT or the stand-down, without polling. Dropping it once
+/// the walk is over ends the watcher, so a Ctrl-C while the result is
+/// written lets it finish rather than cut it off from another thread.
+/// Where SIGINT was inherited ignored (a background job), or the watcher
+/// cannot be started, Ctrl-C keeps its usual effect and the flag is never
+/// set.
+struct Interrupts {
+    flag: Arc<AtomicBool>,
+    /// Set once the walk is over, for a watcher woken by a late SIGINT.
+    over: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl Interrupts {
+    fn arm() -> Interrupts {
         let flag = Arc::new(AtomicBool::new(false));
-        let disarmed = Arc::new(AtomicBool::new(false));
-        let (interrupted, stand_down) = (Arc::clone(&flag), Arc::clone(&disarmed));
-        let watcher = thread::Builder::new()
-            .name("interrupt".to_owned())
-            .spawn(move || {
-                while !interrupted.load(Ordering::Relaxed) {
-                    if stand_down.load(Ordering::Relaxed) {
-                        return;
+        let over = Arc::new(AtomicBool::new(false));
+        let armed = matches!(duscope_walk::cancel_on_interrupt(&flag), Ok(true));
+        if armed {
+            let walk_over = Arc::clone(&over);
+            let watcher = thread::Builder::new()
+                .name("interrupt".to_owned())
+                .spawn(move || {
+                    if duscope_walk::wait_for_interrupt() {
+                        thread::sleep(INTERRUPT_GRACE);
+                        if !walk_over.load(Ordering::SeqCst) {
+                            report_interrupt();
+                            std::process::exit(i32::from(Exit::Interrupted.code()));
+                        }
                     }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                thread::sleep(INTERRUPT_GRACE);
-                report_interrupt();
-                std::process::exit(i32::from(Exit::Interrupted.code()));
-            });
-        if watcher.is_ok() && !matches!(duscope_walk::cancel_on_interrupt(&flag), Ok(true)) {
-            disarmed.store(true, Ordering::Relaxed);
+                });
+            if watcher.is_err() {
+                duscope_walk::stand_down_interrupt();
+                return Interrupts {
+                    flag,
+                    over,
+                    armed: false,
+                };
+            }
         }
-        flag
-    }))
+        Interrupts { flag, over, armed }
+    }
+}
+
+impl Drop for Interrupts {
+    fn drop(&mut self) {
+        if self.armed {
+            self.over.store(true, Ordering::SeqCst);
+            duscope_walk::stand_down_interrupt();
+        }
+    }
 }
 
 /// Reports Ctrl-C: one line on stderr, once, whatever the format.

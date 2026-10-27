@@ -337,6 +337,22 @@ pub fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<bool> {
     platform::cancel_on_interrupt(flag)
 }
 
+/// Blocks the calling thread until SIGINT arrives (`true`), or until
+/// [`stand_down_interrupt`] is called or no handler was installed
+/// (`false`). A thread that ends the process when a walk does not stop in
+/// time waits here instead of polling the flag.
+#[must_use]
+pub fn wait_for_interrupt() -> bool {
+    platform::wait_for_interrupt()
+}
+
+/// Wakes a thread waiting in [`wait_for_interrupt`], which returns
+/// `false`, once the walk it watched is over. The handler stays installed:
+/// a later SIGINT sets the flag, which no walk reads any more.
+pub fn stand_down_interrupt() {
+    platform::stand_down_interrupt();
+}
+
 /// The result queue holds this many directory batches per worker, as in
 /// dua-core; a worker blocks on a full queue until the sink catches up.
 const QUEUED_BATCHES_PER_WORKER: usize = 2;
