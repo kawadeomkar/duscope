@@ -21,7 +21,8 @@ use crate::cli::{
 };
 use crate::out::{Format, Output};
 
-/// `--limit`'s default, and its cap without `--format ndjson`.
+/// `--limit`'s default, and its cap without `--format ndjson` (which
+/// streams every row).
 const DEFAULT_LIMIT: usize = 25;
 const MAX_LIMIT: usize = 100;
 
@@ -64,6 +65,7 @@ pub fn scan(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
 
 /// `top`.
 pub fn top(args: &TopArgs, output: &Output) -> Result<(), Failure> {
+    limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let (envelope, footer) = top_envelope(
         scanned,
@@ -120,6 +122,7 @@ pub(super) fn top_envelope(
 
 /// `tree`.
 pub fn tree(args: &TreeArgs, output: &Output) -> Result<(), Failure> {
+    limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let prepared = prepare(
         scanned,
@@ -169,6 +172,7 @@ pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
             Classes::vendored().merged(user)
         }
     };
+    limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let prepared = prepare(
         scanned,
@@ -207,6 +211,7 @@ pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
         .unwrap_or(DEFAULT_STALE_AGE);
     let older_than = timegrammar::parse_age(older)
         .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--older-than {e}")))?;
+    limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let mut prepared = prepare(
         scanned,
@@ -304,11 +309,7 @@ fn prepare(
             hint: Some("Install the tzdata package, or give dates in RFC 3339".to_owned()),
         });
     }
-    let limit = (output.format != Format::Ndjson).then(|| {
-        args.and_then(|a| a.limit)
-            .unwrap_or(DEFAULT_LIMIT)
-            .min(MAX_LIMIT)
-    });
+    let limit = limit(args, output)?;
     Ok(Prepared {
         size: scan::size_kind(walk),
         now,
@@ -324,6 +325,24 @@ fn prepare(
         warnings,
         scanned,
     })
+}
+
+/// The rows a list returns: `--limit`, 25 by default, at most 100; every
+/// row under `--format ndjson`. A `--limit` above 100 is a usage error,
+/// raised before the scan.
+fn limit(args: Option<&QueryArgs>, output: &Output) -> Result<Option<usize>, Failure> {
+    if output.format == Format::Ndjson {
+        return Ok(None);
+    }
+    match args.and_then(|a| a.limit) {
+        Some(asked) if asked > MAX_LIMIT => Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("--limit {asked} is more than the {MAX_LIMIT} rows a list returns"),
+        )
+        .hint("Rerun duscope with --format ndjson to stream every row")),
+        asked => Ok(Some(asked.unwrap_or(DEFAULT_LIMIT))),
+    }
 }
 
 /// The shared filters the flags ask for, with each as given; and whether

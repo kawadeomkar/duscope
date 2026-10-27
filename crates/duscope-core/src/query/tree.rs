@@ -5,6 +5,8 @@
 //! bytes are charged elsewhere (a later hard link, a clone) has a share of
 //! nothing and sorts as empty, so the shares add up.
 
+use std::collections::BinaryHeap;
+
 use crate::envelope::{TreeEntry, name_fields};
 
 use super::{
@@ -32,7 +34,10 @@ pub struct TreeQuery {
     pub size: SizeKind,
 }
 
-/// The tree under the root of `view`, in pre-order.
+/// The tree under the root of `view`, in pre-order. `--limit` keeps the
+/// shallowest rows: every row of one depth before any row below it, the
+/// earlier in pre-order first within a depth, so a kept row's parent is
+/// kept too; the kept rows stay in pre-order.
 pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
     if view.is_empty() {
         return Page {
@@ -43,7 +48,9 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
     let depth = q.depth.unwrap_or(2);
     let root = view.node(0);
     let root_total = root.size(q.size);
-    let mut rows = Vec::new();
+    // The rows kept so far, the worst on top: (depth, pre-order number,
+    // id, the parent's size).
+    let mut kept: BinaryHeap<(u32, u64, u32, u64)> = BinaryHeap::new();
     let mut total_count = 0u64;
     // (id, its parent's size), the next to visit last.
     let mut stack = vec![(0u32, root_total)];
@@ -55,8 +62,15 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
         }
         if q.filters.keeps(view, &node, q.size) {
             total_count += 1;
-            if q.limit.is_none_or(|limit| rows.len() < limit) {
-                rows.push(entry(view, &node, root_total, share, q.size));
+            let row = (node.depth, total_count, id, parent_total);
+            match q.limit {
+                Some(limit) if kept.len() >= limit => {
+                    if kept.peek().is_some_and(|worst| row < *worst) {
+                        kept.pop();
+                        kept.push(row);
+                    }
+                }
+                _ => kept.push(row),
             }
         }
         if node.is_dir() && node.depth < depth {
@@ -66,8 +80,18 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
             stack.extend(kids.into_iter().rev().map(|kid| (kid, total)));
         }
     }
+    let mut rows = kept.into_vec();
+    rows.sort_unstable_by_key(|&(_, order, _, _)| order);
+    let entries = rows
+        .into_iter()
+        .map(|(_, _, id, parent_total)| {
+            let node = view.node(id);
+            let share = pct(node.counted(q.size), parent_total);
+            entry(view, &node, root_total, share, q.size)
+        })
+        .collect();
     Page {
-        entries: rows,
+        entries,
         total_count,
     }
 }

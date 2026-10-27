@@ -246,6 +246,54 @@ fn p1_cli_03_tree_lists_shares_down_to_its_depth() {
     assert!((library.pct_of_root - library.pct_of_parent).abs() < f64::EPSILON);
 }
 
+#[test]
+fn p1_cli_03_tree_limit_keeps_the_shallowest_rows() {
+    let fixture = home();
+    let (arena, rollup) = scan(&fixture);
+    let view = view(&arena, &rollup, &fixture);
+    let rows = |limit| {
+        let page = tree(
+            &view,
+            &TreeQuery {
+                depth: Some(3),
+                limit: Some(limit),
+                ..TreeQuery::default()
+            },
+        );
+        let rows: Vec<String> = page
+            .entries
+            .iter()
+            .map(|e| {
+                e.path
+                    .trim_start_matches("/home")
+                    .trim_start_matches('/')
+                    .to_owned()
+            })
+            .collect();
+        (rows, page.total_count)
+    };
+    // Every row of depth 1 before any below it, not the first subtree
+    // whole.
+    let (four, total) = rows(4);
+    assert_eq!(four, ["", "Library", "dev", "Movies"]);
+    assert_eq!(total, 17);
+    // A deeper row comes with its parent, and the rows stay in tree order.
+    let (seven, _) = rows(7);
+    assert_eq!(
+        seven,
+        [
+            "",
+            "Library",
+            "Library/Containers",
+            "Library/Preferences",
+            "dev",
+            "Movies",
+            "notes.txt"
+        ]
+    );
+    assert!(rows(0).0.is_empty());
+}
+
 fn tree_rows(view: &ArenaView<'_>, depth: u32, min_pct: f64) -> Vec<String> {
     tree(
         view,

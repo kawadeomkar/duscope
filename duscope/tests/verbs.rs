@@ -394,3 +394,32 @@ fn p1_cli_03_date_filters_are_reported_and_a_missing_zone_warns() {
     let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(envelope["warnings"], serde_json::json!([]));
 }
+
+#[test]
+fn p1_cli_03_a_limit_above_100_is_a_usage_error() {
+    let env = TestEnv::new();
+    let tree = env.fixtures().case_root("empty");
+    for verb in ["top", "tree", "by-type", "stale"] {
+        // Refused before the scan: a missing path does not get that far.
+        let out = duscope(&env)
+            .args([verb, "--json", "--limit", "101", "/nonexistent/duscope"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{verb}");
+        let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(envelope["error"]["code"], "usage");
+        let hint = envelope["error"]["hint"].as_str().unwrap();
+        assert!(hint.contains("--format ndjson"), "{hint}");
+        duscope(&env)
+            .args([verb, "--limit", "100"])
+            .arg(&tree)
+            .assert()
+            .code(0);
+    }
+    // ndjson streams every row, whatever --limit says.
+    duscope(&env)
+        .args(["top", "--format", "ndjson", "--limit", "500"])
+        .arg(&tree)
+        .assert()
+        .code(0);
+}
