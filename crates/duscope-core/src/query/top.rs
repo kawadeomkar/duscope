@@ -5,7 +5,8 @@
 //! tree without nesting. With cut-through, a row whose directory holds a
 //! child directory of at least 80% of its bytes is replaced by that child,
 //! up to three levels down, and `via` names the directories cut through
-//! (which is how `Library/Containers` stands beside `Movies`).
+//! (which is how `Library/Containers` stands beside `Movies`). The filters
+//! judge the rows as listed, after cut-through.
 //! `--files` lists files instead, at any depth unless `--depth` is given.
 
 use std::collections::HashMap;
@@ -72,16 +73,18 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
             let node = view.node(id);
             let has_subdirs = node.last_id > node.files_end;
             if node.depth >= depth || !has_subdirs {
-                // The filters judge the directory at the listed depth; the
-                // row it is cut through to stands for it.
-                if !q.filters.keeps(view, &node, q.size) {
-                    continue;
-                }
+                // The filters judge the row that is listed: the directory,
+                // or the one it is cut through to, whose path, depth and
+                // size the row shows. Cut-through never enters a directory
+                // --exclude leaves out.
                 let (row, via) = if q.cut_through {
                     cut_through(view, node, q.size, &q.filters)
                 } else {
                     (id, Vec::new())
                 };
+                if !q.filters.keeps(view, &view.node(row), q.size) {
+                    continue;
+                }
                 if !via.is_empty() {
                     vias.insert(row, via);
                 }

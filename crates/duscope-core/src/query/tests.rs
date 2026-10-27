@@ -564,7 +564,7 @@ fn p1_cli_03_stale_needs_both_the_mtime_and_the_ctime_old() {
 }
 
 #[test]
-fn p1_cli_03_filters_judge_the_listed_directory_before_cut_through() {
+fn p1_cli_03_filters_judge_the_row_top_lists() {
     let tree = home();
     let (arena, rollup) = scan(&tree);
     let view = view(&arena, &rollup, &tree);
@@ -582,12 +582,31 @@ fn p1_cli_03_filters_judge_the_listed_directory_before_cut_through() {
             .map(|e| e.path.strip_prefix("/home/").unwrap_or(&e.path).to_owned())
             .collect::<Vec<_>>()
     };
-    // --glob names the directory listed; its row is still cut through.
-    let glob = Filters {
-        glob: Some(globs(["Library"]).unwrap()),
+    // The rows are Library/Containers/app (cut through from Library, at
+    // depth 3), dev and Movies (depth 1). --glob, --min-depth and
+    // --min-size judge those rows, not the directories they stand for.
+    let glob = |pattern: &str| Filters {
+        glob: Some(globs([pattern]).unwrap()),
         ..Filters::default()
     };
-    assert_eq!(rows(glob), ["Library/Containers/app"]);
+    assert_eq!(rows(glob("app")), ["Library/Containers/app"]);
+    assert!(rows(glob("Library")).is_empty());
+    assert_eq!(rows(glob("/Library/**")), ["Library/Containers/app"]);
+    let deep = Filters {
+        min_depth: Some(2),
+        ..Filters::default()
+    };
+    assert_eq!(rows(deep), ["Library/Containers/app"]);
+    let shallow = Filters {
+        max_depth: Some(1),
+        ..Filters::default()
+    };
+    assert_eq!(rows(shallow), ["dev", "Movies"]);
+    let large = Filters {
+        min_size: Some(91 * MIB),
+        ..Filters::default()
+    };
+    assert!(rows(large).is_empty());
     // Cut-through stops above a directory --exclude leaves out.
     let exclude = Filters {
         exclude: Some(globs(["app"]).unwrap()),
