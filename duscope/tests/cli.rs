@@ -285,3 +285,45 @@ fn p1_cli_01_a_root_that_is_not_a_directory() {
         assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 1);
     }
 }
+
+#[test]
+fn p1_cli_01_thread_counts() {
+    let env = TestEnv::new();
+    let tree = env.fixtures().case_root("empty");
+    // An exported but empty DUSCOPE_THREADS is the same as an unset one.
+    duscope(&env)
+        .env("DUSCOPE_THREADS", "")
+        .arg("scan")
+        .arg(&tree)
+        .assert()
+        .code(0);
+    let three = duscope(&env)
+        .env("DUSCOPE_THREADS", "3")
+        .arg("scan")
+        .arg(&tree)
+        .assert()
+        .code(0);
+    let stdout = String::from_utf8_lossy(&three.get_output().stdout).into_owned();
+    assert!(stdout.ends_with(", 3 threads\n"), "{stdout}");
+    // A value that is not a count names where it came from.
+    let bad = duscope(&env)
+        .env("DUSCOPE_THREADS", "many")
+        .arg("scan")
+        .arg(&tree)
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&bad.get_output().stderr).into_owned();
+    assert!(stderr.contains("DUSCOPE_THREADS"), "{stderr}");
+    // More threads than any machine needs is a usage error, not a scan
+    // that starts thousands of threads.
+    duscope(&env)
+        .args(["scan", "--threads=100000"])
+        .arg(&tree)
+        .assert()
+        .code(2);
+    duscope(&env)
+        .args(["scan", "--threads=1024"])
+        .arg(&tree)
+        .assert()
+        .code(0);
+}

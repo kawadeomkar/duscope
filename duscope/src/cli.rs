@@ -63,7 +63,7 @@ pub struct WalkArgs {
     pub path: Option<PathBuf>,
 
     /// Worker threads (default: the platform's choice)
-    #[arg(long, env = "DUSCOPE_THREADS", value_name = "N")]
+    #[arg(long, env = "DUSCOPE_THREADS", value_parser = parse_threads, value_name = "N")]
     pub threads: Option<usize>,
 
     /// Stay on the root's filesystem
@@ -410,6 +410,29 @@ pub enum ProviderArg {
     Native,
     /// readdir and fstatat
     Fallback,
+}
+
+/// The most worker threads a scan starts. More than this is a typing
+/// mistake, not a faster scan.
+pub const MAX_THREADS: usize = 1024;
+
+/// A thread count (`--threads`, `DUSCOPE_THREADS`): a whole number up to
+/// [`MAX_THREADS`]. Empty, like 0, leaves the choice to the platform, so an
+/// exported but empty `DUSCOPE_THREADS` is the same as an unset one.
+pub fn parse_threads(text: &str) -> Result<usize, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(0);
+    }
+    match text.parse::<usize>() {
+        Ok(n) if n <= MAX_THREADS => Ok(n),
+        Ok(_) => Err(format!(
+            "at most {MAX_THREADS} threads (from --threads or DUSCOPE_THREADS)"
+        )),
+        Err(_) => {
+            Err("not a whole number of threads (from --threads or DUSCOPE_THREADS)".to_owned())
+        }
+    }
 }
 
 /// The multipliers of size suffixes: `K/M/G/T` are powers of 1,024, `KB/MB/GB/TB`
