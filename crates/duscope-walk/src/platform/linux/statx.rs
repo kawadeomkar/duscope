@@ -32,18 +32,35 @@ pub(super) const FULL: u32 =
 /// entry with the server.
 const FLAGS: c_int = libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT | libc::AT_STATX_DONT_SYNC;
 
-/// `statx(2)` of `name` relative to `dir` (`None`: the working directory).
+/// `statx(2)` of `name` relative to `dir` (`None`: the working directory),
+/// leaving an automount untriggered.
 pub(super) fn statx(
     dir: Option<BorrowedFd<'_>>,
     name: &CStr,
     mask: u32,
+) -> io::Result<libc::statx> {
+    statx_with(dir, name, mask, FLAGS)
+}
+
+/// `statx(2)` of `path`, triggering an automount there: for the walk root
+/// and the volumes the walk enters, whose directories the walk opens, which
+/// triggers it anyway.
+pub(super) fn statx_through(path: &CStr, mask: u32) -> io::Result<libc::statx> {
+    statx_with(None, path, mask, FLAGS & !libc::AT_NO_AUTOMOUNT)
+}
+
+fn statx_with(
+    dir: Option<BorrowedFd<'_>>,
+    name: &CStr,
+    mask: u32,
+    flags: c_int,
 ) -> io::Result<libc::statx> {
     let at = dir.map_or(libc::AT_FDCWD, |fd| fd.as_raw_fd());
     let mut buf = MaybeUninit::<libc::statx>::uninit();
     loop {
         // SAFETY: `at` is AT_FDCWD or a descriptor open for the borrow,
         // `name` is NUL-terminated, and `buf` is writable for one statx.
-        let rc = unsafe { libc::statx(at, name.as_ptr(), FLAGS, mask, buf.as_mut_ptr()) };
+        let rc = unsafe { libc::statx(at, name.as_ptr(), flags, mask, buf.as_mut_ptr()) };
         if rc == 0 {
             // SAFETY: statx succeeded, so it filled the struct.
             return Ok(unsafe { buf.assume_init() });

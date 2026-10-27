@@ -10,7 +10,7 @@ use std::sync::{Mutex, PoisonError};
 
 use super::statx;
 use crate::platform::posix;
-use crate::{Entry, NameRef, Normalization, VolumeClass, VolumeInfo};
+use crate::{DirHandle, Entry, Kind, NameRef, Normalization, VolumeClass, VolumeInfo};
 
 /// One line of `/proc/self/mountinfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,55 +116,137 @@ pub(super) fn case_sensitive(fs_type: &str, options: &[String]) -> Option<bool> 
     }
 }
 
-/// The mounts last read from `/proc/self/mountinfo`, re-read when a mount
-/// id is missing from them.
-static MOUNTS: Mutex<Vec<Mount>> = Mutex::new(Vec::new());
+/// The mount table one provider reads from `/proc/self/mountinfo`, for one
+/// walk: read when first needed, and read again when a lookup misses or
+/// finds a mount at another place than asked, since a freed mount id is
+/// handed to the next mount at once.
+#[derive(Debug, Default)]
+pub(in crate::platform) struct Mounts {
+    table: Mutex<Vec<Mount>>,
+    /// The walk root as given and its real path, for matching paths
+    /// against mount points.
+    root: Mutex<Option<(PathBuf, PathBuf)>>,
+}
 
-/// The mount holding `path`: by the mount id `statx` reports (5.8), else by
-/// the longest mount point its real path starts with.
-fn mount_of(path: &Path, mnt_id: Option<u64>) -> io::Result<Mount> {
-    let mut mounts = MOUNTS.lock().unwrap_or_else(PoisonError::into_inner);
-    let find = |mounts: &[Mount]| -> io::Result<Option<Mount>> {
-        if let Some(id) = mnt_id {
-            return Ok(mounts.iter().find(|m| m.id == id).cloned());
+impl Mounts {
+    /// The mount holding `path`: by `mnt_id` (the reusable id, as
+    /// `STATX_MNT_ID` gives it) when there is one, else by the longest
+    /// mount point the real path `real` starts with. With `at_point`, the
+    /// mount must be mounted at `real`.
+    fn lookup(&self, real: &Path, mnt_id: Option<u64>, at_point: bool) -> io::Result<Mount> {
+        let find = |table: &[Mount]| -> Option<Mount> {
+            let found = match mnt_id {
+                Some(id) => table.iter().find(|m| m.id == id),
+                None => table
+                    .iter()
+                    .filter(|m| real.starts_with(&m.path))
+                    .max_by_key(|m| m.path.as_os_str().len()),
+            };
+            found.filter(|m| !at_point || m.path == real).cloned()
+        };
+        let mut table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
+        if !table.is_empty()
+            && let Some(found) = find(&table)
+        {
+            return Ok(found);
         }
-        let real = fs::canonicalize(path)?;
-        Ok(mounts
-            .iter()
-            .filter(|m| real.starts_with(&m.path))
-            .max_by_key(|m| m.path.as_os_str().len())
-            .cloned())
-    };
-    if !mounts.is_empty()
-        && let Some(found) = find(&mounts)?
-    {
-        return Ok(found);
+        *table = parse_mountinfo(&fs::read("/proc/self/mountinfo")?);
+        find(&table)
+            .or_else(|| {
+                (at_point && mnt_id.is_some())
+                    .then(|| table.iter().find(|m| Some(m.id) == mnt_id).cloned())
+                    .flatten()
+            })
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no mount holds the path"))
     }
-    *mounts = parse_mountinfo(&fs::read("/proc/self/mountinfo")?);
-    find(&mounts)?.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no mount holds the path"))
-}
 
-/// The mount id of the mount holding `path`, for kernels whose `statx`
-/// reports none (before 5.8) and for the fallback provider.
-pub(in crate::platform) fn mnt_id_of(path: &Path) -> u64 {
-    mount_of(path, None).map_or(0, |m| m.id)
-}
+    /// The real path of `name` in `dir`: the walk root's real path, read
+    /// once, joined with the names below it.
+    fn real(&self, dir: &DirHandle, name: &[u8]) -> io::Result<PathBuf> {
+        let given = dir.ancestors().last().map_or(dir.path(), DirHandle::path);
+        let mut root = self.root.lock().unwrap_or_else(PoisonError::into_inner);
+        let real_root = match &*root {
+            Some((cached, real)) if cached == given => real.clone(),
+            _ => {
+                let real = fs::canonicalize(given)?;
+                *root = Some((given.to_owned(), real.clone()));
+                real
+            }
+        };
+        let below = dir.path().strip_prefix(given).unwrap_or(Path::new(""));
+        Ok(real_root.join(below).join(OsStr::from_bytes(name)))
+    }
 
-/// The volume mounted at `path` from its mountinfo line alone, sizes 0: the
-/// mounted filesystem is not asked anything (`statx` with
-/// `AT_NO_AUTOMOUNT` and `AT_STATX_DONT_SYNC` reads only what the kernel
-/// holds).
-pub(in crate::platform) fn mount_info(path: &Path) -> io::Result<VolumeInfo> {
-    let c_path = posix::c_path(path)?;
-    let stx = statx::statx(None, &c_path, libc::STATX_MNT_ID | libc::STATX_INO)?;
-    let mnt_id = (stx.stx_mask & libc::STATX_MNT_ID != 0).then_some(stx.stx_mnt_id);
-    let mount = mount_of(path, mnt_id)?;
-    Ok(describe(
-        libc::makedev(stx.stx_dev_major, stx.stx_dev_minor),
-        mount,
-        0,
-        0,
-    ))
+    /// The mount id of the mount holding `path`, by path, for kernels whose
+    /// `statx` reports none (before 5.8) and for the fallback provider; 0
+    /// when it cannot be found.
+    pub(in crate::platform) fn mnt_id_of(&self, path: &Path) -> u64 {
+        fs::canonicalize(path)
+            .and_then(|real| self.lookup(&real, None, false))
+            .map_or(0, |m| m.id)
+    }
+
+    /// Gives an entry whose mount id `statx` did not report (before Linux
+    /// 5.8, or read by `stat`) its mount's id. A directory is looked up by
+    /// path, so a bind mount on the same device is still a mount of its
+    /// own; any other entry on its directory's device takes its
+    /// directory's.
+    pub(in crate::platform) fn fill_mnt_id(&self, entry: &mut Entry, dir: &DirHandle) {
+        if entry.mnt_id != 0 {
+            return;
+        }
+        entry.mnt_id = if entry.kind != Kind::Dir && entry.dev == dir.dev() {
+            dir.mnt_id()
+        } else {
+            self.real(dir, entry.name.as_bytes())
+                .and_then(|real| self.lookup(&real, None, false))
+                .map_or(dir.mnt_id(), |m| m.id)
+        };
+    }
+
+    /// The volume mounted at `path` from its mountinfo line alone, sizes 0:
+    /// the mounted filesystem is not asked anything (`statx` with
+    /// `AT_NO_AUTOMOUNT` and `AT_STATX_DONT_SYNC` reads only what the
+    /// kernel holds).
+    pub(in crate::platform) fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+        let c_path = posix::c_path(path)?;
+        let stx = statx::statx(None, &c_path, libc::STATX_MNT_ID | libc::STATX_INO)?;
+        let mnt_id = (stx.stx_mask & libc::STATX_MNT_ID != 0).then_some(stx.stx_mnt_id);
+        let mount = self.lookup(path, mnt_id, true)?;
+        Ok(describe(
+            libc::makedev(stx.stx_dev_major, stx.stx_dev_minor),
+            mount,
+            0,
+            0,
+        ))
+    }
+
+    /// The volume holding `path`; sizes from `statvfs`, free bytes being
+    /// `f_bavail × f_frsize`. The walk enters it, so an automount there is
+    /// triggered and the mounted volume described. `mnt_id` is the reusable
+    /// id mountinfo lists; the walk puts the entries' id in its place.
+    pub(in crate::platform) fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        let c_path = posix::c_path(path)?;
+        let stx = statx::statx_through(&c_path, statx::BASIC & !libc::STATX_MNT_ID_UNIQUE)?;
+        let entry: Entry = statx::entry(NameRef::new(b""), &stx, crate::Attrs::Basic);
+        let mnt_id = (stx.stx_mask & libc::STATX_MNT_ID != 0).then_some(stx.stx_mnt_id);
+        let real = fs::canonicalize(path)?;
+        let mount = self.lookup(&real, mnt_id, false)?;
+        let vfs = posix::statvfs(&c_path)?;
+        // The fields are 32-bit on 32-bit targets.
+        #[allow(clippy::useless_conversion)]
+        let (frsize, blocks, avail) = (
+            u64::from(vfs.f_frsize),
+            u64::from(vfs.f_blocks),
+            u64::from(vfs.f_bavail),
+        );
+        Ok(describe(
+            entry.dev,
+            mount,
+            blocks.saturating_mul(frsize),
+            avail.saturating_mul(frsize),
+        ))
+    }
 }
 
 /// A volume record from a mount and its sizes.
@@ -188,29 +270,4 @@ fn describe(dev: u64, mount: Mount, total_bytes: u64, free_bytes: u64) -> Volume
         free_bytes,
         reason: None,
     }
-}
-
-/// The volume holding `path`; sizes from `statvfs`, free bytes being
-/// `f_bavail × f_frsize`. `mnt_id` is the reusable id that mountinfo
-/// lists; the walk puts the entries' id in its place.
-pub(in crate::platform) fn volume(path: &Path) -> io::Result<VolumeInfo> {
-    let c_path = posix::c_path(path)?;
-    let stx = statx::statx(None, &c_path, statx::BASIC & !libc::STATX_MNT_ID_UNIQUE)?;
-    let entry: Entry = statx::entry(NameRef::new(b""), &stx, crate::Attrs::Basic);
-    let mnt_id = (stx.stx_mask & libc::STATX_MNT_ID != 0).then_some(stx.stx_mnt_id);
-    let mount = mount_of(path, mnt_id)?;
-    let vfs = posix::statvfs(&c_path)?;
-    // The fields are 32-bit on 32-bit targets.
-    #[allow(clippy::useless_conversion)]
-    let (frsize, blocks, avail) = (
-        u64::from(vfs.f_frsize),
-        u64::from(vfs.f_blocks),
-        u64::from(vfs.f_bavail),
-    );
-    Ok(describe(
-        entry.dev,
-        mount,
-        blocks.saturating_mul(frsize),
-        avail.saturating_mul(frsize),
-    ))
 }

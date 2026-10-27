@@ -6,7 +6,7 @@ mod dents;
 mod mounts;
 mod statx;
 
-pub(super) use mounts::{mnt_id_of, mount_info, volume};
+pub(super) use mounts::Mounts;
 pub(super) use statx::from_stat;
 #[cfg(test)]
 mod tests;
@@ -30,6 +30,8 @@ thread_local! {
 /// The Linux provider.
 #[derive(Debug, Default)]
 pub(crate) struct LinuxProvider {
+    /// The mount table, read for this walk.
+    mounts: Mounts,
     /// `statx` calls made, for the test that counts them.
     #[cfg(test)]
     statx_calls: std::sync::atomic::AtomicUsize,
@@ -61,7 +63,7 @@ impl LinuxProvider {
         for name in names {
             match statx::entry_at(fd, name, opts) {
                 Ok(mut entry) => {
-                    fill_mnt_id(&mut entry, dir);
+                    self.mounts.fill_mnt_id(&mut entry, dir);
                     out.push(entry);
                 }
                 Err(e) => errs.push(ScanError {
@@ -131,11 +133,11 @@ impl Provider for LinuxProvider {
     }
 
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
-        volume(path)
+        self.mounts.volume(path)
     }
 
     fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
-        mount_info(path)
+        self.mounts.mount_info(path)
     }
 
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
@@ -143,24 +145,12 @@ impl Provider for LinuxProvider {
         #[cfg(test)]
         self.statx_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let stx = statx::statx(None, &posix::c_path(path)?, statx::mask(opts))?;
+        // The root is read through an automount, as opening it will be.
+        let stx = statx::statx_through(&posix::c_path(path)?, statx::mask(opts))?;
         let mut entry = statx::entry(name, &stx, opts.attrs);
         if entry.mnt_id == 0 {
-            entry.mnt_id = mounts::mnt_id_of(path);
+            entry.mnt_id = self.mounts.mnt_id_of(path);
         }
         Ok(entry)
-    }
-}
-
-/// Gives an entry whose mount id `statx` did not report (before Linux 5.8,
-/// or read by `stat`) the id of its directory's mount, or of the mount
-/// holding it when it sits on another device.
-pub(super) fn fill_mnt_id(entry: &mut Entry, dir: &DirHandle) {
-    if entry.mnt_id == 0 {
-        entry.mnt_id = if entry.dev == dir.dev() {
-            dir.mnt_id()
-        } else {
-            mounts::mnt_id_of(&dir.path().join(entry.name.as_os_str()))
-        };
     }
 }

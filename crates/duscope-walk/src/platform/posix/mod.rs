@@ -154,6 +154,70 @@ pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
     Ok(unsafe { stat.assume_init() })
 }
 
+/// The names in the directory open on `dir`, without `.` and `..`, read
+/// with `readdir` through a duplicate of the descriptor, so the listing is
+/// of the directory the descriptor holds, not of whatever its path names
+/// by now. The listing starts from the beginning, wherever an earlier read
+/// of the descriptor left off.
+pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>> {
+    // SAFETY: `dir` is open for the borrow; F_DUPFD_CLOEXEC returns a new
+    // descriptor or -1.
+    let dup = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `dup` is a descriptor this function owns; fdopendir takes it
+    // over on success, and on failure it is closed here.
+    let stream = unsafe { libc::fdopendir(dup) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so `dup` is still ours to close.
+        unsafe { libc::close(dup) };
+        return Err(error);
+    }
+    // SAFETY: `stream` is live; the duplicate shares the descriptor's
+    // offset, which a bulk read may have moved.
+    unsafe { libc::rewinddir(stream) };
+    let mut names = Vec::new();
+    let result = loop {
+        set_errno(0);
+        // SAFETY: `stream` is a live directory stream until closedir below.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            break if error.raw_os_error() == Some(0) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: readdir returned a valid entry whose d_name is
+        // NUL-terminated and lives until the next readdir call.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(crate::NameRef::new(name));
+        }
+    };
+    // SAFETY: `stream` came from fdopendir and is closed once.
+    unsafe { libc::closedir(stream) };
+    result.map(|()| names)
+}
+
+/// Sets the calling thread's `errno`.
+fn set_errno(value: libc::c_int) {
+    // SAFETY: the errno location is the calling thread's own int.
+    unsafe {
+        #[cfg(target_os = "linux")]
+        {
+            *libc::__errno_location() = value;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            *libc::__error() = value;
+        }
+    }
+}
+
 /// Per-thread counts of the calls that read entries, for the tests that
 /// count them: bulk reads, and reads of one entry.
 #[cfg(test)]
