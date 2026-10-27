@@ -122,6 +122,7 @@ fn roles(
 
 impl Pack {
     /// Catppuccin Mocha, the default pack.
+    #[must_use]
     pub fn mocha() -> Pack {
         Pack {
             name: "mocha".to_owned(),
@@ -146,6 +147,7 @@ impl Pack {
     /// `no-colour` are accepted too.
     // One literal table per pack.
     #[allow(clippy::too_many_lines)]
+    #[must_use]
     pub fn named(name: &str) -> Option<Pack> {
         let name = match name {
             "catppuccin-mocha" | "catppuccin" => "mocha",
@@ -277,6 +279,7 @@ impl Pack {
     }
 
     /// The colour of `class`.
+    #[must_use]
     pub fn class(&self, class: Class) -> Color {
         let i = Class::ALL.iter().position(|&c| c == class).unwrap_or(6);
         self.classes[i]
@@ -285,6 +288,7 @@ impl Pack {
     /// Where a class colour equals a role drawn as a border or fill: each
     /// clash as `role = class`. Empty for every built-in pack; a theme file
     /// with a clash is refused.
+    #[must_use]
     pub fn clashes(&self) -> Vec<String> {
         let drawn = [
             ("link", self.roles.link),

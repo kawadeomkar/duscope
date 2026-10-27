@@ -147,6 +147,7 @@ struct Painter<'v, 'o, V: TreeView + ?Sized> {
 
 /// Paints the scan in `view` as a map of `w` columns and `h` rows, at most
 /// 32767 (twice that in half-cell units).
+#[must_use]
 pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u16) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
     let mut buffer = CellBuffer::new(w, h);
@@ -618,6 +619,7 @@ fn age_step(now: i64, mtime: i64) -> usize {
 }
 
 /// A class's key letter, as the legend and the shades labels show it.
+#[must_use]
 pub fn class_key(class: Class) -> char {
     match class {
         Class::Code => 'c',
@@ -631,6 +633,7 @@ pub fn class_key(class: Class) -> char {
 }
 
 /// A size as the map prints it: `1.8G`, `932M`, `12K`, `512B`.
+#[must_use]
 pub fn compact(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
     let mut unit = 0;
@@ -757,6 +760,7 @@ pub struct Footer {
 /// The whole frame: the map of `w` columns and `rows − 5` rows, then the
 /// legend, the summary, a warning and the next commands, leaving the last
 /// row for the prompt; below 60×12, the summary alone.
+#[must_use]
 pub fn frame(
     view: &(impl TreeView + ?Sized),
     opts: &PaintOpts<'_>,
