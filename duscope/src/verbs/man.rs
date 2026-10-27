@@ -20,7 +20,7 @@ use crate::cli::Cli;
 use crate::out::emit_bytes;
 
 /// The page's date, changed with its hand-written prose.
-const DATE: &str = "2026-10-26";
+const DATE: &str = "2026-10-27";
 
 /// The hand-written sections, in order.
 const SECTIONS: [&str; 4] = [
