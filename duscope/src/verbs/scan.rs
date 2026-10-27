@@ -2,6 +2,7 @@
 //! arena, then the roll-up. Until P1-CLI-03 brings the queries, every verb
 //! lists the root's largest children.
 
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -484,14 +485,14 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
 /// one exit 4, a cancelled walk 130.
 fn walk_failure(root: &Path, error: WalkError) -> Failure {
     match error {
-        WalkError::Root { source, .. } => match source.raw_os_error() {
-            Some(libc_enoent) if libc_enoent == ENOENT || libc_enoent == ENOTDIR => Failure::new(
+        WalkError::Root { source, .. } => match source.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => Failure::new(
                 Exit::NotFound,
                 "scan_not_found",
                 format!("{} does not exist", root.display()),
             )
             .hint("Check the path, or run duscope scan in the directory to measure"),
-            Some(errno) if errno == EACCES || errno == EPERM => Failure::new(
+            io::ErrorKind::PermissionDenied => Failure::new(
                 Exit::Permission,
                 "permission_denied",
                 format!("permission denied reading {}", root.display()),
@@ -514,12 +515,6 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
     }
 }
-
-/// The errno values the exit codes distinguish; equal on Linux and macOS.
-const ENOENT: i32 = 2;
-const EPERM: i32 = 1;
-const EACCES: i32 = 13;
-const ENOTDIR: i32 = 20;
 
 /// A flag of a later phase.
 fn not_yet(flag: &str, what: &str) -> Failure {

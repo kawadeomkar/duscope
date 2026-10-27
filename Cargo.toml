@@ -37,6 +37,7 @@ crossbeam-utils = "=0.8.23"
 # Default features off: the `log` feature only logs how patterns compile.
 globset = { version = "=0.4.20", default-features = false }
 libc = "=0.2.191"
+log = "=0.4.34"
 thiserror = "2.0.21"
 
 # Dev-dependencies. 0.x crates are pinned with `=`; crates at 1.0 or later take

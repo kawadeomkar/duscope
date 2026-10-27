@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use duscope_testkit::TestEnv;
 use duscope_walk::{
-    Attrs, Boundary, DirId, Entry, Flags, Kind, NameRef, ScanEvent, Share, WalkOptions, walk,
+    Attrs, Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, ScanEvent, Share, WalkOptions,
+    walk,
 };
 
 use super::{Arena, CHUNK, Chunked, DirRec, EntryIdx, EntryRec, SharedRec};
@@ -144,6 +145,101 @@ fn p1_core_01_depths_and_closes_are_recorded() {
     assert_eq!(arena.unreadable().get(&DirId::new(2)), Some(&13));
 }
 
+#[test]
+fn p1_core_01_a_directory_met_before_its_entry_is_a_placeholder() {
+    let dir = |name: &str, id: u32| Entry {
+        dir: Some(DirId::new(id)),
+        kind: Kind::Dir,
+        ..file(name, DirId::ROOT)
+    };
+    let mut arena = Arena::new(Attrs::Basic);
+    arena.push(ScanEvent::Entry(dir("root", 0))).unwrap();
+    // Workers number directories as they find them: 5 can arrive first.
+    arena.push(ScanEvent::Entry(dir("e", 5))).unwrap();
+    // A close for an id whose entry never came (a truncated stream).
+    arena
+        .push(ScanEvent::DirClosed {
+            dir: DirId::new(9),
+            errno: Some(13),
+        })
+        .unwrap();
+    assert_eq!(arena.dir_count(), 10);
+    let present: Vec<u32> = (0..10)
+        .filter(|&id| arena.has_dir(DirId::new(id)))
+        .collect();
+    assert_eq!(present, [0, 5]);
+    assert_eq!(arena.dir(DirId::new(5)).entry, 1);
+    // A placeholder is never read as a directory holding the root's entry.
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| *arena.dir(DirId::new(3))));
+    assert!(read.is_err());
+    assert!(!arena.has_dir(DirId::new(10)));
+    // The ids before 5 fill in as their entries arrive.
+    for (id, name) in (1..5).zip(["a", "b", "c", "d"]) {
+        arena.push(ScanEvent::Entry(dir(name, id))).unwrap();
+    }
+    assert!((0..6).all(|id| arena.has_dir(DirId::new(id))));
+    assert_eq!(arena.dir(DirId::new(3)).entry, 4);
+    assert_eq!(arena.dir(DirId::new(3)).depth, 1);
+}
+
+#[test]
+fn p1_core_01_depth_saturates_at_u16_max() {
+    // A chain deeper than 65,535 directories (beyond PATH_MAX) records the
+    // largest depth the record holds.
+    let mut arena = Arena::new(Attrs::Basic);
+    let deepest = 70_000;
+    for id in 0..=deepest {
+        arena
+            .push(ScanEvent::Entry(Entry {
+                dir: Some(DirId::new(id)),
+                kind: Kind::Dir,
+                ..file("d", DirId::new(id.saturating_sub(1)))
+            }))
+            .unwrap();
+    }
+    assert_eq!(arena.dir(DirId::new(65_535)).depth, u16::MAX);
+    assert_eq!(arena.dir(DirId::new(deepest)).depth, u16::MAX);
+    assert_eq!(arena.dir(DirId::new(65_534)).depth, u16::MAX - 1);
+}
+
+#[test]
+fn p1_core_01_an_entry_without_full_attributes_reads_as_none() {
+    // In a full scan, an entry the walk delivered without the full set is
+    // not collected (NULL in the index), not owner 0 at the epoch.
+    let full = FullAttrs {
+        atime_ns: 5,
+        btime_ns: None,
+        mode: 0o40755,
+        uid: 501,
+        gid: 20,
+    };
+    let mut arena = Arena::new(Attrs::Full);
+    let mut root = file("root", DirId::ROOT);
+    root.kind = Kind::Dir;
+    root.dir = Some(DirId::ROOT);
+    root.full = Some(full);
+    arena.push(ScanEvent::Entry(root)).unwrap();
+    arena
+        .push(ScanEvent::Entry(file("bare", DirId::ROOT)))
+        .unwrap();
+    let mut zeros = file("zeros", DirId::ROOT);
+    zeros.full = Some(FullAttrs {
+        atime_ns: 0,
+        btime_ns: None,
+        mode: 0,
+        uid: 0,
+        gid: 0,
+    });
+    arena.push(ScanEvent::Entry(zeros.clone())).unwrap();
+    assert_eq!(arena.full(EntryIdx::ROOT), Some(full));
+    assert_eq!(arena.full(EntryIdx(1)), None);
+    assert_eq!(arena.full(EntryIdx(2)), zeros.full, "real zeros stay facts");
+    // A basic scan has none at all.
+    let mut basic = Arena::new(Attrs::Basic);
+    basic.push(ScanEvent::Entry(zeros)).unwrap();
+    assert_eq!(basic.full(EntryIdx::ROOT), None);
+}
+
 fn file(name: &str, parent: DirId) -> Entry {
     Entry {
         name: NameRef::from(name),
@@ -241,20 +337,30 @@ fn p1_core_01_a_tree_of_hard_links_grows_by_chunks() {
     assert_eq!((link.dev, link.ino), (1, 100_000 << 16 | 8));
 }
 
-/// The arena's bytes per entry over a benchmark tree, when it has been
-/// built (`just bench build --trees T1,T3`): the arena's share of the
-/// harness's RSS budget (100 bytes per entry on T1, 130 on T3).
+/// The arena's bytes per entry over the benchmark trees T1 and T3: the
+/// arena's share of the harness's RSS budget (100 bytes per entry on T1,
+/// 130 on T3). It runs with `DUSCOPE_TEST_PLATFORM=1`, and then both trees
+/// must be built (`just bench build --trees T1,T3`): a missing tree fails
+/// the test rather than passing it unmeasured. It measures the arena's heap
+/// (`heap_bytes`), not the process's peak RSS: reading that needs
+/// `getrusage`, an `unsafe` call this crate forbids. The harness's peak RSS
+/// of `duscope scan` is the RSS check of the phase-1 suite.
 #[test]
-#[ignore = "needs bench/.trees/T1 and T3; DUSCOPE_TEST_PLATFORM=1"]
+#[ignore = "needs bench/.trees/T1 and T3 built; DUSCOPE_TEST_PLATFORM=1"]
 fn p1_core_01_arena_bytes_per_entry_on_the_bench_trees() {
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
     let _env = TestEnv::new();
     let trees = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/.trees");
     for (tree, budget) in [("T1", 100), ("T3", 130)] {
         let root = trees.join(tree);
-        if !root.is_dir() {
-            eprintln!("skipped {tree}: not built");
-            continue;
-        }
+        assert!(
+            root.is_dir(),
+            "{tree} is not built at {}: run `just bench build --trees T1,T3`",
+            root.display()
+        );
         let (arena, _) = walk_into(&root, Attrs::Basic);
         let tenths = arena.heap_bytes() * 10 / arena.len();
         let shown = format!("{}.{}", tenths / 10, tenths % 10);

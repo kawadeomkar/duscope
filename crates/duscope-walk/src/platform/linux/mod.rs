@@ -15,12 +15,14 @@ use std::cell::RefCell;
 use std::io;
 use std::os::fd::AsFd;
 use std::path::Path;
-use std::sync::Once;
 
 use dents::DentBuf;
 
 use crate::platform::posix;
-use crate::{DirHandle, Entry, NameRef, Provider, STAT_BATCH, ScanError, VolumeInfo, WalkOptions};
+use crate::{
+    DirHandle, Entry, Flags, Kind, NameRef, Provider, STAT_BATCH, ScanError, VolumeInfo,
+    WalkOptions,
+};
 
 thread_local! {
     /// Each worker's listing buffer, reused for every directory it reads.
@@ -35,40 +37,60 @@ pub(crate) struct LinuxProvider {
     /// `statx` calls made, for the test that counts them.
     #[cfg(test)]
     statx_calls: std::sync::atomic::AtomicUsize,
+    /// Of those, reads of a listed directory's own subvolume.
+    #[cfg(test)]
+    subvol_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl LinuxProvider {
-    /// The provider. The first one made raises the descriptor limit.
+    /// The provider. Making one sets up the process (see
+    /// [`platform::setup`](super::setup)).
     pub(crate) fn new() -> LinuxProvider {
-        static SETUP: Once = Once::new();
-        SETUP.call_once(posix::raise_nofile_limit);
+        super::setup();
         LinuxProvider::default()
     }
 
     /// Reads `names` in the directory open on `fd`: an entry or an error
-    /// each, one `statx` per name.
-    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    /// each, one `statx` per name, each name moving into its entry or error.
+    /// A directory that is a different subvolume from `fd`'s is flagged;
+    /// `fd`'s own subvolume is read once, and only when a child reports one.
     fn read_names(
         &self,
         fd: std::os::fd::BorrowedFd<'_>,
         dir: &DirHandle,
-        names: &[NameRef],
+        names: impl IntoIterator<Item = NameRef>,
         opts: &WalkOptions,
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) {
-        #[cfg(test)]
-        self.statx_calls
-            .fetch_add(names.len(), std::sync::atomic::Ordering::Relaxed);
+        let mask = statx::mask(opts);
+        let mut dir_subvol = None;
         for name in names {
-            match statx::entry_at(fd, name, opts) {
-                Ok(mut entry) => {
+            #[cfg(test)]
+            self.statx_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match statx::statx_at(fd, &name, mask) {
+                Ok(stx) => {
+                    let mut entry = statx::entry(name, &stx, opts.attrs);
                     self.mounts.fill_mnt_id(&mut entry, dir);
+                    if entry.kind == Kind::Dir && stx.stx_mask & libc::STATX_SUBVOL != 0 {
+                        let parent = *dir_subvol.get_or_insert_with(|| {
+                            #[cfg(test)]
+                            for counter in [&self.statx_calls, &self.subvol_reads] {
+                                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            statx::subvol_of(fd)
+                        });
+                        entry.flags.set(
+                            Flags::SUBVOLUME,
+                            parent.is_some_and(|p| p != stx.stx_subvol),
+                        );
+                    }
                     out.push(entry);
                 }
                 Err(e) => errs.push(ScanError {
                     dir: dir.id(),
-                    name: name.clone(),
+                    name,
                     errno: e.raw_os_error().unwrap_or(crate::EIO),
                 }),
             }
@@ -109,7 +131,7 @@ impl Provider for LinuxProvider {
         if names.len() > STAT_BATCH {
             later.extend(names.drain(STAT_BATCH..));
         }
-        self.read_names(fd.as_fd(), dir, &names, opts, out, errs);
+        self.read_names(fd.as_fd(), dir, names, opts, out, errs);
         Ok(())
     }
 
@@ -122,7 +144,7 @@ impl Provider for LinuxProvider {
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        self.read_names(fd.as_fd(), dir, names, opts, out, errs);
+        self.read_names(fd.as_fd(), dir, names.iter().cloned(), opts, out, errs);
         Ok(())
     }
 
@@ -136,7 +158,7 @@ impl Provider for LinuxProvider {
         self.mounts.volume(path)
     }
 
-    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+    fn mount_info(&self, path: &Path, _dev: u64) -> io::Result<VolumeInfo> {
         self.mounts.mount_info(path)
     }
 
