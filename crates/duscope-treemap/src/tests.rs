@@ -2,6 +2,7 @@
 //! every tile at least `--min-tile` units, and lay out the proposal's
 //! mockup as it is drawn.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use proptest::prelude::*;
@@ -40,31 +41,51 @@ fn covers_exactly(layout: &Layout, area: Rect) -> Result<(), String> {
 }
 
 fn items() -> impl Strategy<Value = Vec<(u64, usize)>> {
-    prop::collection::vec(
-        prop_oneof![
-            4 => 1u64..1_000_000_000_000,
-            1 => 0u64..10,
-            // Ratios past what a float's mantissa holds.
-            1 => (1u64 << 55)..(1u64 << 60),
-        ],
-        1..80,
-    )
-    .prop_map(|weights| {
-        weights
-            .into_iter()
-            .enumerate()
-            .map(|(i, w)| (w, i))
-            .collect()
-    })
+    let weight = prop_oneof![
+        8 => 1u64..1_000_000_000_000,
+        2 => 0u64..10,
+        // Ratios past what a float's mantissa holds.
+        2 => (1u64 << 55)..(1u64 << 60),
+        // Sums that saturate a u64.
+        1 => Just(u64::MAX),
+    ];
+    // Mostly a screenful of children, sometimes a crowd.
+    let count = prop_oneof![9 => 1usize..80, 1 => 80usize..2000];
+    count
+        .prop_flat_map(move |n| prop::collection::vec(weight.clone(), n))
+        .prop_map(|weights| {
+            weights
+                .into_iter()
+                .enumerate()
+                .map(|(i, w)| (w, i))
+                .collect()
+        })
 }
 
+/// Areas at an offset, empty ones included.
 fn area() -> impl Strategy<Value = Rect> {
-    (0u16..20, 0u16..20, 1u16..200, 1u16..80).prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    (0u16..20, 0u16..20, 0u16..200, 0u16..80).prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
 }
 
 fn check(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min: u16) -> Result<(), String> {
-    let laid = layout(items, area, algorithm, min);
-    covers_exactly(&laid, area)?;
+    verify(
+        &layout(items, area, algorithm, min),
+        items,
+        area,
+        algorithm,
+        min,
+    )
+}
+
+/// What [`check`] checks, of a layout already made.
+fn verify(
+    laid: &Layout,
+    items: &[(u64, usize)],
+    area: Rect,
+    algorithm: Algorithm,
+    min: u16,
+) -> Result<(), String> {
+    covers_exactly(laid, area)?;
     // Every child is either a tile or in the pool, once.
     let mut ids: Vec<usize> = laid.tiles.iter().map(|t| t.id).collect();
     ids.extend(laid.small.iter().flat_map(|s| s.ids.iter().copied()));
@@ -72,17 +93,23 @@ fn check(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min: u16) -> 
     if ids != (0..items.len()).collect::<Vec<_>>() {
         return Err(format!("children placed: {ids:?}"));
     }
-    // The tiles are the largest children, largest first, equal weights in
-    // their order; the pool holds the rest, largest first.
+    // The tiles and the pool each keep the children largest first, equal
+    // weights in their order. Squarify's tiles are the largest children.
     let mut sorted = items.to_vec();
     sorted.sort_by(|a, b| b.0.cmp(&a.0));
     let order: Vec<usize> = sorted.iter().map(|&(_, id)| id).collect();
     let tiles: Vec<usize> = laid.tiles.iter().map(|t| t.id).collect();
-    if order[..tiles.len()] != tiles[..] {
+    let with_tiles: HashSet<usize> = tiles.iter().copied().collect();
+    let (in_order, pool): (Vec<usize>, Vec<usize>) =
+        order.iter().partition(|&id| with_tiles.contains(id));
+    if in_order != tiles {
         return Err(format!("tiles {tiles:?}, order {order:?}"));
     }
+    if algorithm == Algorithm::Squarify && order[..tiles.len()] != tiles[..] {
+        return Err(format!("tiles {tiles:?} are not the largest of {order:?}"));
+    }
     if let Some(small) = &laid.small
-        && order[tiles.len()..] != small.ids[..]
+        && pool != small.ids
     {
         return Err(format!("pool {:?}, order {order:?}", small.ids));
     }
@@ -106,7 +133,7 @@ proptest! {
     fn p1_map_01_squarify_covers_the_area_in_order(
         items in items(),
         area in area(),
-        min in prop::sample::select(vec![1u16, 2, 4]),
+        min in 1u16..=8,
     ) {
         check(&items, area, Algorithm::Squarify, min).map_err(TestCaseError::fail)?;
     }
@@ -115,7 +142,7 @@ proptest! {
     fn p1_map_01_bisection_covers_the_area_in_order(
         items in items(),
         area in area(),
-        min in prop::sample::select(vec![1u16, 2, 4]),
+        min in 1u16..=8,
     ) {
         check(&items, area, Algorithm::Gp, min).map_err(TestCaseError::fail)?;
     }
@@ -226,5 +253,54 @@ fn p1_map_01_the_pool_tries_the_smallest_tiles_weight() {
         // at that weight exactly, the pool fits beside six tiles.
         let laid = layout(&items, Rect::new(0, 0, 59, 13), algorithm, 4);
         assert_eq!(laid.tiles.len(), 6, "{algorithm:?}");
+    }
+}
+
+#[test]
+fn p1_map_01_bisection_pools_only_the_tiles_too_small() {
+    // A wide directory: tile sizes under the bisection do not follow the
+    // weights, so pooling everything after the first tile too small would
+    // leave none.
+    let items: Vec<(u64, usize)> = (0..100_000)
+        .zip(0..)
+        .map(|(i, id)| (100_000 - i, id))
+        .collect();
+    let area = Rect::new(0, 0, 300, 200);
+    let bisected = layout(&items, area, Algorithm::Gp, 1);
+    assert!(
+        bisected.tiles.len() > 1_000,
+        "{} tiles",
+        bisected.tiles.len()
+    );
+    verify(&bisected, &items, area, Algorithm::Gp, 1).unwrap();
+    // Weights that saturate a u64 when added keep their proportions.
+    let huge = [(u64::MAX, 0), (u64::MAX, 1), (u64::MAX, 2), (1, 3)];
+    let area = Rect::new(0, 0, 80, 36);
+    for algorithm in [Algorithm::Squarify, Algorithm::Gp] {
+        let laid = layout(&huge, area, algorithm, 1);
+        assert_eq!(laid.tiles.len(), 3, "{algorithm:?}");
+        assert_eq!(laid.small.map(|s| s.ids), Some(vec![3]), "{algorithm:?}");
+        check(&huge, area, algorithm, 1).unwrap();
+    }
+}
+
+#[test]
+fn p1_map_01_an_area_too_small_pools_every_child() {
+    let items = [(5, 0), (u64::MAX, 1), (0, 2), (7, 3)];
+    for area in [
+        Rect::new(3, 4, 0, 36),
+        Rect::new(3, 4, 80, 0),
+        Rect::new(0, 0, 0, 0),
+        Rect::new(9, 9, 1, 1),
+    ] {
+        for algorithm in [Algorithm::Squarify, Algorithm::Gp] {
+            // --min-tile 8 does not fit in 1×1 either.
+            let laid = layout(&items, area, algorithm, 8);
+            assert_eq!(laid.tiles, [], "{area:?} {algorithm:?}");
+            let small = laid.small.expect("a pool");
+            assert_eq!(small.ids, [1, 3, 0, 2], "{area:?} {algorithm:?}");
+            assert_eq!(small.rect, area);
+            check(&items, area, algorithm, 1).unwrap();
+        }
     }
 }

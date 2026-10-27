@@ -83,7 +83,7 @@ pub struct WalkArgs {
     pub path: Option<PathBuf>,
 
     /// Worker threads (default: the platform's choice)
-    #[arg(long, env = "DUSCOPE_THREADS", value_name = "N")]
+    #[arg(long, env = "DUSCOPE_THREADS", value_parser = parse_threads, value_name = "N")]
     pub threads: Option<usize>,
 
     /// Stay on the root's filesystem
@@ -251,10 +251,14 @@ pub struct ScanArgs {
     pub treemap: Option<TreemapWhen>,
 
     /// What colours the treemap's tiles
+    ///
+    /// lscolors takes LS_COLORS' *suffix= and ex= (with --attrs full) entries
     #[arg(long, value_enum, value_name = "BY", help_heading = "Output")]
     pub color_by: Option<ColorBy>,
 
-    /// The colours: a theme name (mocha, dracula, …) or a theme file
+    /// The colours: a theme name or the path of a theme file
+    ///
+    /// mocha|tokyo-night|dracula|gruvbox|light|terminal-native|no-color
     #[arg(
         long,
         env = "DUSCOPE_THEME",
@@ -439,7 +443,7 @@ pub enum ColorBy {
     Level,
     /// Age
     Age,
-    /// LS_COLORS
+    /// LS_COLORS, else file class
     Lscolors,
 }
 
@@ -450,6 +454,29 @@ pub enum ProviderArg {
     Native,
     /// readdir and fstatat
     Fallback,
+}
+
+/// The most worker threads a scan starts. More than this is a typing
+/// mistake, not a faster scan.
+pub const MAX_THREADS: usize = 1024;
+
+/// A thread count (`--threads`, `DUSCOPE_THREADS`): a whole number up to
+/// [`MAX_THREADS`]. Empty, like 0, leaves the choice to the platform, so an
+/// exported but empty `DUSCOPE_THREADS` is the same as an unset one.
+pub fn parse_threads(text: &str) -> Result<usize, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(0);
+    }
+    match text.parse::<usize>() {
+        Ok(n) if n <= MAX_THREADS => Ok(n),
+        Ok(_) => Err(format!(
+            "at most {MAX_THREADS} threads (from --threads or DUSCOPE_THREADS)"
+        )),
+        Err(_) => {
+            Err("not a whole number of threads (from --threads or DUSCOPE_THREADS)".to_owned())
+        }
+    }
 }
 
 /// The multipliers of size suffixes: `K/M/G/T` are powers of 1,024, `KB/MB/GB/TB`
@@ -536,5 +563,22 @@ impl clap::builder::TypedValueParser for ThemeName {
                 .iter()
                 .map(clap::builder::PossibleValue::new),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_THREADS, parse_threads};
+
+    #[test]
+    fn p1_cli_01_thread_counts_are_bounded() {
+        assert_eq!(parse_threads(""), Ok(0));
+        assert_eq!(parse_threads("  "), Ok(0));
+        assert_eq!(parse_threads("0"), Ok(0));
+        assert_eq!(parse_threads("8"), Ok(8));
+        assert_eq!(parse_threads("1024"), Ok(MAX_THREADS));
+        assert!(parse_threads("1025").is_err());
+        assert!(parse_threads("-1").is_err());
+        assert!(parse_threads("eight").is_err());
     }
 }

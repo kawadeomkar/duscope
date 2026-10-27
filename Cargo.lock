@@ -378,6 +378,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "termlens",
+ "toml",
 ]
 
 [[package]]
@@ -420,7 +421,9 @@ dependencies = [
  "duscope-core",
  "proptest",
  "serde",
+ "thiserror 2.0.21",
  "toml",
+ "unicode-width",
 ]
 
 [[package]]
@@ -442,6 +445,7 @@ dependencies = [
  "gix-ignore",
  "globset",
  "libc",
+ "log",
  "proptest",
  "thiserror 2.0.21",
 ]

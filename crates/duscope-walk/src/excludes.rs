@@ -15,10 +15,8 @@
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fs::OpenOptions;
-use std::io::{self, Read};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use gix_ignore::glob::pattern::Case;
@@ -141,32 +139,23 @@ impl<'a> Excludes<'a> {
         marked.then_some(Skip::ExcludedCache)
     }
 
-    /// Whether the directory at `path` is a cache by its `CACHEDIR.TAG`.
-    pub(crate) fn tagged(&self, path: &Path) -> bool {
-        !self.opts.exclude_caches.is_empty() && has_cachedir_tag(path)
+    /// Whether a directory's `CACHEDIR.TAG` decides that it is a cache:
+    /// under `--exclude-caches`.
+    pub(crate) fn wants_tags(&self) -> bool {
+        !self.opts.exclude_caches.is_empty()
     }
-}
 
-/// The first 43 bytes of a valid `CACHEDIR.TAG`.
-const CACHEDIR_SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
-
-/// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`: a regular
-/// file, not a link, that starts with the signature. It is opened without
-/// blocking, so a FIFO of that name cannot stall the walk, and checked
-/// through the descriptor, so nothing swapped in after a check is read.
-fn has_cachedir_tag(dir: &Path) -> bool {
-    let Ok(mut tag) = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(dir.join("CACHEDIR.TAG"))
-    else {
-        return false;
-    };
-    let regular = tag
-        .metadata()
-        .is_ok_and(|m| m.is_file() && m.len() >= CACHEDIR_SIGNATURE.len() as u64);
-    let mut head = [0u8; 43];
-    regular && tag.read_exact(&mut head).is_ok() && &head == CACHEDIR_SIGNATURE
+    /// Whether one of `names` may be a cache by its name, so the cache
+    /// rules need the directory's listing for its markers; when none is,
+    /// the listing is never collected.
+    pub(crate) fn may_mark<'n>(&self, mut names: impl Iterator<Item = &'n NameRef>) -> bool {
+        !self.caches.is_empty()
+            && names.any(|name| {
+                self.caches
+                    .iter()
+                    .any(|(glob, _)| glob.is_match(name.as_os_str()))
+            })
+    }
 }
 
 #[cfg(test)]

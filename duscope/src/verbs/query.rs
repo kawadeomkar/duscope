@@ -11,6 +11,7 @@ use duscope_core::query::{
     TopQuery, TreeQuery, TreeView, timegrammar,
 };
 use duscope_core::rules::Classes;
+use duscope_walk::VolumeInfo;
 
 use super::scan::{self, Scanned};
 use super::{Exit, Failure};
@@ -20,7 +21,8 @@ use crate::cli::{
 };
 use crate::out::{Format, Output};
 
-/// `--limit`'s default, and its cap without `--format ndjson`.
+/// `--limit`'s default, and its cap without `--format ndjson` (which
+/// streams every row).
 const DEFAULT_LIMIT: usize = 25;
 const MAX_LIMIT: usize = 100;
 
@@ -52,9 +54,15 @@ enum DepthUse {
 /// The rows of `scan`: the root's largest entries, as `top` lists them by
 /// default; on a terminal, or with `--treemap always`, the treemap.
 pub fn scan(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
+    // The map's flags are settled first: a refused one costs no scan.
+    let style = if output.format == Format::Treemap {
+        Some(super::treemap::style(args, output)?)
+    } else {
+        None
+    };
     let scanned = scan::scan(&args.walk, &args.exclude)?;
-    if output.format == Format::Treemap {
-        return super::treemap::draw(&scanned, args, output);
+    if let Some(style) = &style {
+        return super::treemap::draw(&scanned, args, output, style);
     }
     let (envelope, footer) = top_envelope(scanned, &args.walk, None, "scan", false, true, output)?;
     output.list(&envelope, &footer)
@@ -62,6 +70,7 @@ pub fn scan(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
 
 /// `top`.
 pub fn top(args: &TopArgs, output: &Output) -> Result<(), Failure> {
+    limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let (envelope, footer) = top_envelope(
         scanned,
@@ -118,6 +127,7 @@ pub(super) fn top_envelope(
 
 /// `tree`.
 pub fn tree(args: &TreeArgs, output: &Output) -> Result<(), Failure> {
+    limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let prepared = prepare(
         scanned,
@@ -167,6 +177,7 @@ pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
             Classes::vendored().merged(user)
         }
     };
+    limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let prepared = prepare(
         scanned,
@@ -205,6 +216,7 @@ pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
         .unwrap_or(DEFAULT_STALE_AGE);
     let older_than = timegrammar::parse_age(older)
         .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--older-than {e}")))?;
+    limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let mut prepared = prepare(
         scanned,
@@ -240,34 +252,14 @@ pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
     let page: Page<StaleEntry> =
         query::stale(&prepared.scanned.view(), &q).map_err(core_failure)?;
     let mut warnings = Vec::new();
-    // The scan is older than a tenth of the window it is asked about,
-    // measured on the clock that timed the scan (a fresh scan never is).
-    let age = scan::now_ns().saturating_sub(prepared.scanned.finished_ns);
-    if age > older_than / 10 {
-        warnings.push(Warning {
-            code: "scan_age",
-            message: format!(
-                "the scan is {} old, more than a tenth of the {older} window",
-                crate::out::thousands(u64::try_from(age / 3_600_000_000_000).unwrap_or(0)) + " h"
-            ),
-            count: None,
-            hint: Some("Rerun duscope stale to measure from a fresh scan".to_owned()),
-        });
-    }
-    if args.atime
-        && let Some(option) = prepared.scanned.arena.volumes().first().and_then(|v| {
-            v.options
-                .iter()
-                .find(|o| matches!(o.as_str(), "noatime" | "relatime" | "lazytime"))
-                .cloned()
-        })
-    {
-        warnings.push(Warning {
-            code: "atime_unreliable",
-            message: format!("the volume is mounted {option}, so access times lag reads"),
-            count: None,
-            hint: Some("Rely on stale without --atime, or remount with strictatime".to_owned()),
-        });
+    warnings.extend(scan_age(
+        prepared.now,
+        prepared.scanned.finished_ns,
+        older_than,
+        older,
+    ));
+    if args.atime {
+        warnings.extend(atime_unreliable(prepared.scanned.arena.volumes()));
     }
     let (envelope, footer) = envelope(
         prepared,
@@ -302,14 +294,7 @@ fn prepare(
         )
         .hint("Run without --strict to accept totals that leave them out"));
     }
-    let now = match &walk.test_now {
-        Some(text) => {
-            timegrammar::parse_date(text)
-                .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--test-now {e}")))?
-                .ns
-        }
-        None => timegrammar::now(),
-    };
+    let now = scan::now(walk)?;
     let (filters, tz_unavailable) = match args {
         Some(args) => filters(args, now, depth, stale)?,
         None => (Filters::default(), false),
@@ -329,11 +314,7 @@ fn prepare(
             hint: Some("Install the tzdata package, or give dates in RFC 3339".to_owned()),
         });
     }
-    let limit = (output.format != Format::Ndjson).then(|| {
-        args.and_then(|a| a.limit)
-            .unwrap_or(DEFAULT_LIMIT)
-            .min(MAX_LIMIT)
-    });
+    let limit = limit(args, output)?;
     Ok(Prepared {
         size: scan::size_kind(walk),
         now,
@@ -349,6 +330,24 @@ fn prepare(
         warnings,
         scanned,
     })
+}
+
+/// The rows a list returns: `--limit`, 25 by default, at most 100; every
+/// row under `--format ndjson`. A `--limit` above 100 is a usage error,
+/// raised before the scan.
+fn limit(args: Option<&QueryArgs>, output: &Output) -> Result<Option<usize>, Failure> {
+    if output.format == Format::Ndjson {
+        return Ok(None);
+    }
+    match args.and_then(|a| a.limit) {
+        Some(asked) if asked > MAX_LIMIT => Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("--limit {asked} is more than the {MAX_LIMIT} rows a list returns"),
+        )
+        .hint("Rerun duscope with --format ndjson to stream every row")),
+        asked => Ok(Some(asked.unwrap_or(DEFAULT_LIMIT))),
+    }
 }
 
 /// The shared filters the flags ask for, with each as given; and whether
@@ -507,6 +506,58 @@ fn envelope<T>(
     (envelope, footer)
 }
 
+/// `scan_age`: the scan finished longer ago than a tenth of the window
+/// `stale` asks about (`older`, `older_than` nanoseconds), both read on the
+/// clock the scan was timed by. A fresh scan never is.
+fn scan_age(now: i64, finished_ns: i64, older_than: i64, older: &str) -> Option<Warning> {
+    let age = now.saturating_sub(finished_ns);
+    (age > older_than / 10).then(|| Warning {
+        code: "scan_age",
+        message: format!(
+            "the scan is {} h old, more than a tenth of the {older} window",
+            crate::out::thousands(u64::try_from(age / 3_600_000_000_000).unwrap_or(0))
+        ),
+        count: None,
+        hint: Some("Rerun duscope stale to measure from a fresh scan".to_owned()),
+    })
+}
+
+/// `atime_unreliable`: the volumes the scan entered that are mounted
+/// `noatime`, `relatime` or `lazytime`, whose access times lag reads.
+fn atime_unreliable(volumes: &[VolumeInfo]) -> Option<Warning> {
+    let lagging: Vec<(&VolumeInfo, &str)> = volumes
+        .iter()
+        .filter(|v| v.entered())
+        .filter_map(|v| {
+            let option = v
+                .options
+                .iter()
+                .find(|o| matches!(o.as_str(), "noatime" | "relatime" | "lazytime"))?;
+            Some((v, option.as_str()))
+        })
+        .collect();
+    let message = match lagging.as_slice() {
+        [] => return None,
+        [(volume, option)] => format!(
+            "{} is mounted {option}, so its access times lag reads",
+            volume.mount_point.display()
+        ),
+        more => format!(
+            "{} volumes the scan entered are mounted noatime, relatime or lazytime, so their access times lag reads",
+            more.len()
+        ),
+    };
+    Some(Warning {
+        code: "atime_unreliable",
+        message,
+        count: Some(lagging.len() as u64),
+        hint: Some(
+            "Run duscope stale without --atime, which judges files by their modification and change times"
+                .to_owned(),
+        ),
+    })
+}
+
 /// The failure an engine error is.
 fn core_failure(error: CoreError) -> Failure {
     match error {
@@ -515,5 +566,73 @@ fn core_failure(error: CoreError) -> Failure {
                 .hint("Rerun the command with --attrs full")
         }
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use duscope_core::query::timegrammar;
+    use duscope_walk::{Normalization, Skip, VolumeClass, VolumeInfo};
+
+    use super::{atime_unreliable, scan_age};
+
+    const HOUR: i64 = 3_600_000_000_000;
+
+    #[test]
+    fn p1_cli_03_stale_warns_scan_age_past_a_tenth_of_its_window() {
+        let window = timegrammar::parse_age("180d").unwrap();
+        let now = 2_114_380_800_000_000_000;
+        // 18 days is a tenth of 180: older than that warns.
+        let old = scan_age(now, now - 19 * 24 * HOUR, window, "180d").unwrap();
+        assert_eq!(old.code, "scan_age");
+        assert_eq!(
+            old.message,
+            "the scan is 456 h old, more than a tenth of the 180d window"
+        );
+        assert!(scan_age(now, now - 17 * 24 * HOUR, window, "180d").is_none());
+        // A scan timed on the same clock as the query is never old.
+        assert!(scan_age(now, now, window, "180d").is_none());
+    }
+
+    fn volume(mount_point: &str, options: &[&str], reason: Option<Skip>) -> VolumeInfo {
+        VolumeInfo {
+            dev: 1,
+            mnt_id: 1,
+            mount_point: PathBuf::from(mount_point),
+            fs_type: "ext4".to_owned(),
+            class: VolumeClass::Local,
+            read_only: false,
+            case_sensitive: Some(true),
+            normalization: Normalization::None,
+            options: options.iter().map(|&o| o.to_owned()).collect(),
+            total_bytes: 0,
+            free_bytes: 0,
+            reason,
+        }
+    }
+
+    #[test]
+    fn p1_cli_03_atime_unreliable_reads_every_entered_volume() {
+        let strict = volume("/", &["rw", "strictatime"], None);
+        assert!(atime_unreliable(std::slice::from_ref(&strict)).is_none());
+        // A second, noatime volume the scan entered warns, though the
+        // first is fine.
+        let data = volume("/data", &["rw", "noatime"], None);
+        let one = atime_unreliable(&[strict.clone(), data.clone()]).unwrap();
+        assert_eq!(one.code, "atime_unreliable");
+        assert_eq!(one.count, Some(1));
+        assert_eq!(
+            one.message,
+            "/data is mounted noatime, so its access times lag reads"
+        );
+        assert!(!one.hint.unwrap().contains("strictatime"));
+        // A volume the scan did not enter does not count.
+        let skipped = volume("/net", &["relatime"], Some(Skip::Network));
+        let still_one = atime_unreliable(&[strict, data.clone(), skipped]).unwrap();
+        assert_eq!(still_one.count, Some(1));
+        let two = atime_unreliable(&[data, volume("/home", &["relatime"], None)]).unwrap();
+        assert_eq!(two.count, Some(2));
     }
 }

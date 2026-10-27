@@ -53,6 +53,15 @@ pub struct Date {
 
 /// A date, from RFC 3339 or `YYYY-MM-DD` (local midnight).
 pub fn parse_date(text: &str) -> Result<Date, String> {
+    parse_date_with(text, || match TimeZone::try_system() {
+        Ok(zone) => (zone, false),
+        Err(_) => (TimeZone::UTC, true),
+    })
+}
+
+/// [`parse_date`], with `local` giving the local zone, and whether it is
+/// UTC standing in for a zone the system has no zoneinfo for.
+fn parse_date_with(text: &str, local: impl FnOnce() -> (TimeZone, bool)) -> Result<Date, String> {
     let text = text.trim();
     if let Ok(instant) = text.parse::<Timestamp>() {
         return Ok(Date {
@@ -63,10 +72,7 @@ pub fn parse_date(text: &str) -> Result<Date, String> {
     let day: CivilDate = text
         .parse()
         .map_err(|_| format!("{text:?} is not a date: use RFC 3339 or YYYY-MM-DD"))?;
-    let (zone, tz_unavailable) = match TimeZone::try_system() {
-        Ok(zone) => (zone, false),
-        Err(_) => (TimeZone::UTC, true),
-    };
+    let (zone, tz_unavailable) = local();
     let midnight = day
         .to_zoned(zone)
         .map_err(|e| format!("{text:?}: {e}"))?
@@ -114,7 +120,9 @@ pub fn now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{HOUR_NS, iso8601, parse_age, parse_date};
+    use jiff::tz::{Offset, TimeZone};
+
+    use super::{HOUR_NS, iso8601, parse_age, parse_date, parse_date_with};
 
     #[test]
     fn p1_cli_03_times_print_as_iso_8601_utc() {
@@ -141,10 +149,23 @@ mod tests {
         assert_eq!(utc.ns, 2_114_380_800_000_000_000);
         let offset = parse_date("2037-01-01T02:00:00+02:00").unwrap();
         assert_eq!(offset.ns, utc.ns);
-        // The tests run under TZ=UTC: local midnight is UTC midnight.
-        if std::env::var("TZ").as_deref() == Ok("UTC") {
-            assert_eq!(parse_date("2037-01-01").unwrap().ns, utc.ns);
-        }
+        // YYYY-MM-DD is midnight in the local zone, whatever zone the
+        // process runs in: here India's, five and a half hours east.
+        let india = || {
+            (
+                TimeZone::fixed(Offset::from_seconds(19_800).unwrap()),
+                false,
+            )
+        };
+        let local = parse_date_with("2037-01-01", india).unwrap();
+        assert_eq!(local.ns, utc.ns - 19_800 * 1_000_000_000);
+        assert!(!local.tz_unavailable);
+        // RFC 3339 carries its own offset and never asks for the zone.
+        let offset = parse_date_with("2037-01-01T00:00:00Z", || unreachable!()).unwrap();
+        assert_eq!(offset.ns, utc.ns);
+        // Without zoneinfo, UTC midnight, flagged.
+        let missing = parse_date_with("2037-01-01", || (TimeZone::UTC, true)).unwrap();
+        assert_eq!((missing.ns, missing.tz_unavailable), (utc.ns, true));
         assert!(parse_date("2037-13-01").is_err());
         assert!(parse_date("yesterday").is_err());
     }

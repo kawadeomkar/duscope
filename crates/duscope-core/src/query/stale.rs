@@ -7,7 +7,7 @@ use crate::envelope::{StaleEntry, name_fields};
 
 use super::{
     Filters, Page, SizeKind, SortKey, TreeView, abs_path, attrs_not_collected, flag_names,
-    kind_name, sort_ids, timegrammar::iso8601,
+    kind_name, ranked, timegrammar::iso8601,
 };
 
 /// `stale`'s default `--min-size`: 10 MiB.
@@ -57,28 +57,22 @@ pub fn stale(
     }
     let cutoff = q.now.saturating_sub(q.older_than);
     let root = view.node(0);
-    let mut ids: Vec<u32> = (0..=root.last_id)
-        .filter(|&id| {
-            let node = view.node(id);
-            !node.is_dir()
-                && node.mtime_ns < cutoff
-                && node.ctime_ns < cutoff
-                && (!q.atime || node.atime_ns.is_some_and(|atime| atime < cutoff))
-                && node.size(q.size) >= q.min_size
-                && q.filters.keeps(view, &node, q.size)
-        })
-        .collect();
-    let total_count = ids.len() as u64;
-    sort_ids(view, &mut ids, q.sort, q.size, q.reverse);
-    if let Some(limit) = q.limit {
-        ids.truncate(limit);
-    }
+    let candidates = (0..=root.last_id).filter(|&id| {
+        let node = view.node(id);
+        !node.is_dir()
+            && node.mtime_ns < cutoff
+            && node.ctime_ns < cutoff
+            && (!q.atime || node.atime_ns.is_some_and(|atime| atime < cutoff))
+            && node.size(q.size) >= q.min_size
+            && q.filters.keeps(view, &node, q.size)
+    });
+    let (ids, total_count) = ranked(view, candidates, q.sort, q.size, q.reverse, q.limit);
     let entries = ids
         .into_iter()
         .map(|id| {
             let node = view.node(id);
             let path_bytes = abs_path(view, id);
-            let (name, name_raw) = name_fields(node.name);
+            let (name, name_raw) = name_fields(&view.name(id));
             StaleEntry {
                 path: String::from_utf8_lossy(&path_bytes).into_owned(),
                 path_bytes,

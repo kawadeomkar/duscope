@@ -109,12 +109,14 @@ fn p1_walk_08_the_error_matrix() {
         .dir("loop")
         .dir("long")
         .dir("io")
+        .dir("swapped")
         .file("bad.txt", 1)
         .unreadable("denied", libc::EACCES)
         .unreadable("perm", libc::EPERM)
         .unreadable("loop", libc::ELOOP)
         .unreadable("long", libc::ENAMETOOLONG)
         .unreadable("io", libc::EIO)
+        .unreadable("swapped", libc::ENOTDIR)
         .unstatable("bad.txt", libc::EIO);
     let seen = mem_walk(&tree);
     // EACCES and EPERM: listed empty, with the error number.
@@ -127,23 +129,26 @@ fn p1_walk_08_the_error_matrix() {
         Some(&libc::EPERM)
     );
     assert!(!seen.entries.contains_key(Path::new("/t/denied/x")));
-    assert_eq!(seen.summary.unreadable_dirs, 2);
-    // ELOOP, ENAMETOOLONG and EIO: an error of the parent, the directory
-    // closed without one.
+    // ELOOP, ENAMETOOLONG and EIO on a directory already listed: listed
+    // empty with the error number too, so the unreadable flag and the
+    // partial read cover it, and it is counted once.
     for (name, errno) in [
         ("loop", libc::ELOOP),
         ("long", libc::ENAMETOOLONG),
         ("io", libc::EIO),
     ] {
         let path = Path::new("/t").join(name);
-        assert_eq!(seen.errors.get(&path), Some(&errno), "{name}");
-        assert!(!seen.unreadable.contains_key(&path), "{name}");
+        assert_eq!(seen.unreadable.get(&path), Some(&errno), "{name}");
+        assert!(!seen.errors.contains_key(&path), "{name}");
         assert_eq!(seen.entries[&path].kind, Kind::Dir);
     }
+    assert_eq!(seen.summary.unreadable_dirs, 5);
+    // ENOTDIR: the directory was replaced by a file after it was listed.
+    assert!(!seen.unreadable.contains_key(Path::new("/t/swapped")));
+    assert_eq!(seen.summary.vanished, 1);
     // A file that cannot be read: a scan error of its directory.
     assert_eq!(seen.errors.get(Path::new("/t/bad.txt")), Some(&libc::EIO));
-    assert_eq!(seen.summary.entry_errors, 4);
-    assert_eq!(seen.summary.vanished, 0);
+    assert_eq!(seen.summary.entry_errors, 1);
 }
 
 fn fixture_walk(root: &Path, follow: bool) -> Seen {

@@ -7,7 +7,7 @@ pub(crate) mod winsize;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Once;
@@ -62,6 +62,58 @@ pub(crate) fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput.into())
 }
 
+/// The first 43 bytes of a valid `CACHEDIR.TAG`.
+const CACHEDIR_SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
+/// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`: a regular
+/// file, not a link, that starts with the signature. One `lstat` answers
+/// for a directory without a tag, the common case; a candidate is then
+/// opened without blocking, so a FIFO of that name cannot stall the walk,
+/// and checked again through the descriptor, so nothing swapped in after
+/// the first check is read.
+pub(crate) fn cachedir_tag(dir: &Path) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = dir.join("CACHEDIR.TAG");
+    let long_enough =
+        |m: &std::fs::Metadata| m.is_file() && m.len() >= CACHEDIR_SIGNATURE.len() as u64;
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| long_enough(&m)) {
+        return false;
+    }
+    let Ok(mut tag) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    else {
+        return false;
+    };
+    let mut head = [0u8; 43];
+    tag.metadata().is_ok_and(|m| long_enough(&m))
+        && tag.read_exact(&mut head).is_ok()
+        && &head == CACHEDIR_SIGNATURE
+}
+
+/// Room for a name of up to `NAME_MAX` (255) bytes and its terminating NUL.
+const NAME_BUF: usize = 256;
+
+/// Calls `f` with `name` as a NUL-terminated C string, built on the stack:
+/// the per-entry calls take a name for every entry they read, and a heap
+/// allocation each would cost more than the copy. A name longer than any
+/// filesystem allows still works, through the heap.
+pub(crate) fn with_c_name<R>(
+    name: &[u8],
+    f: impl FnOnce(&std::ffi::CStr) -> io::Result<R>,
+) -> io::Result<R> {
+    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+    if name.len() >= NAME_BUF {
+        return f(&CString::new(name).map_err(|_| invalid())?);
+    }
+    let mut buf = [0u8; NAME_BUF];
+    buf[..name.len()].copy_from_slice(name);
+    f(std::ffi::CStr::from_bytes_with_nul(&buf[..=name.len()]).map_err(|_| invalid())?)
+}
+
 /// Opens `path` for reading its entries. The final component is not
 /// followed, so a directory replaced by a symlink after it was listed fails
 /// with `ELOOP` rather than leading the walk elsewhere. On `EMFILE` or
@@ -70,13 +122,23 @@ pub(crate) fn c_path(path: &Path) -> io::Result<CString> {
 pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
     let path = c_path(path)?;
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `path` is a NUL-terminated C string that outlives the call.
+    parked(|| unsafe { libc::open(path.as_ptr(), flags) })
+}
+
+/// The descriptor `open` returns, retrying on `EINTR` and parking on
+/// `EMFILE` or `ENFILE` with a growing pause, for up to [`PARK_LIMIT`] in
+/// all, until another worker closes one.
+fn parked(mut open: impl FnMut() -> libc::c_int) -> io::Result<OwnedFd> {
     let mut parked = Duration::ZERO;
     let mut pause = Duration::from_millis(1);
     loop {
-        // SAFETY: `path` is a NUL-terminated C string that outlives the call.
-        let fd = unsafe { libc::open(path.as_ptr(), flags) };
+        #[cfg(test)]
+        calls::other();
+        let fd = open();
         if fd >= 0 {
-            // SAFETY: `fd` was just returned by open and is owned by nothing else.
+            // SAFETY: `fd` was just returned by `open` and is owned by
+            // nothing else.
             return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
         }
         let error = io::Error::last_os_error();
@@ -164,11 +226,10 @@ pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
 /// of the descriptor left off.
 pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>> {
     // SAFETY: `dir` is open for the borrow; F_DUPFD_CLOEXEC returns a new
-    // descriptor or -1.
-    let dup = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if dup < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    // descriptor or -1. The duplicate waits for a free descriptor as an
+    // open does.
+    let dup =
+        parked(|| unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) })?.into_raw_fd();
     // SAFETY: `dup` is a descriptor this function owns; fdopendir takes it
     // over on success, and on failure it is closed here.
     let stream = unsafe { libc::fdopendir(dup) };
@@ -221,8 +282,9 @@ fn set_errno(value: libc::c_int) {
     }
 }
 
-/// Per-thread counts of the calls that read entries, for the tests that
-/// count them: bulk reads, and reads of one entry.
+/// Per-thread counts of the system calls the providers make, for the tests
+/// that count them: bulk reads, reads of one entry, and every other call
+/// a walk makes per directory (opening it, duplicating its descriptor).
 #[cfg(test)]
 // Only the macOS tests count bulk reads.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -232,6 +294,7 @@ pub(crate) mod calls {
     thread_local! {
         pub(crate) static BULK: Cell<usize> = const { Cell::new(0) };
         pub(crate) static ENTRY: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static OTHER: Cell<usize> = const { Cell::new(0) };
     }
 
     pub(crate) fn bulk() {
@@ -242,8 +305,148 @@ pub(crate) mod calls {
         ENTRY.with(|n| n.set(n.get() + 1));
     }
 
-    /// This thread's counts so far: (bulk, entry).
-    pub(crate) fn now() -> (usize, usize) {
-        (BULK.with(Cell::get), ENTRY.with(Cell::get))
+    pub(crate) fn other() {
+        OTHER.with(|n| n.set(n.get() + 1));
+    }
+
+    /// This thread's counts so far: (bulk, entry, other).
+    pub(crate) fn now() -> (usize, usize, usize) {
+        (
+            BULK.with(Cell::get),
+            ENTRY.with(Cell::get),
+            OTHER.with(Cell::get),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+    use std::io;
+    use std::path::PathBuf;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use duscope_testkit::TestEnv;
+
+    use std::os::fd::AsFd;
+
+    use super::{NOFILE_TARGET, OPEN_MAX, list_names, open_dir, raise_nofile_limit, with_c_name};
+
+    /// The directory the child process opens under a full descriptor table.
+    const CHILD_DIR: &str = "DUSCOPE_TEST_EMFILE_DIR";
+
+    fn nofile() -> libc::rlimit {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a valid, writable rlimit for getrlimit to fill.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) },
+            0
+        );
+        limit
+    }
+
+    #[test]
+    fn p1_walk_02_the_descriptor_limit_is_raised() {
+        raise_nofile_limit();
+        let limit = nofile();
+        // The raise asks for 65,536 and, where that is refused (macOS above
+        // OPEN_MAX), for OPEN_MAX; never above the hard limit.
+        let floor = limit.rlim_max.min(NOFILE_TARGET).min(OPEN_MAX);
+        assert!(
+            limit.rlim_cur >= floor,
+            "soft limit {} below {floor}",
+            limit.rlim_cur
+        );
+    }
+
+    #[test]
+    fn p1_walk_02_emfile_parks_until_a_descriptor_frees() {
+        // The descriptor table is filled in a child process: in this one,
+        // the tests running beside it would fail with EMFILE.
+        let env = TestEnv::new();
+        let child = "platform::posix::tests::p1_walk_02_emfile_child_process";
+        let out = env
+            .command(std::env::current_exe().unwrap())
+            .args(["--exact", child, "--ignored", "--test-threads", "1"])
+            .env(CHILD_DIR, env.tmp_dir())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "the child did not run: {stdout}"
+        );
+    }
+
+    #[test]
+    #[ignore = "run in a child process by p1_walk_02_emfile_parks_until_a_descriptor_frees"]
+    fn p1_walk_02_emfile_child_process() {
+        // `--ignored` runs (the platform job) reach it without its parent.
+        let Some(dir) = std::env::var_os(CHILD_DIR).map(PathBuf::from) else {
+            return;
+        };
+        let dir_fd = open_dir(&dir).unwrap();
+        let mut limit = nofile();
+        limit.rlim_cur = limit.rlim_cur.min(64);
+        // SAFETY: `limit` is a valid rlimit that setrlimit only reads.
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) },
+            0
+        );
+        let mut held = Vec::new();
+        let full = loop {
+            match File::open("/dev/null") {
+                Ok(file) => held.push(file),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(full.raw_os_error(), Some(libc::EMFILE));
+        let opener = thread::spawn(move || {
+            let start = Instant::now();
+            (open_dir(&dir).map(drop), start.elapsed())
+        });
+        thread::sleep(Duration::from_millis(200));
+        held.pop();
+        let (result, waited) = opener.join().unwrap();
+        result.expect("the open parked until a descriptor freed, then succeeded");
+        assert!(waited >= Duration::from_millis(150), "it waited {waited:?}");
+        // Fill the table again: listing through a held descriptor needs a
+        // duplicate, which parks the same way.
+        let full = loop {
+            match File::open("/dev/null") {
+                Ok(file) => held.push(file),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(full.raw_os_error(), Some(libc::EMFILE));
+        let listing = thread::spawn(move || {
+            let start = Instant::now();
+            (list_names(dir_fd.as_fd()).map(drop), start.elapsed())
+        });
+        thread::sleep(Duration::from_millis(200));
+        held.pop();
+        let (result, waited) = listing.join().unwrap();
+        result.expect("the duplicate parked until a descriptor freed, then succeeded");
+        assert!(waited >= Duration::from_millis(150), "it waited {waited:?}");
+    }
+
+    #[test]
+    fn p1_walk_02_names_pass_to_c_from_the_stack() {
+        for len in [0, 1, 255, 256, 300] {
+            let name = vec![b'n'; len];
+            let back = with_c_name(&name, |c| Ok(c.to_bytes().to_vec())).unwrap();
+            assert_eq!(back, name, "a name of {len} bytes");
+        }
+        let nul = with_c_name(b"a\0b", |_| Ok(()));
+        assert_eq!(nul.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 }

@@ -17,6 +17,7 @@ crossbeam-utils.workspace = true
 gix-ignore.workspace = true
 globset.workspace = true
 libc.workspace = true
+log.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

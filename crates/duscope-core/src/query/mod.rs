@@ -13,6 +13,15 @@ pub mod timegrammar;
 mod top;
 mod tree;
 
+/// The clock every "now" comes from: the scan's start and end, the
+/// queries' ages and cutoffs.
+pub mod clock {
+    pub use super::timegrammar::now;
+}
+
+use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -23,7 +32,7 @@ use crate::CoreError;
 use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::rollup::RollUp;
 
-pub use by_type::{ByTypeQuery, by_type, root_dirs};
+pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
 /// The regular expressions `--regex` takes, matched against path bytes.
 pub use regex::bytes::Regex;
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
@@ -114,6 +123,12 @@ impl Node<'_> {
 }
 
 /// A scan the queries can read.
+///
+/// [`TreeView::node`] answers an entry's scalar columns. Names, paths and
+/// a directory's subdirectories have methods of their own, which the
+/// queries call where they need them: their defaults read them through
+/// `node`, which suits the arena, and a view that does not keep every name
+/// in memory (the index) answers each from its own storage in one step.
 pub trait TreeView {
     /// The number of entries.
     fn len(&self) -> u32;
@@ -127,6 +142,45 @@ pub trait TreeView {
     fn root_path(&self) -> &Path;
     /// Whether `--attrs full` was collected (atime, btime, mode).
     fn full_attrs(&self) -> bool;
+
+    /// The name of entry `id`, as bytes.
+    fn name(&self, id: u32) -> Cow<'_, [u8]> {
+        Cow::Borrowed(self.node(id).name)
+    }
+
+    /// The path of `id` relative to the root, `/`-separated; empty for the
+    /// root.
+    fn path(&self, id: u32) -> Vec<u8> {
+        let mut names = Vec::new();
+        let mut at = id;
+        while at != 0 {
+            let node = self.node(at);
+            names.push(node.name);
+            at = node.parent;
+        }
+        let mut path = Vec::new();
+        for name in names.iter().rev() {
+            if !path.is_empty() {
+                path.push(b'/');
+            }
+            path.extend_from_slice(name);
+        }
+        path
+    }
+
+    /// The subdirectories of `dir`, in canonical order: each one's id and
+    /// the last id of its subtree. Empty for a file.
+    fn child_dirs(&self, dir: u32) -> Vec<(u32, u32)> {
+        let node = self.node(dir);
+        let mut dirs = Vec::new();
+        let mut next = node.files_end.checked_add(1);
+        while let Some(id) = next.filter(|&id| id <= node.last_id) {
+            let last = self.node(id).last_id;
+            dirs.push((id, last));
+            next = last.checked_add(1);
+        }
+        dirs
+    }
 }
 
 /// The arena and its roll-up, as a [`TreeView`].
@@ -240,45 +294,24 @@ impl SizeKind {
 }
 
 /// The ids of `dir`'s children: its files, then the root of each
-/// subdirectory's subtree.
+/// subdirectory's subtree ([`TreeView::child_dirs`]).
 pub fn children<'v>(
     view: &'v (impl TreeView + ?Sized),
     dir: &Node<'_>,
 ) -> impl Iterator<Item = u32> + 'v {
-    let (files_end, last) = (dir.files_end, dir.last_id);
-    let mut next = dir.id + 1;
-    std::iter::from_fn(move || {
-        if next > last {
-            return None;
-        }
-        let id = next;
-        next = if id <= files_end {
-            id + 1
-        } else {
-            view.node(id).last_id + 1
-        };
-        Some(id)
-    })
+    let files = (dir.id + 1)..=dir.files_end;
+    let dirs = if dir.is_dir() {
+        view.child_dirs(dir.id)
+    } else {
+        Vec::new()
+    };
+    files.chain(dirs.into_iter().map(|(id, _)| id))
 }
 
 /// The path of `id` relative to the root, `/`-separated; empty for the
-/// root.
+/// root ([`TreeView::path`]).
 pub fn rel_path(view: &(impl TreeView + ?Sized), id: u32) -> Vec<u8> {
-    let mut names = Vec::new();
-    let mut at = id;
-    while at != 0 {
-        let node = view.node(at);
-        names.push(node.name);
-        at = node.parent;
-    }
-    let mut path = Vec::new();
-    for name in names.iter().rev() {
-        if !path.is_empty() {
-            path.push(b'/');
-        }
-        path.extend_from_slice(name);
-    }
-    path
+    view.path(id)
 }
 
 /// The absolute path of `id`, as bytes.
@@ -558,14 +591,8 @@ pub fn sort_ids_by(
     let mut keyed: Vec<(i128, Vec<u8>, u32)> = ids
         .iter()
         .map(|&id| {
-            let node = view.node(id);
-            let value = match key {
-                SortKey::Size => -i128::from(size_of(&node)),
-                SortKey::Count => -i128::from(node.file_count),
-                SortKey::Mtime => -i128::from(node.max_mtime_ns),
-                SortKey::Path => 0,
-            };
-            (if reverse { -value } else { value }, rel_path(view, id), id)
+            let value = sort_value(&view.node(id), key, reverse, &size_of);
+            (value, rel_path(view, id), id)
         })
         .collect();
     let paths_reversed = reverse && key == SortKey::Path;
@@ -580,6 +607,95 @@ pub fn sort_ids_by(
     for (slot, (_, _, id)) in ids.iter_mut().zip(keyed) {
         *slot = id;
     }
+}
+
+/// Where `node` sorts under `key`, smallest first; paths break ties.
+fn sort_value(
+    node: &Node<'_>,
+    key: SortKey,
+    reverse: bool,
+    size_of: &impl Fn(&Node<'_>) -> u64,
+) -> i128 {
+    let value = match key {
+        SortKey::Size => -i128::from(size_of(node)),
+        SortKey::Count => -i128::from(node.file_count),
+        SortKey::Mtime => -i128::from(node.max_mtime_ns),
+        SortKey::Path => 0,
+    };
+    if reverse { -value } else { value }
+}
+
+/// The first `limit` of `candidates` in [`sort_ids`] order (all of them
+/// without a limit), and how many candidates there were.
+pub fn ranked(
+    view: &(impl TreeView + ?Sized),
+    candidates: impl IntoIterator<Item = u32>,
+    key: SortKey,
+    size: SizeKind,
+    reverse: bool,
+    limit: Option<usize>,
+) -> (Vec<u32>, u64) {
+    ranked_by(view, candidates, key, reverse, limit, |node| {
+        node.size(size)
+    })
+}
+
+/// [`ranked`], with `size_of` giving the size [`SortKey::Size`] reads.
+///
+/// With a limit, the candidates are ranked as they are counted: a heap
+/// keeps the `limit` best sort keys and a list the candidates that tie
+/// with the worst of them, so only those are sorted, and their paths
+/// (which decide among equal keys) spelled. Memory stays near the limit,
+/// not the number of candidates, unless the keys tie (`--sort path`, which
+/// sorts them all).
+pub fn ranked_by(
+    view: &(impl TreeView + ?Sized),
+    candidates: impl IntoIterator<Item = u32>,
+    key: SortKey,
+    reverse: bool,
+    limit: Option<usize>,
+    size_of: impl Fn(&Node<'_>) -> u64,
+) -> (Vec<u32>, u64) {
+    let Some(limit) = limit else {
+        let mut ids: Vec<u32> = candidates.into_iter().collect();
+        sort_ids_by(view, &mut ids, key, reverse, size_of);
+        let total = ids.len() as u64;
+        return (ids, total);
+    };
+    let mut best: BinaryHeap<(i128, u32)> = BinaryHeap::with_capacity(limit.saturating_add(1));
+    let mut ties: Vec<u32> = Vec::new();
+    let mut total = 0u64;
+    for id in candidates {
+        total += 1;
+        if limit == 0 {
+            continue;
+        }
+        let value = sort_value(&view.node(id), key, reverse, &size_of);
+        let Some(&(worst, _)) = best.peek().filter(|_| best.len() >= limit) else {
+            best.push((value, id));
+            continue;
+        };
+        match value.cmp(&worst) {
+            Ordering::Greater => {}
+            Ordering::Equal => ties.push(id),
+            Ordering::Less => {
+                best.push((value, id));
+                if let Some((_, out)) = best.pop() {
+                    // `out` ties with the worst kept key, or the worst kept
+                    // key is now better than every tie.
+                    if best.peek().is_some_and(|&(kept, _)| kept == worst) {
+                        ties.push(out);
+                    } else {
+                        ties.clear();
+                    }
+                }
+            }
+        }
+    }
+    let mut ids: Vec<u32> = best.into_iter().map(|(_, id)| id).chain(ties).collect();
+    sort_ids_by(view, &mut ids, key, reverse, size_of);
+    ids.truncate(limit);
+    (ids, total)
 }
 
 /// A page of rows: what `--limit` kept, and how many matched.

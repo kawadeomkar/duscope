@@ -20,6 +20,7 @@ pub enum Color {
 
 impl Color {
     /// `#rrggbb`.
+    #[must_use]
     pub fn hex(text: &str) -> Option<Color> {
         let hex = text.strip_prefix('#')?;
         if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -53,6 +54,7 @@ impl Color {
 
     /// Relative luminance (sRGB, 0 to 1); `None` for a colour that is not
     /// RGB.
+    #[must_use]
     pub fn luminance(self) -> Option<f64> {
         let Color::Rgb(r, g, b) = self else {
             return None;
@@ -70,6 +72,7 @@ impl Color {
 
     /// The nearest of the 256 xterm colours: the 6×6×6 cube or the grey
     /// ramp, whichever is closer.
+    #[must_use]
     pub fn to_256(self) -> Option<u8> {
         const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
         let Color::Rgb(r, g, b) = self else {
@@ -158,6 +161,7 @@ pub struct CellBuffer {
 
 impl CellBuffer {
     /// A blank buffer of `w` columns and `h` rows.
+    #[must_use]
     pub fn new(w: u16, h: u16) -> CellBuffer {
         CellBuffer {
             w,
@@ -167,11 +171,13 @@ impl CellBuffer {
     }
 
     /// Columns.
+    #[must_use]
     pub fn width(&self) -> u16 {
         self.w
     }
 
     /// Rows.
+    #[must_use]
     pub fn height(&self) -> u16 {
         self.h
     }
@@ -183,12 +189,14 @@ impl CellBuffer {
     }
 
     /// The cell at column `x`, row `y`.
+    #[must_use]
     pub fn get(&self, x: u16, y: u16) -> Option<&Cell> {
         (x < self.w && y < self.h)
             .then(|| &self.cells[usize::from(y) * usize::from(self.w) + usize::from(x)])
     }
 
     /// The cell at column `x`, row `y`, to change.
+    #[must_use]
     pub fn get_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
         (x < self.w && y < self.h)
             .then(|| &mut self.cells[usize::from(y) * usize::from(self.w) + usize::from(x)])
@@ -222,6 +230,7 @@ impl CellBuffer {
 
     /// The buffer as a terminal shows it: escapes for `depth`, then each
     /// row and a newline.
+    #[must_use]
     pub fn to_ansi(&self, depth: Depth) -> String {
         let mut out = String::new();
         for y in 0..self.h {
@@ -255,6 +264,7 @@ impl CellBuffer {
 
     /// The buffer as snapshot text: the characters row by row, then each
     /// row's runs of style as `count fg bg[ b]`.
+    #[must_use]
     pub fn snapshot(&self) -> String {
         let mut out = String::new();
         for y in 0..self.h {

@@ -14,20 +14,26 @@
 //!   the rest;
 //! - smaller: a leaf in the colour of the class holding most of its bytes.
 //!
+//! At the `--depth` cap a folder does not open: a box keeps its outline
+//! (and at depth 1 its title, so `--depth 1` draws the proposal's mockup),
+//! filled as a leaf; anything smaller is a leaf.
+//!
 //! Border colours step overlay1, surface2, surface1 by depth. Leaves fill
 //! their tile with their colour, every second sibling mixed 20% toward the
 //! base. A leaf of at least 5 columns is labelled `  name `, and one of at
-//! least 8×2 cells gets a second row `  size `, in crust on a light fill and
-//! in whichever of the pack's text, crust and base colours reads best on
-//! the fill (black or white on the 16 ANSI colours). What rounds below
+//! least 8×2 cells gets a second row `  size `, in crust on a light fill
+//! (luminance above 0.18) and in text otherwise; where crust is not the
+//! darker of the two (the light pack), in whichever of the pack's text,
+//! crust and base colours reads best, and black or white on the 16 ANSI
+//! colours. What rounds below
 //! `--min-tile` is pooled into the parent's `+N small` tile. With the
 //! `no-color` pack tiles are `░▒▓█` shades by depth and labels carry the
 //! class letter. Names are measured and cut in terminal columns, with
 //! control characters shown as escapes (`\x1b`); a file whose
 //! bytes are charged elsewhere (a later hard link, a clone) weighs nothing.
 
-use duscope_core::query::{Node, SizeKind, TreeView, children, root_dirs};
-use duscope_core::rules::{Class, Classes, ext};
+use duscope_core::query::{Node, SizeKind, TreeView, children, classify};
+use duscope_core::rules::{Class, Classes};
 
 use crate::cells::{Cell, CellBuffer, Color, lay_out};
 use crate::packs::Pack;
@@ -45,8 +51,42 @@ pub enum ColorBy {
     Level,
     /// The newest modification time, through the pack's age ramp.
     Age,
-    /// `LS_COLORS`' extension colours, the class colour where it has none.
-    LsColors(Vec<(String, Color)>),
+    /// `LS_COLORS`' colours for files, the class colour where it has none
+    /// and for folders.
+    LsColors(LsColors),
+}
+
+/// What `--color-by lscolors` takes from `LS_COLORS`: the colour of
+/// executable files (`ex=`) and of names ending in a suffix (`*suffix=`,
+/// `*.tar.gz=` among them). Folders, and the other keys, keep the pack's
+/// colours.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LsColors {
+    /// `ex=`: a file with an execute bit, when the scan collected modes.
+    pub executable: Option<Color>,
+    /// `*suffix=`, lower-cased, in the order given: as in GNU `ls`, the
+    /// last one that matches wins, and case does not matter.
+    pub suffixes: Vec<(String, Color)>,
+}
+
+impl LsColors {
+    /// The colour `ls` gives a file named `name` with `mode`: `ex=` for an
+    /// executable (which `ls` checks before the suffixes), else the last
+    /// suffix the name ends with.
+    #[must_use]
+    pub fn of(&self, name: &[u8], mode: Option<u32>) -> Option<Color> {
+        if let Some(color) = self.executable
+            && mode.is_some_and(|m| m & 0o111 != 0)
+        {
+            return Some(color);
+        }
+        let name = name.to_ascii_lowercase();
+        self.suffixes
+            .iter()
+            .rev()
+            .find(|(suffix, _)| name.ends_with(suffix.as_bytes()))
+            .map(|&(_, color)| color)
+    }
 }
 
 /// The characters a map is drawn with.
@@ -67,7 +107,10 @@ pub struct PaintOpts<'a> {
     pub color_by: ColorBy,
     /// The characters.
     pub glyphs: Glyphs,
-    /// `--depth`: folders at this depth are painted as leaves.
+    /// `--depth`: folders at this depth do not open. One large enough for
+    /// a box keeps its outline (and at depth 1 its title), filled as a
+    /// leaf in place of its children; a smaller one is a leaf. 0 counts as
+    /// 1, as `top --depth 0` lists depth 1.
     pub depth: Option<u32>,
     /// `--min-tile`: the smallest tile side drawn, in units.
     pub min_tile: u16,
@@ -104,8 +147,23 @@ struct Painter<'v, 'o, V: TreeView + ?Sized> {
 
 /// Paints the scan in `view` as a map of `w` columns and `h` rows, at most
 /// 32767 (twice that in half-cell units).
+#[must_use]
 pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u16) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
+    let mut buffer = CellBuffer::new(w, h);
+    paint_into(view, opts, h, &mut buffer);
+    buffer
+}
+
+/// Paints the map into the top `h` rows of `buffer` (at most 32767), as
+/// wide as the buffer.
+fn paint_into(
+    view: &(impl TreeView + ?Sized),
+    opts: &PaintOpts<'_>,
+    h: u16,
+    buffer: &mut CellBuffer,
+) {
+    let (w, h) = (buffer.width(), h.min(u16::MAX / 2).min(buffer.height()));
     let h_units = h * 2;
     let mut painter = Painter {
         view,
@@ -128,52 +186,17 @@ pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u
         if root.is_dir() {
             painter.block(&root, area, 0, None);
         } else {
-            painter.leaf(&root, area, 1, 0, None);
+            painter.leaf(&root, area, 1, 0, None, true);
         }
     }
-    painter.compose(h)
+    painter.compose(h, buffer);
 }
 
-/// Each entry's class: a directory's is that of the outermost directory
-/// rule above or at it (`Other` when none), the directories above the root
-/// included as `by-type` reads them, a file's that rule's or its
-/// extension's.
+/// Each entry's class by pre-order id, as `by-type` reads it
+/// ([`classify`]), so the tiles agree with the legend.
 fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Class> {
-    let n = view.len() as usize;
-    let mut out = vec![Class::Other; n];
-    if n == 0 {
-        return out;
-    }
-    let root = view.node(0);
-    let (mut components, above) = root_dirs(classes, view.root_path());
-    let mut open: Vec<(u32, Option<Class>)> = vec![(u32::MAX, above)];
-    for id in 0..=root.last_id {
-        let node = view.node(id);
-        while open.last().is_some_and(|&(last, _)| id > last) {
-            open.pop();
-            components.pop();
-        }
-        let inherited = open.last().and_then(|&(_, class)| class);
-        if node.is_dir() {
-            components.push(node.name);
-            let class = inherited.or_else(|| classes.of_dir(&components));
-            open.push((node.last_id, class));
-            out[id as usize] = class.unwrap_or(Class::Other);
-            continue;
-        }
-        out[id as usize] = inherited.unwrap_or_else(|| {
-            let suffix = ext(node.name);
-            if suffix.is_empty() {
-                if node.mode.is_some_and(|m| m & 0o111 != 0) {
-                    Class::Binaries
-                } else {
-                    Class::Other
-                }
-            } else {
-                classes.of_ext(&suffix).unwrap_or(Class::Other)
-            }
-        });
-    }
+    let mut out = vec![Class::Other; view.len() as usize];
+    classify(view, classes, |node, class| out[node.id as usize] = class);
     out
 }
 
@@ -223,10 +246,11 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
                 Item::Entry(id) => {
                     let node = self.view.node(id);
                     let folder = folder.or((depth == 0).then_some(order));
-                    if node.is_dir() && self.opts.depth.is_none_or(|cap| node.depth < cap) {
-                        self.folder(&node, tile.rect, folder, tint);
+                    if node.is_dir() {
+                        let open = self.opts.depth.is_none_or(|cap| node.depth < cap.max(1));
+                        self.folder(&node, tile.rect, folder, tint, open);
                     } else {
-                        self.leaf(&node, tile.rect, node.depth, order, folder);
+                        self.leaf(&node, tile.rect, node.depth, order, folder, true);
                     }
                 }
                 Item::Files(dir_id, count) => {
@@ -247,8 +271,16 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
     }
 
     /// Paints directory `node` in `rect`: a box, a gutter group or a leaf,
-    /// by its size in cells.
-    fn folder(&mut self, node: &Node<'_>, rect: Rect, folder: Option<usize>, tint: bool) {
+    /// by its size in cells. A folder that does not `open` (at the
+    /// `--depth` cap) keeps its box, filled as a leaf, or is a leaf.
+    fn folder(
+        &mut self,
+        node: &Node<'_>,
+        rect: Rect,
+        folder: Option<usize>,
+        tint: bool,
+        open: bool,
+    ) {
         let (top, rows) = cell_rows(rect);
         let cols = rect.w;
         let depth = node.depth;
@@ -276,8 +308,13 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
                 cols.saturating_sub(2),
                 rows.saturating_sub(2) * 2,
             );
-            self.block(node, inner, depth, folder);
-        } else if cols >= 3 && rows >= 2 {
+            if open {
+                self.block(node, inner, depth, folder);
+            } else {
+                // The title names a depth-1 box already.
+                self.leaf(node, inner, depth, usize::from(tint), folder, depth > 1);
+            }
+        } else if open && cols >= 3 && rows >= 2 {
             let crust = self.opts.pack.roles.crust;
             self.fill(
                 Rect::new(rect.x, rect.y, rect.w, 1),
@@ -293,11 +330,12 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
             self.block(node, inner, depth, folder);
         } else {
             let order = usize::from(tint);
-            self.leaf(node, rect, depth, order, folder);
+            self.leaf(node, rect, depth, order, folder, true);
         }
     }
 
-    /// Paints `node` as one tile: a file, or a folder too small to open.
+    /// Paints `node` as one tile, labelled when `labelled`: a file, or a
+    /// folder too small to open or at the `--depth` cap.
     fn leaf(
         &mut self,
         node: &Node<'_>,
@@ -305,6 +343,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         depth: u32,
         order: usize,
         folder: Option<usize>,
+        labelled: bool,
     ) {
         let class = if node.is_dir() {
             self.dominant(node.id, false)
@@ -317,16 +356,16 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
             ColorBy::Folder => pack.cycle[folder.unwrap_or(0) % pack.cycle.len()],
             ColorBy::Level => pack.cycle[depth as usize % pack.cycle.len()],
             ColorBy::Age => pack.age[age_step(self.opts.now, node.max_mtime_ns)],
-            ColorBy::LsColors(table) => {
-                let suffix = ext(node.name);
-                table
-                    .iter()
-                    .find(|(e, _)| *e == suffix)
-                    .map_or_else(|| pack.class(class), |&(_, c)| c)
-            }
+            ColorBy::LsColors(_) if node.is_dir() => pack.class(class),
+            ColorBy::LsColors(table) => table
+                .of(node.name, node.mode)
+                .unwrap_or_else(|| pack.class(class)),
         };
         let color = self.tinted(base, order % 2 == 1);
         self.fill(rect, color, clamp_depth(depth));
+        if !labelled {
+            return;
+        }
         let mut name = String::from_utf8_lossy(node.name).into_owned();
         if node.is_dir() {
             name.push('/');
@@ -511,10 +550,9 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         }
     }
 
-    /// The units and the overlay as cells: half blocks, whole cells or
-    /// shades, the overlay on top.
-    fn compose(&self, h: u16) -> CellBuffer {
-        let mut buffer = CellBuffer::new(self.w, h);
+    /// The units and the overlay as the top `h` rows of `buffer`: half
+    /// blocks, whole cells or shades, the overlay on top.
+    fn compose(&self, h: u16, buffer: &mut CellBuffer) {
         let shades = match self.opts.glyphs {
             Glyphs::Unicode => ['░', '▒', '▓', '█'],
             Glyphs::Ascii => ['-', '+', '=', '#'],
@@ -555,7 +593,6 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
                 }
             }
         }
-        buffer
     }
 }
 
@@ -582,6 +619,7 @@ fn age_step(now: i64, mtime: i64) -> usize {
 }
 
 /// A class's key letter, as the legend and the shades labels show it.
+#[must_use]
 pub fn class_key(class: Class) -> char {
     match class {
         Class::Code => 'c',
@@ -595,6 +633,7 @@ pub fn class_key(class: Class) -> char {
 }
 
 /// A size as the map prints it: `1.8G`, `932M`, `12K`, `512B`.
+#[must_use]
 pub fn compact(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
     let mut unit = 0;
@@ -617,7 +656,8 @@ pub fn compact(bytes: u64) -> String {
 /// cut.
 fn truncate(text: &str, room: usize, style: Glyphs) -> String {
     let ascii = style == Glyphs::Ascii;
-    if columns(text, ascii) <= room {
+    let glyphs = glyphs(text, ascii);
+    if glyphs.iter().map(|g| g.columns()).sum::<usize>() <= room {
         return text.to_owned();
     }
     if room == 0 {
@@ -625,7 +665,7 @@ fn truncate(text: &str, room: usize, style: Glyphs) -> String {
     }
     let mut cut = String::new();
     let mut used = 0;
-    for glyph in glyphs(text, ascii) {
+    for glyph in glyphs {
         if used + glyph.columns() > room - 1 {
             break;
         }
@@ -637,17 +677,30 @@ fn truncate(text: &str, room: usize, style: Glyphs) -> String {
     cut
 }
 
-/// The colour a label reads best in on `fill`: of the pack's text, crust
-/// and base colours, the one of highest contrast; on an ANSI colour, black
-/// or bright white; the text colour on the terminal's own background.
+/// The colour of a label on `fill`. The drawing rule, crust on light fills
+/// (luminance above 0.18) and text otherwise, assumes crust is the darker
+/// of the two, as it is in every dark pack; where it is not (the light
+/// pack's text and crust are both dark), the most readable of the pack's
+/// text, crust and base colours; on an ANSI colour, black or bright white,
+/// whichever reads better; the text colour on the terminal's own
+/// background.
 fn readable(fill: Color, pack: &Pack) -> Color {
+    let (text, crust) = (pack.roles.text, pack.roles.crust);
     let candidates: Vec<Color> = match fill {
-        Color::Rgb(..) => vec![pack.roles.text, pack.roles.crust, pack.roles.base],
+        Color::Rgb(..) => {
+            if let (Some(behind), Some(dark), Some(light)) =
+                (luminance(fill), luminance(crust), luminance(text))
+                && dark < light
+            {
+                return if behind > 0.18 { crust } else { text };
+            }
+            vec![text, crust, pack.roles.base]
+        }
         Color::Ansi(_) => vec![Color::Ansi(0), Color::Ansi(15)],
-        Color::Reset => return pack.roles.text,
+        Color::Reset => return text,
     };
     let Some(behind) = luminance(fill) else {
-        return pack.roles.text;
+        return text;
     };
     let contrast = |c: &Color| {
         luminance(*c).map(|l| {
@@ -659,7 +712,7 @@ fn readable(fill: Color, pack: &Pack) -> Color {
         .iter()
         .filter_map(|c| contrast(c).map(|ratio| (ratio, *c)))
         .max_by(|a, b| a.0.total_cmp(&b.0))
-        .map_or(pack.roles.text, |(_, c)| c)
+        .map_or(text, |(_, c)| c)
 }
 
 /// A colour's relative luminance, an ANSI colour's as xterm shows it.
@@ -707,6 +760,7 @@ pub struct Footer {
 /// The whole frame: the map of `w` columns and `rows − 5` rows, then the
 /// legend, the summary, a warning and the next commands, leaving the last
 /// row for the prompt; below 60×12, the summary alone.
+#[must_use]
 pub fn frame(
     view: &(impl TreeView + ?Sized),
     opts: &PaintOpts<'_>,
@@ -722,15 +776,8 @@ pub fn frame(
         return buffer;
     }
     let map_rows = rows - 5;
-    let map = paint(view, opts, w, map_rows);
     let mut buffer = CellBuffer::new(w, map_rows + 4);
-    for y in 0..map_rows {
-        for x in 0..w {
-            if let (Some(cell), Some(slot)) = (map.get(x, y), buffer.get_mut(x, y)) {
-                *slot = *cell;
-            }
-        }
-    }
+    paint_into(view, opts, map_rows, &mut buffer);
     // The legend: `■ code 61%` per class, the swatch in its colour.
     let mut x = 2u16;
     let y = map_rows;
@@ -786,6 +833,11 @@ mod tests {
             mocha.roles.crust
         );
         assert_eq!(readable(mocha.roles.base, &mocha), mocha.roles.text);
+        // Mocha's other (#6c7086, luminance 0.165) is not light: text, as
+        // the rule says, though crust would contrast a little more.
+        let other = mocha.class(crate::paint::Class::Other);
+        assert!(luminance(other).unwrap() < 0.18);
+        assert_eq!(readable(other, &mocha), mocha.roles.text);
     }
 
     #[test]

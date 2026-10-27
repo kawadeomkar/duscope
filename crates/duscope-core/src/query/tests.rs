@@ -1,5 +1,6 @@
 //! P1-CLI-03: the queries on in-memory trees.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use duscope_walk::{
@@ -8,8 +9,8 @@ use duscope_walk::{
 };
 
 use super::{
-    ArenaView, ByTypeQuery, Filters, SizeKind, SortKey, StaleQuery, TopQuery, TreeQuery, TreeView,
-    by_type, globs, stale, top, tree,
+    ArenaView, ByTypeQuery, Filters, Node, SizeKind, SortKey, StaleQuery, TopQuery, TreeQuery,
+    TreeView, by_type, globs, ranked, sort_ids, stale, top, tree,
 };
 use crate::CoreError;
 use crate::arena::Arena;
@@ -98,6 +99,36 @@ fn p1_cli_03_top_lists_the_depth_frontier_with_cut_through() {
             "dev/src"
         ]
     );
+}
+
+#[test]
+fn p1_cli_03_cut_through_reproduces_the_library_containers_example() {
+    // The proposal's `top ~` example: Library holds a Containers of 90% of
+    // its bytes, split between two apps so neither reaches 80% of it, and
+    // Movies has no subdirectory.
+    let mut tree = MemProvider::new("/home");
+    tree.file("Library/Containers/com.apple.mail/data.db", 5 * MIB)
+        .file("Library/Containers/com.example/data.db", 4 * MIB)
+        .file("Library/Preferences/p.plist", MIB)
+        .file("Movies/a.mov", 5 * MIB);
+    let (arena, rollup) = scan(&tree);
+    let view = view(&arena, &rollup, &tree);
+    let page = top(
+        &view,
+        &TopQuery {
+            cut_through: true,
+            ..TopQuery::default()
+        },
+    );
+    let rows: Vec<String> = page.entries.iter().map(|e| e.path.clone()).collect();
+    assert_eq!(paths(&rows), ["Library/Containers", "Movies"]);
+    assert_eq!(page.entries[0].via, ["/home/Library"]);
+    assert_eq!(page.entries[0].depth, 2);
+    assert!(page.entries[1].via.is_empty());
+    // --no-cut-through keeps strict depth.
+    let strict = top(&view, &TopQuery::default());
+    let rows: Vec<String> = strict.entries.iter().map(|e| e.path.clone()).collect();
+    assert_eq!(paths(&rows), ["Library", "Movies"]);
 }
 
 #[test]
@@ -245,6 +276,54 @@ fn p1_cli_03_tree_lists_shares_down_to_its_depth() {
     assert!((library.pct_of_root - library.pct_of_parent).abs() < f64::EPSILON);
 }
 
+#[test]
+fn p1_cli_03_tree_limit_keeps_the_shallowest_rows() {
+    let fixture = home();
+    let (arena, rollup) = scan(&fixture);
+    let view = view(&arena, &rollup, &fixture);
+    let rows = |limit| {
+        let page = tree(
+            &view,
+            &TreeQuery {
+                depth: Some(3),
+                limit: Some(limit),
+                ..TreeQuery::default()
+            },
+        );
+        let rows: Vec<String> = page
+            .entries
+            .iter()
+            .map(|e| {
+                e.path
+                    .trim_start_matches("/home")
+                    .trim_start_matches('/')
+                    .to_owned()
+            })
+            .collect();
+        (rows, page.total_count)
+    };
+    // Every row of depth 1 before any below it, not the first subtree
+    // whole.
+    let (four, total) = rows(4);
+    assert_eq!(four, ["", "Library", "dev", "Movies"]);
+    assert_eq!(total, 17);
+    // A deeper row comes with its parent, and the rows stay in tree order.
+    let (seven, _) = rows(7);
+    assert_eq!(
+        seven,
+        [
+            "",
+            "Library",
+            "Library/Containers",
+            "Library/Preferences",
+            "dev",
+            "Movies",
+            "notes.txt"
+        ]
+    );
+    assert!(rows(0).0.is_empty());
+}
+
 fn tree_rows(view: &ArenaView<'_>, depth: u32, min_pct: f64) -> Vec<String> {
     tree(
         view,
@@ -332,7 +411,7 @@ fn p1_cli_03_by_type_lets_directory_rules_win() {
 }
 
 #[test]
-fn p1_cli_03_stale_needs_both_times_old_and_atime_needs_full_attrs() {
+fn p1_cli_03_stale_lists_large_files_past_the_cutoff_and_atime_needs_full_attrs() {
     let tree = home();
     let (arena, rollup) = scan(&tree);
     let view = view(&arena, &rollup, &tree);
@@ -399,8 +478,6 @@ fn p1_cli_03_sort_keys_and_reverse() {
         SortKey::Path.describe(SizeKind::Allocated, true),
         "path_desc"
     );
-    let _ = Path::new("/");
-    assert!(view.len() > 10);
 }
 
 /// An entry of a synthetic stream: 1000 bytes, 4096 on disk.
@@ -529,7 +606,41 @@ fn p1_cli_03_shared_bytes_count_once_in_tree_and_by_type() {
 }
 
 #[test]
-fn p1_cli_03_filters_judge_the_listed_directory_before_cut_through() {
+fn p1_cli_03_stale_needs_both_the_mtime_and_the_ctime_old() {
+    let year = 365 * 86_400_000_000_000i64;
+    let now = 60 * year;
+    let (old, recent) = (now - 3 * year, now - 86_400_000_000_000);
+    let file = |name: &str, mtime_ns, ctime_ns| Entry {
+        mtime_ns,
+        ctime_ns,
+        ..entry(name, 0, Kind::File)
+    };
+    let (arena, rollup) = stream(vec![
+        Entry {
+            dir: Some(DirId::new(0)),
+            ..entry("r", 0, Kind::Dir)
+        },
+        file("both-old", old, old),
+        file("changed-lately", old, recent),
+        file("modified-lately", recent, old),
+        file("both-recent", recent, recent),
+    ]);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
+    let page = stale(
+        &view,
+        &StaleQuery {
+            now,
+            older_than: year,
+            ..StaleQuery::default()
+        },
+    )
+    .unwrap();
+    let names: Vec<&str> = page.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["both-old"]);
+}
+
+#[test]
+fn p1_cli_03_filters_judge_the_row_top_lists() {
     let tree = home();
     let (arena, rollup) = scan(&tree);
     let view = view(&arena, &rollup, &tree);
@@ -547,18 +658,65 @@ fn p1_cli_03_filters_judge_the_listed_directory_before_cut_through() {
             .map(|e| e.path.strip_prefix("/home/").unwrap_or(&e.path).to_owned())
             .collect::<Vec<_>>()
     };
-    // --glob names the directory listed; its row is still cut through.
-    let glob = Filters {
-        glob: Some(globs(["Library"]).unwrap()),
+    // The rows are Library/Containers/app (cut through from Library, at
+    // depth 3), dev and Movies (depth 1). --glob, --min-depth and
+    // --min-size judge those rows, not the directories they stand for.
+    let glob = |pattern: &str| Filters {
+        glob: Some(globs([pattern]).unwrap()),
         ..Filters::default()
     };
-    assert_eq!(rows(glob), ["Library/Containers/app"]);
+    assert_eq!(rows(glob("app")), ["Library/Containers/app"]);
+    assert!(rows(glob("Library")).is_empty());
+    assert_eq!(rows(glob("/Library/**")), ["Library/Containers/app"]);
+    let deep = Filters {
+        min_depth: Some(2),
+        ..Filters::default()
+    };
+    assert_eq!(rows(deep), ["Library/Containers/app"]);
+    let shallow = Filters {
+        max_depth: Some(1),
+        ..Filters::default()
+    };
+    assert_eq!(rows(shallow), ["dev", "Movies"]);
+    let large = Filters {
+        min_size: Some(91 * MIB),
+        ..Filters::default()
+    };
+    assert!(rows(large).is_empty());
     // Cut-through stops above a directory --exclude leaves out.
     let exclude = Filters {
         exclude: Some(globs(["app"]).unwrap()),
         ..Filters::default()
     };
     assert_eq!(rows(exclude), ["Library/Containers", "dev", "Movies"]);
+}
+
+#[test]
+fn p1_cli_03_by_type_examples_carry_their_names() {
+    use std::os::unix::ffi::OsStrExt;
+    let mut tree = MemProvider::new("/p");
+    tree.file("photos/a.jpg", 3 * MIB).file(
+        Path::new(std::ffi::OsStr::from_bytes(b"photos/caf\xe9.jpg")),
+        2 * MIB,
+    );
+    let (arena, rollup) = scan(&tree);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/p"));
+    let classes = Classes::vendored();
+    let page = by_type(
+        &view,
+        &ByTypeQuery {
+            classes: &classes,
+            examples: 2,
+            filters: Filters::default(),
+            limit: None,
+            size: SizeKind::Apparent,
+        },
+    );
+    let examples = &page.entries[0].largest;
+    assert_eq!(examples[0].name, "a.jpg");
+    assert_eq!(examples[0].name_raw, None);
+    assert_eq!(examples[1].name, "caf\u{fffd}.jpg");
+    assert_eq!(examples[1].name_raw.as_deref(), Some("Y2Fm6S5qcGc="));
 }
 
 #[test]
@@ -622,4 +780,143 @@ fn p1_cli_03_globs_refuse_empty_patterns_and_anchor_dot_slash() {
         assert!(set.is_match("x") && !set.is_match("y/x"), "{pattern:?}");
     }
     assert!(globs(["x"]).unwrap().is_match("y/x"));
+}
+
+/// A view whose nodes carry no names, as the index's will not: names,
+/// paths and subdirectories reach the queries through `name`, `path` and
+/// `child_dirs` alone.
+struct NamelessNodes<'a>(ArenaView<'a>);
+
+impl TreeView for NamelessNodes<'_> {
+    fn len(&self) -> u32 {
+        self.0.len()
+    }
+
+    fn node(&self, id: u32) -> Node<'_> {
+        Node {
+            name: &[],
+            ..self.0.node(id)
+        }
+    }
+
+    fn root_path(&self) -> &Path {
+        self.0.root_path()
+    }
+
+    fn full_attrs(&self) -> bool {
+        self.0.full_attrs()
+    }
+
+    fn name(&self, id: u32) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.node(id).name.to_vec())
+    }
+
+    fn path(&self, id: u32) -> Vec<u8> {
+        self.0.path(id)
+    }
+
+    fn child_dirs(&self, dir: u32) -> Vec<(u32, u32)> {
+        self.0.child_dirs(dir)
+    }
+}
+
+#[test]
+fn p1_cli_03_queries_read_names_and_paths_through_the_view() {
+    let fixture = home();
+    let (arena, rollup) = scan(&fixture);
+    let view = view(&arena, &rollup, &fixture);
+    // The defaults, on the arena.
+    let id_of = |name: &[u8]| {
+        (0..view.len())
+            .find(|&id| view.node(id).name == name)
+            .unwrap()
+    };
+    let app = id_of(b"app");
+    assert_eq!(view.path(app), b"Library/Containers/app");
+    assert_eq!(&*view.name(app), b"app");
+    let subdirs = view.child_dirs(0);
+    let names: Vec<Vec<u8>> = subdirs.iter().map(|&(id, _)| view.path(id)).collect();
+    assert_eq!(names, [&b"Library"[..], b"Movies", b"dev"]);
+    assert!(
+        subdirs
+            .iter()
+            .all(|&(id, last)| last == view.node(id).last_id)
+    );
+    assert!(view.child_dirs(id_of(b"notes.txt")).is_empty());
+    assert!(view.child_dirs(app).is_empty());
+    // The queries give the same rows through a view that keeps names out
+    // of its nodes.
+    let nameless = NamelessNodes(ArenaView::new(
+        &arena,
+        &rollup,
+        fixture.root_path().to_owned(),
+    ));
+    let glob = Filters {
+        glob: Some(globs(["*.mov", "app"]).unwrap()),
+        ..Filters::default()
+    };
+    for q in [
+        TopQuery {
+            cut_through: true,
+            ..TopQuery::default()
+        },
+        TopQuery {
+            depth: Some(2),
+            sort: SortKey::Path,
+            ..TopQuery::default()
+        },
+        TopQuery {
+            files: true,
+            filters: glob.clone(),
+            ..TopQuery::default()
+        },
+    ] {
+        assert_eq!(top(&view, &q), top(&nameless, &q));
+    }
+    let q = TreeQuery {
+        depth: Some(4),
+        filters: glob,
+        ..TreeQuery::default()
+    };
+    assert_eq!(tree(&view, &q), tree(&nameless, &q));
+    let day = 86_400_000_000_000i64;
+    let q = StaleQuery {
+        now: 1_792_627_200_000_000_000 + 10 * day,
+        older_than: 7 * day,
+        min_size: MIB,
+        ..StaleQuery::default()
+    };
+    assert_eq!(stale(&view, &q).unwrap(), stale(&nameless, &q).unwrap());
+}
+
+#[test]
+fn p1_cli_03_ranking_under_a_limit_matches_the_full_sort() {
+    // Sizes from a small set and one time everywhere: many ties, which
+    // the paths break.
+    let mut tree = MemProvider::new("/t");
+    let sizes = [MIB, 2 * MIB, MIB, 3 * MIB, 2 * MIB];
+    for i in 0..60usize {
+        tree.file(format!("d{}/f{:02}", i % 7, (i * 37) % 60), sizes[i % 5]);
+    }
+    let (arena, rollup) = scan(&tree);
+    let view = view(&arena, &rollup, &tree);
+    let all: Vec<u32> = (0..view.len()).collect();
+    let size = SizeKind::Allocated;
+    for key in [SortKey::Size, SortKey::Count, SortKey::Mtime, SortKey::Path] {
+        for reverse in [false, true] {
+            let mut sorted = all.clone();
+            sort_ids(&view, &mut sorted, key, size, reverse);
+            for limit in 0..=all.len() + 1 {
+                let expected = &sorted[..limit.min(sorted.len())];
+                // The order the candidates come in does not matter.
+                for candidates in [all.clone(), all.iter().rev().copied().collect()] {
+                    let (kept, total) = ranked(&view, candidates, key, size, reverse, Some(limit));
+                    assert_eq!(total, all.len() as u64);
+                    assert_eq!(kept, expected, "{key:?} reverse={reverse} limit={limit}");
+                }
+            }
+            let (every, _) = ranked(&view, all.iter().copied(), key, size, reverse, None);
+            assert_eq!(every, sorted);
+        }
+    }
 }

@@ -3,7 +3,6 @@
 //! filesystem cannot answer it. The stat queue, mount points, the walk root
 //! and records with missing attributes come through here.
 
-use std::ffi::CString;
 use std::io;
 use std::os::fd::BorrowedFd;
 use std::path::Path;
@@ -18,34 +17,41 @@ use crate::{Attrs, Entry, FullAttrs, Kind, NameRef, WalkOptions};
 pub(super) const BUFFER_BYTES: usize = 4096;
 
 /// The entry `name` in the directory open on `dir`. A mount point's name
-/// resolves to the root of the mounted volume.
+/// resolves to the root of the mounted volume. `attrs` says whether
+/// `getattrlistat` answers in this directory: it turns false when the call
+/// is refused, so the rest of a batch on a filesystem without attribute
+/// reads costs one `fstatat` per name instead of two calls.
 pub(super) fn entry_at(
     dir: BorrowedFd<'_>,
     name: &NameRef,
     opts: &WalkOptions,
     buf: &mut AttrBuf,
+    attrs: &mut bool,
 ) -> io::Result<Entry> {
-    let c_name = CString::new(name.as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
-    let mut request = Request::single(opts);
-    let mut read = ffi::getattrlistat(dir, &c_name, &request.attrs, buf, request.options);
-    if let Err(e) = &read
-        && request.extended()
-        && bulk::unsupported(e)
-    {
-        request = request.without_extended();
-        read = ffi::getattrlistat(dir, &c_name, &request.attrs, buf, request.options);
-    }
-    match read {
-        Ok(()) => {
-            if let Some(entry) = decode(buf, &request, name)? {
-                return Ok(entry);
+    posix::with_c_name(name.as_bytes(), |c_name| {
+        if *attrs {
+            let mut request = Request::single(opts);
+            let mut read = ffi::getattrlistat(dir, c_name, &request.attrs, buf, request.options);
+            if let Err(e) = &read
+                && request.extended()
+                && bulk::unsupported(e)
+            {
+                request = request.without_extended();
+                read = ffi::getattrlistat(dir, c_name, &request.attrs, buf, request.options);
+            }
+            match read {
+                Ok(()) => {
+                    if let Some(entry) = decode(buf, &request, name)? {
+                        return Ok(entry);
+                    }
+                }
+                Err(e) if !bulk::unsupported(&e) => return Err(e),
+                Err(_) => *attrs = false,
             }
         }
-        Err(e) if !bulk::unsupported(&e) => return Err(e),
-        Err(_) => {}
-    }
-    let stat = posix::lstat_at(dir, &c_name)?;
-    Ok(from_stat(name.clone(), &stat, opts.attrs))
+        let stat = posix::lstat_at(dir, c_name)?;
+        Ok(from_stat(name.clone(), &stat, opts.attrs))
+    })
 }
 
 /// The entry at `path`, not following a final symlink, named `name`.
