@@ -3,16 +3,36 @@
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use duscope_testkit::TestEnv;
 
-use super::MacProvider;
 use super::bulk::{self, Decoded, Outcome, Probe, Request};
-use super::ffi;
-use crate::{Boundary, Entry, Flags, Kind, ScanEvent, WalkOptions, walk_with};
+use super::{MacProvider, ffi, stat};
+use crate::platform::posix;
+use crate::{Boundary, DirHandle, DirId, Entry, Flags, Kind, ScanEvent, WalkOptions, walk_with};
+
+/// A clock on which every bulk refill waits on I/O: each reading moves the
+/// wall clock 10 ms and the CPU clock 1 µs.
+pub(super) struct Waiting;
+
+static TICKS: AtomicU64 = AtomicU64::new(1);
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+impl bulk::Clock for Waiting {
+    fn cpu(&self) -> Option<Duration> {
+        Some(Duration::from_micros(TICKS.fetch_add(1, Ordering::Relaxed)))
+    }
+
+    fn now(&self) -> Instant {
+        *EPOCH + Duration::from_millis(10 * TICKS.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 /// Every entry of a walk by its path, and the paths of the directories that
 /// closed with an error.
@@ -100,10 +120,10 @@ fn p1_walk_03_every_entry_matches_lstat() {
     }
 }
 
-/// The walk of the fixture tree read three ways: by bulk reads, through the
-/// stat queue as if every directory were I/O-bound, and through the stat
-/// queue as if every bulk read failed with `ENOTSUP`.
-fn same_through_the_stat_queue(pretend: Outcome) {
+/// The walk of the fixture tree read by bulk reads and by `queued`, which
+/// sends some or all directories through the stat queue: both must find the
+/// same entries.
+fn same_as_bulk_reads(queued: &MacProvider) {
     let env = TestEnv::new();
     let root = env.fixtures().root();
     let opts = WalkOptions {
@@ -111,10 +131,7 @@ fn same_through_the_stat_queue(pretend: Outcome) {
         ..WalkOptions::default()
     };
     let (bulk, bulk_unreadable) = walk_paths(&MacProvider::new(), &root, &opts);
-    let queued = MacProvider {
-        pretend: Some(pretend),
-    };
-    let (queue, queue_unreadable) = walk_paths(&queued, &root, &opts);
+    let (queue, queue_unreadable) = walk_paths(queued, &root, &opts);
     if env.fixtures().unreadable_effective() {
         assert_eq!(
             bulk_unreadable.len(),
@@ -139,6 +156,15 @@ fn same_through_the_stat_queue(pretend: Outcome) {
     assert_eq!(bulk_unreadable, queue_unreadable);
 }
 
+/// The fixture tree read through the stat queue as if every directory's
+/// bulk read had answered `pretend`.
+fn same_through_the_stat_queue(pretend: Outcome) {
+    same_as_bulk_reads(&MacProvider {
+        pretend: Some(pretend),
+        ..MacProvider::default()
+    });
+}
+
 #[test]
 fn p1_walk_03_the_stat_queue_reads_what_bulk_reads_read() {
     same_through_the_stat_queue(Outcome::IoBound);
@@ -147,6 +173,49 @@ fn p1_walk_03_the_stat_queue_reads_what_bulk_reads_read() {
 #[test]
 fn p1_walk_03_enotsup_rereads_the_directory_by_name() {
     same_through_the_stat_queue(Outcome::Unsupported);
+}
+
+#[test]
+fn p1_walk_03_an_io_bound_directory_keeps_its_probed_entries() {
+    // Every directory of two refills or more switches after its second;
+    // the entries those refills decoded stay, the rest go to the queue,
+    // and nothing is read twice or missed.
+    let provider = MacProvider {
+        waiting: true,
+        ..MacProvider::default()
+    };
+    same_as_bulk_reads(&provider);
+    assert!(
+        provider.switched.load(Ordering::Relaxed) > 0,
+        "the probe never switched"
+    );
+}
+
+#[test]
+fn p1_walk_03_a_record_without_a_name_is_an_error() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let fd = posix::open_dir(&root).unwrap();
+    let dir = DirHandle {
+        id: DirId::ROOT,
+        path: root.clone(),
+        depth: 0,
+    };
+    let (mut out, mut errs) = (Vec::new(), Vec::new());
+    let mut single = ffi::AttrBuf::new(stat::BUFFER_BYTES);
+    super::take(
+        &dir,
+        fd.as_fd(),
+        &WalkOptions::default(),
+        &mut single,
+        Decoded::Nameless,
+        &mut out,
+        &mut errs,
+    );
+    assert!(out.is_empty());
+    assert_eq!(errs.len(), 1);
+    assert_eq!(errs[0].errno, crate::EIO);
+    assert!(errs[0].name.as_bytes().is_empty());
 }
 
 #[test]
