@@ -59,6 +59,18 @@ pub enum Verb {
     ByType(ByTypeArgs),
     /// Large files not modified (or accessed) since a date
     Stale(StaleArgs),
+    /// Print the manual page, in roff, to stdout
+    Man,
+    /// Print the completion script for a shell to stdout
+    Completions(CompletionsArgs),
+}
+
+/// `completions`' arguments.
+#[derive(Debug, Clone, Args)]
+pub struct CompletionsArgs {
+    /// The shell
+    #[arg(value_enum, value_name = "SHELL")]
+    pub shell: clap_complete::Shell,
 }
 
 /// How a scan reads the tree: the flags every verb takes for the scan it

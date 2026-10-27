@@ -7,12 +7,14 @@ Usage: duscope [OPTIONS] [PATH]
        duscope <VERB>
 
 Verbs:
-  scan     Scan a tree and show where its space goes
-  top      The largest directories or files under a path
-  tree     A depth-limited tree with sizes and percentages
-  by-type  Bytes and counts by file class, with the largest examples
-  stale    Large files not modified (or accessed) since a date
-  help     Print this message or the help of the given subcommand(s)
+  scan         Scan a tree and show where its space goes
+  top          The largest directories or files under a path
+  tree         A depth-limited tree with sizes and percentages
+  by-type      Bytes and counts by file class, with the largest examples
+  stale        Large files not modified (or accessed) since a date
+  man          Print the manual page, in roff, to stdout
+  completions  Print the completion script for a shell to stdout
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help
