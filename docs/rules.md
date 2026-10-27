@@ -22,7 +22,7 @@ There are seven classes: `code`, `media`, `archives`, `data`, `binaries`, `docs`
 
 **The ext rule.** A name's extension is its last suffix, lower-cased, at most 16 bytes of `[A-Za-z0-9+~-]`. The five suffixes `tar.gz`, `tar.bz2`, `tar.xz`, `tar.zst` and `tar.lz4` are kept whole. A dotfile (`.bashrc`), an undotted name and a trailing dot have no extension. A key that the rule could never produce, such as `"tar.foo.bar"`, is an error.
 
-**Directory rules** win over the extension of every file beneath the directory. When rules overlap, a user table's rules are tried before the vendored ones. In a user table, an `[ext]` key replaces the vendored key of the same name.
+**Directory rules** win over the extension of every file beneath the directory. When rules overlap, a user table's rules are tried before the vendored ones. Within one table the most specific rule is tried first: a rule of more path components before one of fewer, then a rule with fewer glob components (`foobar` before `foo*`), then the keys in byte order. In a user table, an `[ext]` key replaces the vendored key of the same name; an empty key is an error.
 
 ```toml classes
 [ext]
@@ -70,7 +70,7 @@ cachedir_tag = true
 regenerable_by = "unknown"
 ```
 
-**At scan time.** `scan --exclude-caches` passes each named rule to the scanner as a name and its markers. A rule confirmed by `under` passes its name alone. The `CACHEDIR.TAG` rule is the scanner's own check: it reads the first 43 bytes of the tag.
+**At scan time.** `scan --exclude-caches` passes each rule confirmed by `markers` to the scanner as a name and its markers. A rule confirmed by `under` is reported by `caches` but not excluded at scan time: the scanner checks a directory's parent listing, not its ancestors' path. The `CACHEDIR.TAG` rule is the scanner's own check: it reads the first 43 bytes of the tag.
 
 ## User theme files
 

@@ -72,7 +72,7 @@ fn p1_core_03_du_parity_on_the_fixture_tree_with_hard_links() {
         .unwrap();
     assert_eq!(ours.div_ceil(1024), du, "du -sk");
     // The hard-links case: one 256 KiB inode with four links counts once.
-    let groups = rollup.charges().hardlinks();
+    let groups: Vec<_> = rollup.charges().hardlinks(&arena).collect();
     assert!(
         groups.iter().any(|g| g.sites.len() == 4 && g.nlink == 4),
         "{groups:?}"
@@ -88,8 +88,7 @@ fn p1_core_03_two_scans_of_an_unchanged_tree_charge_the_same_ids() {
         let paths = paths(&arena);
         let mut groups: Vec<(PathBuf, Vec<PathBuf>, u32)> = rollup
             .charges()
-            .hardlinks()
-            .iter()
+            .hardlinks(&arena)
             .map(|g| {
                 let sites: Vec<PathBuf> =
                     g.sites.iter().map(|s| paths[s.index()].clone()).collect();
@@ -120,13 +119,14 @@ fn p1_core_03_a_clone_group_is_counted_once() {
     let root = env.fixtures().case_root("clones");
     let (arena, rollup) = scan(&root, 0);
     let charges = rollup.charges();
-    assert_eq!(charges.clones().len(), 1);
-    assert_eq!(charges.clones()[0].members.len(), 3);
+    let clones: Vec<_> = charges.clones(&arena).collect();
+    assert_eq!(clones.len(), 1);
+    assert_eq!(clones[0].members.len(), 3);
     // The group's 2 MiB once in cum_allocated, three times in what du sees.
     let shared = 2 * 1024 * 1024;
     let du = charges.du_compatible(&arena, DirId::ROOT);
     assert_eq!(du - arena.dir(DirId::ROOT).cum_allocated, 2 * shared);
-    let carries: Vec<bool> = charges.clones()[0]
+    let carries: Vec<bool> = clones[0]
         .members
         .iter()
         .map(|&m| charges.charged(m))
@@ -199,7 +199,7 @@ fn p1_core_03_a_hard_link_is_charged_to_its_lowest_pre_order_id() {
     // Delivered c's link first; a/x has the lowest pre-order id.
     let (arena, rollup) = rolled(vec![link("z", 3), link("y", 2), link("x", 1)], None);
     let charges = rollup.charges();
-    let group = &charges.hardlinks()[0];
+    let group = &charges.hardlinks(&arena).next().unwrap();
     let names: Vec<&[u8]> = group.sites.iter().map(|&s| arena.entry(s).name).collect();
     assert_eq!(names, [b"x".as_slice(), b"y", b"z"]);
     assert!(charges.charged(group.sites[0]));
@@ -237,7 +237,7 @@ fn p1_core_03_clones_and_may_share() {
         None,
     );
     let charges = rollup.charges();
-    let group = &charges.clones()[0];
+    let group = &charges.clones(&arena).next().unwrap();
     let carries: Vec<(&[u8], bool)> = group
         .members
         .iter()
@@ -280,6 +280,39 @@ fn p1_core_03_links_on_an_overlay_are_not_deduplicated() {
         reason: None,
     };
     let (arena, rollup) = rolled(vec![link("x", 1), link("y", 2)], Some(overlay));
-    assert!(rollup.charges().hardlinks().is_empty());
+    assert_eq!(rollup.charges().hardlinks(&arena).count(), 0);
     assert_eq!(arena.dir(DirId::ROOT).cum_allocated, 2 * 4096);
+}
+
+#[test]
+fn p1_core_03_charging_a_tree_of_hard_links_keeps_4_bytes_a_link() {
+    // A store of hard links: 300k files in a, each linked again in b.
+    let files = 300_000u32;
+    let mut entries = Vec::with_capacity(2 * files as usize);
+    for f in 0..files {
+        for parent in [1, 2] {
+            entries.push(Entry {
+                nlink: 2,
+                ino: u64::from(f),
+                share: Share::Hardlink,
+                ..entry(&format!("file-{f:06}"), parent, Kind::File)
+            });
+        }
+    }
+    let (arena, rollup) = rolled(entries, None);
+    let charges = rollup.charges();
+    let per_link = charges.heap_bytes() * 10 / arena.linked_len();
+    eprintln!("charges: {}.{} bytes a link", per_link / 10, per_link % 10);
+    assert!(per_link <= 45, "{per_link} tenths of a byte a link");
+    // a's copy carries the bytes: it comes first in pre-order.
+    let a = arena.dir(DirId::new(1));
+    let b = arena.dir(DirId::new(2));
+    assert_eq!(a.cum_allocated, u64::from(files) * 4096);
+    assert_eq!(b.cum_allocated, 0);
+    assert_eq!(charges.hardlinks(&arena).count(), files as usize);
+    assert!(
+        charges
+            .hardlinks(&arena)
+            .all(|g| g.sites.len() == 2 && arena.entry(g.sites[0]).parent == DirId::new(1))
+    );
 }
