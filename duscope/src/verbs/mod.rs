@@ -1,5 +1,6 @@
 //! The verbs, and the failures they report.
 
+mod query;
 mod scan;
 
 pub use scan::report_interrupt;
@@ -77,22 +78,9 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
     match cli.verb {
         None => scan::run(&cli.scan, output),
         Some(Verb::Scan(args)) => scan::run(&args, output),
-        Some(Verb::Top(args)) => scan::list(
-            &args.walk,
-            &[],
-            "top",
-            Some(&args.query),
-            args.files,
-            output,
-        ),
-        Some(Verb::Tree(args)) => {
-            scan::list(&args.walk, &[], "tree", Some(&args.query), false, output)
-        }
-        Some(Verb::ByType(args)) => {
-            scan::list(&args.walk, &[], "by-type", Some(&args.query), false, output)
-        }
-        Some(Verb::Stale(args)) => {
-            scan::list(&args.walk, &[], "stale", Some(&args.query), true, output)
-        }
+        Some(Verb::Top(args)) => query::top(&args, output),
+        Some(Verb::Tree(args)) => query::tree(&args, output),
+        Some(Verb::ByType(args)) => query::by_type(&args, output),
+        Some(Verb::Stale(args)) => query::stale(&args, output),
     }
 }

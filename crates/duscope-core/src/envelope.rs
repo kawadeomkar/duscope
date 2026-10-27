@@ -236,6 +236,8 @@ pub struct TopEntry {
     pub name_raw: Option<String>,
     /// `file`, `dir`, `symlink` or `other`.
     pub kind: &'static str,
+    /// How far below the root it is.
+    pub depth: u32,
     /// Bytes on disk, the subtree's for a directory.
     pub allocated_bytes: u64,
     /// Apparent bytes, the subtree's for a directory.
@@ -249,7 +251,108 @@ pub struct TopEntry {
     pub dir_count: u64,
     /// The newest modification time in the subtree.
     pub max_mtime: String,
-    /// What else is true of it (`upper_bound`, `unreadable`, `sparse`, …).
+    /// The directories the row was cut through to reach it, outermost
+    /// first: each held a child of at least 80% of its bytes.
+    pub via: Vec<String>,
+    /// What else is true of it (`upper_bound`, `unreadable`, `sparse`,
+    /// `uncharged`, …).
+    pub flags: Vec<&'static str>,
+}
+
+/// A row of `tree`: the entries down to `--depth`, largest first under
+/// each directory.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct TreeEntry {
+    /// The entry's absolute path, as lossy UTF-8.
+    pub path: String,
+    /// The path's bytes, which `--plain` writes raw; not in the JSON.
+    #[serde(skip)]
+    pub path_bytes: Vec<u8>,
+    /// Its name, as lossy UTF-8.
+    pub name: String,
+    /// The name's bytes in base64, only when they are not valid UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_raw: Option<String>,
+    /// `file`, `dir`, `symlink` or `other`.
+    pub kind: &'static str,
+    /// How far below the root it is; the root is 0.
+    pub depth: u32,
+    /// Bytes on disk, the subtree's for a directory.
+    pub allocated_bytes: u64,
+    /// Apparent bytes, the subtree's for a directory.
+    pub apparent_bytes: u64,
+    /// The share of the root's total, in percent with one decimal.
+    pub pct_of_root: f64,
+    /// The share of its parent's total.
+    pub pct_of_parent: f64,
+    /// Non-directories in the subtree; 1 for a file.
+    pub file_count: u64,
+    /// Directories in the subtree, the directory included; 0 for a file.
+    pub dir_count: u64,
+    /// The newest modification time in the subtree.
+    pub max_mtime: String,
+    /// What else is true of it.
+    pub flags: Vec<&'static str>,
+}
+
+/// A row of `by-type`: one file class.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ByTypeEntry {
+    /// The class: `code`, `media`, `archives`, `data`, `binaries`, `docs`
+    /// or `other`.
+    pub class: &'static str,
+    /// Bytes on disk of its files, hard links and clones counted once.
+    pub allocated_bytes: u64,
+    /// Apparent bytes of its files, hard links counted once.
+    pub apparent_bytes: u64,
+    /// The share of the root's total, in percent with one decimal.
+    pub pct_of_root: f64,
+    /// Its files.
+    pub file_count: u64,
+    /// Its largest files, largest first.
+    pub largest: Vec<Example>,
+}
+
+/// One of a class's largest files.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Example {
+    /// The file's absolute path, as lossy UTF-8.
+    pub path: String,
+    /// Its bytes on disk.
+    pub allocated_bytes: u64,
+    /// Its apparent bytes.
+    pub apparent_bytes: u64,
+}
+
+/// A row of `stale`: a large file nobody has changed (or read) since the
+/// cutoff.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StaleEntry {
+    /// The file's absolute path, as lossy UTF-8.
+    pub path: String,
+    /// The path's bytes, which `--plain` writes raw; not in the JSON.
+    #[serde(skip)]
+    pub path_bytes: Vec<u8>,
+    /// Its name, as lossy UTF-8.
+    pub name: String,
+    /// The name's bytes in base64, only when they are not valid UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_raw: Option<String>,
+    /// `file`, `symlink` or `other`.
+    pub kind: &'static str,
+    /// Bytes on disk.
+    pub allocated_bytes: u64,
+    /// Apparent bytes.
+    pub apparent_bytes: u64,
+    /// Last modification.
+    pub mtime: String,
+    /// Last inode change.
+    pub ctime: String,
+    /// Last access; null when the scan did not collect it.
+    pub atime: Option<String>,
+    /// Its hard links.
+    pub nlink: u32,
+    /// What else is true of it.
     pub flags: Vec<&'static str>,
 }
 
