@@ -274,8 +274,15 @@ clang -O2 -Wall -Wextra -o gab_bench bench/gab_bench.c
 ```
 
 The decision (D23) is taken on duscope's own warm T1 scan, timed in alternating pairs, because
-single-threaded medians on a busy machine swing by several percent between runs.
-`results/clone-attributes-macos.json` holds both measurements and the decision:
+single-threaded medians on a busy machine swing by several percent between runs. The pairs come
+from `crates/duscope-walk/examples/clone_pairs.rs`, which prints the `walker.clones` object:
+
+```sh
+cargo run --release -p duscope-walk --example clone_pairs -- bench/.trees/T1 40
+```
+
+`results/clone-attributes-macos.json` holds both measurements, a re-run of the clone pairs with
+the committed driver (`walker_rerun`, +0.1%), and the decision:
 - **Clone attributes.** They add 0.7% to the warm T1 scan, so `--clones` stays on by default.
 - **`PRIVATESIZE`.** It adds 36%, so it is not read: it leaves `FullAttrs`.
 

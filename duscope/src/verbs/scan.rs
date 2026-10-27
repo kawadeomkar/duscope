@@ -2,6 +2,7 @@
 //! arena, then the roll-up. Until P1-CLI-03 brings the queries, every verb
 //! lists the root's largest children.
 
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use duscope_core::envelope::{
     Envelope, QueryBlock, SCHEMA_VERSION, ScanBlock, Tool, TopEntry, VolumeEntry, Warning,
     name_fields,
 };
+use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::roll_up;
 use duscope_walk::{Attrs, DirId, Flags, Kind, WalkError, WalkOptions, WalkSummary, walk};
 use globset::{Glob, GlobSetBuilder};
@@ -30,6 +32,8 @@ pub struct Scanned {
     pub summary: WalkSummary,
     /// How long the walk and the roll-up took.
     pub elapsed: Duration,
+    /// The root, absolute, symbolic links resolved: the path the walk read.
+    pub root: PathBuf,
     /// The root as given.
     pub root_as_given: PathBuf,
     /// When the scan started and finished, Unix nanoseconds.
@@ -61,6 +65,18 @@ pub fn list(
     output: &Output,
 ) -> Result<(), Failure> {
     let scanned = scan(walk_args, excludes)?;
+    // --strict: a directory that could not be read fails the command.
+    if query.is_some_and(|q| q.strict) && scanned.summary.unreadable_dirs > 0 {
+        return Err(Failure::new(
+            Exit::Permission,
+            "permission_denied",
+            format!(
+                "{} directories could not be read, and --strict asks for all of them",
+                scanned.summary.unreadable_dirs
+            ),
+        )
+        .hint("Run without --strict to accept totals that leave them out"));
+    }
     let size_kind = size_kind(walk_args);
     let envelope = envelope(&scanned, walk_args, verb, query, files, size_kind, output);
     let footer = footer(&envelope.scan, &scanned, output);
@@ -92,9 +108,7 @@ fn envelope(
     output: &Output,
 ) -> Envelope<TopEntry> {
     let arena = &scanned.arena;
-    let root = std::fs::canonicalize(&scanned.root_as_given)
-        .or_else(|_| std::path::absolute(&scanned.root_as_given))
-        .unwrap_or_else(|_| scanned.root_as_given.clone());
+    let root = &scanned.root;
     let totals = Totals::of(arena, EntryIdx::ROOT);
     let apparent = size_kind == "apparent";
     let root_total = if apparent {
@@ -152,7 +166,7 @@ fn envelope(
         ok: true,
         schema_version: SCHEMA_VERSION,
         tool: Tool::CURRENT,
-        scan: scan_block(scanned, walk_args, &root, &totals, size_kind),
+        scan: scan_block(scanned, walk_args, root, &totals, size_kind),
         query: QueryBlock {
             command: verb,
             path: root.to_string_lossy().into_owned(),
@@ -194,11 +208,7 @@ fn scan_block(
             AttrsArg::Full => "full",
         },
         thread_count: summary.threads as u64,
-        fs_type: arena
-            .volumes()
-            .first()
-            .map(|v| v.fs_type.clone())
-            .unwrap_or_default(),
+        fs_type: arena.volumes().first().map(|v| v.fs_type.clone()),
         device_confined: walk_args.one_file_system,
         total_allocated_bytes: totals.allocated,
         total_apparent_bytes: totals.apparent,
@@ -390,7 +400,7 @@ fn now_ns() -> i64 {
 
 /// Scans the tree `walk_args` names.
 pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failure> {
-    let root = match &walk_args.path {
+    let given = match &walk_args.path {
         Some(path) => path.clone(),
         None => std::env::current_dir().map_err(|e| {
             Failure::new(
@@ -400,6 +410,10 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             )
         })?,
     };
+    // A root given as a symbolic link, or through one, is read as the path
+    // it leads to; the envelope keeps the path as given beside it.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let ResolvedPath { real: root, .. } = resolve_path(&cwd, &given);
     let opts = options(walk_args, excludes)?;
     let started = Instant::now();
     let started_ns = now_ns();
@@ -412,7 +426,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             push_error = Some(e);
         }
     })
-    .map_err(|e| walk_failure(&root, e))?;
+    .map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
         return Err(Failure::new(Exit::Runtime, "io_error", e.to_string()));
     }
@@ -422,7 +436,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         return Err(Failure::new(
             Exit::Permission,
             "permission_denied",
-            format!("permission denied reading {}", root.display()),
+            format!("permission denied reading {}", given.display()),
         )
         .hint("Run duscope scan on a directory you can read"));
     }
@@ -431,7 +445,8 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         arena,
         summary,
         elapsed: started.elapsed(),
-        root_as_given: root,
+        root,
+        root_as_given: given,
         started_ns,
         finished_ns: now_ns(),
     })
@@ -470,14 +485,14 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
 /// one exit 4, a cancelled walk 130.
 fn walk_failure(root: &Path, error: WalkError) -> Failure {
     match error {
-        WalkError::Root { source, .. } => match source.raw_os_error() {
-            Some(libc_enoent) if libc_enoent == ENOENT || libc_enoent == ENOTDIR => Failure::new(
+        WalkError::Root { source, .. } => match source.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => Failure::new(
                 Exit::NotFound,
                 "scan_not_found",
                 format!("{} does not exist", root.display()),
             )
             .hint("Check the path, or run duscope scan in the directory to measure"),
-            Some(errno) if errno == EACCES || errno == EPERM => Failure::new(
+            io::ErrorKind::PermissionDenied => Failure::new(
                 Exit::Permission,
                 "permission_denied",
                 format!("permission denied reading {}", root.display()),
@@ -501,12 +516,6 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
     }
 }
 
-/// The errno values the exit codes distinguish; equal on Linux and macOS.
-const ENOENT: i32 = 2;
-const EPERM: i32 = 1;
-const EACCES: i32 = 13;
-const ENOTDIR: i32 = 20;
-
 /// A flag of a later phase.
 fn not_yet(flag: &str, what: &str) -> Failure {
     Failure::new(
@@ -514,4 +523,57 @@ fn not_yet(flag: &str, what: &str) -> Failure {
         "not_available",
         format!("{flag} needs {what}, which this version does not have yet"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use clap::Parser;
+    use duscope_core::arena::{Arena, EntryIdx};
+    use duscope_core::rollup::roll_up;
+    use duscope_walk::{Attrs, MemProvider, ScanEvent, WalkOptions, walk_with};
+
+    use super::{Scanned, Totals, scan_block};
+    use crate::cli::{Cli, Verb};
+
+    /// A scan of a small in-memory tree; without its volume when `volume`
+    /// is false.
+    fn scanned(volume: bool) -> Scanned {
+        let mut tree = MemProvider::new("/t");
+        tree.file("a", 10);
+        let mut arena = Arena::new(Attrs::Basic);
+        let summary = walk_with(&tree, Path::new("/t"), &WalkOptions::default(), |event| {
+            if volume || !matches!(event, ScanEvent::Volume(_)) {
+                arena.push(event).unwrap();
+            }
+        })
+        .unwrap();
+        roll_up(&mut arena);
+        Scanned {
+            arena,
+            summary,
+            elapsed: Duration::ZERO,
+            root: "/t".into(),
+            root_as_given: "/t".into(),
+            started_ns: 0,
+            finished_ns: 0,
+        }
+    }
+
+    #[test]
+    fn p1_cli_02_fs_type_is_null_without_a_volume() {
+        let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
+        else {
+            panic!("not scan");
+        };
+        let block = |scanned: &Scanned| {
+            let totals = Totals::of(&scanned.arena, EntryIdx::ROOT);
+            let block = scan_block(scanned, &args.walk, Path::new("/t"), &totals, "allocated");
+            serde_json::to_value(block).unwrap()
+        };
+        assert_eq!(block(&scanned(true))["fs_type"], "mem");
+        assert_eq!(block(&scanned(false))["fs_type"], serde_json::Value::Null);
+    }
 }

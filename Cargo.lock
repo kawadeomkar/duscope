@@ -387,6 +387,7 @@ dependencies = [
  "duscope-testkit",
  "globset",
  "libc",
+ "log",
  "proptest",
  "thiserror 2.0.21",
 ]

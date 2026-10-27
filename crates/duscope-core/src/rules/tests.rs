@@ -81,6 +81,10 @@ fn parts(path: &[Vec<u8>]) -> Vec<&[u8]> {
     path.iter().map(Vec::as_slice).collect()
 }
 
+/// Directory rules the fixture tree has no directory for yet; each is
+/// checked by `p1_core_04_the_proposal_examples_classify_as_listed`.
+const NOT_IN_FIXTURE: [&str; 1] = ["*.dSYM"];
+
 #[test]
 fn p1_core_04_the_fixture_tree_exercises_every_rule() {
     let env = TestEnv::new();
@@ -107,6 +111,13 @@ fn p1_core_04_the_fixture_tree_exercises_every_rule() {
             .dirs
             .iter()
             .any(|dir| single.of_dir(&parts(dir)).is_some());
+        if NOT_IN_FIXTURE.contains(&key) {
+            assert!(
+                !hit,
+                "the fixture tree now exercises {key:?}: take it out of NOT_IN_FIXTURE"
+            );
+            continue;
+        }
         assert!(
             hit,
             "no fixture directory exercises the directory rule {key:?}"
@@ -176,6 +187,39 @@ fn p1_core_04_the_vendored_tables_load() {
             .iter()
             .all(|r| r.regenerable_by != Regenerable::Unknown || r.confirm == Confirm::CachedirTag)
     );
+}
+
+#[test]
+fn p1_core_04_the_proposal_examples_classify_as_listed() {
+    // The examples column of the proposal's class table.
+    let classes = Classes::vendored();
+    let by_ext = [
+        (Class::Code, ["js", "py", "h", "wasm"].as_slice()),
+        (Class::Media, &["jpg", "heic", "mp4", "mp3"]),
+        (Class::Archives, &["tar.gz", "dmg", "whl", "zip"]),
+        (Class::Data, &["db", "cache", "json", "vmdk", "qcow2"]),
+        (Class::Binaries, &["dylib", "o"]),
+        (Class::Docs, &["log", "eml", "mbox", "txt", "pdf"]),
+    ];
+    for (class, exts) in by_ext {
+        for e in exts {
+            assert_eq!(classes.of_ext(e), Some(class), "{e}");
+        }
+    }
+    let by_dir = [
+        (Class::Code, "p/node_modules"),
+        (Class::Data, "Default/IndexedDB"),
+        (Class::Binaries, "Xcode/DerivedData"),
+        (Class::Binaries, "Frameworks/Sparkle.framework"),
+        (Class::Binaries, "Products/Example.app.dSYM"),
+    ];
+    for (class, dir) in by_dir {
+        assert_eq!(classes.of_dir(&path(dir)), Some(class), "{dir}");
+    }
+    // Symbols are a directory bundle (Example.app.dSYM/Contents/Resources/
+    // DWARF/Example), so the directory rule classifies them; no file has a
+    // dsym extension.
+    assert_eq!(classes.of_ext("dsym"), None);
 }
 
 #[test]
@@ -313,14 +357,30 @@ fn p1_core_04_the_examples_in_docs_rules_md_parse() {
     let doc = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/rules.md"))
         .unwrap();
     let mut counts = BTreeMap::new();
-    let mut lines = doc.lines();
-    while let Some(line) = lines.next() {
-        let Some(kind) = line.strip_prefix("```toml ") else {
+    let mut lines = doc.lines().enumerate();
+    while let Some((index, line)) = lines.next() {
+        // Every TOML block is an example that must parse, so each names its
+        // kind; a bare ```toml fence would otherwise go unchecked.
+        let fence = line.trim_start();
+        if !fence
+            .get(..7)
+            .is_some_and(|f| f.eq_ignore_ascii_case("```toml"))
+        {
             continue;
-        };
-        let block: Vec<&str> = lines.by_ref().take_while(|l| *l != "```").collect();
+        }
+        let kind = fence[7..].trim();
+        assert!(
+            !kind.is_empty(),
+            "docs/rules.md:{}: a toml block without its kind (classes, caches or theme)",
+            index + 1
+        );
+        let block: Vec<&str> = lines
+            .by_ref()
+            .map(|(_, l)| l)
+            .take_while(|l| *l != "```")
+            .collect();
         let text = block.join("\n");
-        match kind.trim() {
+        match kind {
             "classes" => {
                 Classes::parse(&text, "docs/rules.md").unwrap();
             }
@@ -328,9 +388,12 @@ fn p1_core_04_the_examples_in_docs_rules_md_parse() {
                 Caches::parse(&text, "docs/rules.md").unwrap();
             }
             "theme" => check_theme(&text),
-            other => panic!("unknown example kind {other:?}"),
+            other => panic!(
+                "docs/rules.md:{}: unknown example kind {other:?}",
+                index + 1
+            ),
         }
-        *counts.entry(kind.trim().to_owned()).or_insert(0) += 1;
+        *counts.entry(kind.to_owned()).or_insert(0) += 1;
     }
     assert_eq!(
         counts.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -387,6 +450,29 @@ fn p1_core_04_errors_point_at_the_line_that_defines_the_key() {
     let text = "[ext] # mine\n\n\"tar.foo.bar\" = \"code\"\n";
     let (line, message) = rules_error(Classes::parse(text, "user.toml"));
     assert_eq!(line, 3, "{message}");
+}
+
+#[test]
+fn p1_core_04_errors_name_the_key_line_in_every_toml_shape() {
+    let cases = [
+        // A byte-order mark, as some editors save the file.
+        ("\u{feff}[ext]\n\"tar.foo.bar\" = \"code\"\n", 2),
+        // An inline table.
+        ("\n\next = { \"tar.foo.bar\" = \"code\" }\n", 3),
+        // Dotted keys.
+        ("ext.rs = \"code\"\next.\"tar.foo.bar\" = \"code\"\n", 2),
+        // A key holding '#'.
+        ("[dir]\nx = \"code\"\n\"#foo//\" = \"code\"\n", 3),
+        // A dotted key under a table header.
+        (
+            "[dir]\nx = \"code\"\n\n[ext]\nrs = \"code\"\n\"a.b\" = \"code\"\n",
+            6,
+        ),
+    ];
+    for (text, expected) in cases {
+        let (line, message) = rules_error(Classes::parse(text, "user.toml"));
+        assert_eq!(line, expected, "{text:?}: {message}");
+    }
 }
 
 #[test]
