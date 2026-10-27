@@ -111,3 +111,42 @@ Output:
 
       --pool-files
           Pool files into their directory's tile
+
+      --json
+          Print the JSON envelope (--format json)
+
+      --plain
+          One tab-separated record per line, sizes in bytes (--format plain)
+
+      --format <FORMAT>
+          The output format
+
+          Possible values:
+          - treemap: The treemap (scan), on a terminal
+          - table:   Tables for people
+          - plain:   Tab-separated records
+          - json:    The JSON envelope
+          - ndjson:  One JSON object per line, every row
+
+      --color <WHEN>
+          When to use colour
+
+          Possible values:
+          - auto:   On a terminal, unless NO_COLOR or TERM=dumb
+          - always: Always
+          - never:  Never
+
+      --no-color
+          Never use colour (--color never)
+
+      --si
+          Show sizes in powers of 1,000 (kB, MB, GB)
+
+  -b, --bytes
+          Show sizes as exact byte counts
+
+  -0, --null
+          End each --plain record with NUL instead of a newline
+
+      --header
+          Start --plain output with a line of field names
