@@ -1,5 +1,6 @@
 //! P1-CLI-03: the queries on in-memory trees.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use duscope_walk::{
@@ -8,8 +9,8 @@ use duscope_walk::{
 };
 
 use super::{
-    ArenaView, ByTypeQuery, Filters, SizeKind, SortKey, StaleQuery, TopQuery, TreeQuery, TreeView,
-    by_type, globs, stale, top, tree,
+    ArenaView, ByTypeQuery, Filters, Node, SizeKind, SortKey, StaleQuery, TopQuery, TreeQuery,
+    TreeView, by_type, globs, stale, top, tree,
 };
 use crate::CoreError;
 use crate::arena::Arena;
@@ -532,7 +533,7 @@ fn p1_cli_03_shared_bytes_count_once_in_tree_and_by_type() {
 fn p1_cli_03_stale_needs_both_the_mtime_and_the_ctime_old() {
     let year = 365 * 86_400_000_000_000i64;
     let now = 60 * year;
-    let (old, new) = (now - 3 * year, now - 86_400_000_000_000);
+    let (old, recent) = (now - 3 * year, now - 86_400_000_000_000);
     let file = |name: &str, mtime_ns, ctime_ns| Entry {
         mtime_ns,
         ctime_ns,
@@ -544,9 +545,9 @@ fn p1_cli_03_stale_needs_both_the_mtime_and_the_ctime_old() {
             ..entry("r", 0, Kind::Dir)
         },
         file("both-old", old, old),
-        file("changed-lately", old, new),
-        file("modified-lately", new, old),
-        file("both-new", new, new),
+        file("changed-lately", old, recent),
+        file("modified-lately", recent, old),
+        file("both-recent", recent, recent),
     ]);
     let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
     let page = stale(
@@ -656,4 +657,111 @@ fn p1_cli_03_globs_refuse_empty_patterns_and_anchor_dot_slash() {
         assert!(set.is_match("x") && !set.is_match("y/x"), "{pattern:?}");
     }
     assert!(globs(["x"]).unwrap().is_match("y/x"));
+}
+
+/// A view whose nodes carry no names, as the index's will not: names,
+/// paths and subdirectories reach the queries through `name`, `path` and
+/// `child_dirs` alone.
+struct NamelessNodes<'a>(ArenaView<'a>);
+
+impl TreeView for NamelessNodes<'_> {
+    fn len(&self) -> u32 {
+        self.0.len()
+    }
+
+    fn node(&self, id: u32) -> Node<'_> {
+        Node {
+            name: &[],
+            ..self.0.node(id)
+        }
+    }
+
+    fn root_path(&self) -> &Path {
+        self.0.root_path()
+    }
+
+    fn full_attrs(&self) -> bool {
+        self.0.full_attrs()
+    }
+
+    fn name(&self, id: u32) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.node(id).name.to_vec())
+    }
+
+    fn path(&self, id: u32) -> Vec<u8> {
+        self.0.path(id)
+    }
+
+    fn child_dirs(&self, dir: u32) -> Vec<(u32, u32)> {
+        self.0.child_dirs(dir)
+    }
+}
+
+#[test]
+fn p1_cli_03_queries_read_names_and_paths_through_the_view() {
+    let fixture = home();
+    let (arena, rollup) = scan(&fixture);
+    let view = view(&arena, &rollup, &fixture);
+    // The defaults, on the arena.
+    let id_of = |name: &[u8]| {
+        (0..view.len())
+            .find(|&id| view.node(id).name == name)
+            .unwrap()
+    };
+    let app = id_of(b"app");
+    assert_eq!(view.path(app), b"Library/Containers/app");
+    assert_eq!(&*view.name(app), b"app");
+    let subdirs = view.child_dirs(0);
+    let names: Vec<Vec<u8>> = subdirs.iter().map(|&(id, _)| view.path(id)).collect();
+    assert_eq!(names, [&b"Library"[..], b"Movies", b"dev"]);
+    assert!(
+        subdirs
+            .iter()
+            .all(|&(id, last)| last == view.node(id).last_id)
+    );
+    assert!(view.child_dirs(id_of(b"notes.txt")).is_empty());
+    assert!(view.child_dirs(app).is_empty());
+    // The queries give the same rows through a view that keeps names out
+    // of its nodes.
+    let nameless = NamelessNodes(ArenaView::new(
+        &arena,
+        &rollup,
+        fixture.root_path().to_owned(),
+    ));
+    let glob = Filters {
+        glob: Some(globs(["*.mov", "app"]).unwrap()),
+        ..Filters::default()
+    };
+    for q in [
+        TopQuery {
+            cut_through: true,
+            ..TopQuery::default()
+        },
+        TopQuery {
+            depth: Some(2),
+            sort: SortKey::Path,
+            ..TopQuery::default()
+        },
+        TopQuery {
+            files: true,
+            filters: glob.clone(),
+            ..TopQuery::default()
+        },
+    ] {
+        assert_eq!(top(&view, &q), top(&nameless, &q));
+    }
+    let q = TreeQuery {
+        depth: Some(4),
+        filters: glob,
+        ..TreeQuery::default()
+    };
+    assert_eq!(tree(&view, &q), tree(&nameless, &q));
+    let day = 86_400_000_000_000i64;
+    let q = StaleQuery {
+        now: 1_792_627_200_000_000_000 + 10 * day,
+        older_than: 7 * day,
+        min_size: MIB,
+        ..StaleQuery::default()
+    };
+    assert_eq!(stale(&view, &q).unwrap(), stale(&nameless, &q).unwrap());
 }

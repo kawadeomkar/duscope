@@ -78,7 +78,7 @@ pub fn stale(
         .map(|id| {
             let node = view.node(id);
             let path_bytes = abs_path(view, id);
-            let (name, name_raw) = name_fields(node.name);
+            let (name, name_raw) = name_fields(&view.name(id));
             StaleEntry {
                 path: String::from_utf8_lossy(&path_bytes).into_owned(),
                 path_bytes,

@@ -19,6 +19,7 @@ pub mod clock {
     pub use super::timegrammar::now;
 }
 
+use std::borrow::Cow;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -120,6 +121,12 @@ impl Node<'_> {
 }
 
 /// A scan the queries can read.
+///
+/// [`TreeView::node`] answers an entry's scalar columns. Names, paths and
+/// a directory's subdirectories have methods of their own, which the
+/// queries call where they need them: their defaults read them through
+/// `node`, which suits the arena, and a view that does not keep every name
+/// in memory (the index) answers each from its own storage in one step.
 pub trait TreeView {
     /// The number of entries.
     fn len(&self) -> u32;
@@ -133,6 +140,45 @@ pub trait TreeView {
     fn root_path(&self) -> &Path;
     /// Whether `--attrs full` was collected (atime, btime, mode).
     fn full_attrs(&self) -> bool;
+
+    /// The name of entry `id`, as bytes.
+    fn name(&self, id: u32) -> Cow<'_, [u8]> {
+        Cow::Borrowed(self.node(id).name)
+    }
+
+    /// The path of `id` relative to the root, `/`-separated; empty for the
+    /// root.
+    fn path(&self, id: u32) -> Vec<u8> {
+        let mut names = Vec::new();
+        let mut at = id;
+        while at != 0 {
+            let node = self.node(at);
+            names.push(node.name);
+            at = node.parent;
+        }
+        let mut path = Vec::new();
+        for name in names.iter().rev() {
+            if !path.is_empty() {
+                path.push(b'/');
+            }
+            path.extend_from_slice(name);
+        }
+        path
+    }
+
+    /// The subdirectories of `dir`, in canonical order: each one's id and
+    /// the last id of its subtree. Empty for a file.
+    fn child_dirs(&self, dir: u32) -> Vec<(u32, u32)> {
+        let node = self.node(dir);
+        let mut dirs = Vec::new();
+        let mut next = node.files_end.checked_add(1);
+        while let Some(id) = next.filter(|&id| id <= node.last_id) {
+            let last = self.node(id).last_id;
+            dirs.push((id, last));
+            next = last.checked_add(1);
+        }
+        dirs
+    }
 }
 
 /// The arena and its roll-up, as a [`TreeView`].
@@ -246,45 +292,24 @@ impl SizeKind {
 }
 
 /// The ids of `dir`'s children: its files, then the root of each
-/// subdirectory's subtree.
+/// subdirectory's subtree ([`TreeView::child_dirs`]).
 pub fn children<'v>(
     view: &'v (impl TreeView + ?Sized),
     dir: &Node<'_>,
 ) -> impl Iterator<Item = u32> + 'v {
-    let (files_end, last) = (dir.files_end, dir.last_id);
-    let mut next = dir.id + 1;
-    std::iter::from_fn(move || {
-        if next > last {
-            return None;
-        }
-        let id = next;
-        next = if id <= files_end {
-            id + 1
-        } else {
-            view.node(id).last_id + 1
-        };
-        Some(id)
-    })
+    let files = (dir.id + 1)..=dir.files_end;
+    let dirs = if dir.is_dir() {
+        view.child_dirs(dir.id)
+    } else {
+        Vec::new()
+    };
+    files.chain(dirs.into_iter().map(|(id, _)| id))
 }
 
 /// The path of `id` relative to the root, `/`-separated; empty for the
-/// root.
+/// root ([`TreeView::path`]).
 pub fn rel_path(view: &(impl TreeView + ?Sized), id: u32) -> Vec<u8> {
-    let mut names = Vec::new();
-    let mut at = id;
-    while at != 0 {
-        let node = view.node(at);
-        names.push(node.name);
-        at = node.parent;
-    }
-    let mut path = Vec::new();
-    for name in names.iter().rev() {
-        if !path.is_empty() {
-            path.push(b'/');
-        }
-        path.extend_from_slice(name);
-    }
-    path
+    view.path(id)
 }
 
 /// The absolute path of `id`, as bytes.

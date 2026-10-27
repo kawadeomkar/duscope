@@ -81,7 +81,7 @@ fn entry(
     size: SizeKind,
 ) -> TreeEntry {
     let path_bytes = abs_path(view, node.id);
-    let (name, name_raw) = name_fields(node.name);
+    let (name, name_raw) = name_fields(&view.name(node.id));
     TreeEntry {
         path: String::from_utf8_lossy(&path_bytes).into_owned(),
         path_bytes,

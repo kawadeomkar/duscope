@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use crate::envelope::{TopEntry, name_fields};
 
 use super::{
-    Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, children, flag_names, kind_name,
-    pct, sort_ids, timegrammar::iso8601,
+    Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, kind_name, pct,
+    sort_ids, timegrammar::iso8601,
 };
 
 /// A child holding at least this share of its directory replaces it.
@@ -66,12 +66,10 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
         );
     } else if root.is_dir() {
         let depth = q.depth.unwrap_or(1).max(1);
-        let mut stack: Vec<u32> = children(view, &root).collect();
+        let subdirs = |id: u32| view.child_dirs(id).into_iter().map(|(dir, _)| dir);
+        let mut stack: Vec<u32> = subdirs(0).collect();
         while let Some(id) = stack.pop() {
             let node = view.node(id);
-            if !node.is_dir() {
-                continue;
-            }
             let has_subdirs = node.last_id > node.files_end;
             if node.depth >= depth || !has_subdirs {
                 // The filters judge the directory at the listed depth; the
@@ -85,7 +83,7 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
                     (id, Vec::new())
                 });
             } else {
-                stack.extend(children(view, &node));
+                stack.extend(subdirs(id));
             }
         }
     }
@@ -124,9 +122,10 @@ fn cut_through<'v, V: TreeView + ?Sized>(
     let mut via = Vec::new();
     for _ in 0..CUT_THROUGH_LEVELS {
         let bytes = u128::from(node.size(size));
-        let dominant = children(view, &node)
-            .map(|id| view.node(id))
-            .filter(Node::is_dir)
+        let dominant = view
+            .child_dirs(node.id)
+            .into_iter()
+            .map(|(id, _)| view.node(id))
             .find(|child| {
                 u128::from(child.size(size)) * 100 >= bytes * u128::from(CUT_THROUGH_PCT)
             });
@@ -150,7 +149,7 @@ fn entry(
     size: SizeKind,
 ) -> TopEntry {
     let path_bytes = abs_path(view, node.id);
-    let (name, name_raw) = name_fields(node.name);
+    let (name, name_raw) = name_fields(&view.name(node.id));
     TopEntry {
         path: String::from_utf8_lossy(&path_bytes).into_owned(),
         path_bytes,
