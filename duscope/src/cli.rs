@@ -493,3 +493,20 @@ pub fn parse_size(text: &str) -> Result<u64, String> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_THREADS, parse_threads};
+
+    #[test]
+    fn p1_cli_01_thread_counts_are_bounded() {
+        assert_eq!(parse_threads(""), Ok(0));
+        assert_eq!(parse_threads("  "), Ok(0));
+        assert_eq!(parse_threads("0"), Ok(0));
+        assert_eq!(parse_threads("8"), Ok(8));
+        assert_eq!(parse_threads("1024"), Ok(MAX_THREADS));
+        assert!(parse_threads("1025").is_err());
+        assert!(parse_threads("-1").is_err());
+        assert!(parse_threads("eight").is_err());
+    }
+}
