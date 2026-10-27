@@ -296,6 +296,12 @@ struct SharedRec {
     key: u64,
 }
 
+// The record sizes the memory budget rests on, checked by the compiler:
+// a field added to a record fails the build, not only a test.
+const _: () = assert!(size_of::<EntryRec>() == 48);
+const _: () = assert!(size_of::<DirRec>() == 48);
+const _: () = assert!(size_of::<SharedRec>() == 16);
+
 /// A clone group member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cloned {
