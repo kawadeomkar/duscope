@@ -550,14 +550,29 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
 }
 
 /// An `--exclude` pattern as the walk matches it, against paths relative to
-/// the root: a pattern starting with `/` is anchored at the root; any other
-/// matches at every depth (`*.tmp` matches `a/b/c.tmp`). `*` stays within a
-/// path component and `**` crosses them; a trailing `/` is dropped.
+/// the root: a pattern starting with `/` or `./` is anchored at the root;
+/// any other matches at every depth (`*.tmp` matches `a/b/c.tmp`). `*` stays
+/// within a path component and `**` crosses them; a trailing `/` is
+/// dropped. A pattern naming nothing below the root (empty, `/` or `.`) is
+/// a usage error.
 fn exclude_glob(pattern: &str, flag: &str) -> Result<Glob, Failure> {
     let trimmed = pattern.trim_end_matches('/');
-    let glob = match trimmed.strip_prefix('/') {
-        Some(anchored) => anchored.to_owned(),
-        None => format!("**/{trimmed}"),
+    let (anchored, rest) = match trimmed.strip_prefix("./") {
+        Some(rest) => (true, rest),
+        None => (trimmed.starts_with('/'), trimmed),
+    };
+    let rest = rest.trim_start_matches('/');
+    if rest.is_empty() || rest == "." {
+        return Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("{flag} {pattern:?}: the pattern names no path below the root"),
+        ));
+    }
+    let glob = if anchored {
+        rest.to_owned()
+    } else {
+        format!("**/{rest}")
     };
     GlobBuilder::new(&glob)
         .literal_separator(true)

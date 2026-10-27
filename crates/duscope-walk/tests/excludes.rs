@@ -203,3 +203,74 @@ fn p1_walk_09_a_valid_cachedir_tag_keeps_the_scan_out() {
     });
     assert!(skipped.is_empty());
 }
+
+#[test]
+fn p1_walk_09_an_excluded_entry_reports_no_error() {
+    let mut tree = MemProvider::new("/t");
+    tree.file("gone.tmp", 10)
+        .unstatable("gone.tmp", libc::ENOENT)
+        .file("locked.tmp", 10)
+        .unstatable("locked.tmp", libc::EACCES)
+        .file("locked.txt", 10)
+        .unstatable("locked.txt", libc::EACCES)
+        .file("kept.txt", 10);
+    let opts = WalkOptions {
+        excludes: globs(&["*.tmp"]),
+        ..WalkOptions::default()
+    };
+    let (entries, _, summary) = mem_walk(&tree, &opts);
+    assert_eq!(entries, ["", "kept.txt"]);
+    // Only the entry the glob keeps reports that it could not be read; the
+    // one that vanished is left out too.
+    assert_eq!((summary.entry_errors, summary.vanished), (1, 0));
+}
+
+#[test]
+fn p1_walk_09_an_excluded_link_is_not_followed() {
+    let env = TestEnv::new();
+    let root = env.fixtures().case_root("symlinks");
+    let follow = |excludes| WalkOptions {
+        follow_symlinks: true,
+        excludes,
+        ..WalkOptions::default()
+    };
+    let (_, _, all) = walked(&root, |sink| {
+        walk(&root, &follow(GlobSet::empty()), sink).unwrap()
+    });
+    let (entries, _, kept) = walked(&root, |sink| {
+        walk(&root, &follow(globs(&["loop-*", "self"])), sink).unwrap()
+    });
+    // The three links that loop are errors when followed; excluded, they
+    // are left out unread.
+    assert_eq!(all.entry_errors - kept.entry_errors, 3);
+    assert!(
+        !entries
+            .iter()
+            .any(|e| e.starts_with("loop-") || e == "self"),
+        "{entries:?}"
+    );
+}
+
+#[test]
+fn p1_walk_09_a_fifo_named_cachedir_tag_does_not_stall_the_walk() {
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("fifo");
+    std::fs::create_dir_all(root.join("cache")).unwrap();
+    let made = env
+        .command("mkfifo")
+        .arg(root.join("cache/CACHEDIR.TAG"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let opts = WalkOptions {
+        exclude_caches: vec![CacheRule {
+            name: Glob::new("never-matches").unwrap(),
+            markers: vec![OsString::from("x")],
+        }],
+        ..WalkOptions::default()
+    };
+    // Opened for reading, a FIFO would block until a writer came.
+    let (entries, skipped, _) = walked(&root, |sink| walk(&root, &opts, sink).unwrap());
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert!(entries.contains(&"cache/CACHEDIR.TAG".to_owned()));
+}
