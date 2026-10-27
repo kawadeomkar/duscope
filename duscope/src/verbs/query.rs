@@ -241,20 +241,12 @@ pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
     let page: Page<StaleEntry> =
         query::stale(&prepared.scanned.view(), &q).map_err(core_failure)?;
     let mut warnings = Vec::new();
-    // The scan is older than a tenth of the window it is asked about,
-    // measured on the clock that timed the scan (a fresh scan never is).
-    let age = scan::now_ns().saturating_sub(prepared.scanned.finished_ns);
-    if age > older_than / 10 {
-        warnings.push(Warning {
-            code: "scan_age",
-            message: format!(
-                "the scan is {} old, more than a tenth of the {older} window",
-                crate::out::thousands(u64::try_from(age / 3_600_000_000_000).unwrap_or(0)) + " h"
-            ),
-            count: None,
-            hint: Some("Rerun duscope stale to measure from a fresh scan".to_owned()),
-        });
-    }
+    warnings.extend(scan_age(
+        prepared.now,
+        prepared.scanned.finished_ns,
+        older_than,
+        older,
+    ));
     if args.atime
         && let Some(option) = prepared.scanned.arena.volumes().first().and_then(|v| {
             v.options
@@ -303,14 +295,7 @@ fn prepare(
         )
         .hint("Run without --strict to accept totals that leave them out"));
     }
-    let now = match &walk.test_now {
-        Some(text) => {
-            timegrammar::parse_date(text)
-                .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--test-now {e}")))?
-                .ns
-        }
-        None => timegrammar::now(),
-    };
+    let now = scan::now(walk)?;
     let (filters, tz_unavailable) = match args {
         Some(args) => filters(args, now, depth, stale)?,
         None => (Filters::default(), false),
@@ -508,6 +493,22 @@ fn envelope<T>(
     (envelope, footer)
 }
 
+/// `scan_age`: the scan finished longer ago than a tenth of the window
+/// `stale` asks about (`older`, `older_than` nanoseconds), both read on the
+/// clock the scan was timed by. A fresh scan never is.
+fn scan_age(now: i64, finished_ns: i64, older_than: i64, older: &str) -> Option<Warning> {
+    let age = now.saturating_sub(finished_ns);
+    (age > older_than / 10).then(|| Warning {
+        code: "scan_age",
+        message: format!(
+            "the scan is {} h old, more than a tenth of the {older} window",
+            crate::out::thousands(u64::try_from(age / 3_600_000_000_000).unwrap_or(0))
+        ),
+        count: None,
+        hint: Some("Rerun duscope stale to measure from a fresh scan".to_owned()),
+    })
+}
+
 /// The failure an engine error is.
 fn core_failure(error: CoreError) -> Failure {
     match error {
@@ -516,5 +517,30 @@ fn core_failure(error: CoreError) -> Failure {
                 .hint("Rerun the command with --attrs full")
         }
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use duscope_core::query::timegrammar;
+
+    use super::scan_age;
+
+    const HOUR: i64 = 3_600_000_000_000;
+
+    #[test]
+    fn p1_cli_03_stale_warns_scan_age_past_a_tenth_of_its_window() {
+        let window = timegrammar::parse_age("180d").unwrap();
+        let now = 2_114_380_800_000_000_000;
+        // 18 days is a tenth of 180: older than that warns.
+        let old = scan_age(now, now - 19 * 24 * HOUR, window, "180d").unwrap();
+        assert_eq!(old.code, "scan_age");
+        assert_eq!(
+            old.message,
+            "the scan is 456 h old, more than a tenth of the 180d window"
+        );
+        assert!(scan_age(now, now - 17 * 24 * HOUR, window, "180d").is_none());
+        // A scan timed on the same clock as the query is never old.
+        assert!(scan_age(now, now, window, "180d").is_none());
     }
 }

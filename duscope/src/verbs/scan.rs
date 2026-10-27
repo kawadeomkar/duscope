@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use duscope_core::arena::Arena;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
-use duscope_core::query::{ArenaView, SizeKind, TreeView};
+use duscope_core::query::{ArenaView, SizeKind, TreeView, clock, timegrammar};
 use duscope_core::rollup::{RollUp, roll_up};
 use duscope_core::rules::Caches;
 use duscope_walk::{Attrs, DirId, IgnoreRules, Skip, WalkError, WalkOptions, WalkSummary, walk};
@@ -241,14 +241,17 @@ pub fn footer(scan: &ScanBlock, scanned: &Scanned, output: &Output) -> String {
     )
 }
 
-/// Now on the system clock, as Unix nanoseconds: the clock scans are timed
-/// by.
-pub fn now_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_nanos()).ok())
-        .unwrap_or(0)
+/// Now, Unix nanoseconds: `--test-now` when given, else [`clock::now`]
+/// (which honours `DUSCOPE_TEST_NOW` in a debug build). The scan is timed
+/// on it and the queries measure ages and the scan's own age on it, so both
+/// read one clock.
+pub fn now(walk_args: &WalkArgs) -> Result<i64, Failure> {
+    match &walk_args.test_now {
+        Some(text) => timegrammar::parse_date(text)
+            .map(|date| date.ns)
+            .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--test-now {e}"))),
+        None => Ok(clock::now()),
+    }
 }
 
 /// Scans the tree `walk_args` names.
@@ -271,7 +274,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     // ends anyway. Nothing is written before a scan completes.
     opts.cancel = interrupt_flag();
     let started = Instant::now();
-    let started_ns = now_ns();
+    let started_ns = now(walk_args)?;
     let mut arena = Arena::new(opts.attrs);
     let mut push_error = None;
     let summary = walk(&root, &opts, |event| {
@@ -317,7 +320,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         root,
         root_as_given: given,
         started_ns,
-        finished_ns: now_ns(),
+        finished_ns: now(walk_args)?,
     })
 }
 

@@ -13,6 +13,12 @@ pub mod timegrammar;
 mod top;
 mod tree;
 
+/// The clock every "now" comes from: the scan's start and end, the
+/// queries' ages and cutoffs.
+pub mod clock {
+    pub use super::timegrammar::now;
+}
+
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
