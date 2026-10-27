@@ -870,11 +870,12 @@ fn p1_walk_07_a_scan_of_slash_skips_the_data_volume_mount() {
     }
     let provider = MacProvider::new();
     let opts = WalkOptions::default();
-    let skip = |root_depth: u32| {
-        // /System/Volumes, read in a scan rooted `root_depth` levels up.
+    let skip_in = |path: &str, root_depth: u32| {
+        // /System/Volumes, read as `path` in a scan rooted `root_depth`
+        // levels up.
         let dir = crate::DirHandle {
             id: crate::DirId::ROOT,
-            path: PathBuf::from("/System/Volumes"),
+            path: PathBuf::from(path),
             depth: root_depth,
         };
         let data = read_one("/System/Volumes", root_depth)
@@ -884,11 +885,46 @@ fn p1_walk_07_a_scan_of_slash_skips_the_data_volume_mount() {
         assert_eq!(data.boundary, Boundary::Mount);
         crate::Provider::skip(&provider, &dir, &data, &opts)
     };
+    let skip = |root_depth| skip_in("/System/Volumes", root_depth);
     // Rooted at /: every firmlink lies under the root.
     assert_eq!(skip(2), Some(crate::Skip::Firmlinked));
     // Rooted at /System/Volumes or /System: the volume is the only way in.
     assert_eq!(skip(0), None);
     assert_eq!(skip(1), None);
+    // A root spelled /System/.. is /: the decision is made on its real path.
+    assert_eq!(
+        skip_in("/System/../System/Volumes", 2),
+        Some(crate::Skip::Firmlinked)
+    );
+}
+
+#[test]
+fn p1_walk_07_a_scan_of_system_skips_the_firmlinks_below_it() {
+    // A scan rooted at /System enters the Data volume through its mount
+    // point, so the firmlinks under /System/Library, which lead into the
+    // same volume, are listed but not entered; a scan of / keeps them.
+    let Some(caches) = read_one("/System/Library", 1)
+        .into_iter()
+        .find(|e| e.name.as_bytes() == b"Caches" && e.boundary == Boundary::Firmlink)
+    else {
+        return; // no /System/Library/Caches firmlink on this system
+    };
+    let provider = MacProvider::new();
+    let skip = |root_depth| {
+        let dir = crate::DirHandle {
+            id: crate::DirId::ROOT,
+            path: PathBuf::from("/System/Library"),
+            depth: root_depth,
+        };
+        crate::Provider::skip(&provider, &dir, &caches, &WalkOptions::default())
+    };
+    assert_eq!(skip(1), Some(crate::Skip::Firmlinked), "rooted at /System");
+    assert_eq!(skip(2), None, "rooted at /");
+    assert_eq!(
+        skip(0),
+        None,
+        "rooted at /System/Library: no mount point below"
+    );
 }
 
 /// A scan of `/` on the machine running the test: `/Users` is counted once,
