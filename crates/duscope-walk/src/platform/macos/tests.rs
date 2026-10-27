@@ -268,6 +268,15 @@ fn p1_walk_03_records_decode_to_entries() {
         Decoded::Restat(_, None)
     ));
 
+    // A filesystem that leaves ATTR_CMN_ERROR out of an error-free record.
+    let record = Packed::file(b"plain", 5, 512)
+        .no_error_field()
+        .bytes(&request);
+    let Decoded::Entry(plain) = bulk::parse(&record, &request).unwrap().decode(&request) else {
+        panic!("not an entry");
+    };
+    assert_eq!((plain.apparent, plain.allocated), (5, 512));
+
     // Cut short: no record.
     let record = Packed::file(b"short", 1, 1).bytes(&request);
     assert!(bulk::parse(&record[..40], &request).is_none());
@@ -333,6 +342,9 @@ struct Packed {
     alloc: u64,
     len: u64,
     missing_file: libc::attrgroup_t,
+    /// Leave `ATTR_CMN_ERROR` out of an error-free record's returned set,
+    /// as a filesystem may; the kernels tested return it with a zero value.
+    no_error_field: bool,
 }
 
 impl Packed {
@@ -347,6 +359,7 @@ impl Packed {
             alloc,
             len,
             missing_file: 0,
+            no_error_field: false,
         }
     }
 
@@ -374,6 +387,11 @@ impl Packed {
         self
     }
 
+    fn no_error_field(mut self) -> Packed {
+        self.no_error_field = true;
+        self
+    }
+
     fn without_file(mut self, attrs: libc::attrgroup_t) -> Packed {
         self.missing_file = attrs;
         self
@@ -382,10 +400,11 @@ impl Packed {
     fn bytes(&self, request: &Request) -> Vec<u8> {
         let attrs = &request.attrs;
         let dir = self.objtype == ffi::VDIR;
-        let common = if self.error == 0 {
-            attrs.commonattr & !ffi::ATTR_CMN_ERROR
-        } else {
+        let error_field = self.error != 0 || !self.no_error_field;
+        let common = if error_field {
             attrs.commonattr | ffi::ATTR_CMN_ERROR
+        } else {
+            attrs.commonattr & !ffi::ATTR_CMN_ERROR
         };
         let returned = [
             common,
@@ -402,12 +421,16 @@ impl Packed {
         for group in returned {
             fixed.extend(group.to_ne_bytes());
         }
-        if self.error != 0 {
+        if error_field {
             fixed.extend(self.error.to_ne_bytes());
         }
         // The name's attrreference; its offset is patched below.
         let name_ref = fixed.len();
         fixed.extend([0u8; 8]);
+        if self.error != 0 {
+            // An error record may end after the name.
+            return self.finish(fixed, name_ref);
+        }
         fixed.extend((-1i32).to_ne_bytes()); // dev: -1 sign-extends to u64::MAX
         fixed.extend(self.objtype.to_ne_bytes());
         fixed.extend(1_500_000_000i64.to_ne_bytes()); // mtime
@@ -433,6 +456,11 @@ impl Packed {
                 fixed.extend(0u64.to_ne_bytes());
             }
         }
+        self.finish(fixed, name_ref)
+    }
+
+    /// Appends the name, pads to 8 bytes and prepends the length.
+    fn finish(&self, mut fixed: Vec<u8>, name_ref: usize) -> Vec<u8> {
         // The length comes first; the reference's offset counts from itself.
         let name_at = 4 + fixed.len();
         let offset = i32::try_from(name_at - (4 + name_ref)).unwrap();
@@ -829,5 +857,68 @@ fn p1_walk_07_a_scan_of_slash_counts_users_once() {
     assert!(
         ours.abs_diff(du) * 50 <= du,
         "/Users: {ours} KiB read, du -skx says {du} KiB"
+    );
+}
+
+#[test]
+fn p1_walk_05_no_creation_time_is_none_through_lstat_too() {
+    // devfs keeps no creation time: the bulk read leaves ATTR_CMN_CRTIME
+    // out, and lstat reports 0.
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    let null = Path::new("/dev/null");
+    let st = lstat(null);
+    if st.st_birthtime != 0 {
+        return;
+    }
+    let entry = super::stat::from_stat(crate::NameRef::from("null"), &st, opts.attrs);
+    assert_eq!(entry.full.unwrap().btime_ns, None);
+    let root = crate::Provider::root(&MacProvider::new(), null, &opts).unwrap();
+    assert_eq!(root.full.unwrap().btime_ns, None, "the native read agrees");
+}
+
+#[test]
+fn p1_walk_07_a_modified_clone_may_share_but_names_no_group() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir().join("clones");
+    std::fs::create_dir_all(&dir).unwrap();
+    let original = dir.join("original.bin");
+    std::fs::write(&original, vec![7u8; 1 << 20]).unwrap();
+    let cp = |name: &str| {
+        let out = env
+            .command("cp")
+            .arg("-c")
+            .arg(&original)
+            .arg(dir.join(name))
+            .output()
+            .unwrap();
+        out.status.success()
+    };
+    if !cp("pure.bin") || !cp("partial.bin") {
+        return; // not APFS
+    }
+    // Overwrite the first 64 KiB of one clone in place.
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("partial.bin"))
+            .unwrap();
+        file.write_all(&vec![9u8; 64 * 1024]).unwrap();
+        file.sync_all().unwrap();
+    }
+    let (entries, _) = walk_paths(&MacProvider::new(), &dir, &WalkOptions::default());
+    let share = |name: &str| entries[&dir.join(name)].share;
+    let Share::Clone(id) = share("original.bin") else {
+        panic!("{:?}", share("original.bin"));
+    };
+    assert_eq!(share("pure.bin"), Share::Clone(id));
+    assert_eq!(share("partial.bin"), Share::MayShare);
+    assert!(
+        entries[&dir.join("partial.bin")]
+            .flags
+            .contains(Flags::MAY_SHARE)
     );
 }
