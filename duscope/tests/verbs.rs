@@ -31,12 +31,14 @@ fn golden(name: &str, actual: &str) {
 }
 
 /// `text` without what differs between runs, machines and releases: the
-/// root's path, the scan's times, the volumes and the version.
+/// root's path, the scan's times, the volumes, the version, and the inode
+/// change times, which are when the fixture tree was built.
 fn normalize(text: &str, root: &Path) -> String {
     let mut text = text.replace(root.to_str().unwrap(), "<root>");
     for (key, placeholder) in [
         ("\"started_at\":\"", "<time>"),
         ("\"finished_at\":\"", "<time>"),
+        ("\"ctime\":\"", "<built>"),
         ("\"name\":\"duscope\",\"version\":\"", "<version>"),
     ] {
         let mut from = 0;
