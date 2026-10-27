@@ -8,6 +8,10 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod envelope;
+mod errors;
+pub mod rules;
 
 #[cfg(test)]
 mod schema_drift;
+
+pub use errors::CoreError;

@@ -8,6 +8,8 @@ ones at the top of the repository.
 - [github-settings.md](github-settings.md): the repository settings duscope
   depends on (branch protection and the required checks, merge methods,
   Actions, security, labels), as a checklist with the command that applies each.
+- [rules.md](rules.md): the schemas of `classes.toml`, `caches.toml` and user
+  theme files, with an example of each.
 - [runners.md](runners.md): the two self-hosted machines the nightly benchmarks
   run on, how each is set up and registered, its network and security limits,
   and what to do when one is offline.

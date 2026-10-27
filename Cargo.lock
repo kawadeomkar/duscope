@@ -230,9 +230,14 @@ name = "duscope-core"
 version = "0.0.1"
 dependencies = [
  "cargo_metadata",
+ "duscope-testkit",
  "duscope-walk",
+ "globset",
  "schemars",
+ "serde",
  "serde_json",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
