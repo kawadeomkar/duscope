@@ -68,6 +68,8 @@ pub fn roll_up(arena: &mut Arena) -> RollUp {
     // subdirectory's subtree in name order. The stack holds subdirectories
     // still to visit, last first.
     let mut stack: Vec<u32> = vec![EntryIdx::ROOT.get()];
+    // One directory's files and subdirectories, as entry indexes.
+    let (mut files, mut subdirs) = (Vec::new(), Vec::new());
     // Each directory and its own id, for the cumulative pass.
     let mut dirs: Vec<(DirId, u32)> = Vec::with_capacity(arena.dir_count());
     while let Some(raw) = stack.pop() {
@@ -76,23 +78,25 @@ pub fn roll_up(arena: &mut Arena) -> RollUp {
         let Some(dir) = view.dir else {
             continue;
         };
-        // Each child's sort key is read once, not twice per comparison:
-        // 24 bytes a child while this directory is numbered.
-        let mut sorted: Vec<(bool, &[u8], u32)> = children
-            .of_dir(dir)
-            .iter()
-            .map(|&child| {
-                let view = arena.entry(EntryIdx::from_raw(child));
-                (view.kind == Kind::Dir, view.name, child)
-            })
-            .collect();
-        sorted.sort_unstable();
-        let files = sorted.partition_point(|&(is_dir, ..)| !is_dir);
-        for &(.., file) in &sorted[..files] {
+        // The children split by kind with one read each, then each part
+        // sorted by name alone, in 4 bytes a child.
+        files.clear();
+        subdirs.clear();
+        for &child in children.of_dir(dir) {
+            if arena.entry(EntryIdx::from_raw(child)).kind == Kind::Dir {
+                subdirs.push(child);
+            } else {
+                files.push(child);
+            }
+        }
+        let name = |&child: &u32| arena.entry(EntryIdx::from_raw(child)).name;
+        files.sort_unstable_by(|a, b| name(a).cmp(name(b)));
+        subdirs.sort_unstable_by(|a, b| name(a).cmp(name(b)));
+        for &file in &files {
             number(&mut order, &mut ids, file);
         }
-        stack.extend(sorted[files..].iter().rev().map(|&(.., child)| child));
-        let files_end = id + u32::try_from(files).unwrap_or(u32::MAX);
+        stack.extend(subdirs.iter().rev());
+        let files_end = id + u32::try_from(files.len()).unwrap_or(u32::MAX);
         arena.dir_mut(dir).files_end = files_end;
         dirs.push((dir, id));
     }
