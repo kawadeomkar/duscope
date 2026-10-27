@@ -9,24 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use duscope_testkit::TestEnv;
-
-/// The golden file `name` under `duscope/tests/golden/`, compared with
-/// `actual`; with `DUSCOPE_TEST_UPDATE_GOLDEN=1` it is rewritten instead.
-fn golden(name: &str, actual: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name);
-    if std::env::var_os("DUSCOPE_TEST_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
-        fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(
-        actual, expected,
-        "golden {name} differs; rerun with DUSCOPE_TEST_UPDATE_GOLDEN=1 to regenerate"
-    );
-}
+use duscope_testkit::{TestEnv, golden};
 
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
@@ -454,8 +437,8 @@ fn p1_cli_02_warnings_stay_off_stdout_in_machine_formats() {
         .output()
         .unwrap();
     let stdout = String::from_utf8(out.stdout).unwrap();
-    let end: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
-    assert_eq!(end["warnings"][0]["code"], "partial_read");
+    let last: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!(last["warnings"][0]["code"], "partial_read");
     assert_eq!(String::from_utf8(out.stderr).unwrap().lines().count(), 1);
     // --plain: the warning and its hint on stderr, none of it on stdout.
     let out = duscope(&env)

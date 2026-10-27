@@ -8,24 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use assert_cmd::Command;
-use duscope_testkit::TestEnv;
-
-/// The golden file `name` under `duscope/tests/golden/`, compared with
-/// `actual`; with `DUSCOPE_TEST_UPDATE_GOLDEN=1` it is rewritten instead.
-fn golden(name: &str, actual: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name);
-    if std::env::var_os("DUSCOPE_TEST_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
-        fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(
-        actual, expected,
-        "golden {name} differs; rerun with DUSCOPE_TEST_UPDATE_GOLDEN=1 to regenerate"
-    );
-}
+use duscope_testkit::{TestEnv, golden};
 
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
