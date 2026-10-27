@@ -10,7 +10,7 @@ use duscope_walk::{
 
 use super::{
     ArenaView, ByTypeQuery, Filters, Node, SizeKind, SortKey, StaleQuery, TopQuery, TreeQuery,
-    TreeView, by_type, globs, stale, top, tree,
+    TreeView, by_type, globs, ranked, sort_ids, stale, top, tree,
 };
 use crate::CoreError;
 use crate::arena::Arena;
@@ -764,4 +764,36 @@ fn p1_cli_03_queries_read_names_and_paths_through_the_view() {
         ..StaleQuery::default()
     };
     assert_eq!(stale(&view, &q).unwrap(), stale(&nameless, &q).unwrap());
+}
+
+#[test]
+fn p1_cli_03_ranking_under_a_limit_matches_the_full_sort() {
+    // Sizes from a small set and one time everywhere: many ties, which
+    // the paths break.
+    let mut tree = MemProvider::new("/t");
+    let sizes = [MIB, 2 * MIB, MIB, 3 * MIB, 2 * MIB];
+    for i in 0..60usize {
+        tree.file(format!("d{}/f{:02}", i % 7, (i * 37) % 60), sizes[i % 5]);
+    }
+    let (arena, rollup) = scan(&tree);
+    let view = view(&arena, &rollup, &tree);
+    let all: Vec<u32> = (0..view.len()).collect();
+    let size = SizeKind::Allocated;
+    for key in [SortKey::Size, SortKey::Count, SortKey::Mtime, SortKey::Path] {
+        for reverse in [false, true] {
+            let mut sorted = all.clone();
+            sort_ids(&view, &mut sorted, key, size, reverse);
+            for limit in 0..=all.len() + 1 {
+                let expected = &sorted[..limit.min(sorted.len())];
+                // The order the candidates come in does not matter.
+                for candidates in [all.clone(), all.iter().rev().copied().collect()] {
+                    let (kept, total) = ranked(&view, candidates, key, size, reverse, Some(limit));
+                    assert_eq!(total, all.len() as u64);
+                    assert_eq!(kept, expected, "{key:?} reverse={reverse} limit={limit}");
+                }
+            }
+            let (every, _) = ranked(&view, all.iter().copied(), key, size, reverse, None);
+            assert_eq!(every, sorted);
+        }
+    }
 }

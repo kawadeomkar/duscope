@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use crate::envelope::{TopEntry, name_fields};
 
 use super::{
-    Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, kind_name, pct,
-    sort_ids, timegrammar::iso8601,
+    Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, kind_name, pct, ranked,
+    timegrammar::iso8601,
 };
 
 /// A child holding at least this share of its directory replaces it.
@@ -52,19 +52,19 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
         };
     }
     let root = view.node(0);
-    // Each row's id and the ids it was cut through.
-    let mut rows: Vec<(u32, Vec<u32>)> = Vec::new();
-    if q.files {
-        // A root that is a file is its own one row.
+    // The ids each row was cut through, for the rows that were.
+    let mut vias: HashMap<u32, Vec<u32>> = HashMap::new();
+    let (ids, total_count) = if q.files {
+        // A root that is a file is its own one row. The files are ranked
+        // as they are found, so only the rows --limit can keep are held.
         let max = q.depth.unwrap_or(u32::MAX);
-        rows.extend(
-            (0..=root.last_id)
-                .map(|id| view.node(id))
-                .filter(|n| !n.is_dir() && n.depth <= max)
-                .filter(|n| q.filters.keeps(view, n, q.size))
-                .map(|n| (n.id, Vec::new())),
-        );
+        let candidates = (0..=root.last_id).filter(|&id| {
+            let n = view.node(id);
+            !n.is_dir() && n.depth <= max && q.filters.keeps(view, &n, q.size)
+        });
+        ranked(view, candidates, q.sort, q.size, q.reverse, q.limit)
     } else if root.is_dir() {
+        let mut rows: Vec<u32> = Vec::new();
         let depth = q.depth.unwrap_or(1).max(1);
         let subdirs = |id: u32| view.child_dirs(id).into_iter().map(|(dir, _)| dir);
         let mut stack: Vec<u32> = subdirs(0).collect();
@@ -77,27 +77,24 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
                 if !q.filters.keeps(view, &node, q.size) {
                     continue;
                 }
-                rows.push(if q.cut_through {
+                let (row, via) = if q.cut_through {
                     cut_through(view, node, q.size, &q.filters)
                 } else {
                     (id, Vec::new())
-                });
+                };
+                if !via.is_empty() {
+                    vias.insert(row, via);
+                }
+                rows.push(row);
             } else {
                 stack.extend(subdirs(id));
             }
         }
-    }
-    let total_count = rows.len() as u64;
-    let mut ids: Vec<u32> = rows.iter().map(|(id, _)| *id).collect();
-    sort_ids(view, &mut ids, q.sort, q.size, q.reverse);
-    if let Some(limit) = q.limit {
-        ids.truncate(limit);
-    }
+        ranked(view, rows, q.sort, q.size, q.reverse, q.limit)
+    } else {
+        (Vec::new(), 0)
+    };
     let root_total = root.size(q.size);
-    let vias: HashMap<u32, Vec<u32>> = rows
-        .into_iter()
-        .filter(|(_, via)| !via.is_empty())
-        .collect();
     let entries = ids
         .into_iter()
         .map(|id| {

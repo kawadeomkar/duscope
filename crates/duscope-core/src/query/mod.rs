@@ -20,6 +20,8 @@ pub mod clock {
 }
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -589,14 +591,8 @@ pub fn sort_ids_by(
     let mut keyed: Vec<(i128, Vec<u8>, u32)> = ids
         .iter()
         .map(|&id| {
-            let node = view.node(id);
-            let value = match key {
-                SortKey::Size => -i128::from(size_of(&node)),
-                SortKey::Count => -i128::from(node.file_count),
-                SortKey::Mtime => -i128::from(node.max_mtime_ns),
-                SortKey::Path => 0,
-            };
-            (if reverse { -value } else { value }, rel_path(view, id), id)
+            let value = sort_value(&view.node(id), key, reverse, &size_of);
+            (value, rel_path(view, id), id)
         })
         .collect();
     let paths_reversed = reverse && key == SortKey::Path;
@@ -611,6 +607,95 @@ pub fn sort_ids_by(
     for (slot, (_, _, id)) in ids.iter_mut().zip(keyed) {
         *slot = id;
     }
+}
+
+/// Where `node` sorts under `key`, smallest first; paths break ties.
+fn sort_value(
+    node: &Node<'_>,
+    key: SortKey,
+    reverse: bool,
+    size_of: &impl Fn(&Node<'_>) -> u64,
+) -> i128 {
+    let value = match key {
+        SortKey::Size => -i128::from(size_of(node)),
+        SortKey::Count => -i128::from(node.file_count),
+        SortKey::Mtime => -i128::from(node.max_mtime_ns),
+        SortKey::Path => 0,
+    };
+    if reverse { -value } else { value }
+}
+
+/// The first `limit` of `candidates` in [`sort_ids`] order (all of them
+/// without a limit), and how many candidates there were.
+pub fn ranked(
+    view: &(impl TreeView + ?Sized),
+    candidates: impl IntoIterator<Item = u32>,
+    key: SortKey,
+    size: SizeKind,
+    reverse: bool,
+    limit: Option<usize>,
+) -> (Vec<u32>, u64) {
+    ranked_by(view, candidates, key, reverse, limit, |node| {
+        node.size(size)
+    })
+}
+
+/// [`ranked`], with `size_of` giving the size [`SortKey::Size`] reads.
+///
+/// With a limit, the candidates are ranked as they are counted: a heap
+/// keeps the `limit` best sort keys and a list the candidates that tie
+/// with the worst of them, so only those are sorted, and their paths
+/// (which decide among equal keys) spelled. Memory stays near the limit,
+/// not the number of candidates, unless the keys tie (`--sort path`, which
+/// sorts them all).
+pub fn ranked_by(
+    view: &(impl TreeView + ?Sized),
+    candidates: impl IntoIterator<Item = u32>,
+    key: SortKey,
+    reverse: bool,
+    limit: Option<usize>,
+    size_of: impl Fn(&Node<'_>) -> u64,
+) -> (Vec<u32>, u64) {
+    let Some(limit) = limit else {
+        let mut ids: Vec<u32> = candidates.into_iter().collect();
+        sort_ids_by(view, &mut ids, key, reverse, size_of);
+        let total = ids.len() as u64;
+        return (ids, total);
+    };
+    let mut best: BinaryHeap<(i128, u32)> = BinaryHeap::with_capacity(limit.saturating_add(1));
+    let mut ties: Vec<u32> = Vec::new();
+    let mut total = 0u64;
+    for id in candidates {
+        total += 1;
+        if limit == 0 {
+            continue;
+        }
+        let value = sort_value(&view.node(id), key, reverse, &size_of);
+        let Some(&(worst, _)) = best.peek().filter(|_| best.len() >= limit) else {
+            best.push((value, id));
+            continue;
+        };
+        match value.cmp(&worst) {
+            Ordering::Greater => {}
+            Ordering::Equal => ties.push(id),
+            Ordering::Less => {
+                best.push((value, id));
+                if let Some((_, out)) = best.pop() {
+                    // `out` ties with the worst kept key, or the worst kept
+                    // key is now better than every tie.
+                    if best.peek().is_some_and(|&(kept, _)| kept == worst) {
+                        ties.push(out);
+                    } else {
+                        ties.clear();
+                    }
+                }
+            }
+        }
+    }
+    let mut ids: Vec<u32> = best.into_iter().map(|(_, id)| id).chain(ties).collect();
+    sort_ids_by(view, &mut ids, key, reverse, size_of);
+    ids.truncate(limit);
+    (ids, total)
 }
 
 /// A page of rows: what `--limit` kept, and how many matched.
