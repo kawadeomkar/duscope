@@ -506,14 +506,14 @@ impl Caches {
     pub fn compile(&self) -> Vec<duscope_walk::CacheRule> {
         self.rules
             .iter()
-            .filter_map(|rule| {
-                let Confirm::Markers(markers) = &rule.confirm else {
-                    return None;
-                };
-                Some(duscope_walk::CacheRule {
-                    name: Glob::new(rule.name.as_deref()?).ok()?,
+            .filter_map(|rule| match (&rule.confirm, &rule.matcher) {
+                // The glob the loader compiled, not a second compile whose
+                // failure would drop the rule.
+                (Confirm::Markers(markers), Some(matcher)) => Some(duscope_walk::CacheRule {
+                    name: matcher.glob().clone(),
                     markers: markers.iter().map(OsString::from).collect(),
-                })
+                }),
+                _ => None,
             })
             .collect()
     }
