@@ -21,6 +21,7 @@ enum Node {
 /// Lays out `items` (`(weight, id)`) by bisection in `area`: a tile per
 /// item, in the order given. A tile may come out zero units wide or tall;
 /// [`crate::layout`] pools those.
+#[must_use]
 pub fn layout_gp(items: &[(u64, usize)], area: Rect) -> Vec<(usize, Rect)> {
     let mut rects = vec![Rect::new(area.x, area.y, 0, 0); items.len()];
     if items.is_empty() {

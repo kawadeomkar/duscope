@@ -36,16 +36,19 @@ pub struct Rect {
 
 impl Rect {
     /// A rectangle.
+    #[must_use]
     pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect { x, y, w, h }
     }
 
     /// Its area in units.
+    #[must_use]
     pub fn area(self) -> u32 {
         u32::from(self.w) * u32::from(self.h)
     }
 
     /// Whether it is at least `side` units in both directions.
+    #[must_use]
     pub fn fits(self, side: u16) -> bool {
         self.w >= side && self.h >= side
     }

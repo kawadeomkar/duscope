@@ -18,6 +18,7 @@ const POOL: usize = usize::MAX;
 /// pool by its weight. A pool too small to show is laid out as if it weighed
 /// more, up to the smallest tile's weight, and takes that child when even
 /// that is not enough. Children of equal weight keep their order.
+#[must_use]
 pub fn layout(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min_tile: u16) -> Layout {
     let mut sorted = items.to_vec();
     sorted.sort_by(|a, b| b.0.cmp(&a.0));

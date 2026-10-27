@@ -15,6 +15,7 @@ use crate::Rect;
 /// Squarifies `items` (`(weight, id)`) in `area`: a tile per item of
 /// positive weight, largest first (equal weights keep their order). A tile
 /// may round to zero width or height; [`crate::layout`] pools those.
+#[must_use]
 pub fn squarify(items: &[(u64, usize)], area: Rect) -> Vec<(usize, Rect)> {
     let mut sorted: Vec<(u64, usize)> = items.iter().copied().filter(|&(w, _)| w > 0).collect();
     sorted.sort_by(|a, b| b.0.cmp(&a.0));
