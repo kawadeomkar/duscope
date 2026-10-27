@@ -231,6 +231,14 @@ pub(super) fn statfs(path: &CStr) -> io::Result<libc::statfs> {
     Ok(unsafe { stat.assume_init() })
 }
 
+/// `pathconf(2)` of `path`; `None` when the value is unknown or the call
+/// fails.
+pub(super) fn pathconf(path: &CStr, name: c_int) -> Option<libc::c_long> {
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    let value = unsafe { libc::pathconf(path.as_ptr(), name) };
+    (value >= 0).then_some(value)
+}
+
 /// `fstatfs(2)` of the volume holding the file open on `fd`.
 pub(super) fn fstatfs(fd: BorrowedFd<'_>) -> io::Result<libc::statfs> {
     let mut stat = MaybeUninit::<libc::statfs>::uninit();

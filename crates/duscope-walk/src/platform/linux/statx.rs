@@ -10,7 +10,8 @@ use std::os::raw::c_int;
 use crate::{Attrs, Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, Share, WalkOptions};
 
 /// The basic mask: type, size, blocks, inode, links, both times and the
-/// mount id (5.8; older kernels leave it out of `stx_mask`).
+/// mount id: the unique one where the kernel has it (6.8), the reusable one
+/// before (5.8); older kernels report neither.
 pub(super) const BASIC: u32 = libc::STATX_TYPE
     | libc::STATX_SIZE
     | libc::STATX_BLOCKS
@@ -18,7 +19,8 @@ pub(super) const BASIC: u32 = libc::STATX_TYPE
     | libc::STATX_NLINK
     | libc::STATX_MTIME
     | libc::STATX_CTIME
-    | libc::STATX_MNT_ID;
+    | libc::STATX_MNT_ID
+    | libc::STATX_MNT_ID_UNIQUE;
 
 /// What `--attrs full` adds: access and creation times, mode, owner and
 /// group, in the same call.
@@ -118,7 +120,7 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
     flags.set(Flags::COMPRESSED, attribute(libc::STATX_ATTR_COMPRESSED));
     let mount_root = attribute(libc::STATX_ATTR_MOUNT_ROOT);
     flags.set(Flags::MOUNT_ROOT, mount_root);
-    let mnt_id = if stx.stx_mask & libc::STATX_MNT_ID != 0 {
+    let mnt_id = if stx.stx_mask & (libc::STATX_MNT_ID | libc::STATX_MNT_ID_UNIQUE) != 0 {
         stx.stx_mnt_id
     } else {
         0

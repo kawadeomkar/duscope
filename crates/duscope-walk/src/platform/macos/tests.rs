@@ -695,11 +695,7 @@ fn volume_of(path: &Path) -> crate::VolumeInfo {
 
 /// The entries of one directory, read by the provider.
 fn read_one(path: &str, depth: u32) -> Vec<Entry> {
-    let dir = crate::DirHandle {
-        id: crate::DirId::ROOT,
-        path: PathBuf::from(path),
-        depth,
-    };
+    let dir = crate::DirHandle::detached(path, depth);
     let (mut out, mut errs) = (Vec::new(), Vec::new());
     crate::Provider::read_dir(
         &MacProvider::new(),
@@ -745,11 +741,7 @@ fn p1_walk_07_a_scan_of_slash_skips_the_data_volume_mount() {
     let opts = WalkOptions::default();
     let skip = |root_depth: u32| {
         // /System/Volumes, read in a scan rooted `root_depth` levels up.
-        let dir = crate::DirHandle {
-            id: crate::DirId::ROOT,
-            path: PathBuf::from("/System/Volumes"),
-            depth: root_depth,
-        };
+        let dir = crate::DirHandle::detached("/System/Volumes", root_depth);
         let data = read_one("/System/Volumes", root_depth)
             .into_iter()
             .find(|e| e.name.as_bytes() == b"Data")

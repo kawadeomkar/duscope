@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use duscope_testkit::TestEnv;
 
-use super::{LinuxProvider, Mount, dents, parse_mountinfo};
+use super::mounts::{Mount, parse_mountinfo};
+use super::{LinuxProvider, dents};
 use crate::{
     DirHandle, DirId, Entry, Kind, NameRef, Provider, STAT_BATCH, ScanError, ScanEvent, VolumeInfo,
     WalkOptions, walk_with,
@@ -249,11 +250,13 @@ fn p1_walk_02_mountinfo_lines_parse() {
                 id: 22,
                 path: PathBuf::from("/proc"),
                 fs_type: "proc".to_owned(),
+                options: vec!["rw".to_owned(), "nosuid".to_owned(), "rw".to_owned()],
             },
             Mount {
                 id: 36,
                 path: PathBuf::from("/mnt/with space"),
                 fs_type: "ext4".to_owned(),
+                options: vec!["rw".to_owned(), "noatime".to_owned(), "rw".to_owned()],
             },
         ]
     );

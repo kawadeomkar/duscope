@@ -122,7 +122,13 @@ fn read_names(
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
             .and_then(|c_name| posix::lstat_at(fd, &c_name));
         match stat {
-            Ok(stat) => out.push(from_stat(name.clone(), &stat, opts.attrs)),
+            Ok(stat) => {
+                #[allow(unused_mut)] // only Linux fills in the mount id
+                let mut entry = from_stat(name.clone(), &stat, opts.attrs);
+                #[cfg(target_os = "linux")]
+                super::linux::fill_mnt_id(&mut entry, dir);
+                out.push(entry);
+            }
             Err(e) => errs.push(ScanError {
                 dir: dir.id(),
                 name: name.clone(),
