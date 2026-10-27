@@ -10,11 +10,12 @@
 //! is one whose name a [`CacheRule`] matches while its parent's listing
 //! holds one of the rule's markers, or one holding a valid `CACHEDIR.TAG`:
 //! a regular file whose first 43 bytes are the tag's signature. Those 43
-//! bytes are the only file contents the scanner reads.
+//! bytes are the only file contents the scanner reads, and only in a
+//! directory the walk would otherwise enter (never a mount it skips).
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -98,33 +99,51 @@ impl<'a> Excludes<'a> {
         !self.caches.is_empty()
     }
 
-    /// Why `entry`, at `rel` below the root and `path` on disk, is left
-    /// out, if it is. `listing` is every name its directory listed, for the
-    /// cache rules' markers.
+    /// Whether matching needs each entry's path relative to the root: there
+    /// are globs or ignore rules.
+    pub(crate) fn wants_rel(&self) -> bool {
+        !self.opts.excludes.is_empty() || !self.opts.ignore.is_empty()
+    }
+
+    /// Whether a glob or an ignore rule matches `rel`, a path relative to
+    /// the root; `is_dir` is `None` for an entry of unknown kind, which
+    /// matches a rule for either.
+    pub(crate) fn matches(&self, rel: &[u8], is_dir: Option<bool>) -> bool {
+        let ignore = &self.opts.ignore;
+        self.opts
+            .excludes
+            .is_match(Path::new(OsStr::from_bytes(rel)))
+            || match is_dir {
+                Some(is_dir) => ignore.ignores(rel, is_dir),
+                None => ignore.ignores(rel, false) || ignore.ignores(rel, true),
+            }
+    }
+
+    /// Why `entry`, at `rel` below the root, is left out by what can be
+    /// told without reading anything, if it is. `listing` is every name its
+    /// directory listed, for the cache rules' markers. A directory the walk
+    /// would enter is then a cache if it is [`tagged`](Self::tagged).
     pub(crate) fn excluded(
         &self,
         rel: &[u8],
         entry: &Entry,
-        path: &Path,
         listing: Option<&HashSet<NameRef>>,
     ) -> Option<Skip> {
         let is_dir = entry.kind == Kind::Dir;
-        if self
-            .opts
-            .excludes
-            .is_match(Path::new(OsStr::from_bytes(rel)))
-            || self.opts.ignore.ignores(rel, is_dir)
-        {
+        if self.wants_rel() && self.matches(rel, Some(is_dir)) {
             return Some(Skip::Excluded);
         }
-        if !is_dir || self.opts.exclude_caches.is_empty() {
-            return None;
-        }
-        let marked = self.caches.iter().any(|(name, markers)| {
-            name.is_match(entry.name.as_os_str())
-                && listing.is_some_and(|names| markers.iter().any(|m| names.contains(m)))
-        });
-        (marked || has_cachedir_tag(path)).then_some(Skip::ExcludedCache)
+        let marked = is_dir
+            && self.caches.iter().any(|(name, markers)| {
+                name.is_match(entry.name.as_os_str())
+                    && listing.is_some_and(|names| markers.iter().any(|m| names.contains(m)))
+            });
+        marked.then_some(Skip::ExcludedCache)
+    }
+
+    /// Whether the directory at `path` is a cache by its `CACHEDIR.TAG`.
+    pub(crate) fn tagged(&self, path: &Path) -> bool {
+        !self.opts.exclude_caches.is_empty() && has_cachedir_tag(path)
     }
 }
 
@@ -132,20 +151,22 @@ impl<'a> Excludes<'a> {
 const CACHEDIR_SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
 /// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`: a regular
-/// file, not a link, that starts with the signature.
+/// file, not a link, that starts with the signature. It is opened without
+/// blocking, so a FIFO of that name cannot stall the walk, and checked
+/// through the descriptor, so nothing swapped in after a check is read.
 fn has_cachedir_tag(dir: &Path) -> bool {
-    let tag = dir.join("CACHEDIR.TAG");
-    let regular = fs::symlink_metadata(&tag).is_ok_and(|m| m.is_file() && m.len() >= 43);
-    if !regular {
-        return false;
-    }
-    let mut head = [0u8; 43];
-    OpenOptions::new()
+    let Ok(mut tag) = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&tag)
-        .and_then(|mut file| file.read_exact(&mut head))
-        .is_ok_and(|()| &head == CACHEDIR_SIGNATURE)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(dir.join("CACHEDIR.TAG"))
+    else {
+        return false;
+    };
+    let regular = tag
+        .metadata()
+        .is_ok_and(|m| m.is_file() && m.len() >= CACHEDIR_SIGNATURE.len() as u64);
+    let mut head = [0u8; 43];
+    regular && tag.read_exact(&mut head).is_ok() && &head == CACHEDIR_SIGNATURE
 }
 
 #[cfg(test)]

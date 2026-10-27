@@ -46,7 +46,7 @@ pub(crate) fn fallback() -> Option<Box<dyn Provider>> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn cancel_on_interrupt(
     flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     posix::signal::cancel_on_interrupt(flag)
 }
 
@@ -54,7 +54,7 @@ pub(crate) fn cancel_on_interrupt(
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn cancel_on_interrupt(
     _flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 

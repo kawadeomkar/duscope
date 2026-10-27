@@ -163,6 +163,9 @@ pub trait Provider: Send + Sync {
 #[derive(Debug)]
 pub struct DirHandle {
     id: DirId,
+    /// Its name in its parent's listing (a followed link's own name); the
+    /// root's as given.
+    name: NameRef,
     path: PathBuf,
     /// The path relative to the root, `/`-separated, as the directory was
     /// reached; empty for the root.
@@ -175,14 +178,20 @@ pub struct DirHandle {
 }
 
 impl DirHandle {
-    /// The handle of `entry`, a directory numbered `id`, inside `parent`.
-    fn new(id: DirId, path: PathBuf, entry: &Entry, parent: Option<Arc<DirHandle>>) -> DirHandle {
+    /// The handle of `entry`, a directory numbered `id` at `rel` below the
+    /// root (empty when no exclude needs it), inside `parent`.
+    fn new(
+        id: DirId,
+        path: PathBuf,
+        rel: Vec<u8>,
+        entry: &Entry,
+        parent: Option<Arc<DirHandle>>,
+    ) -> DirHandle {
         DirHandle {
             id,
+            name: entry.name.clone(),
             path,
-            rel: parent
-                .as_deref()
-                .map_or_else(Vec::new, |p| p.rel_of(entry.name.as_bytes())),
+            rel,
             depth: parent.as_ref().map_or(0, |p| p.depth + 1),
             dev: entry.dev,
             ino: entry.ino,
@@ -191,19 +200,24 @@ impl DirHandle {
         }
     }
 
-    /// A handle for tests: `path`, `depth` levels below a root it does not
-    /// link to.
+    /// A handle for tests: `path`, `depth` levels below a root, with a
+    /// handle for each directory between them.
     #[cfg(test)]
     pub(crate) fn detached(path: impl Into<PathBuf>, depth: u32) -> DirHandle {
+        let path = path.into();
+        let parent = depth
+            .checked_sub(1)
+            .map(|up| Arc::new(DirHandle::detached(path.parent().unwrap_or(&path), up)));
         DirHandle {
             id: DirId::ROOT,
-            path: path.into(),
+            name: NameRef::from(path.file_name().unwrap_or(path.as_os_str())),
+            path,
             rel: Vec::new(),
             depth,
             dev: 0,
             ino: 0,
             mnt_id: 0,
-            parent: None,
+            parent,
         }
     }
 
@@ -248,8 +262,9 @@ impl DirHandle {
         self.id
     }
 
-    /// The directory's path: the root as given, joined with the names below
-    /// it.
+    /// The directory's path, to open: the root as given joined with the
+    /// names below it; below a link followed under `--follow-symlinks`, the
+    /// link's resolved target joined with the names below that.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -312,7 +327,9 @@ pub fn walk(
 /// Makes SIGINT set `flag`, the [`WalkOptions::cancel`] of the walks it is
 /// given to: a running walk then stops within a directory per worker and
 /// returns [`WalkError::Cancelled`]. A later call replaces the flag.
-pub fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<()> {
+/// Returns `false`, installing nothing, when the process inherited SIGINT
+/// ignored (a background job): Ctrl-C was not meant for it.
+pub fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<bool> {
     platform::cancel_on_interrupt(flag)
 }
 
@@ -473,7 +490,7 @@ pub fn walk_with<P: Provider + ?Sized>(
         threads,
         ..WalkSummary::default()
     };
-    let root_dir = DirHandle::new(DirId::ROOT, root.to_owned(), &entry, None);
+    let root_dir = DirHandle::new(DirId::ROOT, root.to_owned(), Vec::new(), &entry, None);
     let root_mnt_id = entry.mnt_id;
     sink(ScanEvent::Entry(entry));
     if let Ok(mut volume) = provider.volume(root) {
@@ -657,7 +674,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             (Some((_, Failed::Vanished)), _) => dir_vanished = true,
             (Some((e, Failed::OnParent)), Some(parent)) => errors.push(ScanError {
                 dir: parent.id,
-                name: NameRef::from(dir.path.file_name().unwrap_or(dir.path.as_os_str())),
+                name: dir.name.clone(),
                 errno: e,
             }),
             (Some((e, _)), _) => errno = Some(e),
@@ -760,7 +777,16 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         shared: &PoolShared<Job, Event>,
     ) -> Option<Adopted> {
         let mut adopted = Adopted::default();
+        // Paths relative to the root, built only for globs and ignore rules.
+        let by_path = self.excludes.as_ref().filter(|ex| ex.wants_rel());
+        let rel_of =
+            |name: &NameRef| by_path.map_or_else(Vec::new, |_| dir.rel_of(name.as_bytes()));
+        // An entry the excludes leave out reports nothing, not even that it
+        // could not be read or vanished.
         errors.retain(|error| {
+            if by_path.is_some_and(|ex| ex.matches(&rel_of(&error.name), None)) {
+                return false;
+            }
             let gone = Failed::of(error.errno) == Failed::Vanished;
             if gone {
                 adopted.vanished.push(error.name.clone());
@@ -782,9 +808,11 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 Some(Some(real)) => real.clone(),
                 _ => dir.path.join(entry.name.as_os_str()),
             };
-            let excluded = self.excludes.as_ref().and_then(|ex| {
-                ex.excluded(&dir.rel_of(entry.name.as_bytes()), entry, &path, listing)
-            });
+            let rel = rel_of(&entry.name);
+            let excluded = self
+                .excludes
+                .as_ref()
+                .and_then(|ex| ex.excluded(&rel, entry, listing));
             if excluded.is_some() {
                 adopted.excluded += 1;
                 if !is_dir {
@@ -799,8 +827,20 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     return None;
                 };
                 entry.dir = Some(id);
-                let skip =
-                    excluded.or_else(|| self.decide(dir, entry, &path, &mut adopted.volumes));
+                let mut skip = excluded;
+                if skip.is_none() {
+                    let met = adopted.volumes.len();
+                    skip = self.decide(dir, entry, &path, &mut adopted.volumes);
+                    // The tag is read only in a directory the walk would
+                    // enter, so a skipped mount is never touched.
+                    if skip.is_none() && self.excludes.as_ref().is_some_and(|ex| ex.tagged(&path)) {
+                        adopted.excluded += 1;
+                        for volume in &mut adopted.volumes[met..] {
+                            volume.reason = Some(Skip::ExcludedCache);
+                        }
+                        skip = Some(Skip::ExcludedCache);
+                    }
+                }
                 if let Some(reason) = skip {
                     adopted.skipped.push((id, reason));
                     continue;
@@ -808,6 +848,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 jobs.push(Job::ReadDir(Arc::new(DirHandle::new(
                     id,
                     path,
+                    rel,
                     entry,
                     Some(Arc::clone(dir)),
                 ))));
@@ -832,7 +873,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     /// directory reached through a link is read from. A link that loops, one
     /// to a directory on its own path, and one whose target cannot be named
     /// (`ENAMETOOLONG`) or read (`EIO`) become errors of `dir`; one that
-    /// leads nowhere stays a link.
+    /// leads nowhere stays a link, and so does one the globs or ignore rules
+    /// leave out, which is left out unread.
     fn follow_links(
         &self,
         dir: &DirHandle,
@@ -842,7 +884,12 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         let mut resolved = Vec::with_capacity(entries.len());
         let mut kept = Vec::with_capacity(entries.len());
         for entry in entries.drain(..) {
-            if entry.kind != Kind::Symlink {
+            let excluded = || {
+                self.excludes.as_ref().is_some_and(|ex| {
+                    ex.wants_rel() && ex.matches(&dir.rel_of(entry.name.as_bytes()), Some(false))
+                })
+            };
+            if entry.kind != Kind::Symlink || excluded() {
                 kept.push(entry);
                 resolved.push(None);
                 continue;

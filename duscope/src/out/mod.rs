@@ -12,7 +12,7 @@ mod table;
 mod units;
 
 use std::borrow::Cow;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write as _};
 
 use duscope_core::envelope::{ByTypeEntry, Envelope, StaleEntry, TopEntry, TreeEntry, Warning};
 use serde::Serialize;
@@ -136,21 +136,30 @@ impl Output {
     /// flags as far as they can be read or through the environment: its
     /// usage error is then the error envelope.
     pub fn json_requested(args: &[String]) -> bool {
-        let mut explicit = None;
+        // The flags rank as the decision ranks them: --json, then --plain,
+        // then --format.
+        let (mut json, mut plain, mut format) = (false, false, None);
         let mut args = args.iter().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--" => break,
-                "--json" => explicit = Some(Format::Json),
-                "--plain" => explicit = Some(Format::Plain),
-                "--format" => explicit = args.next().and_then(|v| Format::from_name(v)),
+                "--json" => json = true,
+                "--plain" => plain = true,
+                "--format" => format = args.next().and_then(|v| Format::from_name(v)),
                 _ => {
                     if let Some(name) = arg.strip_prefix("--format=") {
-                        explicit = Format::from_name(name);
+                        format = Format::from_name(name);
                     }
                 }
             }
         }
+        let explicit = if json {
+            Some(Format::Json)
+        } else if plain {
+            Some(Format::Plain)
+        } else {
+            format
+        };
         let env = EnvVars::read(|name| std::env::var_os(name));
         let tty = std::io::stdout().is_terminal();
         matches!(
@@ -356,7 +365,7 @@ impl Output {
             }
         };
         if self.is_machine() {
-            eprintln!("{footer}");
+            stderr_line(footer);
         }
         if !self.is_json() {
             warn(&envelope.warnings);
@@ -368,7 +377,7 @@ impl Output {
     /// stderr in the machine formats.
     pub fn line(&self, line: &str) -> Result<(), Failure> {
         if self.is_machine() {
-            eprintln!("{line}");
+            stderr_line(line);
             Ok(())
         } else {
             emit(|out| writeln!(out, "{line}"))
@@ -391,18 +400,25 @@ impl Output {
 /// Warnings for people, on stderr.
 fn warn(warnings: &[Warning]) {
     for warning in warnings {
-        eprintln!("warning: {}", warning.message);
+        stderr_line(&format!("warning: {}", warning.message));
         if let Some(hint) = &warning.hint {
-            eprintln!("hint: {hint}");
+            stderr_line(&format!("hint: {hint}"));
         }
     }
 }
 
+/// Writes one line to stderr. Unlike `eprintln!`, it does not panic when
+/// stderr is a closed pipe (`duscope … 2>&1 | head`): the line is dropped.
+pub fn stderr_line(line: &str) {
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "{line}");
+}
+
 /// A failure for people, on stderr.
 pub fn to_stderr(failure: &Failure) {
-    eprintln!("duscope: {}", failure.message);
+    stderr_line(&format!("duscope: {}", failure.message));
     if let Some(hint) = &failure.hint {
-        eprintln!("hint: {hint}");
+        stderr_line(&format!("hint: {hint}"));
     }
 }
 
