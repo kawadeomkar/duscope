@@ -14,4 +14,7 @@ pub enum CoreError {
         /// What is wrong.
         message: String,
     },
+    /// The scan does not fit the arena's record fields.
+    #[error("the scan is too large for the arena: {0}")]
+    ArenaFull(&'static str),
 }

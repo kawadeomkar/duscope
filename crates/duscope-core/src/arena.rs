@@ -1,0 +1,626 @@
+//! The arena: the scan in memory, built on the consumer thread from the
+//! walk's [`ScanEvent`]s.
+//!
+//! Each entry is a 48-byte [`EntryRec`] in scan order; each directory also
+//! has a 48-byte [`DirRec`], indexed by its [`DirId`], whose cumulative
+//! fields the roll-up fills (P1-CORE-02). Names are stored once each in
+//! chunked byte storage, without deduplication. What few entries need is
+//! kept beside the records: the `(dev, ino)` of hard-linked files, clone
+//! ids, mount boundaries, the `--attrs full` side records. Every store grows
+//! by fixed-size chunks, so a `Vec` doubling can never double the peak
+//! resident size.
+
+use std::collections::HashMap;
+use std::mem::size_of;
+
+use duscope_walk::{
+    Attrs, Boundary, DirId, Entry, Flags, FullAttrs, Kind, ScanError, ScanEvent, Share, Skip,
+    VolumeInfo,
+};
+
+use crate::CoreError;
+
+/// An entry's index in scan order; the root is 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntryIdx(u32);
+
+impl EntryIdx {
+    /// The root's index.
+    pub const ROOT: EntryIdx = EntryIdx(0);
+
+    /// The index as a number.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The index for a side table.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// One entry: 48 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct EntryRec {
+    apparent: u64,
+    allocated: u64,
+    mtime_ns: i64,
+    ctime_ns: i64,
+    /// Where the name starts in the name store.
+    name_at: u32,
+    name_len: u16,
+    kind: u8,
+    /// `Flags` bits 0..=7.
+    flags: u8,
+    /// The directory the entry is in.
+    parent: u32,
+    /// A non-directory's hard-link count; a directory's own [`DirId`]
+    /// (directories never enter the hard-link map, so their link count is
+    /// not kept).
+    nlink_or_dir: u32,
+}
+
+/// One directory's record beside its entry: 48 bytes, the cumulative fields
+/// zero until the roll-up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct DirRec {
+    /// Total apparent bytes of the subtree, the directory included.
+    pub cum_apparent: u64,
+    /// Total allocated bytes of the subtree.
+    pub cum_allocated: u64,
+    /// The latest mtime in the subtree.
+    pub max_mtime_ns: i64,
+    /// The directory's entry.
+    pub entry: u32,
+    /// Non-directories in the subtree.
+    pub n_files: u32,
+    /// Directories in the subtree, the directory excluded.
+    pub n_dirs: u32,
+    /// The last pre-order id of the subtree.
+    pub last_id: u32,
+    /// The last pre-order id of the directory's own files.
+    pub files_end: u32,
+    /// How far below the root; the root is 0.
+    pub depth: u16,
+    /// Roll-up flags ([`DirRec::UPPER_BOUND`]).
+    pub flags: u16,
+}
+
+impl DirRec {
+    /// The subtree's totals include blocks that may be shared with a clone
+    /// the scan could not group: an upper bound.
+    pub const UPPER_BOUND: u16 = 1;
+    /// The directory could not be read.
+    pub const UNREADABLE: u16 = 2;
+}
+
+/// The `--attrs full` side record of one entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FullRec {
+    atime_ns: i64,
+    /// `i64::MIN` where the filesystem keeps no creation time.
+    btime_ns: i64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+impl FullRec {
+    fn new(full: &FullAttrs) -> FullRec {
+        FullRec {
+            atime_ns: full.atime_ns,
+            btime_ns: full.btime_ns.unwrap_or(i64::MIN),
+            uid: full.uid,
+            gid: full.gid,
+            mode: full.mode,
+        }
+    }
+
+    fn get(self) -> FullAttrs {
+        FullAttrs {
+            atime_ns: self.atime_ns,
+            btime_ns: (self.btime_ns != i64::MIN).then_some(self.btime_ns),
+            mode: self.mode,
+            uid: self.uid,
+            gid: self.gid,
+        }
+    }
+}
+
+/// Elements per chunk of a [`Chunked`] store: 64 Ki.
+const CHUNK_SHIFT: u32 = 16;
+const CHUNK: usize = 1 << CHUNK_SHIFT;
+
+/// A vector that grows by fixed-size chunks instead of doubling.
+#[derive(Debug, Clone)]
+pub struct Chunked<T> {
+    chunks: Vec<Vec<T>>,
+    len: usize,
+}
+
+impl<T> Default for Chunked<T> {
+    fn default() -> Chunked<T> {
+        Chunked {
+            chunks: Vec::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T> Chunked<T> {
+    /// The number of elements.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Appends an element.
+    pub fn push(&mut self, value: T) {
+        if self.len % CHUNK == 0 {
+            self.chunks.push(Vec::with_capacity(CHUNK));
+        }
+        if let Some(chunk) = self.chunks.last_mut() {
+            chunk.push(value);
+        }
+        self.len += 1;
+    }
+
+    /// The element at `index`.
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.chunks
+            .get(index >> CHUNK_SHIFT)?
+            .get(index & (CHUNK - 1))
+    }
+
+    /// The element at `index`, mutably.
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.chunks
+            .get_mut(index >> CHUNK_SHIFT)?
+            .get_mut(index & (CHUNK - 1))
+    }
+
+    /// The elements in order.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.chunks.iter().flatten()
+    }
+
+    /// The bytes the store holds on the heap.
+    pub fn heap_bytes(&self) -> usize {
+        self.chunks.len() * CHUNK * size_of::<T>() + self.chunks.capacity() * size_of::<Vec<T>>()
+    }
+}
+
+impl<T: Default + Clone> Chunked<T> {
+    /// The element at `index`, adding default elements up to it first.
+    pub fn slot(&mut self, index: usize) -> &mut T {
+        while self.len <= index {
+            self.push(T::default());
+        }
+        // The loop above made the slot.
+        let chunk = &mut self.chunks[index >> CHUNK_SHIFT];
+        &mut chunk[index & (CHUNK - 1)]
+    }
+}
+
+/// Bytes per chunk of the name store: 1 MiB. A name never spans chunks.
+const NAME_CHUNK_SHIFT: u32 = 20;
+const NAME_CHUNK: usize = 1 << NAME_CHUNK_SHIFT;
+
+/// Every name, stored once each, in 1 MiB chunks.
+#[derive(Debug, Clone, Default)]
+struct Names {
+    chunks: Vec<Vec<u8>>,
+}
+
+impl Names {
+    /// Stores `name`, returning where it starts.
+    fn push(&mut self, name: &[u8]) -> Result<u32, CoreError> {
+        let fits = self
+            .chunks
+            .last()
+            .is_some_and(|chunk| chunk.len() + name.len() <= NAME_CHUNK);
+        if !fits {
+            self.chunks.push(Vec::with_capacity(NAME_CHUNK));
+        }
+        let index = self.chunks.len() - 1;
+        let chunk = &mut self.chunks[index];
+        let at = (index << NAME_CHUNK_SHIFT) | chunk.len();
+        chunk.extend_from_slice(name);
+        u32::try_from(at).map_err(|_| CoreError::ArenaFull("the names fill 4 GiB"))
+    }
+
+    fn get(&self, at: u32, len: u16) -> &[u8] {
+        let at = at as usize;
+        let chunk = &self.chunks[at >> NAME_CHUNK_SHIFT];
+        let start = at & (NAME_CHUNK - 1);
+        &chunk[start..start + usize::from(len)]
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.chunks.iter().map(Vec::capacity).sum::<usize>()
+            + self.chunks.capacity() * size_of::<Vec<u8>>()
+    }
+}
+
+/// An entry as the arena holds it, read through [`Arena::entry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryView<'a> {
+    /// The entry's index.
+    pub idx: EntryIdx,
+    /// The name's bytes.
+    pub name: &'a [u8],
+    /// What the entry is.
+    pub kind: Kind,
+    /// Apparent size.
+    pub apparent: u64,
+    /// Allocated bytes.
+    pub allocated: u64,
+    /// Last modification, Unix nanoseconds.
+    pub mtime_ns: i64,
+    /// Last inode change, Unix nanoseconds.
+    pub ctime_ns: i64,
+    /// Storage flags.
+    pub flags: Flags,
+    /// The directory the entry is in (the root is its own parent).
+    pub parent: DirId,
+    /// A directory's own id.
+    pub dir: Option<DirId>,
+    /// A non-directory's hard-link count; 0 for a directory.
+    pub nlink: u32,
+}
+
+/// The identity a hard-linked or cloned file keeps beside its record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Linked {
+    /// The entry.
+    pub entry: EntryIdx,
+    /// Its device.
+    pub dev: u64,
+    /// Its inode number.
+    pub ino: u64,
+}
+
+/// A clone group member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cloned {
+    /// The entry.
+    pub entry: EntryIdx,
+    /// Its device.
+    pub dev: u64,
+    /// The clone group's id.
+    pub clone_id: u64,
+}
+
+/// Where an entry crosses onto another filesystem or tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Crossing {
+    /// The entry.
+    pub entry: EntryIdx,
+    /// The kind of boundary.
+    pub boundary: Boundary,
+    /// The device on the far side.
+    pub dev: u64,
+    /// The mount id on the far side.
+    pub mnt_id: u64,
+}
+
+/// The scan in memory.
+#[derive(Debug, Clone)]
+pub struct Arena {
+    attrs: Attrs,
+    entries: Chunked<EntryRec>,
+    dirs: Chunked<DirRec>,
+    names: Names,
+    /// `--attrs full` records, parallel to `entries` when collected.
+    full: Chunked<FullRec>,
+    linked: Vec<Linked>,
+    cloned: Vec<Cloned>,
+    may_share: Vec<EntryIdx>,
+    crossings: Vec<Crossing>,
+    unreadable: HashMap<DirId, i32>,
+    skipped: HashMap<DirId, Skip>,
+    errors: Vec<ScanError>,
+    volumes: Vec<VolumeInfo>,
+    vanished: u64,
+    root_dev: u64,
+    root_mnt_id: u64,
+}
+
+impl Arena {
+    /// An empty arena for a scan collecting `attrs`.
+    pub fn new(attrs: Attrs) -> Arena {
+        Arena {
+            attrs,
+            entries: Chunked::default(),
+            dirs: Chunked::default(),
+            names: Names::default(),
+            full: Chunked::default(),
+            linked: Vec::new(),
+            cloned: Vec::new(),
+            may_share: Vec::new(),
+            crossings: Vec::new(),
+            unreadable: HashMap::new(),
+            skipped: HashMap::new(),
+            errors: Vec::new(),
+            volumes: Vec::new(),
+            vanished: 0,
+            root_dev: 0,
+            root_mnt_id: 0,
+        }
+    }
+
+    /// Takes one event of the walk, in the order the walk delivers them.
+    pub fn push(&mut self, event: ScanEvent) -> Result<(), CoreError> {
+        match event {
+            ScanEvent::Entry(entry) => self.push_entry(&entry)?,
+            ScanEvent::DirClosed { dir, errno } => {
+                if let Some(errno) = errno {
+                    self.unreadable.insert(dir, errno);
+                    self.dirs.slot(dir.index()).flags |= DirRec::UNREADABLE;
+                }
+            }
+            ScanEvent::Vanished { .. } => self.vanished += 1,
+            ScanEvent::Volume(volume) => self.volumes.push(volume),
+            ScanEvent::Error(error) => self.errors.push(error),
+            ScanEvent::Skipped { dir, reason } => {
+                self.skipped.insert(dir, reason);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_entry(&mut self, entry: &Entry) -> Result<(), CoreError> {
+        let full = |what| CoreError::ArenaFull(what);
+        let idx = u32::try_from(self.entries.len()).map_err(|_| full("more than 4G entries"))?;
+        let name_len = u16::try_from(entry.name.as_bytes().len())
+            .map_err(|_| full("a name longer than 64 KiB"))?;
+        let name_at = self.names.push(entry.name.as_bytes())?;
+        let flags = u8::try_from(entry.flags.bits()).map_err(|_| full("a flag beyond bit 7"))?;
+        let is_dir = entry.kind == Kind::Dir;
+        let nlink_or_dir = match entry.dir {
+            Some(dir) => dir.get(),
+            None => entry.nlink,
+        };
+        self.entries.push(EntryRec {
+            apparent: entry.apparent,
+            allocated: entry.allocated,
+            mtime_ns: entry.mtime_ns,
+            ctime_ns: entry.ctime_ns,
+            name_at,
+            name_len,
+            kind: kind_code(entry.kind),
+            flags,
+            parent: entry.parent.get(),
+            nlink_or_dir,
+        });
+        let index = EntryIdx(idx);
+        if let Some(dir) = entry.dir {
+            let depth = if idx == 0 {
+                0
+            } else {
+                self.dirs
+                    .get(entry.parent.index())
+                    .map_or(0, |p| p.depth.saturating_add(1))
+            };
+            let rec = self.dirs.slot(dir.index());
+            rec.entry = idx;
+            rec.depth = depth;
+        }
+        if self.attrs == Attrs::Full {
+            let rec = entry.full.as_ref().map_or(
+                FullRec {
+                    atime_ns: 0,
+                    btime_ns: i64::MIN,
+                    uid: 0,
+                    gid: 0,
+                    mode: 0,
+                },
+                FullRec::new,
+            );
+            self.full.push(rec);
+        }
+        if idx == 0 {
+            self.root_dev = entry.dev;
+            self.root_mnt_id = entry.mnt_id;
+        }
+        if !is_dir && entry.nlink > 1 {
+            self.linked.push(Linked {
+                entry: index,
+                dev: entry.dev,
+                ino: entry.ino,
+            });
+        }
+        match entry.share {
+            Share::Clone(clone_id) => self.cloned.push(Cloned {
+                entry: index,
+                dev: entry.dev,
+                clone_id,
+            }),
+            Share::MayShare => self.may_share.push(index),
+            Share::None | Share::Hardlink => {}
+        }
+        if is_dir && (entry.boundary != Boundary::None || idx == 0) {
+            self.crossings.push(Crossing {
+                entry: index,
+                boundary: entry.boundary,
+                dev: entry.dev,
+                mnt_id: entry.mnt_id,
+            });
+        }
+        Ok(())
+    }
+
+    /// Entries, the root included.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the arena holds nothing yet.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Directories, the root included when it is one.
+    pub fn dir_count(&self) -> usize {
+        self.dirs.len()
+    }
+
+    /// The attribute set the scan collected.
+    pub fn attrs(&self) -> Attrs {
+        self.attrs
+    }
+
+    /// The entry at `idx`.
+    ///
+    /// # Panics
+    ///
+    /// When `idx` is not an entry of this arena.
+    pub fn entry(&self, idx: EntryIdx) -> EntryView<'_> {
+        let rec = self.rec(idx);
+        let kind = kind_of(rec.kind);
+        let dir = (kind == Kind::Dir).then(|| DirId::new(rec.nlink_or_dir));
+        EntryView {
+            idx,
+            name: self.names.get(rec.name_at, rec.name_len),
+            kind,
+            apparent: rec.apparent,
+            allocated: rec.allocated,
+            mtime_ns: rec.mtime_ns,
+            ctime_ns: rec.ctime_ns,
+            flags: Flags::from_bits_truncate(u32::from(rec.flags)),
+            parent: DirId::new(rec.parent),
+            dir,
+            nlink: if dir.is_some() { 0 } else { rec.nlink_or_dir },
+        }
+    }
+
+    fn rec(&self, idx: EntryIdx) -> &EntryRec {
+        self.entries
+            .get(idx.index())
+            .unwrap_or_else(|| panic!("no entry {idx:?}"))
+    }
+
+    /// The `--attrs full` attributes of `idx`; `None` in a basic scan.
+    pub fn full(&self, idx: EntryIdx) -> Option<FullAttrs> {
+        self.full.get(idx.index()).map(|rec| rec.get())
+    }
+
+    /// The directory record of `dir`.
+    ///
+    /// # Panics
+    ///
+    /// When `dir` is not a directory of this arena.
+    pub fn dir(&self, dir: DirId) -> &DirRec {
+        self.dirs
+            .get(dir.index())
+            .unwrap_or_else(|| panic!("no directory {dir:?}"))
+    }
+
+    /// Every entry, in scan order.
+    pub fn entries(&self) -> impl Iterator<Item = EntryView<'_>> {
+        (0..self.entries.len()).map(|i| self.entry(EntryIdx(u32::try_from(i).unwrap_or(u32::MAX))))
+    }
+
+    /// Hard-linked non-directories with their `(dev, ino)`.
+    pub fn linked(&self) -> &[Linked] {
+        &self.linked
+    }
+
+    /// Clone group members.
+    pub fn cloned(&self) -> &[Cloned] {
+        &self.cloned
+    }
+
+    /// Files whose blocks may be shared without a clone id.
+    pub fn may_share(&self) -> &[EntryIdx] {
+        &self.may_share
+    }
+
+    /// The root and every directory on a boundary, with its device and
+    /// mount id.
+    pub fn crossings(&self) -> &[Crossing] {
+        &self.crossings
+    }
+
+    /// Directories that could not be read, with the error number.
+    pub fn unreadable(&self) -> &HashMap<DirId, i32> {
+        &self.unreadable
+    }
+
+    /// Directories listed but not entered, and why.
+    pub fn skipped(&self) -> &HashMap<DirId, Skip> {
+        &self.skipped
+    }
+
+    /// Entries listed but not read.
+    pub fn errors(&self) -> &[ScanError] {
+        &self.errors
+    }
+
+    /// The volumes the walk met.
+    pub fn volumes(&self) -> &[VolumeInfo] {
+        &self.volumes
+    }
+
+    /// Entries that vanished between listing and reading.
+    pub fn vanished(&self) -> u64 {
+        self.vanished
+    }
+
+    /// The root's device and mount id.
+    pub fn root_volume(&self) -> (u64, u64) {
+        (self.root_dev, self.root_mnt_id)
+    }
+
+    /// The bytes the arena holds on the heap: what it adds to the peak
+    /// resident size.
+    pub fn heap_bytes(&self) -> usize {
+        self.entries.heap_bytes()
+            + self.dirs.heap_bytes()
+            + self.names.heap_bytes()
+            + self.full.heap_bytes()
+            + self.linked.capacity() * size_of::<Linked>()
+            + self.cloned.capacity() * size_of::<Cloned>()
+            + self.may_share.capacity() * size_of::<EntryIdx>()
+            + self.crossings.capacity() * size_of::<Crossing>()
+            + self.errors.capacity() * size_of::<ScanError>()
+            + self.volumes.capacity() * size_of::<VolumeInfo>()
+    }
+}
+
+/// A kind as the record stores it.
+fn kind_code(kind: Kind) -> u8 {
+    match kind {
+        Kind::Dir => 0,
+        Kind::File => 1,
+        Kind::Symlink => 2,
+        Kind::Socket => 3,
+        Kind::Fifo => 4,
+        Kind::Char => 5,
+        Kind::Block => 6,
+        Kind::Unknown => 7,
+    }
+}
+
+/// The kind a record stores.
+fn kind_of(code: u8) -> Kind {
+    match code {
+        0 => Kind::Dir,
+        1 => Kind::File,
+        2 => Kind::Symlink,
+        3 => Kind::Socket,
+        4 => Kind::Fifo,
+        5 => Kind::Char,
+        6 => Kind::Block,
+        _ => Kind::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests;
