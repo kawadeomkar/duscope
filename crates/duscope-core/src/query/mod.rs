@@ -23,7 +23,7 @@ use crate::CoreError;
 use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::rollup::RollUp;
 
-pub use by_type::{ByTypeQuery, by_type};
+pub use by_type::{ByTypeQuery, by_type, root_dirs};
 /// The regular expressions `--regex` takes, matched against path bytes.
 pub use regex::bytes::Regex;
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
@@ -32,6 +32,8 @@ pub use tree::{TreeQuery, tree};
 
 /// One entry of a scan, as the queries read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Independent facts of one entry, as the index stores them.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Node<'a> {
     /// Its pre-order id; the root is 0.
     pub id: u32,
@@ -69,6 +71,9 @@ pub struct Node<'a> {
     /// Whether its bytes count in its ancestors' totals (a later hard link
     /// or clone does not).
     pub charged: bool,
+    /// A later link of an inode: its apparent size is left out of its
+    /// ancestors' totals too, where an uncharged clone's is not.
+    pub linked_away: bool,
     /// Storage flags.
     pub flags: Flags,
     /// A directory whose totals may include shared blocks.
@@ -87,6 +92,18 @@ impl Node<'_> {
         match size {
             SizeKind::Allocated => self.allocated,
             SizeKind::Apparent => self.apparent,
+        }
+    }
+
+    /// What it adds to its parent's total in `size`: a directory's subtree;
+    /// nothing for an uncharged file's allocated bytes, or a later link's
+    /// apparent ones.
+    pub fn counted(&self, size: SizeKind) -> u64 {
+        match size {
+            _ if self.is_dir() => self.size(size),
+            SizeKind::Allocated if !self.charged => 0,
+            SizeKind::Apparent if self.linked_away => 0,
+            _ => self.size(size),
         }
     }
 
@@ -140,20 +157,22 @@ impl TreeView for ArenaView<'_> {
         let idx = self.rollup.entry_at(id);
         let view = self.arena.entry(idx);
         let full = self.arena.full(idx);
-        let parent_dir = self.arena.dir(view.parent);
-        let parent = if id == 0 {
-            0
+        // The root has no parent directory (and a file root no directory
+        // at all).
+        let (parent, depth) = if id == 0 {
+            (0, 0)
         } else {
-            self.rollup.id_of(EntryIdx::from_raw(parent_dir.entry))
+            let parent_dir = self.arena.dir(view.parent);
+            (
+                self.rollup.id_of(EntryIdx::from_raw(parent_dir.entry)),
+                u32::from(parent_dir.depth) + 1,
+            )
         };
+        let charges = self.rollup.charges();
         let mut node = Node {
             id,
             parent,
-            depth: if id == 0 {
-                0
-            } else {
-                u32::from(parent_dir.depth) + 1
-            },
+            depth,
             name: view.name,
             kind: view.kind,
             allocated: view.allocated,
@@ -167,7 +186,8 @@ impl TreeView for ArenaView<'_> {
             btime_ns: full.and_then(|f| f.btime_ns),
             mode: full.map(|f| f.mode),
             nlink: view.nlink,
-            charged: self.rollup.charges().charged(idx),
+            charged: charges.charged(idx),
+            linked_away: charges.linked_away(idx),
             flags: view.flags,
             upper_bound: false,
             unreadable: false,
@@ -422,35 +442,59 @@ impl Filters {
             return true;
         }
         let rel = rel_path(view, node.id);
-        let path = Path::new(std::ffi::OsStr::from_bytes(&rel));
-        // An excluded directory leaves out what is under it too.
-        if let Some(set) = &self.exclude {
-            let mut ancestors = rel
-                .iter()
-                .enumerate()
-                .filter(|&(_, &b)| b == b'/')
-                .map(|(i, _)| Path::new(std::ffi::OsStr::from_bytes(&rel[..i])));
-            if set.is_match(path) || ancestors.any(|a| set.is_match(a)) {
-                return false;
-            }
+        if self.excluded(&rel) {
+            return false;
         }
+        let path = Path::new(std::ffi::OsStr::from_bytes(&rel));
         let matched = self.glob.as_ref().is_none_or(|set| set.is_match(path))
             && self.regex.as_ref().is_none_or(|re| re.is_match(&rel));
         matched != (self.invert && (self.glob.is_some() || self.regex.is_some()))
     }
+
+    /// Whether `--exclude` leaves out `node`: it, or a directory above it,
+    /// matches.
+    pub fn excludes(&self, view: &(impl TreeView + ?Sized), node: &Node<'_>) -> bool {
+        self.exclude.is_some() && self.excluded(&rel_path(view, node.id))
+    }
+
+    /// Whether `--exclude` matches `rel`, or a directory above it.
+    fn excluded(&self, rel: &[u8]) -> bool {
+        let Some(set) = &self.exclude else {
+            return false;
+        };
+        let mut ancestors = rel
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b == b'/')
+            .map(|(i, _)| Path::new(std::ffi::OsStr::from_bytes(&rel[..i])));
+        set.is_match(Path::new(std::ffi::OsStr::from_bytes(rel)))
+            || ancestors.any(|a| set.is_match(a))
+    }
 }
 
 /// Globs as `--glob` and `--exclude` take them, matched against paths
-/// relative to the root: a pattern starting with `/` is anchored at the
-/// root, any other matches at every depth; `*` stays within a component and
-/// `**` crosses them; a trailing `/` is dropped.
+/// relative to the root: a pattern starting with `/` or `./` is anchored at
+/// the root, any other matches at every depth; `*` stays within a component
+/// and `**` crosses them; a trailing `/` is dropped. A pattern naming no
+/// path below the root (empty, `/` or `.`) is refused.
 pub fn globs<'a>(patterns: impl IntoIterator<Item = &'a str>) -> Result<GlobSet, String> {
     let mut set = GlobSetBuilder::new();
     for pattern in patterns {
         let trimmed = pattern.trim_end_matches('/');
-        let glob = match trimmed.strip_prefix('/') {
-            Some(anchored) => anchored.to_owned(),
-            None => format!("**/{trimmed}"),
+        let (anchored, rest) = match trimmed.strip_prefix("./") {
+            Some(rest) => (true, rest),
+            None => (trimmed.starts_with('/'), trimmed),
+        };
+        let rest = rest.trim_start_matches('/');
+        if rest.is_empty() || rest == "." {
+            return Err(format!(
+                "{pattern:?}: the pattern names no path below the root"
+            ));
+        }
+        let glob = if anchored {
+            rest.to_owned()
+        } else {
+            format!("**/{rest}")
         };
         set.add(
             GlobBuilder::new(&glob)
@@ -490,8 +534,9 @@ impl SortKey {
     }
 }
 
-/// Sorts `ids` by `key` (path bytewise among equals), reversed with
-/// `reverse`.
+/// Sorts `ids` by `key`, path bytewise among equals; `reverse` reverses
+/// the key, and equals stay in path order (except under [`SortKey::Path`],
+/// which it reverses whole).
 pub fn sort_ids(
     view: &(impl TreeView + ?Sized),
     ids: &mut [u32],
@@ -499,23 +544,39 @@ pub fn sort_ids(
     size: SizeKind,
     reverse: bool,
 ) {
+    sort_ids_by(view, ids, key, reverse, |node| node.size(size));
+}
+
+/// [`sort_ids`], with `size_of` giving the size [`SortKey::Size`] reads.
+pub fn sort_ids_by(
+    view: &(impl TreeView + ?Sized),
+    ids: &mut [u32],
+    key: SortKey,
+    reverse: bool,
+    size_of: impl Fn(&Node<'_>) -> u64,
+) {
     let mut keyed: Vec<(i128, Vec<u8>, u32)> = ids
         .iter()
         .map(|&id| {
             let node = view.node(id);
             let value = match key {
-                SortKey::Size => -i128::from(node.size(size)),
+                SortKey::Size => -i128::from(size_of(&node)),
                 SortKey::Count => -i128::from(node.file_count),
                 SortKey::Mtime => -i128::from(node.max_mtime_ns),
                 SortKey::Path => 0,
             };
-            (value, rel_path(view, id), id)
+            (if reverse { -value } else { value }, rel_path(view, id), id)
         })
         .collect();
-    keyed.sort();
-    if reverse {
-        keyed.reverse();
-    }
+    let paths_reversed = reverse && key == SortKey::Path;
+    keyed.sort_by(|a, b| {
+        let by_path = if paths_reversed {
+            b.1.cmp(&a.1)
+        } else {
+            a.1.cmp(&b.1)
+        };
+        a.0.cmp(&b.0).then(by_path)
+    });
     for (slot, (_, _, id)) in ids.iter_mut().zip(keyed) {
         *slot = id;
     }

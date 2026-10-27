@@ -209,7 +209,7 @@ pub struct QueryArgs {
     #[arg(long, value_name = "REGEX")]
     pub regex: Option<String>,
 
-    /// Show the rows the path filters leave out instead
+    /// Show the rows --glob and --regex leave out instead
     #[arg(long)]
     pub invert: bool,
 

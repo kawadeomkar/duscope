@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -266,12 +266,10 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     // A root given as a symbolic link, or through one, is scanned as the
     // directory it leads to; the envelope keeps the path as given.
     let root = std::fs::canonicalize(&given).unwrap_or_else(|_| given.clone());
-    let opts = options(walk_args, excludes)?;
+    let mut opts = options(walk_args, excludes)?;
     // Ctrl-C stops the walk; if it has not stopped soon after, the process
     // ends anyway. Nothing is written before a scan completes.
-    if duscope_walk::cancel_on_interrupt(&opts.cancel).is_ok() {
-        watch_interrupt(Arc::clone(&opts.cancel));
-    }
+    opts.cancel = interrupt_flag();
     let started = Instant::now();
     let started_ns = now_ns();
     let mut arena = Arena::new(opts.attrs);
@@ -288,14 +286,27 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         return Err(Failure::new(Exit::Runtime, "io_error", e.to_string()));
     }
     // A root that is a directory nobody may list is a permission failure
-    // (exit 4); a directory below it that cannot be read is a partial read.
-    if arena.unreadable().contains_key(&DirId::ROOT) {
-        return Err(Failure::new(
-            Exit::Permission,
-            "permission_denied",
-            format!("permission denied reading {}", given.display()),
-        )
-        .hint("Run duscope scan on a directory you can read"));
+    // (exit 4), one that fails otherwise (EIO, ELOOP) a runtime error; a
+    // directory below it that cannot be read is a partial read.
+    if let Some(&errno) = arena.unreadable().get(&DirId::ROOT) {
+        return Err(if errno == EACCES || errno == EPERM {
+            Failure::new(
+                Exit::Permission,
+                "permission_denied",
+                format!("permission denied reading {}", given.display()),
+            )
+            .hint("Run duscope scan on a directory you can read")
+        } else {
+            Failure::new(
+                Exit::Runtime,
+                "io_error",
+                format!(
+                    "cannot read {}: {}",
+                    given.display(),
+                    std::io::Error::from_raw_os_error(errno)
+                ),
+            )
+        });
     }
     let rollup = roll_up(&mut arena);
     Ok(Scanned {
@@ -363,14 +374,29 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
 }
 
 /// An `--exclude` pattern as the walk matches it, against paths relative to
-/// the root: a pattern starting with `/` is anchored at the root; any other
-/// matches at every depth (`*.tmp` matches `a/b/c.tmp`). `*` stays within a
-/// path component and `**` crosses them; a trailing `/` is dropped.
+/// the root: a pattern starting with `/` or `./` is anchored at the root;
+/// any other matches at every depth (`*.tmp` matches `a/b/c.tmp`). `*` stays
+/// within a path component and `**` crosses them; a trailing `/` is
+/// dropped. A pattern naming nothing below the root (empty, `/` or `.`) is
+/// a usage error.
 fn exclude_glob(pattern: &str, flag: &str) -> Result<Glob, Failure> {
     let trimmed = pattern.trim_end_matches('/');
-    let glob = match trimmed.strip_prefix('/') {
-        Some(anchored) => anchored.to_owned(),
-        None => format!("**/{trimmed}"),
+    let (anchored, rest) = match trimmed.strip_prefix("./") {
+        Some(rest) => (true, rest),
+        None => (trimmed.starts_with('/'), trimmed),
+    };
+    let rest = rest.trim_start_matches('/');
+    if rest.is_empty() || rest == "." {
+        return Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("{flag} {pattern:?}: the pattern names no path below the root"),
+        ));
+    }
+    let glob = if anchored {
+        rest.to_owned()
+    } else {
+        format!("**/{rest}")
     };
     GlobBuilder::new(&glob)
         .literal_separator(true)
@@ -430,28 +456,43 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
 /// a slow machine to notice the flag and end the process.
 const INTERRUPT_GRACE: Duration = Duration::from_millis(100);
 
-/// Ends the process with exit 130 once `flag` has been set for
-/// [`INTERRUPT_GRACE`], in case the walk is still finishing a directory.
-fn watch_interrupt(flag: Arc<AtomicBool>) {
-    let watcher = thread::Builder::new()
-        .name("interrupt".to_owned())
-        .spawn(move || {
-            while !flag.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(5));
-            }
-            thread::sleep(INTERRUPT_GRACE);
-            report_interrupt();
-            std::process::exit(i32::from(Exit::Interrupted.code()));
-        });
-    // Without the watcher the walk still stops; it may take longer.
-    drop(watcher);
+/// The process's Ctrl-C flag, set up once. A watcher thread ends the
+/// process with exit 130 once the flag has been set for
+/// [`INTERRUPT_GRACE`], in case the walk is still finishing a directory;
+/// SIGINT sets the flag only once that thread runs. Where SIGINT was
+/// inherited ignored (a background job), or the thread cannot be started,
+/// Ctrl-C keeps its usual effect and the flag is never set.
+fn interrupt_flag() -> Arc<AtomicBool> {
+    static FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    Arc::clone(FLAG.get_or_init(|| {
+        let flag = Arc::new(AtomicBool::new(false));
+        let disarmed = Arc::new(AtomicBool::new(false));
+        let (interrupted, stand_down) = (Arc::clone(&flag), Arc::clone(&disarmed));
+        let watcher = thread::Builder::new()
+            .name("interrupt".to_owned())
+            .spawn(move || {
+                while !interrupted.load(Ordering::Relaxed) {
+                    if stand_down.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                thread::sleep(INTERRUPT_GRACE);
+                report_interrupt();
+                std::process::exit(i32::from(Exit::Interrupted.code()));
+            });
+        if watcher.is_ok() && !matches!(duscope_walk::cancel_on_interrupt(&flag), Ok(true)) {
+            disarmed.store(true, Ordering::Relaxed);
+        }
+        flag
+    }))
 }
 
 /// Reports Ctrl-C: one line on stderr, once, whatever the format.
 pub fn report_interrupt() {
     static REPORTED: AtomicBool = AtomicBool::new(false);
     if !REPORTED.swap(true, Ordering::SeqCst) {
-        eprintln!("duscope: interrupted");
+        crate::out::stderr_line("duscope: interrupted");
     }
 }
 

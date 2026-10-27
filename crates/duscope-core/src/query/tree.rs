@@ -1,13 +1,15 @@
 //! `tree`: the root and its entries down to `--depth` (default 2), each
 //! directory's children largest first (or in `--sort` order), with each
 //! entry's share of the root and of its parent. `--min-pct` leaves out an
-//! entry below that share of its parent, and what is under it.
+//! entry below that share of its parent, and what is under it. A file whose
+//! bytes are charged elsewhere (a later hard link, a clone) has a share of
+//! nothing and sorts as empty, so the shares add up.
 
 use crate::envelope::{TreeEntry, name_fields};
 
 use super::{
     Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, children, flag_names, kind_name,
-    pct, sort_ids, timegrammar::iso8601,
+    pct, sort_ids_by, timegrammar::iso8601,
 };
 
 /// What `tree` was asked.
@@ -47,7 +49,7 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
     let mut stack = vec![(0u32, root_total)];
     while let Some((id, parent_total)) = stack.pop() {
         let node = view.node(id);
-        let share = pct(node.size(q.size), parent_total);
+        let share = pct(node.counted(q.size), parent_total);
         if id != 0 && share < q.min_pct {
             continue;
         }
@@ -59,7 +61,7 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
         }
         if node.is_dir() && node.depth < depth {
             let mut kids: Vec<u32> = children(view, &node).collect();
-            sort_ids(view, &mut kids, q.sort, q.size, q.reverse);
+            sort_ids_by(view, &mut kids, q.sort, q.reverse, |n| n.counted(q.size));
             let total = node.size(q.size);
             stack.extend(kids.into_iter().rev().map(|kid| (kid, total)));
         }
@@ -89,7 +91,7 @@ fn entry(
         depth: node.depth,
         allocated_bytes: node.allocated,
         apparent_bytes: node.apparent,
-        pct_of_root: pct(node.size(size), root_total),
+        pct_of_root: pct(node.counted(size), root_total),
         pct_of_parent: if node.id == 0 { 100.0 } else { share },
         file_count: node.file_count,
         dir_count: node.dir_count,

@@ -70,6 +70,12 @@ impl Charges {
         !self.uncharged.contains(entry)
     }
 
+    /// Whether `entry` is a later link of an inode, whose apparent size is
+    /// left out of its ancestors' totals too (an uncharged clone's is not).
+    pub fn linked_away(&self, entry: EntryIdx) -> bool {
+        self.linked_away.contains(entry)
+    }
+
     /// The hard-linked inodes, by device and inode number.
     pub fn hardlinks<'a>(&'a self, arena: &'a Arena) -> impl Iterator<Item = HardlinkGroup> + 'a {
         groups(&self.links, move |i| {

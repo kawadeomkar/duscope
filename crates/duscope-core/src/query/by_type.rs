@@ -6,10 +6,14 @@
 //! beneath it), else that of its extension in the classes table. A file
 //! without an extension is `binaries` when the scan collected its mode and
 //! an execute bit is set, `other` otherwise, as is an extension the table
-//! does not list. Hard links and clones count once, at the entry charged
-//! with them. `other` is always the last row.
+//! does not list; a directory rule matching a directory above the root
+//! applies too. A hard-linked file counts once, at the link charged with
+//! it; a clone's allocated bytes count at the member charged with them,
+//! its apparent bytes and the file itself at each member, as in the
+//! totals. `other` is always the last row.
 
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 use crate::envelope::{ByTypeEntry, Example};
 use crate::rules::{Class, Classes, ext};
@@ -97,23 +101,31 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
     }
 }
 
+/// The names of the directories above `root`, outermost first, which the
+/// directory rules match with the names below them; and the class a rule
+/// gives a directory among them, the outermost's, which everything under
+/// the root then takes.
+pub fn root_dirs<'p>(classes: &Classes, root: &'p Path) -> (Vec<&'p [u8]>, Option<Class>) {
+    let mut components: Vec<&[u8]> = root
+        .as_os_str()
+        .as_bytes()
+        .split(|&b| b == b'/')
+        .filter(|c| !c.is_empty())
+        .collect();
+    components.pop();
+    let class = (1..=components.len()).find_map(|end| classes.of_dir(&components[..end]));
+    (components, class)
+}
+
 /// Each class's files under the root, by [`index`].
 fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
     let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
     let root = view.node(0);
     // The directory rules match a directory's last path components, the
     // root's own included.
-    let mut components: Vec<&[u8]> = view
-        .root_path()
-        .as_os_str()
-        .as_bytes()
-        .split(|&b| b == b'/')
-        .filter(|c| !c.is_empty())
-        .collect();
-    let base = components.len().saturating_sub(1);
-    components.truncate(base);
+    let (mut components, above) = root_dirs(q.classes, view.root_path());
     // The directories open above the current id: (last id, its class).
-    let mut open: Vec<(u32, Option<Class>)> = Vec::new();
+    let mut open: Vec<(u32, Option<Class>)> = vec![(u32::MAX, above)];
     for id in 0..=root.last_id {
         let node = view.node(id);
         while open.last().is_some_and(|&(last, _)| id > last) {
@@ -127,7 +139,7 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
             open.push((node.last_id, class));
             continue;
         }
-        if !node.charged || !q.filters.keeps(view, &node, q.size) {
+        if node.linked_away || !q.filters.keeps(view, &node, q.size) {
             continue;
         }
         let class = inherited.unwrap_or_else(|| {
@@ -144,11 +156,11 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
             }
         });
         let tally = &mut tallies[index(class)];
-        tally.allocated += node.allocated;
-        tally.apparent += node.apparent;
+        tally.allocated += node.counted(SizeKind::Allocated);
+        tally.apparent += node.counted(SizeKind::Apparent);
         tally.files += 1;
         if q.examples > 0 {
-            let size = node.size(q.size);
+            let size = node.counted(q.size);
             let at = tally
                 .largest
                 .partition_point(|&(s, other)| s > size || (s == size && other < id));

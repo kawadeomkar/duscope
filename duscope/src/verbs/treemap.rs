@@ -75,14 +75,19 @@ pub fn draw(scanned: &Scanned, args: &ScanArgs, output: &Output) -> Result<(), F
     let view = scanned.view();
     let block = scan::scan_block(scanned, &args.walk, size);
     let root = view.root_path().display().to_string();
+    // A terminal without UTF-8 gets ASCII separators.
+    let dot = match opts.glyphs {
+        Glyphs::Unicode => "·",
+        Glyphs::Ascii => "-",
+    };
     let footer = Footer {
         legend: legend(&view, &classes, size),
-        summary: scan::footer(&block, scanned, output),
+        summary: scan::footer(&block, scanned, output).replace('·', dot),
         warning: scan::warnings(scanned)
             .first()
             .map(|w| format!("warning: {}", w.message)),
         next: format!(
-            "next: duscope top {root} --depth 2 · duscope by-type {root} · duscope stale {root}"
+            "next: duscope top {root} --depth 2 {dot} duscope by-type {root} {dot} duscope stale {root}"
         ),
     };
     let buffer = frame(&view, &opts, &footer, columns, rows);

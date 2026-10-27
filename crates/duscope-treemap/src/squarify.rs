@@ -6,7 +6,9 @@
 //! The edges are computed as floats, then rounded to whole units. Each edge
 //! is computed once and shared by the tiles on both sides of it, and the
 //! last strip and the last tile of a strip end on the area's own edge, so
-//! the rounded tiles cover the area exactly.
+//! the rounded tiles cover the area exactly. A strip never reaches past the
+//! area's edge, however the floats round: weights a quintillion times apart
+//! leave the later strips with no room, and their tiles empty.
 
 use crate::Rect;
 
@@ -41,15 +43,18 @@ pub(crate) fn in_order(items: &[(u64, usize)], area: Rect) -> Vec<(usize, Rect)>
         // A strip along the shorter side: a column when what is left is
         // wider than tall (or square), a row otherwise.
         let column = x1 - x0 >= y1 - y0;
-        let side = if column { y1 - y0 } else { x1 - x0 };
+        let side = if column { y1 - y0 } else { x1 - x0 }.max(0.0);
         let len = strip(left, side, k);
         let (row, after) = left.split_at(len);
         let sum: f64 = row.iter().map(|&(w, _)| weight(w)).sum();
         let start = if column { x0 } else { y0 };
+        let edge_of_area = if column { x1 } else { y1 };
         let far = if after.is_empty() {
-            if column { x1 } else { y1 }
+            edge_of_area
         } else {
-            start + sum * k / side
+            // On a side of no length the quotient is infinite or NaN, and
+            // min takes the edge.
+            (start + sum * k / side).min(edge_of_area)
         };
         // The tiles' edges along the strip, the last on the area's edge.
         let (along, end) = if column { (y0, y1) } else { (x0, x1) };
@@ -104,7 +109,12 @@ fn strip(items: &[(u64, usize)], side: f64, k: f64) -> usize {
 /// nearest unit (halves up).
 fn snapped(left: f64, top: f64, right: f64, bottom: f64) -> Rect {
     let (x, y) = (snap(left), snap(top));
-    Rect::new(x, y, snap(right) - x, snap(bottom) - y)
+    Rect::new(
+        x,
+        y,
+        snap(right).saturating_sub(x),
+        snap(bottom).saturating_sub(y),
+    )
 }
 
 // Edges lie between 0 and u16::MAX, so the cast is exact after rounding.

@@ -46,8 +46,15 @@ fn scaled(bytes: u64, base: u64, units: &[&str]) -> String {
     if unit == 0 {
         return format!("{bytes} B");
     }
-    // One decimal from integer arithmetic: tenths of the unit, rounded.
-    let tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
+    // One decimal from integer arithmetic: tenths of the unit, rounded; a
+    // value that rounds up to the next unit is shown in it (1.0 MiB, not
+    // 1024.0 KiB).
+    let mut tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
+    if tenths >= u128::from(base) * 10 && unit + 1 < units.len() {
+        divisor *= u128::from(base);
+        unit += 1;
+        tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
+    }
     format!("{}.{} {}", tenths / 10, tenths % 10, units[unit])
 }
 
@@ -136,6 +143,9 @@ mod tests {
         assert_eq!(si.size(1000), "1.0 kB");
         assert_eq!(bytes.size(442_701_234_176), "442701234176");
         assert_eq!(Units::default().size(u64::MAX), "16.0 EiB");
+        // A value that rounds up to the next unit is shown in it.
+        assert_eq!(Units::default().size(1_048_575), "1.0 MiB");
+        assert_eq!(si.size(999_999), "1.0 MB");
     }
 
     #[test]

@@ -55,11 +55,13 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
     // Each row's id and the ids it was cut through.
     let mut rows: Vec<(u32, Vec<u32>)> = Vec::new();
     if q.files {
+        // A root that is a file is its own one row.
         let max = q.depth.unwrap_or(u32::MAX);
         rows.extend(
-            (1..=root.last_id)
+            (0..=root.last_id)
                 .map(|id| view.node(id))
                 .filter(|n| !n.is_dir() && n.depth <= max)
+                .filter(|n| q.filters.keeps(view, n, q.size))
                 .map(|n| (n.id, Vec::new())),
         );
     } else if root.is_dir() {
@@ -72,8 +74,13 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
             }
             let has_subdirs = node.last_id > node.files_end;
             if node.depth >= depth || !has_subdirs {
+                // The filters judge the directory at the listed depth; the
+                // row it is cut through to stands for it.
+                if !q.filters.keeps(view, &node, q.size) {
+                    continue;
+                }
                 rows.push(if q.cut_through {
-                    cut_through(view, node, q.size)
+                    cut_through(view, node, q.size, &q.filters)
                 } else {
                     (id, Vec::new())
                 });
@@ -82,7 +89,6 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
             }
         }
     }
-    rows.retain(|(id, _)| q.filters.keeps(view, &view.node(*id), q.size));
     let total_count = rows.len() as u64;
     let mut ids: Vec<u32> = rows.iter().map(|(id, _)| *id).collect();
     sort_ids(view, &mut ids, q.sort, q.size, q.reverse);
@@ -107,11 +113,13 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
     }
 }
 
-/// The row a directory becomes: itself, or the child it is cut through to.
+/// The row a directory becomes: itself, or the child it is cut through to,
+/// never one `--exclude` leaves out.
 fn cut_through<'v, V: TreeView + ?Sized>(
     view: &'v V,
     mut node: Node<'v>,
     size: SizeKind,
+    filters: &Filters,
 ) -> (u32, Vec<u32>) {
     let mut via = Vec::new();
     for _ in 0..CUT_THROUGH_LEVELS {
@@ -123,7 +131,7 @@ fn cut_through<'v, V: TreeView + ?Sized>(
                 u128::from(child.size(size)) * 100 >= bytes * u128::from(CUT_THROUGH_PCT)
             });
         match dominant {
-            Some(child) if bytes > 0 => {
+            Some(child) if bytes > 0 && !filters.excludes(view, &child) => {
                 via.push(node.id);
                 node = child;
             }

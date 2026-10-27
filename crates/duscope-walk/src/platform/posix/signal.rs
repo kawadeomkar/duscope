@@ -20,9 +20,22 @@ extern "C" fn on_interrupt(_signal: libc::c_int) {
     }
 }
 
-/// Installs the handler, which sets `flag` on SIGINT. A flag set by an
-/// earlier call stays allocated, since the handler may be reading it.
-pub(crate) fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<()> {
+/// Installs the handler, which sets `flag` on SIGINT; `false`, installing
+/// nothing, when SIGINT is ignored (as the shell leaves it for a background
+/// job). A flag set by an earlier call stays allocated, since the handler
+/// may be reading it.
+pub(crate) fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<bool> {
+    // SAFETY: `sigaction` is plain data, for which all-zero bytes are a
+    // valid value.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: a null new action only reads the current one into `current`,
+    // which lives through the call.
+    if unsafe { libc::sigaction(libc::SIGINT, ptr::null(), &raw mut current) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if current.sa_sigaction == libc::SIG_IGN {
+        return Ok(false);
+    }
     FLAG.store(
         Arc::into_raw(Arc::clone(flag)).cast_mut(),
         Ordering::Release,
@@ -39,7 +52,7 @@ pub(crate) fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<()> {
         libc::sigaction(libc::SIGINT, &raw const action, ptr::null_mut())
     };
     if installed == 0 {
-        Ok(())
+        Ok(true)
     } else {
         Err(io::Error::last_os_error())
     }
