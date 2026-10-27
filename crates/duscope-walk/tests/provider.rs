@@ -4,6 +4,10 @@
 //! first link, and sums 512-byte blocks: `st_blocks` for disk usage, the
 //! apparent size rounded up to whole blocks for `-A` (macOS) and
 //! `--apparent-size` (GNU). The walk's entries are summed the same way.
+//!
+//! This file holds the one `cfg(target_os)` outside `src/platform/` that the
+//! scanner's tests need: the facts it selects on are about the two `du`
+//! implementations it compares against, not about the scanner.
 
 // Linux has no provider until P1-WALK-02, which adds its `du` check here.
 #![cfg(target_os = "macos")]
