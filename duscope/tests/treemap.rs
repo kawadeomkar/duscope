@@ -242,6 +242,69 @@ fn p1_map_02_buffer_snapshots_on_the_fixture_tree() {
     }
 }
 
+#[test]
+fn p1_map_02_buffer_snapshots_of_the_map_flags() {
+    let env = TestEnv::new();
+    let root = env.fixtures().path("home");
+    let mut arena = Arena::new(Attrs::Basic);
+    let walk_opts = WalkOptions {
+        threads: 4,
+        ..WalkOptions::default()
+    };
+    walk(&root, &walk_opts, |event| arena.push(event).unwrap()).unwrap();
+    let rollup = roll_up(&mut arena);
+    let view = ArenaView::new(&arena, &rollup, root.clone());
+    let classes = Classes::vendored();
+    let mocha = Pack::named("mocha").unwrap();
+    let footer = Footer {
+        summary: "<summary>".to_owned(),
+        next: "<next>".to_owned(),
+        ..Footer::default()
+    };
+    let base = PaintOpts {
+        size: SizeKind::Allocated,
+        ..opts(&mocha, &classes, Glyphs::Unicode)
+    };
+    let os = std::env::consts::OS;
+    for (name, opts) in [
+        (
+            "min_tile_4",
+            PaintOpts {
+                min_tile: 4,
+                ..base.clone()
+            },
+        ),
+        (
+            "pool_files",
+            PaintOpts {
+                pool_files: true,
+                ..base.clone()
+            },
+        ),
+        (
+            "depth_1",
+            PaintOpts {
+                depth: Some(1),
+                ..base.clone()
+            },
+        ),
+    ] {
+        let buffer = frame(&view, &opts, &footer, 80, 24);
+        golden(
+            &format!("scan_treemap_{name}_80x24@{os}.snap"),
+            &buffer.snapshot(),
+        );
+    }
+    // Each flag changes the picture.
+    let plain = frame(&view, &base, &footer, 80, 24).snapshot();
+    for name in ["min_tile_4", "pool_files", "depth_1"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden")
+            .join(format!("scan_treemap_{name}_80x24@{os}.snap"));
+        assert_ne!(fs::read_to_string(path).unwrap(), plain, "{name}");
+    }
+}
+
 /// The arena and roll-up of a walk of `root`.
 fn scan_tree(root: &Path) -> (Arena, duscope_core::rollup::RollUp) {
     let mut arena = Arena::new(Attrs::Basic);
