@@ -421,3 +421,56 @@ fn p1_cli_02_a_root_given_as_a_link_is_read_where_it_leads() {
     );
     assert_eq!(dangling["scan"]["file_count"], 1);
 }
+
+#[test]
+fn p1_cli_02_warnings_stay_off_stdout_in_machine_formats() {
+    let env = TestEnv::new();
+    let fixtures = env.fixtures();
+    if !fixtures.unreadable_effective() {
+        eprintln!("skipped: mode 000 does not deny this process access");
+        return;
+    }
+    let tree = fixtures.case_root("unreadable");
+    // --json: one line on stdout with the warning inside the envelope, and
+    // the footer alone on stderr.
+    let out = duscope(&env)
+        .args(["top", "--json"])
+        .arg(&tree)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(envelope["warnings"][0]["code"], "partial_read");
+    assert_eq!(envelope["scan"]["error_count"], 1);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains(" allocated · "), "{stderr}");
+    // ndjson: the warning is in the end line.
+    let out = duscope(&env)
+        .args(["top", "--format", "ndjson"])
+        .arg(&tree)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let end: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!(end["warnings"][0]["code"], "partial_read");
+    assert_eq!(String::from_utf8(out.stderr).unwrap().lines().count(), 1);
+    // --plain: the warning and its hint on stderr, none of it on stdout.
+    let out = duscope(&env)
+        .args(["top", "--plain"])
+        .arg(&tree)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(!stdout.contains("could not be read"), "{stdout}");
+    assert!(!stdout.contains("hint:"), "{stdout}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("warning: 1 directories could not be read"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("hint: Rerun duscope"), "{stderr}");
+}
