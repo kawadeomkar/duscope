@@ -255,3 +255,23 @@ fn p1_cli_03_a_closed_pipe_under_long_output_exits_zero() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.lines().count() <= 1, "{stderr}");
 }
+
+#[test]
+fn p1_cli_03_top_reports_the_depth_it_listed_and_takes_a_file_root() {
+    let env = TestEnv::new();
+    let tree = env.tmp_dir().join("tree");
+    fs::create_dir_all(tree.join("a")).unwrap();
+    fs::write(tree.join("a/f"), "x").unwrap();
+    let tree = tree.to_str().unwrap();
+    // --depth 0 lists depth 1, and says so.
+    let (_, top) = json(&env, &["top", "--depth", "0", tree]);
+    assert_eq!(top["query"]["depth"], 1);
+    // A file as the root: one row for top --files and tree, none for top.
+    let file = format!("{tree}/a/f");
+    let (_, files) = json(&env, &["top", "--files", &file]);
+    assert_eq!(files["total_count"], 1);
+    let (_, dirs) = json(&env, &["top", &file]);
+    assert_eq!(dirs["total_count"], 0);
+    let (_, rows) = json(&env, &["tree", &file]);
+    assert_eq!(rows["entries"][0]["kind"], "file");
+}

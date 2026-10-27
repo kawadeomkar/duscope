@@ -147,3 +147,32 @@ fn p1_walk_09_ignore_from_honours_negations() {
         .assert()
         .code(2);
 }
+
+#[test]
+fn p1_walk_09_a_pattern_naming_nothing_is_refused_and_dot_slash_anchors() {
+    let env = TestEnv::new();
+    let tree = env.tmp_dir().join("tree");
+    for file in ["build/a.o", "src/build/b.o", "src/main.rs"] {
+        let path = tree.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "x").unwrap();
+    }
+    for pattern in ["", "/", "//", ".", "./"] {
+        duscope(&env)
+            .args(["scan", "--json", "--exclude", pattern])
+            .arg(&tree)
+            .assert()
+            .code(2);
+    }
+    // Anchored at the root: build/ is left out, src/build/ is not.
+    for pattern in ["/build", "./build", "//build", "./build/"] {
+        let out = duscope(&env)
+            .args(["scan", "--json", "--exclude", pattern])
+            .arg(&tree)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{pattern}");
+        let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(envelope["scan"]["file_count"], 2, "{pattern}");
+    }
+}

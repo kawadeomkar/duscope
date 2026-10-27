@@ -127,7 +127,7 @@ pub fn layout(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min_tile
                 small: Some(small(pool, area)),
             };
         }
-        let pool_weight: u64 = pool.iter().map(|&(w, _)| w).sum();
+        let pool_weight = sum(pool);
         let mut placing = head.to_vec();
         if !pool.is_empty() {
             placing.push((boost.unwrap_or(pool_weight).max(pool_weight), POOL));
@@ -151,11 +151,13 @@ pub fn layout(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min_tile
         let small = match placed.get(head.len()) {
             None => None,
             Some(&(_, rect)) if !rect.fits(min) => {
+                // Double the boost up to the smallest tile's weight, which
+                // is tried too; past it the pool takes that tile.
                 let smallest = head.last().map_or(0, |&(w, _)| w);
-                let more =
-                    boost.map_or_else(|| pool_share(head, area, min), |b: u64| b.saturating_mul(2));
-                if more < smallest {
-                    boost = Some(more);
+                if boost.unwrap_or(0) < smallest {
+                    let more = boost
+                        .map_or_else(|| pool_share(head, area, min), |b: u64| b.saturating_mul(2));
+                    boost = Some(more.min(smallest));
                 } else {
                     kept -= 1;
                     boost = None;
@@ -187,9 +189,14 @@ fn pool_share(head: &[(u64, usize)], area: Rect, min: u16) -> u64 {
 fn small(items: &[(u64, usize)], rect: Rect) -> Small {
     Small {
         ids: items.iter().map(|&(_, id)| id).collect(),
-        weight: items.iter().map(|&(w, _)| w).sum(),
+        weight: sum(items),
         rect,
     }
+}
+
+/// The weights of `items` added up, at most `u64::MAX`.
+fn sum(items: &[(u64, usize)]) -> u64 {
+    items.iter().fold(0, |sum, &(w, _)| sum.saturating_add(w))
 }
 
 #[cfg(test)]

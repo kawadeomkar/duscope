@@ -2,7 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use duscope_walk::{Attrs, MemProvider, WalkOptions, walk_with};
+use duscope_walk::{
+    Attrs, Boundary, DirId, Entry, Flags, Kind, MemProvider, NameRef, ScanEvent, Share,
+    WalkOptions, walk_with,
+};
 
 use super::{
     ArenaView, ByTypeQuery, Filters, SizeKind, SortKey, StaleQuery, TopQuery, TreeQuery, TreeView,
@@ -398,4 +401,225 @@ fn p1_cli_03_sort_keys_and_reverse() {
     );
     let _ = Path::new("/");
     assert!(view.len() > 10);
+}
+
+/// An entry of a synthetic stream: 1000 bytes, 4096 on disk.
+fn entry(name: &str, parent: u32, kind: Kind) -> Entry {
+    Entry {
+        name: NameRef::from(name),
+        parent: DirId::new(parent),
+        dir: None,
+        kind,
+        apparent: 1000,
+        allocated: 4096,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        nlink: 1,
+        dev: 7,
+        ino: 0,
+        mnt_id: 7,
+        share: Share::None,
+        boundary: Boundary::None,
+        flags: Flags::empty(),
+        full: None,
+    }
+}
+
+/// The arena and roll-up of a synthetic stream.
+fn stream(entries: Vec<Entry>) -> (Arena, RollUp) {
+    let mut arena = Arena::new(Attrs::Basic);
+    for e in entries {
+        arena.push(ScanEvent::Entry(e)).unwrap();
+    }
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
+#[test]
+fn p1_cli_03_a_file_root_is_its_own_row() {
+    let (arena, rollup) = stream(vec![entry("f.txt", 0, Kind::File)]);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r/f.txt"));
+    let root = view.node(0);
+    assert_eq!((root.depth, root.parent, root.allocated), (0, 0, 4096));
+    let files = top(
+        &view,
+        &TopQuery {
+            files: true,
+            ..TopQuery::default()
+        },
+    );
+    assert_eq!(files.total_count, 1);
+    assert_eq!(files.entries[0].path, "/r/f.txt");
+    assert_eq!(top(&view, &TopQuery::default()).total_count, 0);
+    assert_eq!(tree(&view, &TreeQuery::default()).total_count, 1);
+}
+
+#[test]
+fn p1_cli_03_shared_bytes_count_once_in_tree_and_by_type() {
+    let dir = |name: &str, parent, id| Entry {
+        dir: Some(DirId::new(id)),
+        apparent: 0,
+        allocated: 0,
+        ..entry(name, parent, Kind::Dir)
+    };
+    let link = |name: &str, parent| Entry {
+        nlink: 2,
+        ino: 99,
+        share: Share::Hardlink,
+        ..entry(name, parent, Kind::File)
+    };
+    let clone = |name: &str, parent| Entry {
+        share: Share::Clone(5),
+        flags: Flags::MAY_SHARE | Flags::SHARES_ALL,
+        ..entry(name, parent, Kind::File)
+    };
+    // a/x.txt and b/x.txt are one inode; a/c.txt and b/c.txt one clone
+    // group: b's are charged at a's.
+    let (arena, rollup) = stream(vec![
+        dir("r", 0, 0),
+        dir("a", 0, 1),
+        dir("b", 0, 2),
+        link("x.txt", 1),
+        clone("c.txt", 1),
+        link("x.txt", 2),
+        clone("c.txt", 2),
+    ]);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
+    let root = view.node(0);
+    assert_eq!((root.allocated, root.apparent), (2 * 4096, 3 * 1000));
+    let classes = Classes::vendored();
+    for size in [SizeKind::Allocated, SizeKind::Apparent] {
+        let page = by_type(
+            &view,
+            &ByTypeQuery {
+                classes: &classes,
+                examples: 3,
+                filters: Filters::default(),
+                limit: None,
+                size,
+            },
+        );
+        // The classes add up to the root: the later link not at all, the
+        // uncharged clone with its apparent bytes and as a file.
+        let sum =
+            |f: fn(&crate::envelope::ByTypeEntry) -> u64| page.entries.iter().map(f).sum::<u64>();
+        assert_eq!(sum(|e| e.allocated_bytes), root.allocated);
+        assert_eq!(sum(|e| e.apparent_bytes), root.apparent);
+        assert_eq!(sum(|e| e.file_count), 3);
+        // Within a directory, the shares add up to at most 100%.
+        let page = tree(
+            &view,
+            &TreeQuery {
+                size,
+                ..TreeQuery::default()
+            },
+        );
+        let b: Vec<(String, f64)> = page
+            .entries
+            .iter()
+            .filter(|e| e.path.starts_with("/r/b/"))
+            .map(|e| (e.name.clone(), e.pct_of_parent))
+            .collect();
+        let expected = match size {
+            SizeKind::Allocated => [("c.txt".to_owned(), 0.0), ("x.txt".to_owned(), 0.0)],
+            SizeKind::Apparent => [("c.txt".to_owned(), 100.0), ("x.txt".to_owned(), 0.0)],
+        };
+        assert_eq!(b, expected, "{size:?}");
+    }
+}
+
+#[test]
+fn p1_cli_03_filters_judge_the_listed_directory_before_cut_through() {
+    let tree = home();
+    let (arena, rollup) = scan(&tree);
+    let view = view(&arena, &rollup, &tree);
+    let rows = |filters: Filters| {
+        let page = top(
+            &view,
+            &TopQuery {
+                cut_through: true,
+                filters,
+                ..TopQuery::default()
+            },
+        );
+        page.entries
+            .iter()
+            .map(|e| e.path.strip_prefix("/home/").unwrap_or(&e.path).to_owned())
+            .collect::<Vec<_>>()
+    };
+    // --glob names the directory listed; its row is still cut through.
+    let glob = Filters {
+        glob: Some(globs(["Library"]).unwrap()),
+        ..Filters::default()
+    };
+    assert_eq!(rows(glob), ["Library/Containers/app"]);
+    // Cut-through stops above a directory --exclude leaves out.
+    let exclude = Filters {
+        exclude: Some(globs(["app"]).unwrap()),
+        ..Filters::default()
+    };
+    assert_eq!(rows(exclude), ["Library/Containers", "dev", "Movies"]);
+}
+
+#[test]
+fn p1_cli_03_a_directory_rule_above_the_root_applies_below_it() {
+    let mut tree = MemProvider::new("/p");
+    tree.file("logo.png", 5 * MIB).file("index.js", MIB);
+    let (arena, rollup) = scan(&tree);
+    // Scanned as a package inside node_modules: everything is code.
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/w/node_modules/pkg"));
+    let classes = Classes::vendored();
+    let page = by_type(
+        &view,
+        &ByTypeQuery {
+            classes: &classes,
+            examples: 0,
+            filters: Filters::default(),
+            limit: None,
+            size: SizeKind::Apparent,
+        },
+    );
+    let summary: Vec<(&str, u64)> = page
+        .entries
+        .iter()
+        .map(|e| (e.class, e.file_count))
+        .collect();
+    assert_eq!(summary, [("code", 2)]);
+}
+
+#[test]
+fn p1_cli_03_reverse_keeps_ties_in_path_order() {
+    let mut tree = MemProvider::new("/t");
+    tree.file("b/f", MIB).file("a/f", MIB).file("c/f", MIB);
+    let (arena, rollup) = scan(&tree);
+    let view = view(&arena, &rollup, &tree);
+    let order = |sort, reverse| {
+        top(
+            &view,
+            &TopQuery {
+                sort,
+                reverse,
+                ..TopQuery::default()
+            },
+        )
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(order(SortKey::Size, false), ["a", "b", "c"]);
+    assert_eq!(order(SortKey::Size, true), ["a", "b", "c"]);
+    assert_eq!(order(SortKey::Path, true), ["c", "b", "a"]);
+}
+
+#[test]
+fn p1_cli_03_globs_refuse_empty_patterns_and_anchor_dot_slash() {
+    for pattern in ["", "/", "//", ".", "./"] {
+        assert!(globs([pattern]).is_err(), "{pattern:?}");
+    }
+    for pattern in ["/x", "./x", "//x"] {
+        let set = globs([pattern]).unwrap();
+        assert!(set.is_match("x") && !set.is_match("y/x"), "{pattern:?}");
+    }
+    assert!(globs(["x"]).unwrap().is_match("y/x"));
 }
