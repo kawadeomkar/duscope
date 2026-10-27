@@ -393,9 +393,13 @@ pub fn walk_with<P: Provider + ?Sized>(
         ..WalkSummary::default()
     };
     let root_dir = DirHandle::new(DirId::ROOT, root.to_owned(), &entry, None);
-    let root_mnt_id = entry.mnt_id;
+    let (root_dev, root_mnt_id) = (entry.dev, entry.mnt_id);
     sink(ScanEvent::Entry(entry));
     if let Ok(mut volume) = provider.volume(root) {
+        // The root's own identity, as every other volume row takes its
+        // entry's: on macOS a volume's statfs device can be its volume
+        // group's, shared by every volume in the group.
+        volume.dev = root_dev;
         volume.mnt_id = root_mnt_id;
         volume.reason = None;
         summary.volumes += 1;

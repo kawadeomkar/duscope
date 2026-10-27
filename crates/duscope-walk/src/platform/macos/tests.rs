@@ -1077,6 +1077,30 @@ fn p1_walk_06_the_system_and_data_volumes_have_their_own_mount_ids() {
     let root = crate::Provider::root(&MacProvider::new(), Path::new("/"), &WalkOptions::default())
         .unwrap();
     assert_eq!(root.mnt_id, system.mnt_id);
+    // The root's volume row carries the root entry's own device, as every
+    // other row carries its entry's, so no two rows share a device: a
+    // System-volume root is not reported with the Data volume's.
+    let opts = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    let (mut root_dev, mut volumes) = (None, Vec::new());
+    walk_with(
+        &MacProvider::new(),
+        Path::new("/System/Volumes"),
+        &opts,
+        |event| match event {
+            ScanEvent::Entry(entry) if entry.dir == Some(crate::DirId::ROOT) => {
+                root_dev = Some(entry.dev);
+            }
+            ScanEvent::Volume(volume) => volumes.push(volume),
+            _ => {}
+        },
+    )
+    .unwrap();
+    assert_eq!(Some(volumes[0].dev), root_dev, "the root's volume row");
+    let devs: std::collections::HashSet<u64> = volumes.iter().map(|v| v.dev).collect();
+    assert_eq!(devs.len(), volumes.len(), "{volumes:?}");
 }
 
 #[test]

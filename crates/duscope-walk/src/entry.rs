@@ -202,7 +202,10 @@ pub struct Entry {
     pub ctime_ns: i64,
     /// Hard-link count.
     pub nlink: u32,
-    /// Device id.
+    /// Device id. On macOS it is the volume's own device
+    /// (`FSOPT_RETURN_REALDEV`), which inside a volume group differs from
+    /// the group's shared `st_dev`: a later `(dev, ino)` check against
+    /// `lstat` must read the device the same way.
     pub dev: u64,
     /// Inode number.
     pub ino: u64,
