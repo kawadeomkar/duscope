@@ -4,7 +4,7 @@
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Once;
@@ -87,13 +87,21 @@ pub(crate) fn with_c_name<R>(
 pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
     let path = c_path(path)?;
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `path` is a NUL-terminated C string that outlives the call.
+    parked(|| unsafe { libc::open(path.as_ptr(), flags) })
+}
+
+/// The descriptor `open` returns, retrying on `EINTR` and parking on
+/// `EMFILE` or `ENFILE` with a growing pause, for up to [`PARK_LIMIT`] in
+/// all, until another worker closes one.
+fn parked(mut open: impl FnMut() -> libc::c_int) -> io::Result<OwnedFd> {
     let mut parked = Duration::ZERO;
     let mut pause = Duration::from_millis(1);
     loop {
-        // SAFETY: `path` is a NUL-terminated C string that outlives the call.
-        let fd = unsafe { libc::open(path.as_ptr(), flags) };
+        let fd = open();
         if fd >= 0 {
-            // SAFETY: `fd` was just returned by open and is owned by nothing else.
+            // SAFETY: `fd` was just returned by `open` and is owned by
+            // nothing else.
             return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
         }
         let error = io::Error::last_os_error();
@@ -170,11 +178,10 @@ pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
 /// of the descriptor left off.
 pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>> {
     // SAFETY: `dir` is open for the borrow; F_DUPFD_CLOEXEC returns a new
-    // descriptor or -1.
-    let dup = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if dup < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    // descriptor or -1. The duplicate waits for a free descriptor as an
+    // open does.
+    let dup =
+        parked(|| unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) })?.into_raw_fd();
     // SAFETY: `dup` is a descriptor this function owns; fdopendir takes it
     // over on success, and on failure it is closed here.
     let stream = unsafe { libc::fdopendir(dup) };
@@ -237,7 +244,9 @@ mod tests {
 
     use duscope_testkit::TestEnv;
 
-    use super::{NOFILE_TARGET, OPEN_MAX, open_dir, raise_nofile_limit, with_c_name};
+    use std::os::fd::AsFd;
+
+    use super::{NOFILE_TARGET, OPEN_MAX, list_names, open_dir, raise_nofile_limit, with_c_name};
 
     /// The directory the child process opens under a full descriptor table.
     const CHILD_DIR: &str = "DUSCOPE_TEST_EMFILE_DIR";
@@ -300,6 +309,7 @@ mod tests {
         let Some(dir) = std::env::var_os(CHILD_DIR).map(PathBuf::from) else {
             return;
         };
+        let dir_fd = open_dir(&dir).unwrap();
         let mut limit = nofile();
         limit.rlim_cur = limit.rlim_cur.min(64);
         // SAFETY: `limit` is a valid rlimit that setrlimit only reads.
@@ -323,6 +333,24 @@ mod tests {
         held.pop();
         let (result, waited) = opener.join().unwrap();
         result.expect("the open parked until a descriptor freed, then succeeded");
+        assert!(waited >= Duration::from_millis(150), "it waited {waited:?}");
+        // Fill the table again: listing through a held descriptor needs a
+        // duplicate, which parks the same way.
+        let full = loop {
+            match File::open("/dev/null") {
+                Ok(file) => held.push(file),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(full.raw_os_error(), Some(libc::EMFILE));
+        let listing = thread::spawn(move || {
+            let start = Instant::now();
+            (list_names(dir_fd.as_fd()).map(drop), start.elapsed())
+        });
+        thread::sleep(Duration::from_millis(200));
+        held.pop();
+        let (result, waited) = listing.join().unwrap();
+        result.expect("the duplicate parked until a descriptor freed, then succeeded");
         assert!(waited >= Duration::from_millis(150), "it waited {waited:?}");
     }
 
