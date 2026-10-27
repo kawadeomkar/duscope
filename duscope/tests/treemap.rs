@@ -198,3 +198,131 @@ fn p1_map_02_buffer_snapshots_on_the_fixture_tree() {
         }
     }
 }
+
+/// The arena and roll-up of a walk of `root`.
+fn scan_tree(root: &Path) -> (Arena, duscope_core::rollup::RollUp) {
+    let mut arena = Arena::new(Attrs::Basic);
+    walk(root, &WalkOptions::default(), |event| {
+        arena.push(event).unwrap();
+    })
+    .unwrap();
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
+/// The columns `line` takes, for the characters the tests below use:
+/// combining accents take none, CJK characters two.
+fn columns(line: &str) -> usize {
+    line.chars()
+        .map(|c| match u32::from(c) {
+            0x0300..=0x036F => 0,
+            0x3000..=0x9FFF => 2,
+            _ => 1,
+        })
+        .sum()
+}
+
+fn opts<'a>(pack: &'a Pack, classes: &'a Classes, glyphs: Glyphs) -> PaintOpts<'a> {
+    PaintOpts {
+        pack,
+        color_by: ColorBy::Type,
+        glyphs,
+        depth: None,
+        min_tile: 1,
+        pool_files: false,
+        size: SizeKind::Apparent,
+        now: 0,
+        classes,
+    }
+}
+
+#[test]
+fn p1_map_02_names_cannot_escape_or_misalign_the_map() {
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("names");
+    let mib = 1u64 << 20;
+    for (name, size) in [
+        ("evil\x1b]0;PWNED\x07.txt", 4 * mib),
+        ("line\nbreak.txt", 3 * mib),
+        ("写真フォルダの名前.jpg", 3 * mib),
+        ("Beyonce\u{301} re\u{301}sume\u{301}.mp3", 2 * mib),
+        ("写真/a.jpg", 2 * mib),
+    ] {
+        let path = root.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::File::create(&path).unwrap().set_len(size).unwrap();
+    }
+    let (arena, rollup) = scan_tree(&root);
+    let view = ArenaView::new(&arena, &rollup, root.clone());
+    let classes = Classes::vendored();
+    let footer = Footer {
+        summary: "<summary>".to_owned(),
+        next: "next".to_owned(),
+        ..Footer::default()
+    };
+    let mocha = Pack::named("mocha").unwrap();
+    let buffer = frame(
+        &view,
+        &opts(&mocha, &classes, Glyphs::Unicode),
+        &footer,
+        70,
+        14,
+    );
+    let plain = buffer.to_ansi(duscope_treemap::cells::Depth::None);
+    assert!(!plain.contains(['\x1b', '\x07']), "{plain}");
+    assert!(plain.contains("\\x1b"), "the escape is shown: {plain}");
+    // Every row is the terminal's width: no row broken by a newline, none
+    // pushed past the edge by wide characters or cut short by accents.
+    assert_eq!(plain.lines().count(), 13);
+    for line in plain.lines() {
+        assert_eq!(columns(line), 70, "{line:?}");
+    }
+    // In colour, the only escapes are SGR.
+    let colored = buffer.to_ansi(duscope_treemap::cells::Depth::TrueColor);
+    assert!(!colored.contains("\x1b]") && !colored.contains('\x07'));
+    // ASCII glyphs keep the names to ASCII too.
+    let ascii = frame(
+        &view,
+        &opts(&mocha, &classes, Glyphs::Ascii),
+        &footer,
+        70,
+        14,
+    );
+    assert!(
+        ascii
+            .to_ansi(duscope_treemap::cells::Depth::None)
+            .is_ascii()
+    );
+}
+
+#[test]
+fn p1_map_02_a_rule_above_the_root_colours_the_map_as_the_legend() {
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("w/node_modules/pkg");
+    fs::create_dir_all(&root).unwrap();
+    fs::File::create(root.join("logo.png"))
+        .unwrap()
+        .set_len(1 << 20)
+        .unwrap();
+    let (arena, rollup) = scan_tree(&root);
+    let view = ArenaView::new(&arena, &rollup, root.clone());
+    let classes = Classes::vendored();
+    let mocha = Pack::named("mocha").unwrap();
+    // One tile, the png's: code, as node_modules makes it in by-type.
+    let buffer =
+        duscope_treemap::paint::paint(&view, &opts(&mocha, &classes, Glyphs::Unicode), 20, 5);
+    assert_eq!(buffer.get(0, 4).unwrap().bg, mocha.class(Class::Code));
+}
+
+#[test]
+fn p1_map_02_a_terminal_taller_than_the_units_hold_is_capped() {
+    let env = TestEnv::new();
+    let root = env.fixtures().case_root("empty");
+    let (arena, rollup) = scan_tree(&root);
+    let view = ArenaView::new(&arena, &rollup, root.clone());
+    let classes = Classes::vendored();
+    let mocha = Pack::named("mocha").unwrap();
+    let opts = opts(&mocha, &classes, Glyphs::Unicode);
+    let buffer = duscope_treemap::paint::paint(&view, &opts, 1, u16::MAX);
+    assert_eq!(buffer.height(), u16::MAX / 2);
+}

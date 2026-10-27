@@ -18,6 +18,7 @@ mod gp;
 pub mod packs;
 pub mod paint;
 mod squarify;
+mod width;
 
 pub use gp::layout_gp;
 pub use squarify::squarify;

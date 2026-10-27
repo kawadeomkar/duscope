@@ -4,6 +4,8 @@
 
 use std::fmt::Write as _;
 
+use crate::width::{char_width, glyphs};
+
 /// A colour as a cell holds it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Color {
@@ -121,8 +123,11 @@ pub enum Depth {
 /// One terminal cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
-    /// The character.
+    /// The character; `'\0'` in the right half of a wide character, which
+    /// the cell to its left prints.
     pub ch: char,
+    /// Combining marks printed after `ch`; `'\0'` where there are none.
+    pub marks: [char; 2],
     /// Its colour.
     pub fg: Color,
     /// The cell's background.
@@ -135,6 +140,7 @@ impl Default for Cell {
     fn default() -> Cell {
         Cell {
             ch: ' ',
+            marks: ['\0'; 2],
             fg: Color::Reset,
             bg: Color::Reset,
             bold: false,
@@ -170,6 +176,12 @@ impl CellBuffer {
         self.h
     }
 
+    /// Row `y`.
+    fn row(&self, y: u16) -> &[Cell] {
+        let w = usize::from(self.w);
+        &self.cells[usize::from(y) * w..(usize::from(y) + 1) * w]
+    }
+
     /// The cell at column `x`, row `y`.
     pub fn get(&self, x: u16, y: u16) -> Option<&Cell> {
         (x < self.w && y < self.h)
@@ -183,16 +195,29 @@ impl CellBuffer {
     }
 
     /// Writes `text` from column `x` on row `y`, clipped at `max` columns
-    /// and the buffer's edge, keeping each cell's background.
-    pub fn text(&mut self, x: u16, y: u16, text: &str, max: u16, fg: Color, bold: bool) {
-        for (i, ch) in text.chars().take(usize::from(max)).enumerate() {
-            let Ok(i) = u16::try_from(i) else { break };
-            if let Some(cell) = self.get_mut(x.saturating_add(i), y) {
+    /// and the buffer's edge, keeping each cell's background; `ascii` keeps
+    /// it to ASCII. Control characters show as escapes (`\x1b`), and wide
+    /// characters take two columns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text(
+        &mut self,
+        x: u16,
+        y: u16,
+        text: &str,
+        max: u16,
+        fg: Color,
+        bold: bool,
+        ascii: bool,
+    ) {
+        let max = max.min(self.w.saturating_sub(x));
+        lay_out(text, max, ascii, |i, ch, marks| {
+            if let Some(cell) = self.get_mut(x + i, y) {
                 cell.ch = ch;
+                cell.marks = marks;
                 cell.fg = fg;
                 cell.bold = bold;
             }
-        }
+        });
     }
 
     /// The buffer as a terminal shows it: escapes for `depth`, then each
@@ -200,9 +225,13 @@ impl CellBuffer {
     pub fn to_ansi(&self, depth: Depth) -> String {
         let mut out = String::new();
         for y in 0..self.h {
+            let row = self.row(y);
             let mut current: Option<(Color, Color, bool)> = None;
             for x in 0..self.w {
-                let cell = self.cells[usize::from(y) * usize::from(self.w) + usize::from(x)];
+                let cell = row[usize::from(x)];
+                if tail(row, usize::from(x)) {
+                    continue;
+                }
                 let style = (cell.fg, cell.bg, cell.bold);
                 if depth != Depth::None && current != Some(style) {
                     out.push_str("\x1b[0");
@@ -214,7 +243,7 @@ impl CellBuffer {
                     out.push('m');
                     current = Some(style);
                 }
-                out.push(cell.ch);
+                push_cell(&mut out, row, usize::from(x));
             }
             if depth != Depth::None {
                 out.push_str("\x1b[0m");
@@ -229,8 +258,11 @@ impl CellBuffer {
     pub fn snapshot(&self) -> String {
         let mut out = String::new();
         for y in 0..self.h {
-            for x in 0..self.w {
-                out.push(self.cells[usize::from(y) * usize::from(self.w) + usize::from(x)].ch);
+            let row = self.row(y);
+            for x in 0..row.len() {
+                if !tail(row, x) {
+                    push_cell(&mut out, row, x);
+                }
             }
             out.push('\n');
         }
@@ -264,6 +296,49 @@ impl CellBuffer {
 }
 
 /// The SGR parameters for `color` as a foreground or background.
+/// Lays `text` out in at most `max` columns, calling `put` with each
+/// column's offset, character and marks: a wide character's right half is
+/// a `'\0'` cell, and a wide character with one column left is a space.
+pub(crate) fn lay_out(
+    text: &str,
+    max: u16,
+    ascii: bool,
+    mut put: impl FnMut(u16, char, [char; 2]),
+) {
+    let mut at = 0u16;
+    for glyph in glyphs(text, ascii) {
+        if at >= max {
+            break;
+        }
+        if glyph.wide && at + 1 >= max {
+            put(at, ' ', ['\0'; 2]);
+            break;
+        }
+        put(at, glyph.ch, glyph.marks);
+        if glyph.wide {
+            put(at + 1, '\0', ['\0'; 2]);
+            at += 1;
+        }
+        at += 1;
+    }
+}
+
+/// Whether the cell at `x` is the right half of the wide character before
+/// it, which prints both columns.
+fn tail(row: &[Cell], x: usize) -> bool {
+    row[x].ch == '\0' && x > 0 && char_width(row[x - 1].ch) == 2
+}
+
+/// Writes the cell at `x` of `row`: its character and marks, or a space
+/// for a half of a wide character whose other half was painted over.
+fn push_cell(out: &mut String, row: &[Cell], x: usize) {
+    let cell = row[x];
+    let whole = cell.ch != '\0'
+        && (char_width(cell.ch) != 2 || row.get(x + 1).is_some_and(|next| next.ch == '\0'));
+    out.push(if whole { cell.ch } else { ' ' });
+    out.extend(cell.marks.iter().filter(|&&m| m != '\0'));
+}
+
 fn sgr(out: &mut String, color: Color, depth: Depth, background: bool) {
     let (base, bright, extended) = if background {
         (40, 100, 48)
@@ -328,7 +403,7 @@ mod tests {
     #[test]
     fn p1_map_02_no_colour_writes_no_escapes() {
         let mut buffer = CellBuffer::new(4, 1);
-        buffer.text(0, 0, "abcdef", 4, Color::Rgb(1, 2, 3), true);
+        buffer.text(0, 0, "abcdef", 4, Color::Rgb(1, 2, 3), true, false);
         assert_eq!(buffer.to_ansi(Depth::None), "abcd\n");
         assert!(
             buffer

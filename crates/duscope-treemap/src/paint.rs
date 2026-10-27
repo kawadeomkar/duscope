@@ -18,15 +18,20 @@
 //! their tile with their colour, every second sibling mixed 20% toward the
 //! base. A leaf of at least 5 columns is labelled `  name `, and one of at
 //! least 8×2 cells gets a second row `  size `, in crust on a light fill and
-//! in the text colour otherwise. What rounds below `--min-tile` is pooled
-//! into the parent's `+N small` tile. With the `no-color` pack tiles are
-//! `░▒▓█` shades by depth and labels carry the class letter.
+//! in whichever of the pack's text, crust and base colours reads best on
+//! the fill (black or white on the 16 ANSI colours). What rounds below
+//! `--min-tile` is pooled into the parent's `+N small` tile. With the
+//! `no-color` pack tiles are `░▒▓█` shades by depth and labels carry the
+//! class letter. Names are measured and cut in terminal columns, with
+//! control characters shown as escapes (`\x1b`); a file whose
+//! bytes are charged elsewhere (a later hard link, a clone) weighs nothing.
 
-use duscope_core::query::{Node, SizeKind, TreeView, children};
+use duscope_core::query::{Node, SizeKind, TreeView, children, root_dirs};
 use duscope_core::rules::{Class, Classes, ext};
 
-use crate::cells::{Cell, CellBuffer, Color};
+use crate::cells::{Cell, CellBuffer, Color, lay_out};
 use crate::packs::Pack;
+use crate::width::{columns, glyphs};
 use crate::{Algorithm, Rect, layout};
 
 /// What colours the tiles.
@@ -97,9 +102,11 @@ struct Painter<'v, 'o, V: TreeView + ?Sized> {
     class_of: Vec<Class>,
 }
 
-/// Paints the scan in `view` as a map of `w` columns and `h` rows.
+/// Paints the scan in `view` as a map of `w` columns and `h` rows, at most
+/// 32767 (twice that in half-cell units).
 pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u16) -> CellBuffer {
-    let h_units = h.saturating_mul(2);
+    let h = h.min(u16::MAX / 2);
+    let h_units = h * 2;
     let mut painter = Painter {
         view,
         opts,
@@ -128,7 +135,8 @@ pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u
 }
 
 /// Each entry's class: a directory's is that of the outermost directory
-/// rule above or at it (`Other` when none), a file's that rule's or its
+/// rule above or at it (`Other` when none), the directories above the root
+/// included as `by-type` reads them, a file's that rule's or its
 /// extension's.
 fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Class> {
     let n = view.len() as usize;
@@ -137,8 +145,8 @@ fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Class> 
         return out;
     }
     let root = view.node(0);
-    let mut components: Vec<&[u8]> = Vec::new();
-    let mut open: Vec<(u32, Option<Class>)> = Vec::new();
+    let (mut components, above) = root_dirs(classes, view.root_path());
+    let mut open: Vec<(u32, Option<Class>)> = vec![(u32::MAX, above)];
     for id in 0..=root.last_id {
         let node = view.node(id);
         while open.last().is_some_and(|&(last, _)| id > last) {
@@ -192,11 +200,11 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         for id in children(self.view, dir) {
             let node = self.view.node(id);
             if self.opts.pool_files && !node.is_dir() {
-                pooled_files.0 += node.size(size);
+                pooled_files.0 += node.counted(size);
                 pooled_files.1 += 1;
                 continue;
             }
-            weights.push((node.size(size), items.len()));
+            weights.push((node.counted(size), items.len()));
             items.push(Item::Entry(id));
         }
         if pooled_files.1 > 0 {
@@ -339,12 +347,12 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         let mut bytes = [0u64; 7];
         for child in id + 1..=last {
             let node = self.view.node(child);
-            if !node.is_dir() && node.charged {
+            if !node.is_dir() {
                 let i = Class::ALL
                     .iter()
                     .position(|&c| c == self.class_of[child as usize])
                     .unwrap_or(6);
-                bytes[i] += node.size(self.opts.size);
+                bytes[i] += node.counted(self.opts.size);
             }
         }
         let best = (0..7)
@@ -394,7 +402,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
             ch,
             fg: color,
             bg: base,
-            bold: false,
+            ..Cell::default()
         };
         let (right, bottom) = (x + cols - 1, top + rows - 1);
         for cx in x + 1..right {
@@ -422,7 +430,8 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
             Glyphs::Ascii => "-",
         };
         let full = format!("{name} {dot} {}", compact(node.size(self.opts.size)));
-        let text = if full.chars().count() <= room {
+        let ascii = self.opts.glyphs == Glyphs::Ascii;
+        let text = if columns(&full, ascii) <= room {
             full
         } else {
             truncate(&name, room, self.opts.glyphs)
@@ -432,19 +441,20 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         }
         let pack = self.opts.pack;
         let label = format!(" {text} ");
-        for (i, ch) in label.chars().enumerate() {
-            let Ok(i) = u16::try_from(i) else { break };
+        let max = u16::try_from(room + 2).unwrap_or(u16::MAX);
+        lay_out(&label, max, ascii, |i, ch, marks| {
             self.put(
                 x + 2 + i,
                 top,
                 Cell {
                     ch,
+                    marks,
                     fg: pack.roles.text,
                     bg: pack.roles.base,
                     bold: true,
                 },
             );
-        }
+        });
     }
 
     /// Labels a tile: `  name ` on its first full row when it is at least 5
@@ -458,12 +468,11 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         let pack = self.opts.pack;
         let fg = if pack.shades {
             Color::Reset
-        } else if fill.luminance().is_some_and(|l| l > 0.18) {
-            pack.roles.crust
         } else {
-            pack.roles.text
+            readable(fill, pack)
         };
         let room = usize::from(rect.w.saturating_sub(3));
+        let ascii = self.opts.glyphs == Glyphs::Ascii;
         let name = if pack.shades {
             format!("{} {name}", class_key(class))
         } else {
@@ -479,8 +488,8 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         for (row, text) in lines.iter().enumerate() {
             let y = top + u16::try_from(row).unwrap_or(0);
             let line = format!("  {text} ");
-            for (i, ch) in line.chars().take(usize::from(rect.w)).enumerate() {
-                let Ok(i) = u16::try_from(i) else { break };
+            let max = rect.w.min(self.w.saturating_sub(rect.x));
+            lay_out(&line, max, ascii, |i, ch, marks| {
                 let x = rect.x + i;
                 let bg = if pack.shades {
                     Color::Reset
@@ -492,12 +501,13 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
                     y,
                     Cell {
                         ch,
+                        marks,
                         fg,
                         bg,
                         bold: false,
                     },
                 );
-            }
+            });
         }
     }
 
@@ -529,17 +539,15 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
                     }
                 } else if top.color == bottom.color || self.opts.glyphs == Glyphs::Ascii {
                     Cell {
-                        ch: ' ',
-                        fg: Color::Reset,
                         bg: top.color,
-                        bold: false,
+                        ..Cell::default()
                     }
                 } else {
                     Cell {
                         ch: '▀',
                         fg: top.color,
                         bg: bottom.color,
-                        bold: false,
+                        ..Cell::default()
                     }
                 };
                 if let Some(slot) = buffer.get_mut(x, y) {
@@ -605,21 +613,82 @@ pub fn compact(bytes: u64) -> String {
     format!("{whole}{}", UNITS[unit])
 }
 
-/// `text` cut to `room` characters, the last one `…` (`~` in ASCII) when
+/// `text` cut to `room` columns, the last one `…` (`~` in ASCII) when
 /// cut.
-fn truncate(text: &str, room: usize, glyphs: Glyphs) -> String {
-    if text.chars().count() <= room {
+fn truncate(text: &str, room: usize, style: Glyphs) -> String {
+    let ascii = style == Glyphs::Ascii;
+    if columns(text, ascii) <= room {
         return text.to_owned();
     }
     if room == 0 {
         return String::new();
     }
-    let mut cut: String = text.chars().take(room - 1).collect();
-    cut.push(match glyphs {
-        Glyphs::Unicode => '…',
-        Glyphs::Ascii => '~',
-    });
+    let mut cut = String::new();
+    let mut used = 0;
+    for glyph in glyphs(text, ascii) {
+        if used + glyph.columns() > room - 1 {
+            break;
+        }
+        used += glyph.columns();
+        cut.push(glyph.ch);
+        cut.extend(glyph.marks.iter().filter(|&&m| m != '\0'));
+    }
+    cut.push(if ascii { '~' } else { '…' });
     cut
+}
+
+/// The colour a label reads best in on `fill`: of the pack's text, crust
+/// and base colours, the one of highest contrast; on an ANSI colour, black
+/// or bright white; the text colour on the terminal's own background.
+fn readable(fill: Color, pack: &Pack) -> Color {
+    let candidates: Vec<Color> = match fill {
+        Color::Rgb(..) => vec![pack.roles.text, pack.roles.crust, pack.roles.base],
+        Color::Ansi(_) => vec![Color::Ansi(0), Color::Ansi(15)],
+        Color::Reset => return pack.roles.text,
+    };
+    let Some(behind) = luminance(fill) else {
+        return pack.roles.text;
+    };
+    let contrast = |c: &Color| {
+        luminance(*c).map(|l| {
+            let (hi, lo) = if l > behind { (l, behind) } else { (behind, l) };
+            (hi + 0.05) / (lo + 0.05)
+        })
+    };
+    candidates
+        .iter()
+        .filter_map(|c| contrast(c).map(|ratio| (ratio, *c)))
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map_or(pack.roles.text, |(_, c)| c)
+}
+
+/// A colour's relative luminance, an ANSI colour's as xterm shows it.
+fn luminance(color: Color) -> Option<f64> {
+    const XTERM: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (205, 0, 0),
+        (0, 205, 0),
+        (205, 205, 0),
+        (0, 0, 238),
+        (205, 0, 205),
+        (0, 205, 205),
+        (229, 229, 229),
+        (127, 127, 127),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (92, 92, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    match color {
+        Color::Ansi(n) => {
+            let (r, g, b) = XTERM[usize::from(n % 16)];
+            Color::Rgb(r, g, b).luminance()
+        }
+        other => other.luminance(),
+    }
 }
 
 /// The lines under the map.
@@ -646,9 +715,10 @@ pub fn frame(
     rows: u16,
 ) -> CellBuffer {
     let pack = opts.pack;
+    let ascii = opts.glyphs == Glyphs::Ascii;
     if w < 60 || rows < 12 {
         let mut buffer = CellBuffer::new(w, 1);
-        buffer.text(0, 0, &footer.summary, w, pack.roles.text, false);
+        buffer.text(0, 0, &footer.summary, w, pack.roles.text, false, ascii);
         return buffer;
     }
     let map_rows = rows - 5;
@@ -675,21 +745,48 @@ pub fn frame(
         if x + needed > w {
             break;
         }
-        buffer.text(x, y, &swatch.to_string(), 1, pack.class(class), false);
-        buffer.text(x + 1, y, &text, w - x - 1, pack.roles.subtext, false);
+        let swatch = swatch.to_string();
+        buffer.text(x, y, &swatch, 1, pack.class(class), false, ascii);
+        buffer.text(x + 1, y, &text, w - x - 1, pack.roles.subtext, false, ascii);
         x += needed;
     }
-    buffer.text(0, y + 1, &footer.summary, w, pack.roles.text, false);
+    buffer.text(0, y + 1, &footer.summary, w, pack.roles.text, false, ascii);
     if let Some(warning) = &footer.warning {
-        buffer.text(0, y + 2, warning, w, pack.roles.red, false);
+        buffer.text(0, y + 2, warning, w, pack.roles.red, false, ascii);
     }
-    buffer.text(0, y + 3, &footer.next, w, pack.roles.subtext, false);
+    buffer.text(0, y + 3, &footer.next, w, pack.roles.subtext, false, ascii);
     buffer
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Glyphs, compact, truncate};
+    use super::{Glyphs, compact, luminance, readable, truncate};
+    use crate::cells::Color;
+    use crate::packs::Pack;
+
+    #[test]
+    fn p1_map_02_labels_read_on_every_fill() {
+        let contrast = |a: Color, b: Color| {
+            let (x, y) = (luminance(a).unwrap(), luminance(b).unwrap());
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        };
+        // The light pack's text and crust are both dark: on its dark
+        // binaries purple a label takes the light base.
+        let light = Pack::named("light").unwrap();
+        let purple = Color::hex("#7b1fa2").unwrap();
+        assert!(contrast(readable(purple, &light), purple) >= 4.5);
+        // On the 16 ANSI colours, black on light ones, white on dark ones.
+        let native = Pack::named("terminal-native").unwrap();
+        assert_eq!(readable(Color::Ansi(6), &native), Color::Ansi(0));
+        assert_eq!(readable(Color::Ansi(4), &native), Color::Ansi(15));
+        // Mocha keeps crust on light fills and text on dark ones.
+        let mocha = Pack::named("mocha").unwrap();
+        assert_eq!(
+            readable(mocha.class(crate::paint::Class::Code), &mocha),
+            mocha.roles.crust
+        );
+        assert_eq!(readable(mocha.roles.base, &mocha), mocha.roles.text);
+    }
 
     #[test]
     fn p1_map_02_sizes_print_compactly() {
@@ -702,5 +799,11 @@ mod tests {
         assert_eq!(truncate("node_modules", 6, Glyphs::Unicode), "node_…");
         assert_eq!(truncate("node_modules", 6, Glyphs::Ascii), "node_~");
         assert_eq!(truncate("src", 6, Glyphs::Unicode), "src");
+        // Cut in columns: a CJK character takes two.
+        assert_eq!(truncate("写真フォルダ", 6, Glyphs::Unicode), "写真…");
+        assert_eq!(
+            truncate("e\u{301}e\u{301}e\u{301}", 3, Glyphs::Unicode),
+            "e\u{301}e\u{301}e\u{301}"
+        );
     }
 }
