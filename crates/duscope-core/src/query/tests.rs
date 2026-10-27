@@ -332,7 +332,7 @@ fn p1_cli_03_by_type_lets_directory_rules_win() {
 }
 
 #[test]
-fn p1_cli_03_stale_needs_both_times_old_and_atime_needs_full_attrs() {
+fn p1_cli_03_stale_lists_large_files_past_the_cutoff_and_atime_needs_full_attrs() {
     let tree = home();
     let (arena, rollup) = scan(&tree);
     let view = view(&arena, &rollup, &tree);
@@ -526,6 +526,40 @@ fn p1_cli_03_shared_bytes_count_once_in_tree_and_by_type() {
         };
         assert_eq!(b, expected, "{size:?}");
     }
+}
+
+#[test]
+fn p1_cli_03_stale_needs_both_the_mtime_and_the_ctime_old() {
+    let year = 365 * 86_400_000_000_000i64;
+    let now = 60 * year;
+    let (old, new) = (now - 3 * year, now - 86_400_000_000_000);
+    let file = |name: &str, mtime_ns, ctime_ns| Entry {
+        mtime_ns,
+        ctime_ns,
+        ..entry(name, 0, Kind::File)
+    };
+    let (arena, rollup) = stream(vec![
+        Entry {
+            dir: Some(DirId::new(0)),
+            ..entry("r", 0, Kind::Dir)
+        },
+        file("both-old", old, old),
+        file("changed-lately", old, new),
+        file("modified-lately", new, old),
+        file("both-new", new, new),
+    ]);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
+    let page = stale(
+        &view,
+        &StaleQuery {
+            now,
+            older_than: year,
+            ..StaleQuery::default()
+        },
+    )
+    .unwrap();
+    let names: Vec<&str> = page.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["both-old"]);
 }
 
 #[test]
