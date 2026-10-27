@@ -3,20 +3,41 @@
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use duscope_testkit::TestEnv;
 
-use super::MacProvider;
 use super::bulk::{self, Decoded, Outcome, Probe, Request};
-use super::ffi;
+use super::{MacProvider, ffi, stat};
 use crate::platform::posix;
-use crate::{Boundary, Entry, Flags, Kind, ScanEvent, Share, WalkOptions, walk_with};
+use crate::{
+    Boundary, DirHandle, DirId, Entry, Flags, Kind, ScanEvent, Share, WalkOptions, walk_with,
+};
 
-/// Every entry of a walk by its path, and the paths of the directories that
-/// closed with an error.
+/// A clock on which every bulk refill waits on I/O: each reading moves the
+/// wall clock 10 ms and the CPU clock 1 µs.
+pub(super) struct Waiting;
+
+static TICKS: AtomicU64 = AtomicU64::new(1);
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+impl bulk::Clock for Waiting {
+    fn cpu(&self) -> Option<Duration> {
+        Some(Duration::from_micros(TICKS.fetch_add(1, Ordering::Relaxed)))
+    }
+
+    fn now(&self) -> Instant {
+        *EPOCH + Duration::from_millis(10 * TICKS.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Every entry of a walk by its path, and the sorted paths of the
+/// directories that closed with an error.
 fn walk_paths(
     provider: &MacProvider,
     root: &Path,
@@ -44,6 +65,8 @@ fn walk_paths(
         _ => {}
     })
     .unwrap();
+    // Directories close in the order the workers finish them.
+    unreadable.sort();
     (entries, unreadable)
 }
 
@@ -101,24 +124,18 @@ fn p1_walk_03_every_entry_matches_lstat() {
     }
 }
 
-/// The walk of the fixture tree read three ways: by bulk reads, through the
-/// stat queue as if every directory were I/O-bound, and through the
-/// fallback provider as if every bulk read failed with `ENOTSUP`.
-fn same_through_the_stat_queue(pretend: Outcome) {
+/// The walk of the fixture tree read by bulk reads and by `queued`, which
+/// sends some or all directories through the stat queue: both must find the
+/// same entries.
+fn same_as_bulk_reads(queued: &MacProvider) {
     let env = TestEnv::new();
     let root = env.fixtures().root();
     let opts = WalkOptions {
         threads: 4,
         ..WalkOptions::default()
     };
-    let (bulk, mut bulk_unreadable) = walk_paths(&MacProvider::new(), &root, &opts);
-    let queued = MacProvider {
-        pretend: Some(pretend),
-        ..MacProvider::default()
-    };
-    let (queue, mut queue_unreadable) = walk_paths(&queued, &root, &opts);
-    bulk_unreadable.sort();
-    queue_unreadable.sort();
+    let (bulk, bulk_unreadable) = walk_paths(&MacProvider::new(), &root, &opts);
+    let (queue, queue_unreadable) = walk_paths(queued, &root, &opts);
     if env.fixtures().unreadable_effective() {
         assert_eq!(
             bulk_unreadable.len(),
@@ -136,7 +153,7 @@ fn same_through_the_stat_queue(pretend: Outcome) {
             dir: entry.dir.map(|_| crate::DirId::ROOT),
             ..entry.clone()
         };
-        if pretend == Outcome::Unsupported {
+        if queued.pretend == Some(Outcome::Unsupported) {
             if entry.kind == Kind::Dir {
                 entry.nlink = 0;
             }
@@ -164,6 +181,16 @@ fn same_through_the_stat_queue(pretend: Outcome) {
     assert_eq!(bulk_unreadable, queue_unreadable);
 }
 
+/// The fixture tree read as if every directory's bulk read had answered
+/// `pretend`: through the stat queue for `IoBound`, through the fallback
+/// provider for `Unsupported` (`ENOTSUP`).
+fn same_through_the_stat_queue(pretend: Outcome) {
+    same_as_bulk_reads(&MacProvider {
+        pretend: Some(pretend),
+        ..MacProvider::default()
+    });
+}
+
 #[test]
 fn p1_walk_03_the_stat_queue_reads_what_bulk_reads_read() {
     same_through_the_stat_queue(Outcome::IoBound);
@@ -172,6 +199,49 @@ fn p1_walk_03_the_stat_queue_reads_what_bulk_reads_read() {
 #[test]
 fn p1_walk_03_enotsup_rereads_the_directory_through_the_fallback() {
     same_through_the_stat_queue(Outcome::Unsupported);
+}
+
+#[test]
+fn p1_walk_03_an_io_bound_directory_keeps_its_probed_entries() {
+    // Every directory of two refills or more switches after its second;
+    // the entries those refills decoded stay, the rest go to the queue,
+    // and nothing is read twice or missed.
+    let provider = MacProvider {
+        waiting: true,
+        ..MacProvider::default()
+    };
+    same_as_bulk_reads(&provider);
+    assert!(
+        provider.switched.load(Ordering::Relaxed) > 0,
+        "the probe never switched"
+    );
+}
+
+#[test]
+fn p1_walk_03_a_record_without_a_name_is_an_error() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let fd = posix::open_dir(&root).unwrap();
+    let dir = DirHandle {
+        id: DirId::ROOT,
+        path: root.clone(),
+        depth: 0,
+    };
+    let (mut out, mut errs) = (Vec::new(), Vec::new());
+    let mut single = ffi::AttrBuf::new(stat::BUFFER_BYTES);
+    super::take(
+        &dir,
+        fd.as_fd(),
+        &WalkOptions::default(),
+        &mut single,
+        Decoded::Nameless,
+        &mut out,
+        &mut errs,
+    );
+    assert!(out.is_empty());
+    assert_eq!(errs.len(), 1);
+    assert_eq!(errs[0].errno, crate::EIO);
+    assert!(errs[0].name.as_bytes().is_empty());
 }
 
 #[test]
@@ -514,10 +584,10 @@ fn p1_walk_03_an_unsearchable_directory_lists_its_children_as_errors() {
 }
 
 /// Counts the calls the wrapped provider makes on the walk's threads:
-/// (bulk reads, reads of one entry).
+/// (bulk reads, reads of one entry, other calls).
 struct Counting<'a> {
     inner: &'a MacProvider,
-    calls: std::sync::Mutex<(usize, usize)>,
+    calls: std::sync::Mutex<(usize, usize, usize)>,
 }
 
 impl Counting<'_> {
@@ -528,6 +598,7 @@ impl Counting<'_> {
         let mut calls = self.calls.lock().unwrap();
         calls.0 += after.0 - before.0;
         calls.1 += after.1 - before.1;
+        calls.2 += after.2 - before.2;
         result
     }
 }
@@ -617,7 +688,7 @@ fn p1_walk_05_full_attrs_add_no_calls_per_entry() {
     let count = |attrs| {
         let provider = Counting {
             inner: &MacProvider::new(),
-            calls: std::sync::Mutex::new((0, 0)),
+            calls: std::sync::Mutex::new((0, 0, 0)),
         };
         // One worker: the probe, which can send a directory to the stat
         // queue depending on how busy the machine is, runs only with more.
@@ -629,15 +700,17 @@ fn p1_walk_05_full_attrs_add_no_calls_per_entry() {
         walk_with(&provider, &root, &opts, |_| {}).unwrap();
         provider.calls.into_inner().unwrap()
     };
-    let (basic_bulk, basic_entry) = count(crate::Attrs::Basic);
-    let (full_bulk, full_entry) = count(crate::Attrs::Full);
+    let (basic_bulk, basic_entry, basic_other) = count(crate::Attrs::Basic);
+    let (full_bulk, full_entry, full_other) = count(crate::Attrs::Full);
     // The same reads of single entries (the root, mount points, records
-    // that lack an attribute). Records grow by 44 bytes under --attrs full,
-    // so a big directory takes a few more bulk refills of the same 64 KiB
-    // buffer, and no call of any other kind.
+    // that lack an attribute) and the same opens. Records grow by 44 bytes
+    // under --attrs full, so a big directory takes a few more refills of
+    // the same 64 KiB buffer: 0.4% more on the fixture tree, bounded here
+    // at 5%, which no call per entry could stay under.
     assert_eq!(full_entry, basic_entry);
+    assert_eq!(full_other, basic_other);
     assert!(
-        basic_bulk <= full_bulk && full_bulk * 2 <= basic_bulk * 3,
+        basic_bulk <= full_bulk && full_bulk * 100 <= basic_bulk * 105,
         "bulk reads: {basic_bulk} basic, {full_bulk} full"
     );
 }
@@ -946,5 +1019,14 @@ fn p1_walk_07_a_modified_clone_may_share_but_names_no_group() {
         entries[&dir.join("partial.bin")]
             .flags
             .contains(Flags::MAY_SHARE)
+    );
+}
+
+#[test]
+fn p1_walk_04_the_fallback_provider_turns_dataless_downloads_off() {
+    assert!(crate::platform::fallback().is_some());
+    assert_eq!(
+        ffi::dataless_policy().unwrap(),
+        ffi::IOPOL_MATERIALIZE_DATALESS_FILES_OFF
     );
 }
