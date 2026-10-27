@@ -109,6 +109,48 @@ fn p1_map_02_pixels_and_bad_themes_are_refused() {
     }
 }
 
+#[test]
+fn p1_map_02_refused_map_flags_are_refused_before_the_scan() {
+    let env = TestEnv::new();
+    // On a path that does not exist the usage error wins over
+    // scan_not_found: nothing was scanned.
+    let missing = env.tmp_dir().join("does-not-exist");
+    let out = duscope(&env)
+        .args(["scan", "--treemap", "pixels"])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("needs the pixels feature"), "{stderr}");
+    assert!(
+        stderr.contains("cargo install duscope --features pixels"),
+        "{stderr}"
+    );
+    let out = duscope(&env)
+        .args([
+            "scan",
+            "--treemap",
+            "always",
+            "--theme",
+            "solarized",
+            "--json",
+        ])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    // --json wins over the map: no theme to read, the path is missing.
+    assert_eq!(out.status.code(), Some(3));
+    let out = duscope(&env)
+        .args(["scan", "--treemap", "always", "--theme", "solarized"])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--theme solarized"), "{stderr}");
+}
+
 /// The golden file `name` under `duscope/tests/golden/`, compared with
 /// `actual`; with `DUSCOPE_TEST_UPDATE_GOLDEN=1` it is rewritten instead.
 fn golden(name: &str, actual: &str) {

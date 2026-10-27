@@ -18,17 +18,26 @@ use crate::out::{Output, emit_bytes};
 /// The size assumed when stdout is not a terminal (`--treemap always`).
 const DEFAULT_SIZE: (u16, u16) = (80, 24);
 
-/// Draws the treemap of `scanned`.
-pub fn draw(scanned: &Scanned, args: &ScanArgs, output: &Output) -> Result<(), Failure> {
+/// How the map looks: settled from the flags and the environment before
+/// the scan, so a flag the map refuses is refused without scanning.
+pub struct Style {
+    pack: Pack,
+    depth: Depth,
+}
+
+/// The map's style for `args`: refuses `--treemap pixels` (`not_compiled`)
+/// and a theme that is neither a pack nor a readable theme file (`usage`).
+pub fn style(args: &ScanArgs, output: &Output) -> Result<Style, Failure> {
     if args.treemap == Some(TreemapWhen::Pixels) {
         return Err(Failure::new(
             Exit::Usage,
             "not_compiled",
             "--treemap pixels needs the pixels feature, which this build does not have",
         )
-        .hint("Run duscope scan with --treemap always for the cell map"));
+        .hint(
+            "Install with cargo install duscope --features pixels, or run duscope scan --treemap always for the cell map",
+        ));
     }
-    let (columns, rows) = duscope_walk::terminal_size().unwrap_or(DEFAULT_SIZE);
     // The theme is read (and a bad one refused) even when colour is off.
     let themed = theme(args.theme.as_ref())?;
     let pack = if output.color {
@@ -45,10 +54,23 @@ pub fn draw(scanned: &Scanned, args: &ScanArgs, output: &Output) -> Result<(), F
     } else {
         Depth::Ansi256
     };
+    Ok(Style { pack, depth })
+}
+
+/// Draws the treemap of `scanned` in `style`.
+pub fn draw(
+    scanned: &Scanned,
+    args: &ScanArgs,
+    output: &Output,
+    style: &Style,
+) -> Result<(), Failure> {
+    let (columns, rows) = duscope_walk::terminal_size().unwrap_or(DEFAULT_SIZE);
+    let Style { pack, depth } = style;
+    let depth = *depth;
     let classes = Classes::vendored();
     let size = scan::size_kind(&args.walk);
     let opts = PaintOpts {
-        pack: &pack,
+        pack,
         color_by: match args.color_by {
             None | Some(ColorByArg::Type) => ColorBy::Type,
             Some(ColorByArg::Folder) => ColorBy::Folder,

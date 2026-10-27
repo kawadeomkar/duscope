@@ -52,9 +52,15 @@ enum DepthUse {
 /// The rows of `scan`: the root's largest entries, as `top` lists them by
 /// default; on a terminal, or with `--treemap always`, the treemap.
 pub fn scan(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
+    // The map's flags are settled first: a refused one costs no scan.
+    let style = if output.format == Format::Treemap {
+        Some(super::treemap::style(args, output)?)
+    } else {
+        None
+    };
     let scanned = scan::scan(&args.walk, &args.exclude)?;
-    if output.format == Format::Treemap {
-        return super::treemap::draw(&scanned, args, output);
+    if let Some(style) = &style {
+        return super::treemap::draw(&scanned, args, output, style);
     }
     let (envelope, footer) = top_envelope(scanned, &args.walk, None, "scan", false, true, output)?;
     output.list(&envelope, &footer)
