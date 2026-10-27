@@ -10,7 +10,7 @@ mod tests;
 mod volume;
 
 pub(super) use stat::from_stat;
-pub(super) use volume::of as volume;
+pub(super) use volume::{mount_info, of as volume};
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -257,6 +257,10 @@ impl Provider for MacProvider {
 
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
         volume::of(path)
+    }
+
+    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+        volume::mount_info(path)
     }
 
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {

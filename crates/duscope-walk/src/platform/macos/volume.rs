@@ -17,6 +17,23 @@ pub(in crate::platform) fn of(path: &Path) -> io::Result<VolumeInfo> {
     let c_path = posix::c_path(path)?;
     let fs = ffi::statfs(&c_path)?;
     let dev = bulk::dev(posix::lstat(&c_path)?.st_dev);
+    Ok(describe(&fs, dev))
+}
+
+/// The volume mounted at `path` from the kernel's record of its mounts,
+/// without asking the volume anything; a path that is not a mount point
+/// (a firmlink) is read with `statfs`. The walk fills in the device.
+pub(in crate::platform) fn mount_info(path: &Path) -> io::Result<VolumeInfo> {
+    let mounted = ffi::mounted_volumes()?;
+    let target = path.as_os_str().as_bytes();
+    match mounted.iter().find(|fs| c_chars(&fs.f_mntonname) == target) {
+        Some(fs) => Ok(describe(fs, 0)),
+        None => of(path),
+    }
+}
+
+/// A volume record from its `statfs`.
+fn describe(fs: &libc::statfs, dev: u64) -> VolumeInfo {
     let block = u64::from(fs.f_bsize);
     let fs_type = String::from_utf8_lossy(&c_chars(&fs.f_fstypename)).to_lowercase();
     let mount_point = PathBuf::from(OsStr::from_bytes(&c_chars(&fs.f_mntonname)));
@@ -24,7 +41,7 @@ pub(in crate::platform) fn of(path: &Path) -> io::Result<VolumeInfo> {
         .ok()
         .and_then(|c| ffi::pathconf(&c, libc::_PC_CASE_SENSITIVE))
         .map(|value| value != 0);
-    Ok(VolumeInfo {
+    VolumeInfo {
         dev,
         mnt_id: dev,
         mount_point,
@@ -40,9 +57,8 @@ pub(in crate::platform) fn of(path: &Path) -> io::Result<VolumeInfo> {
         fs_type,
         total_bytes: fs.f_blocks.saturating_mul(block),
         free_bytes: fs.f_bavail.saturating_mul(block),
-        entered: true,
-        skip: None,
-    })
+        reason: None,
+    }
 }
 
 /// The platform matrix's class of a macOS filesystem type.

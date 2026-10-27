@@ -27,9 +27,10 @@ pub(super) const BASIC: u32 = libc::STATX_TYPE
 pub(super) const FULL: u32 =
     libc::STATX_ATIME | libc::STATX_BTIME | libc::STATX_MODE | libc::STATX_UID | libc::STATX_GID;
 
-/// Never follow a final symlink; on NFS and SMB, take the client's cached
-/// attributes instead of revalidating each entry with the server.
-const FLAGS: c_int = libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_DONT_SYNC;
+/// Never follow a final symlink, never trigger an automount; on NFS and
+/// SMB, take the client's cached attributes instead of revalidating each
+/// entry with the server.
+const FLAGS: c_int = libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT | libc::AT_STATX_DONT_SYNC;
 
 /// `statx(2)` of `name` relative to `dir` (`None`: the working directory).
 pub(super) fn statx(

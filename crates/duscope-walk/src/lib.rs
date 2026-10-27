@@ -24,7 +24,7 @@ mod scheduler;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic;
@@ -119,6 +119,15 @@ pub trait Provider: Send + Sync {
     /// The volume holding `path`.
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
 
+    /// The volume mounted at `path`, read where the platform can without
+    /// touching the mounted filesystem, with its sizes left 0: the walk
+    /// classifies a mount with it before deciding whether to enter, so a
+    /// dead network mount it leaves alone is never asked for its sizes. The
+    /// default is [`volume`](Provider::volume).
+    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.volume(path)
+    }
+
     /// The entry of the walk root itself, not following a final symlink. Its
     /// name is the path's last component, or the whole path when it has none
     /// (`/`).
@@ -162,7 +171,7 @@ impl DirHandle {
 
     /// A handle for tests: `path`, `depth` levels below a root it does not
     /// link to.
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(test)]
     pub(crate) fn detached(path: impl Into<PathBuf>, depth: u32) -> DirHandle {
         DirHandle {
             id: DirId::ROOT,
@@ -328,8 +337,16 @@ struct Walk<'a, P: ?Sized> {
     out_of_ids: AtomicBool,
     /// The root's mount id, which `-x` confines the walk to.
     root_mnt_id: u64,
-    /// The mount ids of the volumes met so far, each reported once.
-    volumes: Mutex<HashSet<u64>>,
+    /// Each mount id met so far: its class (`None` when it could not be
+    /// read), and whether its volume has been reported.
+    mounts: Mutex<HashMap<u64, Met>>,
+}
+
+/// A mount the walk has met.
+#[derive(Debug, Clone, Copy)]
+struct Met {
+    class: Option<VolumeClass>,
+    reported: bool,
 }
 
 /// Walks `root` with `provider`, delivering every entry to `sink` on this
@@ -368,8 +385,7 @@ pub fn walk_with<P: Provider + ?Sized>(
     sink(ScanEvent::Entry(entry));
     if let Ok(mut volume) = provider.volume(root) {
         volume.mnt_id = root_mnt_id;
-        volume.entered = true;
-        volume.skip = None;
+        volume.reason = None;
         summary.volumes += 1;
         sink(ScanEvent::Volume(volume));
     }
@@ -387,7 +403,13 @@ pub fn walk_with<P: Provider + ?Sized>(
         next_dir: AtomicU32::new(1),
         out_of_ids: AtomicBool::new(false),
         root_mnt_id,
-        volumes: Mutex::new(HashSet::from([root_mnt_id])),
+        mounts: Mutex::new(HashMap::from([(
+            root_mnt_id,
+            Met {
+                class: None,
+                reported: true,
+            },
+        )])),
     };
     let run = |job: Job, worker: &Worker<Job>, shared: &PoolShared<Job, Event>| {
         state.run(job, worker, shared);
@@ -436,7 +458,7 @@ fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEv
     }
     for volume in batch.volumes {
         summary.volumes += 1;
-        summary.mounts_excluded += u64::from(!volume.entered);
+        summary.mounts_excluded += u64::from(!volume.entered());
         sink(ScanEvent::Volume(volume));
     }
     summary.skipped_dirs += batch.skipped.len() as u64;
@@ -595,9 +617,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 };
                 entry.dir = Some(id);
                 let path = dir.path.join(entry.name.as_os_str());
-                let skip = self
-                    .cross(dir, entry, &path, &mut volumes)
-                    .or_else(|| self.provider.skip(dir, entry, self.opts));
+                let skip = self.decide(dir, entry, &path, &mut volumes);
                 if let Some(reason) = skip {
                     skipped.push((id, reason));
                     continue;
@@ -617,48 +637,98 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     }
 
     /// Decides whether the walk enters `entry`, a directory of `dir` at
-    /// `path`, when it lies on another mount: a kernel pseudo-filesystem
-    /// never, a network one only under `--include-network`, any other mount
-    /// than the root's not under `-x`, and a mount of a directory already on
-    /// the path never. The volume is added to `volumes` the first time it is
-    /// met. `None` enters.
-    fn cross(
+    /// `path`. Never a directory already on the path (a bind mount of an
+    /// ancestor, or one the kernel did not report as a mount); at a mount
+    /// crossing, never a kernel pseudo-filesystem, a network one only under
+    /// `--include-network`, and under `-x` no mount other than the root's (a
+    /// firmlink leads into the volume the root's own is paired with, so it
+    /// is no crossing for `-x`); then whatever the provider skips. A mount's
+    /// volume is added to `volumes` the first time it is met, read in full
+    /// only when the walk enters it. `None` enters.
+    fn decide(
         &self,
         dir: &DirHandle,
         entry: &Entry,
         path: &Path,
         volumes: &mut Vec<VolumeInfo>,
     ) -> Option<Skip> {
-        if entry.mnt_id == dir.mnt_id && entry.boundary != Boundary::Mount {
-            return None;
-        }
         let cycle = dir
             .ancestors()
             .any(|a| (a.dev, a.ino) == (entry.dev, entry.ino));
-        let volume = self.provider.volume(path).ok();
-        let skip = match volume.as_ref().map(|v| v.class) {
+        let crossing = entry.mnt_id != dir.mnt_id || entry.boundary == Boundary::Mount;
+        if !crossing {
+            return if cycle {
+                Some(Skip::BindCycle)
+            } else {
+                self.provider.skip(dir, entry, self.opts)
+            };
+        }
+        let (met, first) = self.meet(entry.mnt_id, path);
+        let skip = match met.class {
             _ if cycle => Some(Skip::BindCycle),
             Some(VolumeClass::Kernel) => Some(Skip::Kernel),
             Some(VolumeClass::Network) if !self.opts.include_network => Some(Skip::Network),
-            _ if self.opts.one_file_system && entry.mnt_id != self.root_mnt_id => {
+            _ if self.opts.one_file_system
+                && entry.boundary != Boundary::Firmlink
+                && entry.mnt_id != self.root_mnt_id =>
+            {
                 Some(Skip::OneFileSystem)
             }
-            _ => None,
+            _ => self.provider.skip(dir, entry, self.opts),
         };
-        if let Some(mut volume) = volume {
-            let first = self
-                .volumes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(entry.mnt_id);
-            if first {
+        // A directory the provider skips is reached another way (the Data
+        // volume through its firmlinks), so it reports no volume of its own.
+        let provider_skip = skip.is_some_and(|s| s == Skip::Firmlinked);
+        if first && !provider_skip {
+            let volume = match skip {
+                None => self.provider.volume(path),
+                Some(_) => self.provider.mount_info(path),
+            };
+            if let Ok(mut volume) = volume {
+                volume.dev = entry.dev;
                 volume.mnt_id = entry.mnt_id;
-                volume.entered = skip.is_none();
-                volume.skip = skip;
+                volume.reason = skip;
                 volumes.push(volume);
+                self.reported(entry.mnt_id);
             }
         }
         skip
+    }
+
+    /// The mount `mnt_id` at `path`, read with [`Provider::mount_info`] the
+    /// first time it is met; and whether its volume is yet to be reported.
+    fn meet(&self, mnt_id: u64, path: &Path) -> (Met, bool) {
+        let known = self
+            .mounts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&mnt_id)
+            .copied();
+        let met = known.unwrap_or_else(|| {
+            let class = self.provider.mount_info(path).ok().map(|v| v.class);
+            *self
+                .mounts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(mnt_id)
+                .or_insert(Met {
+                    class,
+                    reported: false,
+                })
+        });
+        (met, !met.reported)
+    }
+
+    /// Notes that the volume of `mnt_id` has been reported.
+    fn reported(&self, mnt_id: u64) {
+        if let Some(met) = self
+            .mounts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&mnt_id)
+        {
+            met.reported = true;
+        }
     }
 
     /// Sends a batch, then makes the jobs it found stealable.

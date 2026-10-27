@@ -246,10 +246,15 @@ pub struct VolumeInfo {
     pub total_bytes: u64,
     /// Bytes free for an unprivileged user.
     pub free_bytes: u64,
-    /// Whether the walk entered the volume; why not, when it did not.
-    pub entered: bool,
-    /// Why the walk did not enter the volume.
-    pub skip: Option<Skip>,
+    /// Why the walk did not enter the volume; `None` when it did.
+    pub reason: Option<Skip>,
+}
+
+impl VolumeInfo {
+    /// Whether the walk entered the volume.
+    pub fn entered(&self) -> bool {
+        self.reason.is_none()
+    }
 }
 
 /// The platform matrix's classes of filesystem types.

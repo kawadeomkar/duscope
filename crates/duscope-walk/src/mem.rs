@@ -251,8 +251,7 @@ impl Provider for MemProvider {
             options: Vec::new(),
             total_bytes: 1 << 40,
             free_bytes: 1 << 39,
-            entered: true,
-            skip: None,
+            reason: None,
         })
     }
 

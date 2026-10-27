@@ -115,6 +115,13 @@ fn retry(mut call: impl FnMut() -> libc::c_int) -> io::Result<()> {
     }
 }
 
+/// `fstatat(2)`'s flags: never follow a final symlink, and on Linux never
+/// trigger an automount.
+#[cfg(target_os = "linux")]
+const STAT_FLAGS: libc::c_int = libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT;
+#[cfg(not(target_os = "linux"))]
+const STAT_FLAGS: libc::c_int = libc::AT_SYMLINK_NOFOLLOW;
+
 /// `fstatat(2)` of `name` in the directory open on `dir`, not following a
 /// final symlink.
 pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
@@ -128,7 +135,7 @@ pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::sta
             dir.as_raw_fd(),
             name.as_ptr(),
             stat.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
+            STAT_FLAGS,
         )
     })?;
     // SAFETY: fstatat succeeded, so it filled the struct.

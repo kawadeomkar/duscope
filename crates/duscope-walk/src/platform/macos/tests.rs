@@ -823,3 +823,28 @@ fn p1_walk_07_a_scan_of_slash_counts_users_once() {
         "/Users: {ours} KiB read, du -skx says {du} KiB"
     );
 }
+
+#[test]
+fn p1_walk_06_mount_classes() {
+    use super::volume::class;
+    use crate::VolumeClass;
+    assert_eq!(class("apfs"), VolumeClass::Local);
+    assert_eq!(class("devfs"), VolumeClass::Kernel);
+    assert_eq!(class("smbfs"), VolumeClass::Network);
+    assert_eq!(class("autofs"), VolumeClass::Network);
+    assert_eq!(class("macfuse"), VolumeClass::Network);
+    assert_eq!(class("exfat"), VolumeClass::Foreign);
+    assert_eq!(class("cd9660"), VolumeClass::ReadOnlyImage);
+}
+
+#[test]
+fn p1_walk_06_mount_info_reads_the_mount_table() {
+    // The boot volume is mounted at /; its record comes from getfsstat.
+    let info = super::volume::mount_info(Path::new("/")).unwrap();
+    assert_eq!(info.mount_point, Path::new("/"));
+    assert_eq!(info.class, crate::VolumeClass::Local);
+    assert!(
+        info.total_bytes > 0,
+        "MNT_NOWAIT still gives the cached sizes"
+    );
+}

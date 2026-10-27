@@ -6,7 +6,7 @@ mod dents;
 mod mounts;
 mod statx;
 
-pub(super) use mounts::volume;
+pub(super) use mounts::{mnt_id_of, mount_info, volume};
 pub(super) use statx::from_stat;
 #[cfg(test)]
 mod tests;
@@ -132,6 +132,10 @@ impl Provider for LinuxProvider {
 
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
         volume(path)
+    }
+
+    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+        mount_info(path)
     }
 
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {

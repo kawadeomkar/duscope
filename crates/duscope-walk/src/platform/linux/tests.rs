@@ -332,3 +332,44 @@ fn p1_walk_05_full_attrs_add_no_calls() {
     // The five attributes are mask bits of the same statx.
     assert_eq!(count(crate::Attrs::Full), count(crate::Attrs::Basic));
 }
+
+#[test]
+fn p1_walk_06_mount_classes() {
+    use super::mounts::{case_sensitive, class};
+    use crate::VolumeClass;
+    assert_eq!(class("ext4"), VolumeClass::Local);
+    assert_eq!(class("proc"), VolumeClass::Kernel);
+    assert_eq!(class("nfs4"), VolumeClass::Network);
+    assert_eq!(class("fuse.sshfs"), VolumeClass::Network);
+    assert_eq!(class("ceph"), VolumeClass::Network);
+    assert_eq!(class("autofs"), VolumeClass::Network);
+    assert_eq!(
+        class("fuseblk"),
+        VolumeClass::Foreign,
+        "ntfs-3g on a local disk"
+    );
+    assert_eq!(class("tmpfs"), VolumeClass::Memory);
+    assert_eq!(class("overlay"), VolumeClass::Overlay);
+    assert_eq!(class("squashfs"), VolumeClass::ReadOnlyImage);
+    assert_eq!(case_sensitive("exfat", &[]), Some(false));
+    assert_eq!(case_sensitive("ntfs3", &["nocase".to_owned()]), Some(false));
+    assert_eq!(case_sensitive("hfsplus", &[]), None);
+    assert_eq!(case_sensitive("ext4", &[]), Some(true));
+}
+
+#[test]
+fn p1_walk_06_the_fallback_root_has_a_mount_id() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let entry = crate::platform::fallback::FallbackProvider
+        .root(&root, &WalkOptions::default())
+        .unwrap();
+    assert_ne!(entry.mnt_id, 0);
+}
+
+#[test]
+fn p1_walk_06_mount_info_reads_the_mount_table() {
+    let info = super::mounts::mount_info(Path::new("/proc")).unwrap();
+    assert_eq!(info.class, crate::VolumeClass::Kernel);
+    assert_eq!((info.total_bytes, info.free_bytes), (0, 0));
+}

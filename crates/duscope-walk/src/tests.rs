@@ -620,10 +620,40 @@ struct MountRow {
 /// longest mount path above it, a mount point carries `Boundary::Mount`, and
 /// `bind_of` gives a mount point the identity of another directory, as a
 /// bind mount does.
+/// A mount table row.
+fn row(path: &'static str, mnt_id: u64, class: VolumeClass) -> MountRow {
+    MountRow {
+        path,
+        mnt_id,
+        class,
+    }
+}
+
 struct Mounted<'a> {
     inner: &'a MemProvider,
     mounts: Vec<MountRow>,
     bind_of: Option<(&'static str, &'static str)>,
+    /// Paths that are firmlinks, and the one mount point the provider skips
+    /// as reached through them.
+    firmlinks: Vec<&'static str>,
+    firmlinked: Option<&'static str>,
+    /// Paths `volume` and `mount_info` were asked about.
+    volume_calls: Mutex<Vec<PathBuf>>,
+    mount_info_calls: Mutex<Vec<PathBuf>>,
+}
+
+impl<'a> Mounted<'a> {
+    fn new(inner: &'a MemProvider, mounts: Vec<MountRow>) -> Mounted<'a> {
+        Mounted {
+            inner,
+            mounts,
+            bind_of: None,
+            firmlinks: Vec::new(),
+            firmlinked: None,
+            volume_calls: Mutex::new(Vec::new()),
+            mount_info_calls: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl Mounted<'_> {
@@ -640,6 +670,9 @@ impl Mounted<'_> {
             if path == Path::new(mount.path) {
                 entry.boundary = Boundary::Mount;
             }
+        }
+        if self.firmlinks.iter().any(|f| path == Path::new(f)) {
+            entry.boundary = Boundary::Firmlink;
         }
         if let Some((point, target)) = self.bind_of
             && path == Path::new(point)
@@ -669,12 +702,33 @@ impl Provider for Mounted<'_> {
         Ok(())
     }
 
+    fn skip(&self, _dir: &DirHandle, entry: &Entry, _opts: &WalkOptions) -> Option<Skip> {
+        let firmlinked = self.firmlinked?;
+        (entry.boundary == Boundary::Mount
+            && self
+                .mount_of(Path::new(firmlinked))
+                .is_some_and(|m| m.mnt_id == entry.mnt_id))
+        .then_some(Skip::Firmlinked)
+    }
+
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.volume_calls.lock().unwrap().push(path.to_owned());
         let mut volume = self.inner.volume(path)?;
         if let Some(mount) = self.mount_of(path) {
             volume.mount_point = PathBuf::from(mount.path);
             volume.mnt_id = mount.mnt_id;
             volume.class = mount.class;
+        }
+        Ok(volume)
+    }
+
+    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.mount_info_calls.lock().unwrap().push(path.to_owned());
+        let mut volume = self.inner.volume(path)?;
+        if let Some(mount) = self.mount_of(path) {
+            volume.mount_point = PathBuf::from(mount.path);
+            volume.class = mount.class;
+            (volume.total_bytes, volume.free_bytes) = (0, 0);
         }
         Ok(volume)
     }
@@ -703,43 +757,19 @@ fn walk_mounts(opts: &WalkOptions) -> MountWalk {
         .file("nfs/d", 1)
         .file("plain/e", 1)
         .dir("disk/loop");
-    let provider = Mounted {
-        inner: &tree,
-        mounts: vec![
-            MountRow {
-                path: "/mem",
-                mnt_id: 1,
-                class: VolumeClass::Local,
-            },
-            MountRow {
-                path: "/mem/disk",
-                mnt_id: 2,
-                class: VolumeClass::Local,
-            },
-            MountRow {
-                path: "/mem/tmp",
-                mnt_id: 3,
-                class: VolumeClass::Memory,
-            },
-            MountRow {
-                path: "/mem/proc",
-                mnt_id: 4,
-                class: VolumeClass::Kernel,
-            },
-            MountRow {
-                path: "/mem/nfs",
-                mnt_id: 5,
-                class: VolumeClass::Network,
-            },
-            MountRow {
-                path: "/mem/disk/loop",
-                mnt_id: 6,
-                class: VolumeClass::Local,
-            },
+    let mut provider = Mounted::new(
+        &tree,
+        vec![
+            row("/mem", 1, VolumeClass::Local),
+            row("/mem/disk", 2, VolumeClass::Local),
+            row("/mem/tmp", 3, VolumeClass::Memory),
+            row("/mem/proc", 4, VolumeClass::Kernel),
+            row("/mem/nfs", 5, VolumeClass::Network),
+            row("/mem/disk/loop", 6, VolumeClass::Local),
         ],
-        // /mem bind-mounted on /mem/disk/loop: entering it would loop.
-        bind_of: Some(("/mem/disk/loop", "/mem")),
-    };
+    );
+    // /mem bind-mounted on /mem/disk/loop: entering it would loop.
+    provider.bind_of = Some(("/mem/disk/loop", "/mem"));
     let (result, events) = walk_events(&provider, tree.root_path(), opts);
     let summary = result.unwrap();
     let (paths, dirs) = replay(tree.root_path(), &events);
@@ -790,7 +820,7 @@ fn p1_walk_06_mounts_are_crossed_by_default() {
     // The root's volume, then one per mount met.
     let ids: Vec<(u64, bool, Option<Skip>)> = volumes
         .iter()
-        .map(|v| (v.mnt_id, v.entered, v.skip))
+        .map(|v| (v.mnt_id, v.entered(), v.reason))
         .collect();
     assert_eq!(ids[0], (1, true, None));
     let mut rest = ids[1..].to_vec();
@@ -855,4 +885,128 @@ fn p1_walk_06_one_file_system_stays_on_the_root_mount() {
     assert!(skips.contains(&(PathBuf::from("/mem/disk"), Skip::OneFileSystem)));
     assert!(skips.contains(&(PathBuf::from("/mem/tmp"), Skip::OneFileSystem)));
     assert_eq!(summary.mounts_excluded, 4);
+}
+
+#[test]
+fn p1_walk_06_skipped_mounts_are_never_asked_for_sizes() {
+    let mut tree = MemProvider::new("/mem");
+    tree.file("nfs/d", 1).file("proc/c", 1).file("disk/a", 1);
+    let provider = Mounted::new(
+        &tree,
+        vec![
+            row("/mem", 1, VolumeClass::Local),
+            row("/mem/nfs", 5, VolumeClass::Network),
+            row("/mem/proc", 4, VolumeClass::Kernel),
+            row("/mem/disk", 2, VolumeClass::Local),
+        ],
+    );
+    let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+    result.unwrap();
+    // The root's and the entered disk's volumes are read in full; the
+    // network and kernel mounts only from the mount table.
+    let mut sized = provider.volume_calls.lock().unwrap().clone();
+    sized.sort();
+    assert_eq!(sized, [PathBuf::from("/mem"), PathBuf::from("/mem/disk")]);
+    let info = provider.mount_info_calls.lock().unwrap().len();
+    assert_eq!(
+        info, 5,
+        "each crossing classified once, each skipped volume described once"
+    );
+    let excluded: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            ScanEvent::Volume(v) if !v.entered() => Some(v.total_bytes),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(excluded, [0, 0], "skipped volumes carry no sizes");
+}
+
+#[test]
+fn p1_walk_06_a_same_device_bind_mount_is_still_a_cycle() {
+    // A kernel before 5.8, or the fallback provider, reports a bind mount on
+    // the same device with its parent's mount id and no mount boundary.
+    let mut tree = MemProvider::new("/mem");
+    tree.file("data/f", 1).dir("data/sub/loop");
+    let mut provider = Mounted::new(&tree, vec![row("/mem", 1, VolumeClass::Local)]);
+    provider.bind_of = Some(("/mem/data/sub/loop", "/mem/data"));
+    let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+    let summary = result.unwrap();
+    let (paths, dirs) = replay(tree.root_path(), &events);
+    assert!(paths.contains(&PathBuf::from("/mem/data/sub/loop")));
+    let skipped = id_of(&dirs, "/mem/data/sub/loop");
+    assert!(events.contains(&ScanEvent::Skipped {
+        dir: skipped,
+        reason: Skip::BindCycle
+    }));
+    assert_eq!(
+        summary.mounts_excluded, 0,
+        "no mount was detected, so no volume row"
+    );
+}
+
+#[test]
+fn p1_walk_06_firmlinks_are_no_crossing_for_one_file_system() {
+    // macOS: / on the System volume (1); /users a firmlink onto the Data
+    // volume (2), also mounted at /sys/data, which the provider skips as
+    // reached through the firmlinks.
+    let mut tree = MemProvider::new("/mem");
+    tree.file("users/me/notes", 1)
+        .file("sys/data/users/me/notes", 1)
+        .file("bin/ls", 1);
+    let mut provider = Mounted::new(
+        &tree,
+        vec![
+            row("/mem", 1, VolumeClass::Local),
+            row("/mem/users", 2, VolumeClass::Local),
+            row("/mem/sys/data", 2, VolumeClass::Local),
+        ],
+    );
+    provider.firmlinks = vec!["/mem/users"];
+    provider.firmlinked = Some("/mem/sys/data");
+    for one_file_system in [false, true] {
+        let opts = WalkOptions {
+            one_file_system,
+            ..WalkOptions::default()
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+        let summary = result.unwrap();
+        let (paths, _) = replay(tree.root_path(), &events);
+        assert!(
+            paths.contains(&PathBuf::from("/mem/users/me/notes")),
+            "-x {one_file_system}"
+        );
+        assert!(!paths.contains(&PathBuf::from("/mem/sys/data/users/me/notes")));
+        // The Data volume is reported once, entered, whichever of its two
+        // paths the workers reached first.
+        let data: Vec<bool> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::Volume(v) if v.mnt_id == 2 => Some(v.entered()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(data, [true], "-x {one_file_system}");
+        assert_eq!(summary.mounts_excluded, 0);
+    }
+}
+
+#[test]
+fn p1_walk_06_a_handle_walks_back_to_the_root() {
+    let root = Arc::new(DirHandle::detached("/r", 0));
+    let entry = MemProvider::new("/r")
+        .root(Path::new("/r"), &WalkOptions::default())
+        .unwrap();
+    let child = DirHandle::new(
+        DirId::new(1),
+        PathBuf::from("/r/a"),
+        &entry,
+        Some(Arc::clone(&root)),
+    );
+    let paths: Vec<&Path> = child.ancestors().map(DirHandle::path).collect();
+    assert_eq!(paths, [Path::new("/r/a"), Path::new("/r")]);
+    assert_eq!(
+        (child.depth(), child.parent().map(DirHandle::depth)),
+        (1, Some(0))
+    );
 }

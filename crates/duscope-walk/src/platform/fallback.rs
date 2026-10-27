@@ -18,9 +18,9 @@ use crate::platform::posix;
 use crate::{DirHandle, Entry, NameRef, Provider, STAT_BATCH, ScanError, VolumeInfo, WalkOptions};
 
 #[cfg(target_os = "linux")]
-use super::linux::{from_stat, volume};
+use super::linux::{from_stat, mount_info, volume};
 #[cfg(target_os = "macos")]
-use super::macos::{from_stat, volume};
+use super::macos::{from_stat, mount_info, volume};
 
 /// The fallback provider.
 #[derive(Debug, Default, Clone, Copy)]
@@ -88,13 +88,19 @@ impl Provider for FallbackProvider {
         volume(path)
     }
 
+    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+        mount_info(path)
+    }
+
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
         let name = NameRef::from(path.file_name().unwrap_or(path.as_os_str()));
-        Ok(from_stat(
-            name,
-            &posix::lstat(&posix::c_path(path)?)?,
-            opts.attrs,
-        ))
+        #[allow(unused_mut)] // only Linux fills in the mount id
+        let mut entry = from_stat(name, &posix::lstat(&posix::c_path(path)?)?, opts.attrs);
+        #[cfg(target_os = "linux")]
+        {
+            entry.mnt_id = super::linux::mnt_id_of(path);
+        }
+        Ok(entry)
     }
 
     /// The platform provider's default, so the two compare like for like.
@@ -266,17 +272,20 @@ mod tests {
             ..WalkOptions::default()
         };
         let mut entries = Vec::new();
+        let (_, stats_before) = crate::platform::posix::calls::now();
         walk(&root, &opts, |event| {
             if let ScanEvent::Entry(entry) = event {
                 entries.push(entry);
             }
         })
         .unwrap();
+        let (_, stats_after) = crate::platform::posix::calls::now();
         assert!(entries.len() > 200);
-        // What only the fallback reports: no mount id on Linux, st_nlink
-        // for a directory with a subdirectory on macOS.
+        // What only the fallback does: read the root with lstat on this
+        // thread (Linux reads it with statx otherwise), and report st_nlink
+        // for a directory with a subdirectory (macOS).
         if cfg!(target_os = "linux") {
-            assert!(entries.iter().all(|e| e.mnt_id == 0));
+            assert_eq!(stats_after - stats_before, 1);
         } else {
             assert!(entries.iter().any(|e| e.kind == Kind::Dir && e.nlink >= 3));
         }

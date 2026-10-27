@@ -201,18 +201,18 @@ fn p1_walk_06_linux_mounts_are_crossed_confined_and_cycles_stopped() {
             .unwrap()
     };
     assert_eq!(
-        (volume("ext4").class, volume("ext4").entered),
+        (volume("ext4").class, volume("ext4").entered()),
         (VolumeClass::Local, true)
     );
     assert_eq!(volume("ext4").fs_type, "ext4");
     assert_eq!(
-        (volume("tmpfs").class, volume("tmpfs").entered),
+        (volume("tmpfs").class, volume("tmpfs").entered()),
         (VolumeClass::Memory, true)
     );
     if has_exfat {
         let exfat = volume("exfat");
         assert_eq!(
-            (exfat.class, exfat.entered, exfat.case_sensitive),
+            (exfat.class, exfat.entered(), exfat.case_sensitive),
             (VolumeClass::Foreign, true, Some(false))
         );
     }
@@ -290,7 +290,7 @@ fn p1_walk_06_macos_an_exfat_image_is_crossed_and_confined() {
     assert!(seen.paths.contains(&root.join("exfat/inside")));
     let exfat = seen.volumes.iter().find(|v| v.fs_type == "exfat").unwrap();
     assert_eq!(
-        (exfat.class, exfat.entered, exfat.case_sensitive),
+        (exfat.class, exfat.entered(), exfat.case_sensitive),
         (VolumeClass::Foreign, true, Some(false))
     );
     assert_eq!(seen.summary.mounts_excluded, 0);
