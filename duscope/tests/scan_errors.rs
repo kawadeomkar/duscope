@@ -86,9 +86,9 @@ fn p1_walk_08_sigint_exits_130_within_200_ms() {
     // take longer than the wait below: launch it once first.
     duscope(&env).arg("--version").assert().success();
     // One worker on the whole fixture tree takes about a second; the signal
-    // comes once it is under way. A scan that finished first is retried
-    // with a shorter wait, one the signal reached before it started (killed
-    // by SIGINT itself) with a longer one.
+    // comes once it is under way. A scan that finished and wrote its result
+    // first is retried with a shorter wait, one the signal reached before it
+    // started (killed by SIGINT itself) with a longer one.
     let mut wait = 300;
     for _ in 0..6 {
         let child = env
@@ -108,7 +108,8 @@ fn p1_walk_08_sigint_exits_130_within_200_ms() {
         let out = child.wait_with_output().unwrap();
         let took = signalled.elapsed();
         match out.status.code() {
-            Some(0) => {
+            // The scan finished, and wrote its result, before the signal.
+            Some(_) if !out.stdout.is_empty() => {
                 eprintln!("the scan finished within {wait} ms; trying sooner");
                 wait /= 2;
                 continue;

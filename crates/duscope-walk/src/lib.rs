@@ -484,6 +484,9 @@ pub fn walk_with<P: Provider + ?Sized>(
         if let Err(worker_panic) = pool.finish() {
             panic::resume_unwind(worker_panic);
         }
+        // A walk cancelled as it finished is cancelled: Ctrl-C during the
+        // last directory still stops the command.
+        let finished = finished && !opts.cancel.load(Ordering::Relaxed);
         if finished {
             summary.clones_unavailable = opts.clones && provider.clones_unavailable(opts);
             Ok(summary)
