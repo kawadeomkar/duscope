@@ -207,11 +207,7 @@ fn scan_block(
             AttrsArg::Full => "full",
         },
         thread_count: summary.threads as u64,
-        fs_type: arena
-            .volumes()
-            .first()
-            .map(|v| v.fs_type.clone())
-            .unwrap_or_default(),
+        fs_type: arena.volumes().first().map(|v| v.fs_type.clone()),
         device_confined: walk_args.one_file_system,
         total_allocated_bytes: totals.allocated,
         total_apparent_bytes: totals.apparent,
@@ -532,4 +528,57 @@ fn not_yet(flag: &str, what: &str) -> Failure {
         "not_available",
         format!("{flag} needs {what}, which this version does not have yet"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use clap::Parser;
+    use duscope_core::arena::{Arena, EntryIdx};
+    use duscope_core::rollup::roll_up;
+    use duscope_walk::{Attrs, MemProvider, ScanEvent, WalkOptions, walk_with};
+
+    use super::{Scanned, Totals, scan_block};
+    use crate::cli::{Cli, Verb};
+
+    /// A scan of a small in-memory tree; without its volume when `volume`
+    /// is false.
+    fn scanned(volume: bool) -> Scanned {
+        let mut tree = MemProvider::new("/t");
+        tree.file("a", 10);
+        let mut arena = Arena::new(Attrs::Basic);
+        let summary = walk_with(&tree, Path::new("/t"), &WalkOptions::default(), |event| {
+            if volume || !matches!(event, ScanEvent::Volume(_)) {
+                arena.push(event).unwrap();
+            }
+        })
+        .unwrap();
+        roll_up(&mut arena);
+        Scanned {
+            arena,
+            summary,
+            elapsed: Duration::ZERO,
+            root: "/t".into(),
+            root_as_given: "/t".into(),
+            started_ns: 0,
+            finished_ns: 0,
+        }
+    }
+
+    #[test]
+    fn p1_cli_02_fs_type_is_null_without_a_volume() {
+        let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
+        else {
+            panic!("not scan");
+        };
+        let block = |scanned: &Scanned| {
+            let totals = Totals::of(&scanned.arena, EntryIdx::ROOT);
+            let block = scan_block(scanned, &args.walk, Path::new("/t"), &totals, "allocated");
+            serde_json::to_value(block).unwrap()
+        };
+        assert_eq!(block(&scanned(true))["fs_type"], "mem");
+        assert_eq!(block(&scanned(false))["fs_type"], serde_json::Value::Null);
+    }
 }
