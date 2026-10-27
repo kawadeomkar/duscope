@@ -109,7 +109,9 @@ pub enum Kind {
 }
 
 /// Whether an entry's blocks may be shared with another entry, for the
-/// hard-link and clone charging of the roll-up.
+/// hard-link and clone charging of the roll-up. A hard-linked file that is
+/// also a clone reports `Clone`: the clone group decides its sharing, and
+/// its `nlink` above 1 still tells the roll-up it is linked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Share {
     /// Nothing is shared.
