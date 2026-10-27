@@ -556,6 +556,28 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
     Some(r)
 }
 
+/// Where the probe's clocks come from. Tests stand in a clock on which
+/// every refill waits, to drive the switch to the stat queue.
+pub(super) trait Clock {
+    /// The calling thread's CPU time so far, when it can be read.
+    fn cpu(&self) -> Option<Duration>;
+    /// The wall clock.
+    fn now(&self) -> Instant;
+}
+
+/// The thread's CPU clock and the monotonic wall clock.
+pub(super) struct Clocks;
+
+impl Clock for Clocks {
+    fn cpu(&self) -> Option<Duration> {
+        ffi::thread_cpu_time()
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 /// dua-core's probe: a bulk refill that spends less than half its wall time
 /// on the CPU was waiting on I/O, and two such refills in a row at the start
 /// of a directory hand it to the stat queue, where every worker can wait on
@@ -599,28 +621,33 @@ pub(super) enum Outcome {
     Done,
     /// The filesystem does not do bulk reads (`ENOTSUP`, `EINVAL`).
     Unsupported,
-    /// The probe found the directory I/O-bound; nothing was kept.
+    /// The probe found the directory I/O-bound after its first two refills.
+    /// The records of those refills were handed over; the rest were not
+    /// read.
     IoBound,
     /// The directory can be listed but not searched (`EACCES` on the first
     /// read): its names are known, but none of its entries can be read.
     Unsearchable,
 }
 
-/// Reads every record of the directory open on `dir` into `out`, calling
-/// `restat` for each entry that must be read again by name. With `probe`,
-/// the first two refills are timed against the thread's CPU clock.
+/// Reads the records of the directory open on `dir`, handing each one to
+/// `each` as soon as its refill is decoded, so no listing of the whole
+/// directory is ever held. With `probe`, the first two refills are timed on
+/// its clocks.
 pub(super) fn read(
     dir: BorrowedFd<'_>,
     opts: &WalkOptions,
     buf: &mut AttrBuf,
-    probe: bool,
-    out: &mut Vec<Decoded>,
+    probe: Option<&dyn Clock>,
+    each: &mut dyn FnMut(Decoded),
 ) -> io::Result<Outcome> {
     let mut request = Request::bulk(opts);
     let mut timer = Probe::default();
     let mut fills = 0usize;
     loop {
-        let timing = (probe && timer.active()).then(|| (ffi::thread_cpu_time(), Instant::now()));
+        let timing = probe
+            .filter(|_| timer.active())
+            .map(|clock| (clock, clock.cpu(), clock.now()));
         let count = match ffi::getattrlistbulk(dir, &request.attrs, buf, u64::from(request.options))
         {
             Ok(0) => return Ok(Outcome::Done),
@@ -638,13 +665,11 @@ pub(super) fn read(
             Err(e) => return Err(e),
         };
         fills += 1;
-        if let Some((cpu_start, start)) = timing {
-            let cpu = cpu_start.and_then(|s| ffi::thread_cpu_time()?.checked_sub(s));
-            if timer.sample(cpu, start.elapsed()) {
-                out.clear();
-                return Ok(Outcome::IoBound);
-            }
-        }
+        // Timed around the call alone: decoding is CPU work of our own.
+        let switch = timing.is_some_and(|(clock, cpu_start, start)| {
+            let cpu = cpu_start.and_then(|s| clock.cpu()?.checked_sub(s));
+            timer.sample(cpu, clock.now().saturating_duration_since(start))
+        });
         let mut bytes = buf.bytes();
         for _ in 0..count {
             let Some(len) = record_len(bytes) else {
@@ -653,10 +678,11 @@ pub(super) fn read(
                     "getattrlistbulk returned a record longer than its buffer",
                 ));
             };
-            let decoded =
-                parse(&bytes[..len], &request).map_or(Decoded::Nameless, |r| r.decode(&request));
-            out.push(decoded);
+            each(parse(&bytes[..len], &request).map_or(Decoded::Nameless, |r| r.decode(&request)));
             bytes = &bytes[len..];
+        }
+        if switch {
+            return Ok(Outcome::IoBound);
         }
     }
 }
