@@ -160,8 +160,8 @@ pub struct WalkSummary {
 /// Walks `root` with this platform's provider, delivering every entry to
 /// `sink`. [`walk_with`] walks with a given provider.
 ///
-/// Returns [`WalkError::NoProvider`] on a platform without one; the Linux
-/// provider arrives with P1-WALK-02.
+/// Returns [`WalkError::NoProvider`] on a platform other than Linux and
+/// macOS.
 pub fn walk(
     root: &Path,
     opts: &WalkOptions,
@@ -181,11 +181,11 @@ const POLL: Duration = Duration::from_millis(50);
 
 /// Reported for a directory whose read failed without an OS error number.
 /// `EIO` is 5 on Linux and macOS alike.
-const EIO: i32 = 5;
+pub(crate) const EIO: i32 = 5;
 
 /// The names one [`Job::Stat`] reads: the Linux floor's batch size, which
 /// spreads a wide directory's per-entry calls over every worker.
-const STAT_BATCH: usize = 1024;
+pub(crate) const STAT_BATCH: usize = 1024;
 
 /// A job for the pool.
 enum Job {

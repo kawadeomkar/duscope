@@ -87,3 +87,16 @@ pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
         }
     }
 }
+
+/// `statvfs(3)` of the filesystem holding `path`.
+#[cfg(target_os = "linux")]
+pub(crate) fn statvfs(path: &std::ffi::CStr) -> io::Result<libc::statvfs> {
+    let mut buf = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `buf` is writable for one
+    // `struct statvfs`.
+    if unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: statvfs succeeded, so it filled the struct.
+    Ok(unsafe { buf.assume_init() })
+}
