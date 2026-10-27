@@ -17,9 +17,11 @@
 //! Border colours step overlay1, surface2, surface1 by depth. Leaves fill
 //! their tile with their colour, every second sibling mixed 20% toward the
 //! base. A leaf of at least 5 columns is labelled `  name `, and one of at
-//! least 8×2 cells gets a second row `  size `, in crust on a light fill and
-//! in whichever of the pack's text, crust and base colours reads best on
-//! the fill (black or white on the 16 ANSI colours). What rounds below
+//! least 8×2 cells gets a second row `  size `, in crust on a light fill
+//! (luminance above 0.18) and in text otherwise; where crust is not the
+//! darker of the two (the light pack), in whichever of the pack's text,
+//! crust and base colours reads best, and black or white on the 16 ANSI
+//! colours. What rounds below
 //! `--min-tile` is pooled into the parent's `+N small` tile. With the
 //! `no-color` pack tiles are `░▒▓█` shades by depth and labels carry the
 //! class letter. Names are measured and cut in terminal columns, with
@@ -633,17 +635,30 @@ fn truncate(text: &str, room: usize, style: Glyphs) -> String {
     cut
 }
 
-/// The colour a label reads best in on `fill`: of the pack's text, crust
-/// and base colours, the one of highest contrast; on an ANSI colour, black
-/// or bright white; the text colour on the terminal's own background.
+/// The colour of a label on `fill`. The drawing rule, crust on light fills
+/// (luminance above 0.18) and text otherwise, assumes crust is the darker
+/// of the two, as it is in every dark pack; where it is not (the light
+/// pack's text and crust are both dark), the most readable of the pack's
+/// text, crust and base colours; on an ANSI colour, black or bright white,
+/// whichever reads better; the text colour on the terminal's own
+/// background.
 fn readable(fill: Color, pack: &Pack) -> Color {
+    let (text, crust) = (pack.roles.text, pack.roles.crust);
     let candidates: Vec<Color> = match fill {
-        Color::Rgb(..) => vec![pack.roles.text, pack.roles.crust, pack.roles.base],
+        Color::Rgb(..) => {
+            if let (Some(behind), Some(dark), Some(light)) =
+                (luminance(fill), luminance(crust), luminance(text))
+                && dark < light
+            {
+                return if behind > 0.18 { crust } else { text };
+            }
+            vec![text, crust, pack.roles.base]
+        }
         Color::Ansi(_) => vec![Color::Ansi(0), Color::Ansi(15)],
-        Color::Reset => return pack.roles.text,
+        Color::Reset => return text,
     };
     let Some(behind) = luminance(fill) else {
-        return pack.roles.text;
+        return text;
     };
     let contrast = |c: &Color| {
         luminance(*c).map(|l| {
@@ -655,7 +670,7 @@ fn readable(fill: Color, pack: &Pack) -> Color {
         .iter()
         .filter_map(|c| contrast(c).map(|ratio| (ratio, *c)))
         .max_by(|a, b| a.0.total_cmp(&b.0))
-        .map_or(pack.roles.text, |(_, c)| c)
+        .map_or(text, |(_, c)| c)
 }
 
 /// A colour's relative luminance, an ANSI colour's as xterm shows it.
@@ -782,6 +797,11 @@ mod tests {
             mocha.roles.crust
         );
         assert_eq!(readable(mocha.roles.base, &mocha), mocha.roles.text);
+        // Mocha's other (#6c7086, luminance 0.165) is not light: text, as
+        // the rule says, though crust would contrast a little more.
+        let other = mocha.class(crate::paint::Class::Other);
+        assert!(luminance(other).unwrap() < 0.18);
+        assert_eq!(readable(other, &mocha), mocha.roles.text);
     }
 
     #[test]
