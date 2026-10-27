@@ -1,16 +1,18 @@
 //! Reading entries with `statx(2)` relative to their directory's descriptor:
 //! `AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC` and the basic mask.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::raw::c_int;
 
+use crate::platform::posix;
 use crate::{Boundary, DirId, Entry, Flags, Kind, NameRef, Share, WalkOptions};
 
-/// The basic mask: type, size, blocks, inode, links, both times and the
-/// mount id (5.8; older kernels leave it out of `stx_mask`).
+/// The basic mask: type, size, blocks, inode, links, both times, the mount
+/// id (5.8) and the subvolume id (6.10). A kernel that does not know a bit
+/// leaves it out of `stx_mask`.
 pub(super) const BASIC: u32 = libc::STATX_TYPE
     | libc::STATX_SIZE
     | libc::STATX_BLOCKS
@@ -18,7 +20,8 @@ pub(super) const BASIC: u32 = libc::STATX_TYPE
     | libc::STATX_NLINK
     | libc::STATX_MTIME
     | libc::STATX_CTIME
-    | libc::STATX_MNT_ID;
+    | libc::STATX_MNT_ID
+    | libc::STATX_SUBVOL;
 
 /// Never follow a final symlink; on NFS and SMB, take the client's cached
 /// attributes instead of revalidating each entry with the server.
@@ -47,14 +50,35 @@ pub(super) fn statx(
     }
 }
 
-/// The entry `name` in the directory open on `dir`.
-pub(super) fn entry_at(
-    dir: BorrowedFd<'_>,
-    name: &NameRef,
-    opts: &WalkOptions,
-) -> io::Result<Entry> {
-    let c_name = CString::new(name.as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
-    Ok(entry(name.clone(), &statx(Some(dir), &c_name, mask(opts))?))
+/// `statx(2)` of `name` in the directory open on `dir`, with the name
+/// passed from the stack.
+pub(super) fn statx_at(dir: BorrowedFd<'_>, name: &NameRef, mask: u32) -> io::Result<libc::statx> {
+    posix::with_c_name(name.as_bytes(), |c_name| statx(Some(dir), c_name, mask))
+}
+
+/// The subvolume of the directory open on `dir`, when the kernel and the
+/// filesystem report one (6.10; btrfs and bcachefs).
+pub(super) fn subvol_of(dir: BorrowedFd<'_>) -> Option<u64> {
+    let at = dir.as_raw_fd();
+    let mut buf = MaybeUninit::<libc::statx>::uninit();
+    // SAFETY: `at` is a descriptor open for the borrow, the empty name is
+    // NUL-terminated (AT_EMPTY_PATH reads `at` itself), and `buf` is
+    // writable for one statx.
+    let rc = unsafe {
+        libc::statx(
+            at,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH | libc::AT_STATX_DONT_SYNC,
+            libc::STATX_SUBVOL,
+            buf.as_mut_ptr(),
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: statx succeeded, so it filled the struct.
+    let stx = unsafe { buf.assume_init() };
+    (stx.stx_mask & libc::STATX_SUBVOL != 0).then_some(stx.stx_subvol)
 }
 
 /// The mask for `opts`.
@@ -105,6 +129,9 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx) -> Entry {
     flags.set(Flags::COMPRESSED, attribute(libc::STATX_ATTR_COMPRESSED));
     let mount_root = attribute(libc::STATX_ATTR_MOUNT_ROOT);
     flags.set(Flags::MOUNT_ROOT, mount_root);
+    // An automount point not yet triggered is a mount boundary too: what
+    // lies beneath it is another filesystem.
+    let automount = attribute(libc::STATX_ATTR_AUTOMOUNT);
     let mnt_id = if stx.stx_mask & libc::STATX_MNT_ID != 0 {
         stx.stx_mnt_id
     } else {
@@ -124,7 +151,7 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx) -> Entry {
         ino: stx.stx_ino,
         mnt_id,
         share: share(kind, u64::from(stx.stx_nlink)),
-        boundary: if mount_root {
+        boundary: if mount_root || automount {
             Boundary::Mount
         } else {
             Boundary::None
