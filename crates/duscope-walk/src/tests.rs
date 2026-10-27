@@ -510,7 +510,7 @@ fn p1_walk_03_a_wide_directory_is_read_in_batches_by_several_workers() {
 fn p1_walk_03_a_failed_stat_batch_records_every_name() {
     let mut tree = MemProvider::new("/mem");
     for i in 0..1_500 {
-        tree.file(format!("wide/f{i}"), 10);
+        tree.file(format!("f{i}"), 10);
     }
     let provider = Splitting {
         inner: &tree,
@@ -525,12 +525,41 @@ fn p1_walk_03_a_failed_stat_batch_records_every_name() {
     let (result, events) = walk_events(&provider, tree.root_path(), &opts);
     let summary = result.unwrap();
     replay(tree.root_path(), &events);
-    // The root's one child, wide/, also went through a (failed) batch.
+    // Two batches, of 1,024 and 476 names, both failed: only the root was
+    // read, and every name of both batches is an error.
+    let batches = provider.batches.lock().unwrap();
+    let mut sizes: Vec<usize> = batches.iter().map(|&(len, _)| len).collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [476, 1_024]);
     assert_eq!(summary.entries, 1);
-    assert_eq!(summary.entry_errors, 1);
-    let errors = events
+    assert_eq!(summary.entry_errors, 1_500);
+    let named: HashSet<Vec<u8>> = events
         .iter()
-        .filter(|e| matches!(e, ScanEvent::Error(ScanError { errno: 2, .. })))
-        .count();
-    assert_eq!(errors, 1);
+        .filter_map(|e| match e {
+            ScanEvent::Error(ScanError { errno: 2, name, .. }) => Some(name.as_bytes().to_vec()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(named.len(), 1_500);
+    assert!((0..1_500).all(|i| named.contains(format!("f{i}").as_bytes())));
+}
+
+#[test]
+fn p1_walk_03_stat_batches_hold_only_their_own_names() {
+    let count: usize = 200_000;
+    let later: Vec<NameRef> = (0..count)
+        .map(|i| NameRef::from(format!("f{i}").as_str()))
+        .collect();
+    let batches: Vec<Vec<NameRef>> = stat_batches(later).collect();
+    assert_eq!(batches.len(), count.div_ceil(STAT_BATCH));
+    assert!(
+        batches
+            .iter()
+            .all(|b| !b.is_empty() && b.capacity() <= STAT_BATCH)
+    );
+    assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), count);
+    // The job Vecs together hold room for the names they carry, not the
+    // tail of the listing each time: under 64 bytes per name.
+    let held: usize = batches.iter().map(Vec::capacity).sum::<usize>() * size_of::<NameRef>();
+    assert!(held <= 64 * count, "{held} bytes held for {count} names");
 }

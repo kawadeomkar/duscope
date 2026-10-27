@@ -187,6 +187,18 @@ pub(crate) const EIO: i32 = 5;
 /// spreads a wide directory's per-entry calls over every worker.
 pub(crate) const STAT_BATCH: usize = 1024;
 
+/// Cuts the names a directory's read left for later into [`Job::Stat`]
+/// batches of at most [`STAT_BATCH`], each in a Vec of its own size.
+/// Splitting one Vec repeatedly would leave every batch holding the capacity
+/// of all the names after it: a million names would hold about 8 GB.
+fn stat_batches(later: Vec<NameRef>) -> impl Iterator<Item = Vec<NameRef>> {
+    let mut names = later.into_iter();
+    std::iter::from_fn(move || {
+        let batch: Vec<NameRef> = names.by_ref().take(STAT_BATCH).collect();
+        (!batch.is_empty()).then_some(batch)
+    })
+}
+
 /// A job for the pool.
 enum Job {
     /// Read one directory.
@@ -382,10 +394,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 dir: dir.clone(),
                 parts: AtomicUsize::new(later.len().div_ceil(STAT_BATCH) + 1),
             });
-            while !later.is_empty() {
-                let rest = later.split_off(later.len().min(STAT_BATCH));
-                jobs.push(Job::Stat(Arc::clone(&split), later));
-                later = rest;
+            for names in stat_batches(later) {
+                jobs.push(Job::Stat(Arc::clone(&split), names));
             }
             split
         });
