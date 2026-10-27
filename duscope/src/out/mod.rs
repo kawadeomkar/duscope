@@ -113,8 +113,13 @@ impl Output {
             Some(TreemapWhen::Never) | None => Format::Table,
             Some(_) => Format::Treemap,
         };
-        let format = format::decide(explicit, env, tty, human)
-            .map_err(|message| Failure::new(Exit::Usage, "usage", message))?;
+        let format = match format::decide(explicit, env, tty, human)
+            .map_err(|message| Failure::new(Exit::Usage, "usage", message))?
+        {
+            // Only scan draws a treemap; the list verbs show their table.
+            Format::Treemap if treemap.is_none() => Format::Table,
+            format => format,
+        };
         let color = if args.no_color {
             Some(ColorWhen::Never)
         } else {
@@ -312,7 +317,7 @@ pub fn to_stderr(failure: &Failure) {
 #[cfg(test)]
 mod tests {
     use super::format::EnvVars;
-    use super::{Format, Output, OutputArgs};
+    use super::{Format, FormatArg, Output, OutputArgs};
     use crate::cli::TreemapWhen;
 
     #[test]
@@ -337,5 +342,40 @@ mod tests {
         assert_eq!(piped.format, Format::Treemap);
         let piped = Output::decide_with(&none, Some(TreemapWhen::Auto), &env, false).unwrap();
         assert_eq!(piped.format, Format::Plain);
+    }
+
+    #[test]
+    fn p1_cli_02_a_list_verb_asked_for_a_treemap_shows_its_table() {
+        let treemap = OutputArgs {
+            format: Some(FormatArg::Treemap),
+            ..OutputArgs::default()
+        };
+        for tty in [true, false] {
+            let decided = Output::decide_with(&treemap, None, &EnvVars::default(), tty).unwrap();
+            assert_eq!(decided.format, Format::Table);
+        }
+        let env = EnvVars {
+            duscope_format: Some("treemap".to_owned()),
+            ..EnvVars::default()
+        };
+        let none = OutputArgs::default();
+        assert_eq!(
+            Output::decide_with(&none, None, &env, false)
+                .unwrap()
+                .format,
+            Format::Table
+        );
+        // scan still draws it.
+        assert_eq!(
+            Output::decide_with(
+                &treemap,
+                Some(TreemapWhen::Auto),
+                &EnvVars::default(),
+                false
+            )
+            .unwrap()
+            .format,
+            Format::Treemap
+        );
     }
 }
