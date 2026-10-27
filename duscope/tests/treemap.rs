@@ -420,3 +420,12 @@ fn p1_map_02_ls_colors_paint_executables_and_suffixes_but_not_folders() {
     let folder = buffer.get(2, 8).unwrap().bg;
     assert!(matches!(folder, Color::Rgb(..)), "{folder:?}");
 }
+
+#[test]
+fn p1_map_02_theme_help_names_every_pack() {
+    let env = TestEnv::new();
+    let out = duscope(&env).args(["scan", "--help"]).output().unwrap();
+    let help = String::from_utf8(out.stdout).unwrap();
+    let names = duscope_treemap::packs::NAMES.join("|");
+    assert!(help.contains(&names), "{names} not in:\n{help}");
+}

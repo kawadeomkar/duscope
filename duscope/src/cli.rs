@@ -244,7 +244,9 @@ pub struct ScanArgs {
     #[arg(long, value_enum, value_name = "BY", help_heading = "Output")]
     pub color_by: Option<ColorBy>,
 
-    /// The colours: a theme name (mocha, dracula, …) or a theme file
+    /// The colours: a theme name or the path of a theme file
+    ///
+    /// mocha|tokyo-night|dracula|gruvbox|light|terminal-native|no-color
     #[arg(
         long,
         env = "DUSCOPE_THEME",
