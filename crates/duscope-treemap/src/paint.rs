@@ -149,6 +149,20 @@ struct Painter<'v, 'o, V: TreeView + ?Sized> {
 /// 32767 (twice that in half-cell units).
 pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u16) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
+    let mut buffer = CellBuffer::new(w, h);
+    paint_into(view, opts, h, &mut buffer);
+    buffer
+}
+
+/// Paints the map into the top `h` rows of `buffer` (at most 32767), as
+/// wide as the buffer.
+fn paint_into(
+    view: &(impl TreeView + ?Sized),
+    opts: &PaintOpts<'_>,
+    h: u16,
+    buffer: &mut CellBuffer,
+) {
+    let (w, h) = (buffer.width(), h.min(u16::MAX / 2).min(buffer.height()));
     let h_units = h * 2;
     let mut painter = Painter {
         view,
@@ -174,7 +188,7 @@ pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u
             painter.leaf(&root, area, 1, 0, None, true);
         }
     }
-    painter.compose(h)
+    painter.compose(h, buffer);
 }
 
 /// Each entry's class by pre-order id, as `by-type` reads it
@@ -535,10 +549,9 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         }
     }
 
-    /// The units and the overlay as cells: half blocks, whole cells or
-    /// shades, the overlay on top.
-    fn compose(&self, h: u16) -> CellBuffer {
-        let mut buffer = CellBuffer::new(self.w, h);
+    /// The units and the overlay as the top `h` rows of `buffer`: half
+    /// blocks, whole cells or shades, the overlay on top.
+    fn compose(&self, h: u16, buffer: &mut CellBuffer) {
         let shades = match self.opts.glyphs {
             Glyphs::Unicode => ['░', '▒', '▓', '█'],
             Glyphs::Ascii => ['-', '+', '=', '#'],
@@ -579,7 +592,6 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
                 }
             }
         }
-        buffer
     }
 }
 
@@ -641,7 +653,8 @@ pub fn compact(bytes: u64) -> String {
 /// cut.
 fn truncate(text: &str, room: usize, style: Glyphs) -> String {
     let ascii = style == Glyphs::Ascii;
-    if columns(text, ascii) <= room {
+    let glyphs = glyphs(text, ascii);
+    if glyphs.iter().map(|g| g.columns()).sum::<usize>() <= room {
         return text.to_owned();
     }
     if room == 0 {
@@ -649,7 +662,7 @@ fn truncate(text: &str, room: usize, style: Glyphs) -> String {
     }
     let mut cut = String::new();
     let mut used = 0;
-    for glyph in glyphs(text, ascii) {
+    for glyph in glyphs {
         if used + glyph.columns() > room - 1 {
             break;
         }
@@ -759,15 +772,8 @@ pub fn frame(
         return buffer;
     }
     let map_rows = rows - 5;
-    let map = paint(view, opts, w, map_rows);
     let mut buffer = CellBuffer::new(w, map_rows + 4);
-    for y in 0..map_rows {
-        for x in 0..w {
-            if let (Some(cell), Some(slot)) = (map.get(x, y), buffer.get_mut(x, y)) {
-                *slot = *cell;
-            }
-        }
-    }
+    paint_into(view, opts, map_rows, &mut buffer);
     // The legend: `■ code 61%` per class, the swatch in its colour.
     let mut x = 2u16;
     let y = map_rows;
