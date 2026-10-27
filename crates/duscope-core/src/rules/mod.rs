@@ -166,13 +166,16 @@ pub struct Classes {
     dir: Vec<(DirPattern, Class)>,
 }
 
+/// A classes table as read, every key with its place in the text so an
+/// error can name its line whatever the TOML shape (a dotted key, an
+/// inline table, a byte-order mark).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClassesFile {
     #[serde(default)]
-    ext: BTreeMap<String, Class>,
+    ext: BTreeMap<toml::Spanned<String>, Class>,
     #[serde(default)]
-    dir: BTreeMap<String, Class>,
+    dir: BTreeMap<toml::Spanned<String>, Class>,
 }
 
 impl Classes {
@@ -188,30 +191,30 @@ impl Classes {
     /// A table read from TOML text; `file` names it in errors.
     pub fn parse(text: &str, file: &str) -> Result<Classes, CoreError> {
         let parsed: ClassesFile = toml::from_str(text).map_err(|e| toml_error(text, file, &e))?;
-        for key in parsed.ext.keys() {
-            if key.is_empty() || ext(format!("x.{key}").as_bytes()) != *key {
-                return Err(rule_error(
+        let mut ext_map = BTreeMap::new();
+        for (key, class) in parsed.ext {
+            let span = key.span();
+            let key = key.into_inner();
+            if key.is_empty() || ext(format!("x.{key}").as_bytes()) != key {
+                return Err(span_error(
                     text,
                     file,
-                    "ext",
-                    key,
+                    &span,
                     format!("{key:?} is not an extension duscope's ext rule can produce"),
                 ));
             }
+            ext_map.insert(key, class);
         }
         let mut dir = Vec::with_capacity(parsed.dir.len());
         for (key, class) in parsed.dir {
-            let pattern = DirPattern::new(&key)
-                .map_err(|message| rule_error(text, file, "dir", &key, message))?;
+            let pattern = DirPattern::new(key.as_ref())
+                .map_err(|message| span_error(text, file, &key.span(), message))?;
             dir.push((pattern, class));
         }
         // The most specific rule is tried first: more path components, then
         // fewer globbed ones; the sort is stable, so keys break ties.
         dir.sort_by_key(|(pattern, _)| pattern.specificity());
-        Ok(Classes {
-            ext: parsed.ext,
-            dir,
-        })
+        Ok(Classes { ext: ext_map, dir })
     }
 
     /// This table with `user` merged over it: the user's extensions replace
@@ -518,7 +521,9 @@ impl Caches {
 
 /// The 1-based line of the start of `span` in `text`.
 fn line_of(text: &str, span: &Range<usize>) -> usize {
-    text[..span.start.min(text.len())].matches('\n').count() + 1
+    // Bytes, not a str slice: a span need not fall on a char boundary.
+    let before = &text.as_bytes()[..span.start.min(text.len())];
+    before.split(|&b| b == b'\n').count()
 }
 
 /// A TOML parse error, with the line it points at.
@@ -530,37 +535,13 @@ fn toml_error(text: &str, file: &str, error: &toml::de::Error) -> CoreError {
     }
 }
 
-/// An invalid rule keyed `key` in the table `[section]`, with the line that
-/// defines it.
-fn rule_error(text: &str, file: &str, section: &str, key: &str, message: String) -> CoreError {
-    let header = format!("[{section}]");
-    let mut current = String::new();
-    let line = text
-        .lines()
-        .position(|line| {
-            let line = line.split('#').next().unwrap_or_default().trim();
-            if line.starts_with('[') {
-                current = line.replace(' ', "");
-                return false;
-            }
-            current == header && key_of(line) == Some(key)
-        })
-        .map_or(1, |index| index + 1);
+/// An invalid rule whose key is at `span` in `text`.
+fn span_error(text: &str, file: &str, span: &Range<usize>, message: String) -> CoreError {
     CoreError::Rules {
         file: file.to_owned(),
-        line,
+        line: line_of(text, span),
         message,
     }
-}
-
-/// The key a `key = value` line defines: bare, or in double or single
-/// quotes (escapes are not read).
-fn key_of(line: &str) -> Option<&str> {
-    let (quote, rest) = match line.chars().next()? {
-        q @ ('"' | '\'') => (q, &line[1..]),
-        _ => return line.split(['=', ' ', '\t']).next(),
-    };
-    rest.split(quote).next()
 }
 
 #[cfg(test)]

@@ -434,6 +434,29 @@ fn p1_core_04_errors_point_at_the_line_that_defines_the_key() {
 }
 
 #[test]
+fn p1_core_04_errors_name_the_key_line_in_every_toml_shape() {
+    let cases = [
+        // A byte-order mark, as some editors save the file.
+        ("\u{feff}[ext]\n\"tar.foo.bar\" = \"code\"\n", 2),
+        // An inline table.
+        ("\n\next = { \"tar.foo.bar\" = \"code\" }\n", 3),
+        // Dotted keys.
+        ("ext.rs = \"code\"\next.\"tar.foo.bar\" = \"code\"\n", 2),
+        // A key holding '#'.
+        ("[dir]\nx = \"code\"\n\"#foo//\" = \"code\"\n", 3),
+        // A dotted key under a table header.
+        (
+            "[dir]\nx = \"code\"\n\n[ext]\nrs = \"code\"\n\"a.b\" = \"code\"\n",
+            6,
+        ),
+    ];
+    for (text, expected) in cases {
+        let (line, message) = rules_error(Classes::parse(text, "user.toml"));
+        assert_eq!(line, expected, "{text:?}: {message}");
+    }
+}
+
+#[test]
 fn p1_core_04_an_empty_extension_key_is_an_error() {
     // Files without an extension are `other` (or `binaries` when
     // executable); no rule can reclassify them all.
