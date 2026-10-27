@@ -50,8 +50,8 @@ impl RollUp {
 /// Numbers the arena's entries in pre-order and fills every directory's
 /// cumulative fields: totals of apparent and allocated bytes (the directory
 /// itself included), file and directory counts, the recursive `max_mtime`,
-/// `last_id`, `files_end`. Hard links and clones are charged by
-/// [`crate::accounting`]; here every entry's bytes count.
+/// `last_id`, `files_end`. Every entry's bytes count here; hard links and
+/// clones are charged once by the accounting that follows (P1-CORE-03).
 pub fn roll_up(arena: &mut Arena) -> RollUp {
     let n = arena.len();
     if n == 0 {
