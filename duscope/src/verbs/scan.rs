@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use duscope_core::arena::Arena;
+use duscope_core::arena::{Arena, EntryIdx};
 use duscope_core::rollup::roll_up;
 use duscope_walk::{Attrs, DirId, WalkError, WalkOptions, WalkSummary, walk};
 use globset::{Glob, GlobSetBuilder};
@@ -40,16 +40,37 @@ pub fn run(args: &ScanArgs) -> Result<(), Failure> {
 /// Scans and prints the one-line summary.
 pub fn summarize(walk_args: &WalkArgs, excludes: &[String]) -> Result<(), Failure> {
     let scanned = scan(walk_args, excludes)?;
-    let root = scanned.arena.dir(DirId::ROOT);
+    let (allocated, files, dirs) = root_totals(&scanned.arena);
     let line = format!(
         "{} allocated · {} files · {} dirs · {:.1} s, {} threads",
-        iec(root.cum_allocated),
-        thousands(u64::from(root.n_files)),
-        thousands(u64::from(root.n_dirs)),
+        iec(allocated),
+        thousands(files),
+        thousands(dirs),
         scanned.elapsed.as_secs_f64(),
         scanned.summary.threads,
     );
     write_stdout(&line)
+}
+
+/// The root's allocated bytes, files and directories below it. A root
+/// that is not a directory (a file, or a symbolic link the walk does not
+/// follow) is one file of its own size.
+fn root_totals(arena: &Arena) -> (u64, u64, u64) {
+    if arena.is_empty() {
+        return (0, 0, 0);
+    }
+    let root = arena.entry(EntryIdx::ROOT);
+    match root.dir {
+        Some(dir) => {
+            let rec = arena.dir(dir);
+            (
+                rec.cum_allocated,
+                u64::from(rec.n_files),
+                u64::from(rec.n_dirs),
+            )
+        }
+        None => (root.allocated, 1, 0),
+    }
 }
 
 /// Scans the tree `walk_args` names.

@@ -249,3 +249,41 @@ fn p1_cli_01_sigpipe_exits_zero() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn p1_cli_01_a_root_that_is_not_a_directory() {
+    let env = TestEnv::new();
+    let links = env.fixtures().case_root("symlinks");
+    // A regular file is one file of its own size.
+    let out = duscope(&env)
+        .arg("scan")
+        .arg(links.join("target.txt"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains(" · 1 files · 0 dirs · "), "{stdout}");
+    assert!(out.stderr.is_empty());
+    // A symbolic link to a directory, and one that leads nowhere, are
+    // scanned without a crash.
+    for link in ["to-dir", "dangling"] {
+        let out = duscope(&env)
+            .arg("scan")
+            .arg(links.join(link))
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{link}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stderr.is_empty(), "{link}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 1);
+    }
+}
