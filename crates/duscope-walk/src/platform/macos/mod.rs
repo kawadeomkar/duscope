@@ -17,7 +17,6 @@ use std::collections::HashSet;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
-use std::sync::Once;
 
 use bulk::{Clock, Decoded, Outcome};
 use ffi::AttrBuf;
@@ -49,19 +48,20 @@ pub(crate) struct MacProvider {
 }
 
 impl MacProvider {
-    /// The provider. The first one made sets up the process: the
-    /// descriptor limit is raised and dataless files are never downloaded.
+    /// The provider. Making one sets up the process (see
+    /// [`platform::setup`](super::setup)).
     pub(crate) fn new() -> MacProvider {
-        static SETUP: Once = Once::new();
-        SETUP.call_once(|| {
-            posix::raise_nofile_limit();
-            // A failure leaves the default policy, under which reading a
-            // dataless file's attributes can download it.
-            if let Err(e) = ffi::disable_dataless_materialization() {
-                log::warn!("cannot turn off dataless-file materialisation: {e}");
-            }
-        });
+        super::setup();
         MacProvider::default()
+    }
+}
+
+/// Turns off dataless-file materialisation for the process, so reading an
+/// iCloud placeholder's attributes never downloads it. A failure leaves the
+/// default policy, under which it can; it is logged.
+pub(super) fn keep_dataless_files() {
+    if let Err(e) = ffi::disable_dataless_materialization() {
+        log::warn!("cannot turn off dataless-file materialisation: {e}");
     }
 }
 

@@ -566,3 +566,12 @@ fn p1_walk_03_an_unsearchable_directory_lists_its_children_as_errors() {
     // empty-closed/ (mode 000) cannot be opened at all.
     assert_eq!(closed_with, [libc::EACCES]);
 }
+
+#[test]
+fn p1_walk_04_the_fallback_provider_turns_dataless_downloads_off() {
+    assert!(crate::platform::fallback().is_some());
+    assert_eq!(
+        ffi::dataless_policy().unwrap(),
+        ffi::IOPOL_MATERIALIZE_DATALESS_FILES_OFF
+    );
+}

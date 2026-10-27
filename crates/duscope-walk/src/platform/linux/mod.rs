@@ -16,7 +16,6 @@ use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
 
 use dents::DentBuf;
 
@@ -43,10 +42,10 @@ pub(crate) struct LinuxProvider {
 }
 
 impl LinuxProvider {
-    /// The provider. The first one made raises the descriptor limit.
+    /// The provider. Making one sets up the process (see
+    /// [`platform::setup`](super::setup)).
     pub(crate) fn new() -> LinuxProvider {
-        static SETUP: Once = Once::new();
-        SETUP.call_once(posix::raise_nofile_limit);
+        super::setup();
         LinuxProvider::default()
     }
 
