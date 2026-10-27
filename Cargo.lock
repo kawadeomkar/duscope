@@ -272,7 +272,9 @@ dependencies = [
  "bitflags",
  "crossbeam-deque",
  "crossbeam-utils",
+ "duscope-testkit",
  "globset",
+ "libc",
  "proptest",
  "thiserror",
 ]

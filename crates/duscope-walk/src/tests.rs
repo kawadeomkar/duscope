@@ -1,10 +1,13 @@
-//! P1-WALK-01: the walk over in-memory trees.
+//! P1-WALK-01: the walk over in-memory trees; P1-WALK-03: directories split
+//! into stat batches.
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, ThreadId};
+use std::time::Duration;
 
 use proptest::prelude::*;
 
@@ -84,6 +87,76 @@ impl Provider for CancelAfter<'_> {
             self.cancel.store(true, Ordering::Relaxed);
         }
         self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+}
+
+/// Lists the first `keep` children of every directory and leaves the rest
+/// for stat batches, recording which threads read the batches. With
+/// `fail_stats`, every batch fails as if its directory had vanished.
+struct Splitting<'a> {
+    inner: &'a MemProvider,
+    keep: usize,
+    fail_stats: bool,
+    batches: Mutex<Vec<(usize, ThreadId)>>,
+}
+
+impl Provider for Splitting<'_> {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn read_dir_split(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+        later: &mut Vec<NameRef>,
+    ) -> io::Result<()> {
+        let mut all = Vec::new();
+        self.inner.read_dir(dir, opts, &mut all, errs)?;
+        let rest = all.split_off(all.len().min(self.keep));
+        out.extend(all);
+        later.extend(rest.into_iter().map(|entry| entry.name));
+        Ok(())
+    }
+
+    fn stat_names(
+        &self,
+        dir: &DirHandle,
+        names: &[NameRef],
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        self.batches
+            .lock()
+            .unwrap()
+            .push((names.len(), thread::current().id()));
+        // Long enough for idle workers to steal the other batches.
+        thread::sleep(Duration::from_millis(2));
+        if self.fail_stats {
+            return Err(io::Error::from_raw_os_error(2));
+        }
+        let wanted: HashSet<&NameRef> = names.iter().collect();
+        let mut all = Vec::new();
+        self.inner.read_dir(dir, opts, &mut all, errs)?;
+        out.extend(all.into_iter().filter(|entry| wanted.contains(&entry.name)));
+        Ok(())
     }
 
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
@@ -389,4 +462,75 @@ fn p1_walk_01_flags_keep_their_bit_values() {
         assert_eq!(flag.bits(), bit, "{flag:?}");
     }
     assert_eq!(Flags::all().bits(), 0xff);
+}
+
+#[test]
+fn p1_walk_03_a_wide_directory_is_read_in_batches_by_several_workers() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..20_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    // Subdirectories that only the stat batches find are still entered.
+    for i in 0..3 {
+        tree.file(format!("wide/sub{i}/inside"), 1);
+    }
+    let provider = Splitting {
+        inner: &tree,
+        keep: 100,
+        fail_stats: false,
+        batches: Mutex::new(Vec::new()),
+    };
+    let opts = WalkOptions {
+        threads: 4,
+        ..WalkOptions::default()
+    };
+    let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+    let summary = result.unwrap();
+    let (paths, _) = replay(tree.root_path(), &events);
+    assert_eq!(
+        sorted(paths.iter().map(PathBuf::as_path)),
+        sorted(tree.paths())
+    );
+    assert_eq!(summary.entries, tree.entry_count() as u64);
+
+    let batches = provider.batches.lock().unwrap();
+    // wide/ leaves 19,903 names: 19 full batches of 1,024 and one of 447.
+    assert_eq!(
+        batches.len(),
+        20,
+        "{:?}",
+        batches.iter().map(|b| b.0).collect::<Vec<_>>()
+    );
+    assert!(batches.iter().all(|&(len, _)| len <= STAT_BATCH));
+    let threads: HashSet<ThreadId> = batches.iter().map(|&(_, thread)| thread).collect();
+    assert!(threads.len() > 1, "one worker read every batch");
+}
+
+#[test]
+fn p1_walk_03_a_failed_stat_batch_records_every_name() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..1_500 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    let provider = Splitting {
+        inner: &tree,
+        keep: 0,
+        fail_stats: true,
+        batches: Mutex::new(Vec::new()),
+    };
+    let opts = WalkOptions {
+        threads: 2,
+        ..WalkOptions::default()
+    };
+    let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+    let summary = result.unwrap();
+    replay(tree.root_path(), &events);
+    // The root's one child, wide/, also went through a (failed) batch.
+    assert_eq!(summary.entries, 1);
+    assert_eq!(summary.entry_errors, 1);
+    let errors = events
+        .iter()
+        .filter(|e| matches!(e, ScanEvent::Error(ScanError { errno: 2, .. })))
+        .count();
+    assert_eq!(errors, 1);
 }
