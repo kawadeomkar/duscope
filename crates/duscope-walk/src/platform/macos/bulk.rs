@@ -376,14 +376,16 @@ pub(super) fn build(fields: Fields) -> Entry {
     flags.set(Flags::PURGEABLE, ext & ffi::EF_IS_PURGEABLE != 0);
     flags.set(Flags::MAY_SHARE, ext & ffi::EF_MAY_SHARE_BLOCKS != 0);
     flags.set(Flags::SHARES_ALL, ext & ffi::EF_SHARES_ALL_BLOCKS != 0);
-    // A clone id names a group only where the blocks may be shared; every
-    // APFS file has one, cloned or not.
+    // Every APFS file has a clone id, cloned or not, and a clone that has
+    // been modified gets a new one while still sharing some blocks. So the
+    // id names a group only for a file that shares all its blocks; one that
+    // only may share some is sized as an upper bound.
     let share = if kind == Kind::Dir {
         Share::None
+    } else if let Some(id) = clone_id.filter(|&id| id != 0 && flags.contains(Flags::SHARES_ALL)) {
+        Share::Clone(id)
     } else if flags.contains(Flags::MAY_SHARE) {
-        clone_id
-            .filter(|&id| id != 0)
-            .map_or(Share::MayShare, Share::Clone)
+        Share::MayShare
     } else if nlink > 1 {
         Share::Hardlink
     } else {
@@ -484,6 +486,11 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
     if common & libc::ATTR_CMN_NAME != 0 {
         r.name = c.reference();
     }
+    if r.error != 0 {
+        // Only the name matters for an entry that could not be read, and
+        // the record need not hold the attributes after it.
+        return Some(r);
+    }
     if common & libc::ATTR_CMN_DEVID != 0 {
         r.dev = c.i32()?;
     }
@@ -516,10 +523,6 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
     }
     if common & libc::ATTR_CMN_FILEID != 0 {
         r.ino = c.u64()?;
-    }
-    if r.error != 0 {
-        // Only the name matters for an entry that could not be read.
-        return Some(r);
     }
     if r.objtype == ffi::VDIR {
         let dir = attrs.dirattr;

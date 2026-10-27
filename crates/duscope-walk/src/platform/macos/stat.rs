@@ -121,7 +121,10 @@ pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat, attrs: At
         clone_id: None,
         full: (attrs == Attrs::Full).then(|| FullAttrs {
             atime_ns: time(stat.st_atime, stat.st_atime_nsec),
-            btime_ns: Some(time(stat.st_birthtime, stat.st_birthtime_nsec)),
+            // macOS reports a birth time of 0 where the filesystem keeps
+            // none (devfs, autofs, some network and FUSE volumes).
+            btime_ns: (stat.st_birthtime != 0 || stat.st_birthtime_nsec != 0)
+                .then(|| time(stat.st_birthtime, stat.st_birthtime_nsec)),
             mode: u32::from(stat.st_mode),
             uid: stat.st_uid,
             gid: stat.st_gid,

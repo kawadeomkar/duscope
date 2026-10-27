@@ -9,7 +9,6 @@
 //! FUSE) have none.
 
 use std::ffi::CString;
-use std::fs;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
@@ -54,10 +53,7 @@ impl Provider for FallbackProvider {
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        let mut names = Vec::new();
-        for entry in fs::read_dir(dir.path())? {
-            names.push(NameRef::from(entry?.file_name().as_os_str()));
-        }
+        let mut names = posix::list_names(fd.as_fd())?;
         if names.len() > STAT_BATCH {
             later.extend(names.drain(STAT_BATCH..));
         }
