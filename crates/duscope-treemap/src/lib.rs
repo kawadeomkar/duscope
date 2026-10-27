@@ -14,12 +14,14 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cells;
+mod errors;
 mod gp;
 pub mod packs;
 pub mod paint;
 mod squarify;
 mod width;
 
+pub use errors::TreemapError;
 pub use gp::layout_gp;
 pub use squarify::squarify;
 

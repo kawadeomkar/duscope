@@ -13,6 +13,7 @@ include.workspace = true
 [dependencies]
 duscope-core.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 toml.workspace = true
 unicode-width.workspace = true
 

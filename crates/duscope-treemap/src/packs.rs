@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use duscope_core::rules::Class;
 use serde::Deserialize;
 
+use crate::TreemapError;
 use crate::cells::Color;
 
 /// The roles every part of the UI draws with.
@@ -306,17 +307,31 @@ impl Pack {
     /// A pack from a user's theme file (`docs/rules.md`): every colour
     /// `#rrggbb`, thirteen roles, seven classes, ten cycle and five age
     /// colours, no role drawn as a border equal to a class.
-    pub fn from_toml(text: &str, name: &str) -> Result<Pack, String> {
-        let file: ThemeFile =
-            toml::from_str(text).map_err(|e| format!("{name}: {}", e.message()))?;
+    ///
+    /// # Errors
+    ///
+    /// The first thing wrong with the file, as a [`TreemapError`] naming
+    /// `name`: its syntax, a missing or unknown role or class, a colour
+    /// that is not `#rrggbb`, a list of the wrong length, or a clash.
+    pub fn from_toml(text: &str, name: &str) -> Result<Pack, TreemapError> {
+        let file: ThemeFile = toml::from_str(text).map_err(|e| TreemapError::ThemeSyntax {
+            file: name.to_owned(),
+            message: e.message().to_owned(),
+        })?;
         let color = |what: &str, hex: &str| {
-            Color::hex(hex).ok_or_else(|| format!("{name}: {what} = {hex:?} is not #rrggbb"))
+            Color::hex(hex).ok_or_else(|| TreemapError::ThemeColor {
+                file: name.to_owned(),
+                key: what.to_owned(),
+                value: hex.to_owned(),
+            })
+        };
+        let missing = |table: &'static str, key: &str| TreemapError::ThemeMissing {
+            file: name.to_owned(),
+            table,
+            key: key.to_owned(),
         };
         let role = |key: &str| {
-            let hex = file
-                .roles
-                .get(key)
-                .ok_or_else(|| format!("{name}: [roles] has no {key}"))?;
+            let hex = file.roles.get(key).ok_or_else(|| missing("roles", key))?;
             color(key, hex)
         };
         if let Some(extra) = file
@@ -324,7 +339,12 @@ impl Pack {
             .keys()
             .find(|k| !ROLE_NAMES.contains(&k.as_str()))
         {
-            return Err(format!("{name}: [roles] has no role {extra:?}"));
+            return Err(TreemapError::ThemeUnknown {
+                file: name.to_owned(),
+                table: "roles",
+                kind: "role",
+                key: extra.clone(),
+            });
         }
         let roles = Roles {
             base: role("base")?,
@@ -346,7 +366,7 @@ impl Pack {
             let hex = file
                 .classes
                 .get(class.as_str())
-                .ok_or_else(|| format!("{name}: [classes] has no {}", class.as_str()))?;
+                .ok_or_else(|| missing("classes", class.as_str()))?;
             *slot = color(class.as_str(), hex)?;
         }
         if let Some(extra) = file
@@ -354,37 +374,51 @@ impl Pack {
             .keys()
             .find(|k| !Class::ALL.iter().any(|c| c.as_str() == k.as_str()))
         {
-            return Err(format!("{name}: [classes] has no class {extra:?}"));
+            return Err(TreemapError::ThemeUnknown {
+                file: name.to_owned(),
+                table: "classes",
+                kind: "class",
+                key: extra.clone(),
+            });
         }
-        let list = |what: &str, hexes: &[String], n: usize| -> Result<Vec<Color>, String> {
-            if hexes.len() != n {
-                return Err(format!(
-                    "{name}: {what} needs {n} colours, not {}",
-                    hexes.len()
-                ));
-            }
-            hexes.iter().map(|hex| color(what, hex)).collect()
+        let count = |list: &'static str, expected: usize, found: usize| TreemapError::ThemeCount {
+            file: name.to_owned(),
+            list,
+            expected,
+            found,
         };
-        let cycle = list("cycle", &file.cycle, 10)?;
-        let age = list("age", &file.age, 5)?;
+        let cycle: [Color; 10] = colors(&file.cycle, |hex| color("cycle", hex))?
+            .try_into()
+            .map_err(|v: Vec<Color>| count("cycle", 10, v.len()))?;
+        let age: [Color; 5] = colors(&file.age, |hex| color("age", hex))?
+            .try_into()
+            .map_err(|v: Vec<Color>| count("age", 5, v.len()))?;
         let pack = Pack {
             name: name.to_owned(),
             dark: roles.base.luminance().is_none_or(|l| l < 0.5),
             roles,
             classes,
-            cycle: cycle.try_into().map_err(|_| format!("{name}: cycle"))?,
-            age: age.try_into().map_err(|_| format!("{name}: age"))?,
+            cycle,
+            age,
             shades: false,
         };
         let conflicts = pack.clashes();
         if !conflicts.is_empty() {
-            return Err(format!(
-                "{name}: a role drawn as a border or fill equals a class colour: {}",
-                conflicts.join(", ")
-            ));
+            return Err(TreemapError::ThemeClash {
+                file: name.to_owned(),
+                clashes: conflicts,
+            });
         }
         Ok(pack)
     }
+}
+
+/// `hexes` as colours, through `color`.
+fn colors(
+    hexes: &[String],
+    color: impl Fn(&str) -> Result<Color, TreemapError>,
+) -> Result<Vec<Color>, TreemapError> {
+    hexes.iter().map(|hex| color(hex)).collect()
 }
 
 /// The thirteen roles a theme file names.
@@ -407,6 +441,7 @@ mod tests {
     use std::path::Path;
 
     use super::{NAMES, Pack};
+    use crate::TreemapError;
     use crate::cells::Color;
 
     #[test]
@@ -441,22 +476,36 @@ mod tests {
         assert!(pack.dark);
         // A clash, a bad colour and a missing role are refused.
         let clash = doc[start..end].replace("link = \"#74c7ec\"", "link = \"#89b4fa\"");
-        assert!(
-            Pack::from_toml(&clash, "t")
-                .unwrap_err()
-                .contains("link = code")
+        assert_eq!(
+            Pack::from_toml(&clash, "t").unwrap_err(),
+            TreemapError::ThemeClash {
+                file: "t".to_owned(),
+                clashes: vec!["link = code".to_owned()],
+            }
         );
         let bad = doc[start..end].replace("\"#1e1e2e\"", "\"blue\"");
-        assert!(
-            Pack::from_toml(&bad, "t")
-                .unwrap_err()
-                .contains("not #rrggbb")
-        );
+        let err = Pack::from_toml(&bad, "t").unwrap_err();
+        assert!(matches!(err, TreemapError::ThemeColor { .. }), "{err}");
+        assert_eq!(err.to_string(), "t: base = \"blue\" is not #rrggbb");
         let missing = doc[start..end].replace("green = \"#a6e3a1\"\n", "");
+        assert_eq!(
+            Pack::from_toml(&missing, "t").unwrap_err().to_string(),
+            "t: [roles] has no green"
+        );
+        // A list of the wrong length says how long it should be.
+        let short = doc[start..end].replace("\"#f38ba8\"]", "]");
+        let err = Pack::from_toml(&short, "t").unwrap_err();
         assert!(
-            Pack::from_toml(&missing, "t")
-                .unwrap_err()
-                .contains("no green")
+            matches!(
+                err,
+                TreemapError::ThemeCount {
+                    list: "age",
+                    expected: 5,
+                    found: 4,
+                    ..
+                }
+            ),
+            "{err}"
         );
         assert_eq!(Color::hex("#a6e3a1"), Some(pack.roles.green));
     }
