@@ -337,20 +337,30 @@ fn p1_core_01_a_tree_of_hard_links_grows_by_chunks() {
     assert_eq!((link.dev, link.ino), (1, 100_000 << 16 | 8));
 }
 
-/// The arena's bytes per entry over a benchmark tree, when it has been
-/// built (`just bench build --trees T1,T3`): the arena's share of the
-/// harness's RSS budget (100 bytes per entry on T1, 130 on T3).
+/// The arena's bytes per entry over the benchmark trees T1 and T3: the
+/// arena's share of the harness's RSS budget (100 bytes per entry on T1,
+/// 130 on T3). It runs with `DUSCOPE_TEST_PLATFORM=1`, and then both trees
+/// must be built (`just bench build --trees T1,T3`): a missing tree fails
+/// the test rather than passing it unmeasured. It measures the arena's heap
+/// (`heap_bytes`), not the process's peak RSS: reading that needs
+/// `getrusage`, an `unsafe` call this crate forbids. The harness's peak RSS
+/// of `duscope scan` is the RSS check of the phase-1 suite.
 #[test]
-#[ignore = "needs bench/.trees/T1 and T3; DUSCOPE_TEST_PLATFORM=1"]
+#[ignore = "needs bench/.trees/T1 and T3 built; DUSCOPE_TEST_PLATFORM=1"]
 fn p1_core_01_arena_bytes_per_entry_on_the_bench_trees() {
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
     let _env = TestEnv::new();
     let trees = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/.trees");
     for (tree, budget) in [("T1", 100), ("T3", 130)] {
         let root = trees.join(tree);
-        if !root.is_dir() {
-            eprintln!("skipped {tree}: not built");
-            continue;
-        }
+        assert!(
+            root.is_dir(),
+            "{tree} is not built at {}: run `just bench build --trees T1,T3`",
+            root.display()
+        );
         let (arena, _) = walk_into(&root, Attrs::Basic);
         let tenths = arena.heap_bytes() * 10 / arena.len();
         let shown = format!("{}.{}", tenths / 10, tenths % 10);
