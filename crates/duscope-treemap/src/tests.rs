@@ -44,6 +44,8 @@ fn items() -> impl Strategy<Value = Vec<(u64, usize)>> {
         prop_oneof![
             4 => 1u64..1_000_000_000_000,
             1 => 0u64..10,
+            // Ratios past what a float's mantissa holds.
+            1 => (1u64 << 55)..(1u64 << 60),
         ],
         1..80,
     )
@@ -186,5 +188,43 @@ fn p1_map_01_the_mockup_lays_out_to_its_eleven_tiles() {
     for (tile, mock) in laid.tiles.iter().zip(&mockup.tile) {
         let [x, y, w, h] = mock.rect;
         assert_eq!(tile.rect, Rect::new(x, y, w, h), "{}", mock.name);
+    }
+}
+
+#[test]
+fn p1_map_01_weights_far_apart_still_cover_the_area() {
+    // Ratios near 2^58: the float edges round past the area's own.
+    let weights = [
+        774,
+        2692,
+        212,
+        389,
+        3538,
+        0,
+        528,
+        172,
+        288_248_411_558_657_120,
+    ];
+    let items: Vec<(u64, usize)> = weights.into_iter().zip(0..).collect();
+    for algorithm in [Algorithm::Squarify, Algorithm::Gp] {
+        for min in [1, 4] {
+            check(&items, Rect::new(0, 0, 55, 58), algorithm, min).unwrap();
+        }
+    }
+    let huge = [(u64::MAX, 0), (u64::MAX, 1), (1, 2)];
+    check(&huge, Rect::new(0, 0, 80, 24), Algorithm::Squarify, 1).unwrap();
+}
+
+#[test]
+fn p1_map_01_the_pool_tries_the_smallest_tiles_weight() {
+    let weights = [
+        269_870, 549_675, 701_720, 465_351, 1, 36_722, 51_267, 58_903,
+    ];
+    let items: Vec<(u64, usize)> = weights.into_iter().zip(0..).collect();
+    for algorithm in [Algorithm::Squarify, Algorithm::Gp] {
+        // Doubling the pool's weight overshoots the smallest tile's; tried
+        // at that weight exactly, the pool fits beside six tiles.
+        let laid = layout(&items, Rect::new(0, 0, 59, 13), algorithm, 4);
+        assert_eq!(laid.tiles.len(), 6, "{algorithm:?}");
     }
 }
