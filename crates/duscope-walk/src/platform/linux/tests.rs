@@ -113,9 +113,12 @@ fn p1_walk_02_one_statx_per_entry() {
     summary.replace(walk_with(&provider, &root, &opts, |_| {}).unwrap());
     let summary = summary.unwrap();
     // Every listed name is read once, the root included; nothing else is
-    // stat'ed, by statx or otherwise (the provider makes no lstat call).
+    // stat'ed, by statx or otherwise (the provider makes no lstat call),
+    // except a directory's own subvolume where a child reports one (btrfs
+    // and bcachefs on 6.10 and later; never on the CI runners' ext4).
     let calls = provider.statx_calls.load(Ordering::Relaxed) as u64;
-    assert_eq!(calls, summary.entries + summary.entry_errors);
+    let subvol = provider.subvol_reads.load(Ordering::Relaxed) as u64;
+    assert_eq!(calls, summary.entries + summary.entry_errors + subvol);
 }
 
 /// Records which threads read the stat batches of the wrapped provider.
@@ -273,4 +276,37 @@ fn p1_walk_02_the_volume_comes_from_mountinfo_and_statvfs() {
     );
     assert!(volume.total_bytes >= volume.free_bytes && volume.total_bytes > 0);
     assert!(!volume.fs_type.is_empty());
+}
+
+#[test]
+fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
+    // SAFETY: statx is plain data; all zeros is a valid value.
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    stx.stx_mode = u16::try_from(libc::S_IFDIR).unwrap();
+    let with = |stx: &libc::statx, bit: libc::c_int| {
+        let mut stx = *stx;
+        let bit = u64::from(bit.cast_unsigned());
+        stx.stx_attributes_mask |= bit;
+        stx.stx_attributes |= bit;
+        super::statx::entry(NameRef::from("d"), &stx)
+    };
+    let plain = super::statx::entry(NameRef::from("d"), &stx);
+    assert_eq!(plain.boundary, crate::Boundary::None);
+    assert!(plain.flags.is_empty());
+    let root = with(&stx, libc::STATX_ATTR_MOUNT_ROOT);
+    assert_eq!(root.boundary, crate::Boundary::Mount);
+    assert!(root.flags.contains(crate::Flags::MOUNT_ROOT));
+    // An automount point not yet triggered is a boundary, not a mount root.
+    let auto = with(&stx, libc::STATX_ATTR_AUTOMOUNT);
+    assert_eq!(auto.boundary, crate::Boundary::Mount);
+    assert!(!auto.flags.contains(crate::Flags::MOUNT_ROOT));
+    let packed = with(&stx, libc::STATX_ATTR_COMPRESSED);
+    assert!(packed.flags.contains(crate::Flags::COMPRESSED));
+    // An attribute the kernel does not vouch for in the mask is not read.
+    let mut unvouched = stx;
+    unvouched.stx_attributes |= u64::from(libc::STATX_ATTR_AUTOMOUNT.cast_unsigned());
+    assert_eq!(
+        super::statx::entry(NameRef::from("d"), &unvouched).boundary,
+        crate::Boundary::None
+    );
 }

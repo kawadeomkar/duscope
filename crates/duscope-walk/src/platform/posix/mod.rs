@@ -58,6 +58,26 @@ pub(crate) fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput.into())
 }
 
+/// Room for a name of up to `NAME_MAX` (255) bytes and its terminating NUL.
+const NAME_BUF: usize = 256;
+
+/// Calls `f` with `name` as a NUL-terminated C string, built on the stack:
+/// the per-entry calls take a name for every entry they read, and a heap
+/// allocation each would cost more than the copy. A name longer than any
+/// filesystem allows still works, through the heap.
+pub(crate) fn with_c_name<R>(
+    name: &[u8],
+    f: impl FnOnce(&std::ffi::CStr) -> io::Result<R>,
+) -> io::Result<R> {
+    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+    if name.len() >= NAME_BUF {
+        return f(&CString::new(name).map_err(|_| invalid())?);
+    }
+    let mut buf = [0u8; NAME_BUF];
+    buf[..name.len()].copy_from_slice(name);
+    f(std::ffi::CStr::from_bytes_with_nul(&buf[..=name.len()]).map_err(|_| invalid())?)
+}
+
 /// Opens `path` for reading its entries. The final component is not
 /// followed, so a directory replaced by a symlink after it was listed fails
 /// with `ELOOP` rather than leading the walk elsewhere. On `EMFILE` or
@@ -99,4 +119,22 @@ pub(crate) fn statvfs(path: &std::ffi::CStr) -> io::Result<libc::statvfs> {
     }
     // SAFETY: statvfs succeeded, so it filled the struct.
     Ok(unsafe { buf.assume_init() })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::with_c_name;
+
+    #[test]
+    fn p1_walk_02_names_pass_to_c_from_the_stack() {
+        for len in [0, 1, 255, 256, 300] {
+            let name = vec![b'n'; len];
+            let back = with_c_name(&name, |c| Ok(c.to_bytes().to_vec())).unwrap();
+            assert_eq!(back, name, "a name of {len} bytes");
+        }
+        let nul = with_c_name(b"a\0b", |_| Ok(()));
+        assert_eq!(nul.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
 }
