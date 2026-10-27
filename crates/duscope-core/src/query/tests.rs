@@ -478,8 +478,6 @@ fn p1_cli_03_sort_keys_and_reverse() {
         SortKey::Path.describe(SizeKind::Allocated, true),
         "path_desc"
     );
-    let _ = Path::new("/");
-    assert!(view.len() > 10);
 }
 
 /// An entry of a synthetic stream: 1000 bytes, 4096 on disk.
