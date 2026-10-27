@@ -188,9 +188,6 @@ pub trait Provider: Send + Sync {
 #[derive(Debug)]
 pub struct DirHandle {
     id: DirId,
-    /// Its name in its parent's listing (a followed link's own name); the
-    /// root's as given.
-    name: NameRef,
     path: PathBuf,
     depth: u32,
     dev: u64,
@@ -204,7 +201,6 @@ impl DirHandle {
     fn new(id: DirId, path: PathBuf, entry: &Entry, parent: Option<Arc<DirHandle>>) -> DirHandle {
         DirHandle {
             id,
-            name: entry.name.clone(),
             path,
             depth: parent.as_ref().map_or(0, |p| p.depth + 1),
             dev: entry.dev,
@@ -224,7 +220,6 @@ impl DirHandle {
             .map(|up| Arc::new(DirHandle::detached(path.parent().unwrap_or(&path), up)));
         DirHandle {
             id: DirId::ROOT,
-            name: NameRef::from(path.file_name().unwrap_or(path.as_os_str())),
             path,
             depth,
             dev: 0,
@@ -360,17 +355,21 @@ enum Failed {
     /// `EACCES`, `EPERM` and the rest: the directory is listed empty, with
     /// the error number.
     Unreadable,
-    /// `ENOENT`, `ESTALE`: it disappeared after it was listed.
+    /// `ENOENT`, `ESTALE`, and `ENOTDIR` for a directory replaced by a file:
+    /// it disappeared, as listed, after it was listed.
     Vanished,
-    /// `ELOOP`, `ENAMETOOLONG`, `EIO`: an error of the directory that
-    /// listed it.
+    /// `ELOOP`, `ENAMETOOLONG`, `EIO`: an error of the entry, recorded on
+    /// the directory that listed it with the entry dropped, for a link
+    /// followed under `--follow-symlinks`. A directory that fails this way
+    /// when it is read has had its entry delivered already, so it is listed
+    /// empty with the error number, as an unreadable one.
     OnParent,
 }
 
 impl Failed {
     fn of(errno: i32) -> Failed {
         match errno {
-            libc::ENOENT | libc::ESTALE => Failed::Vanished,
+            libc::ENOENT | libc::ESTALE | libc::ENOTDIR => Failed::Vanished,
             libc::ELOOP | libc::ENAMETOOLONG | libc::EIO => Failed::OnParent,
             _ => Failed::Unreadable,
         }
@@ -662,18 +661,16 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         else {
             return;
         };
-        // A directory that could not be read, by the error matrix; the root
-        // has no parent to carry its error.
+        // A directory that could not be read, by the error matrix: one that
+        // disappeared is vanished, and any other failure, ELOOP,
+        // ENAMETOOLONG and EIO included, lists it empty with the error
+        // number (its entry was delivered with its parent, so it cannot be
+        // dropped, and the unreadable flag and the partial read cover it).
         let (mut errno, mut dir_vanished) = (None, false);
-        match (failed.map(|e| (e, Failed::of(e))), &dir.parent) {
-            (None, _) => {}
-            (Some((_, Failed::Vanished)), _) => dir_vanished = true,
-            (Some((e, Failed::OnParent)), Some(parent)) => errors.push(ScanError {
-                dir: parent.id,
-                name: dir.name.clone(),
-                errno: e,
-            }),
-            (Some((e, _)), _) => errno = Some(e),
+        match failed.map(|e| (e, Failed::of(e))) {
+            None => {}
+            Some((_, Failed::Vanished)) => dir_vanished = true,
+            Some((e, _)) => errno = Some(e),
         }
         let split = (!later.is_empty()).then(|| {
             let split = Arc::new(Split {
