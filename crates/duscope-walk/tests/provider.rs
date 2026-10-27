@@ -7,6 +7,10 @@
 //! version on Ubuntu 24.04) counts a directory's apparent size as 0, where
 //! older releases count its `st_size`. Both print KiB rounded up. The walk's
 //! entries are summed the same way.
+//!
+//! This file holds the one `cfg(target_os)` outside `src/platform/` that the
+//! scanner's tests need: the facts it selects on are about the two `du`
+//! implementations it compares against, not about the scanner.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
