@@ -101,7 +101,13 @@ impl Request {
                 fileattr: FILE,
                 forkattr: 0,
             },
-            options: libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_NOFOLLOW,
+            // FSOPT_RETURN_REALDEV: the device of the volume itself. The
+            // System and Data volumes of macOS's boot volume group share
+            // one st_dev; their real devices differ, so the device can stand
+            // for the volume (the mount id) and keep inodes of the two apart.
+            options: libc::FSOPT_PACK_INVAL_ATTRS
+                | libc::FSOPT_NOFOLLOW
+                | libc::FSOPT_RETURN_REALDEV,
             bulk: false,
         };
         // ATTR_CMNEXT_PRIVATESIZE is not asked for: it added 36% to a warm
@@ -229,6 +235,20 @@ impl Record<'_> {
             return Err((name, None));
         }
         let kind = kind(self.objtype);
+        let mount_point = kind == Kind::Dir
+            && self.has(DIR_GROUP, libc::ATTR_DIR_MOUNTSTATUS)
+            && self.mount_status & DIR_MNTSTATUS_MNTPOINT != 0;
+        // A firmlink's record describes the link on the System volume; read
+        // by name, it resolves to the directory it shows on the Data volume.
+        // A bulk read does not cross mounts: a mount point's record describes
+        // the directory beneath it, not the mounted root. Both are read
+        // again by name, whatever else the record holds.
+        if request.bulk && self.flags & ffi::SF_FIRMLINK != 0 {
+            return Err((name, Some(Boundary::Firmlink)));
+        }
+        if request.bulk && mount_point {
+            return Err((name, Some(Boundary::Mount)));
+        }
         let complete = if kind == Kind::Dir {
             self.has(DIR_GROUP, REQUIRED_DIR)
         } else {
@@ -237,21 +257,8 @@ impl Record<'_> {
         if !complete {
             return Err((name, None));
         }
-        // A firmlink's record describes the link on the System volume; read
-        // by name, it resolves to the directory it shows on the Data volume.
-        if request.bulk && self.flags & ffi::SF_FIRMLINK != 0 {
-            return Err((name, Some(Boundary::Firmlink)));
-        }
-        // A bulk read does not cross mounts: a mount point's record describes
-        // the directory beneath it, not the mounted root.
-        if request.bulk
-            && kind == Kind::Dir
-            && self.has(DIR_GROUP, libc::ATTR_DIR_MOUNTSTATUS)
-            && self.mount_status & DIR_MNTSTATUS_MNTPOINT != 0
-        {
-            return Err((name, Some(Boundary::Mount)));
-        }
-        Ok(build(Fields {
+        let dev = dev(self.dev);
+        let mut entry = build(Fields {
             name,
             kind,
             apparent: self.len,
@@ -259,7 +266,8 @@ impl Record<'_> {
             mtime_ns: self.mtime.ns(),
             ctime_ns: self.ctime.ns(),
             nlink: self.links,
-            dev: dev(self.dev),
+            dev,
+            mnt_id: dev,
             ino: self.ino,
             bsd_flags: self.flags,
             ext_flags: self
@@ -277,7 +285,12 @@ impl Record<'_> {
                 uid: self.uid,
                 gid: self.gid,
             }),
-        }))
+        });
+        // Read by name, a mount point is the mounted volume's root.
+        if mount_point {
+            entry.boundary = Boundary::Mount;
+        }
+        Ok(entry)
     }
 }
 
@@ -327,6 +340,8 @@ pub(super) struct Fields {
     pub(super) ctime_ns: i64,
     pub(super) nlink: u32,
     pub(super) dev: u64,
+    /// The volume's id: `ATTR_CMN_FSID`, or the device where it is unknown.
+    pub(super) mnt_id: u64,
     pub(super) ino: u64,
     /// `st_flags` / `ATTR_CMN_FLAGS`.
     pub(super) bsd_flags: u32,
@@ -350,6 +365,7 @@ pub(super) fn build(fields: Fields) -> Entry {
         ctime_ns,
         nlink,
         dev,
+        mnt_id,
         ino,
         bsd_flags,
         ext_flags,
@@ -369,14 +385,16 @@ pub(super) fn build(fields: Fields) -> Entry {
     flags.set(Flags::PURGEABLE, ext & ffi::EF_IS_PURGEABLE != 0);
     flags.set(Flags::MAY_SHARE, ext & ffi::EF_MAY_SHARE_BLOCKS != 0);
     flags.set(Flags::SHARES_ALL, ext & ffi::EF_SHARES_ALL_BLOCKS != 0);
-    // A clone id names a group only where the blocks may be shared; every
-    // APFS file has one, cloned or not.
+    // Every APFS file has a clone id, cloned or not, and a clone that has
+    // been modified gets a new one while still sharing some blocks. So the
+    // id names a group only for a file that shares all its blocks; one that
+    // only may share some is sized as an upper bound.
     let share = if kind == Kind::Dir {
         Share::None
+    } else if let Some(id) = clone_id.filter(|&id| id != 0 && flags.contains(Flags::SHARES_ALL)) {
+        Share::Clone(id)
     } else if flags.contains(Flags::MAY_SHARE) {
-        clone_id
-            .filter(|&id| id != 0)
-            .map_or(Share::MayShare, Share::Clone)
+        Share::MayShare
     } else if nlink > 1 {
         Share::Hardlink
     } else {
@@ -394,8 +412,7 @@ pub(super) fn build(fields: Fields) -> Entry {
         nlink,
         dev,
         ino,
-        // A macOS volume is identified by its device id.
-        mnt_id: dev,
+        mnt_id,
         share,
         boundary: Boundary::None,
         flags,
@@ -477,9 +494,15 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
     if common & libc::ATTR_CMN_NAME != 0 {
         r.name = c.reference();
     }
+    if r.error != 0 {
+        // Only the name matters for an entry that could not be read, and
+        // the record need not hold the attributes after it.
+        return Some(r);
+    }
     if common & libc::ATTR_CMN_DEVID != 0 {
         r.dev = c.i32()?;
     }
+
     if common & libc::ATTR_CMN_OBJTYPE != 0 {
         r.objtype = c.u32()?;
     }
@@ -509,10 +532,6 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
     }
     if common & libc::ATTR_CMN_FILEID != 0 {
         r.ino = c.u64()?;
-    }
-    if r.error != 0 {
-        // Only the name matters for an entry that could not be read.
-        return Some(r);
     }
     if r.objtype == ffi::VDIR {
         let dir = attrs.dirattr;

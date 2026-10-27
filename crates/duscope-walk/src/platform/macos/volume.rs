@@ -17,12 +17,18 @@ pub(in crate::platform) fn of(path: &Path) -> io::Result<VolumeInfo> {
     let c_path = posix::c_path(path)?;
     let fs = ffi::statfs(&c_path)?;
     let dev = bulk::dev(posix::lstat(&c_path)?.st_dev);
-    Ok(describe(&fs, dev))
+    let mut volume = describe(&fs, dev);
+    volume.case_sensitive = posix::c_path(&volume.mount_point)
+        .ok()
+        .and_then(|c| ffi::pathconf(&c, libc::_PC_CASE_SENSITIVE))
+        .map(|value| value != 0);
+    Ok(volume)
 }
 
 /// The volume mounted at `path` from the kernel's record of its mounts,
-/// without asking the volume anything; a path that is not a mount point
-/// (a firmlink) is read with `statfs`. The walk fills in the device.
+/// without asking the volume anything, so its case sensitivity is left
+/// unknown; a path that is not a mount point (a firmlink) is read with
+/// `statfs`. The walk fills in the device.
 pub(in crate::platform) fn mount_info(path: &Path) -> io::Result<VolumeInfo> {
     let mounted = ffi::mounted_volumes()?;
     let target = path.as_os_str().as_bytes();
@@ -32,22 +38,18 @@ pub(in crate::platform) fn mount_info(path: &Path) -> io::Result<VolumeInfo> {
     }
 }
 
-/// A volume record from its `statfs`.
+/// A volume record from its `statfs`, case sensitivity not read.
 fn describe(fs: &libc::statfs, dev: u64) -> VolumeInfo {
     let block = u64::from(fs.f_bsize);
     let fs_type = String::from_utf8_lossy(&c_chars(&fs.f_fstypename)).to_lowercase();
     let mount_point = PathBuf::from(OsStr::from_bytes(&c_chars(&fs.f_mntonname)));
-    let case_sensitive = posix::c_path(&mount_point)
-        .ok()
-        .and_then(|c| ffi::pathconf(&c, libc::_PC_CASE_SENSITIVE))
-        .map(|value| value != 0);
     VolumeInfo {
         dev,
         mnt_id: dev,
         mount_point,
         class: class(&fs_type),
         read_only: fs.f_flags & flag(libc::MNT_RDONLY) != 0,
-        case_sensitive,
+        case_sensitive: None,
         normalization: if fs_type == "apfs" || fs_type == "hfs" {
             Normalization::Insensitive
         } else {

@@ -663,8 +663,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 self.provider.skip(dir, entry, self.opts)
             };
         }
-        let (met, first) = self.meet(entry.mnt_id, path);
-        let skip = match met.class {
+        let class = self.class(entry.mnt_id, path);
+        let skip = match class {
             _ if cycle => Some(Skip::BindCycle),
             Some(VolumeClass::Kernel) => Some(Skip::Kernel),
             Some(VolumeClass::Network) if !self.opts.include_network => Some(Skip::Network),
@@ -679,7 +679,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         // A directory the provider skips is reached another way (the Data
         // volume through its firmlinks), so it reports no volume of its own.
         let provider_skip = skip.is_some_and(|s| s == Skip::Firmlinked);
-        if first && !provider_skip {
+        if !provider_skip && self.claim(entry.mnt_id) {
             let volume = match skip {
                 None => self.provider.volume(path),
                 Some(_) => self.provider.mount_info(path),
@@ -689,46 +689,44 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 volume.mnt_id = entry.mnt_id;
                 volume.reason = skip;
                 volumes.push(volume);
-                self.reported(entry.mnt_id);
             }
         }
         skip
     }
 
-    /// The mount `mnt_id` at `path`, read with [`Provider::mount_info`] the
-    /// first time it is met; and whether its volume is yet to be reported.
-    fn meet(&self, mnt_id: u64, path: &Path) -> (Met, bool) {
-        let known = self
-            .mounts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&mnt_id)
-            .copied();
-        let met = known.unwrap_or_else(|| {
-            let class = self.provider.mount_info(path).ok().map(|v| v.class);
-            *self
-                .mounts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(mnt_id)
-                .or_insert(Met {
-                    class,
-                    reported: false,
-                })
-        });
-        (met, !met.reported)
-    }
-
-    /// Notes that the volume of `mnt_id` has been reported.
-    fn reported(&self, mnt_id: u64) {
+    /// The class of the mount `mnt_id` at `path`, read with
+    /// [`Provider::mount_info`] the first time the mount is met; `None` when
+    /// it cannot be read.
+    fn class(&self, mnt_id: u64, path: &Path) -> Option<VolumeClass> {
         if let Some(met) = self
             .mounts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get_mut(&mnt_id)
+            .get(&mnt_id)
         {
-            met.reported = true;
+            return met.class;
         }
+        let class = self.provider.mount_info(path).ok().map(|v| v.class);
+        self.mounts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(mnt_id)
+            .or_insert(Met {
+                class,
+                reported: false,
+            })
+            .class
+    }
+
+    /// Claims the report of the volume of `mnt_id`: true for the one caller
+    /// that is to report it.
+    fn claim(&self, mnt_id: u64) -> bool {
+        let mut mounts = self.mounts.lock().unwrap_or_else(PoisonError::into_inner);
+        let met = mounts.entry(mnt_id).or_insert(Met {
+            class: None,
+            reported: false,
+        });
+        !std::mem::replace(&mut met.reported, true)
     }
 
     /// Sends a batch, then makes the jobs it found stealable.
