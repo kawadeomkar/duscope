@@ -81,6 +81,10 @@ fn parts(path: &[Vec<u8>]) -> Vec<&[u8]> {
     path.iter().map(Vec::as_slice).collect()
 }
 
+/// Directory rules the fixture tree has no directory for yet; each is
+/// checked by `p1_core_04_the_proposal_examples_classify_as_listed`.
+const NOT_IN_FIXTURE: [&str; 1] = ["*.dSYM"];
+
 #[test]
 fn p1_core_04_the_fixture_tree_exercises_every_rule() {
     let env = TestEnv::new();
@@ -107,6 +111,13 @@ fn p1_core_04_the_fixture_tree_exercises_every_rule() {
             .dirs
             .iter()
             .any(|dir| single.of_dir(&parts(dir)).is_some());
+        if NOT_IN_FIXTURE.contains(&key) {
+            assert!(
+                !hit,
+                "the fixture tree now exercises {key:?}: take it out of NOT_IN_FIXTURE"
+            );
+            continue;
+        }
         assert!(
             hit,
             "no fixture directory exercises the directory rule {key:?}"
@@ -200,10 +211,15 @@ fn p1_core_04_the_proposal_examples_classify_as_listed() {
         (Class::Data, "Default/IndexedDB"),
         (Class::Binaries, "Xcode/DerivedData"),
         (Class::Binaries, "Frameworks/Sparkle.framework"),
+        (Class::Binaries, "Products/Example.app.dSYM"),
     ];
     for (class, dir) in by_dir {
         assert_eq!(classes.of_dir(&path(dir)), Some(class), "{dir}");
     }
+    // Symbols are a directory bundle (Example.app.dSYM/Contents/Resources/
+    // DWARF/Example), so the directory rule classifies them; no file has a
+    // dsym extension.
+    assert_eq!(classes.of_ext("dsym"), None);
 }
 
 #[test]
