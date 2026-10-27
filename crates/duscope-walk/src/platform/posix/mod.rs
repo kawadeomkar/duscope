@@ -123,9 +123,102 @@ pub(crate) fn statvfs(path: &std::ffi::CStr) -> io::Result<libc::statvfs> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use std::io;
+    use std::path::PathBuf;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    use super::with_c_name;
+    use duscope_testkit::TestEnv;
+
+    use super::{NOFILE_TARGET, OPEN_MAX, open_dir, raise_nofile_limit, with_c_name};
+
+    /// The directory the child process opens under a full descriptor table.
+    const CHILD_DIR: &str = "DUSCOPE_TEST_EMFILE_DIR";
+
+    fn nofile() -> libc::rlimit {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a valid, writable rlimit for getrlimit to fill.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) },
+            0
+        );
+        limit
+    }
+
+    #[test]
+    fn p1_walk_02_the_descriptor_limit_is_raised() {
+        raise_nofile_limit();
+        let limit = nofile();
+        // The raise asks for 65,536 and, where that is refused (macOS above
+        // OPEN_MAX), for OPEN_MAX; never above the hard limit.
+        let floor = limit.rlim_max.min(NOFILE_TARGET).min(OPEN_MAX);
+        assert!(
+            limit.rlim_cur >= floor,
+            "soft limit {} below {floor}",
+            limit.rlim_cur
+        );
+    }
+
+    #[test]
+    fn p1_walk_02_emfile_parks_until_a_descriptor_frees() {
+        // The descriptor table is filled in a child process: in this one,
+        // the tests running beside it would fail with EMFILE.
+        let env = TestEnv::new();
+        let child = "platform::posix::tests::p1_walk_02_emfile_child_process";
+        let out = env
+            .command(std::env::current_exe().unwrap())
+            .args(["--exact", child, "--ignored", "--test-threads", "1"])
+            .env(CHILD_DIR, env.tmp_dir())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "the child did not run: {stdout}"
+        );
+    }
+
+    #[test]
+    #[ignore = "run in a child process by p1_walk_02_emfile_parks_until_a_descriptor_frees"]
+    fn p1_walk_02_emfile_child_process() {
+        // `--ignored` runs (the platform job) reach it without its parent.
+        let Some(dir) = std::env::var_os(CHILD_DIR).map(PathBuf::from) else {
+            return;
+        };
+        let mut limit = nofile();
+        limit.rlim_cur = limit.rlim_cur.min(64);
+        // SAFETY: `limit` is a valid rlimit that setrlimit only reads.
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) },
+            0
+        );
+        let mut held = Vec::new();
+        let full = loop {
+            match File::open("/dev/null") {
+                Ok(file) => held.push(file),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(full.raw_os_error(), Some(libc::EMFILE));
+        let opener = thread::spawn(move || {
+            let start = Instant::now();
+            (open_dir(&dir).map(drop), start.elapsed())
+        });
+        thread::sleep(Duration::from_millis(200));
+        held.pop();
+        let (result, waited) = opener.join().unwrap();
+        result.expect("the open parked until a descriptor freed, then succeeded");
+        assert!(waited >= Duration::from_millis(150), "it waited {waited:?}");
+    }
 
     #[test]
     fn p1_walk_02_names_pass_to_c_from_the_stack() {
