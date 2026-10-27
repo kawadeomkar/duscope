@@ -230,10 +230,19 @@ pub fn iec(bytes: u64) -> String {
     if unit == 0 {
         return format!("{bytes} B");
     }
-    // One decimal from integer arithmetic: tenths of the unit, rounded.
-    let divisor = 1u128 << (10 * unit);
-    let tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
-    format!("{}.{} {}", tenths / 10, tenths % 10, UNITS[unit])
+    // One decimal from integer arithmetic: tenths of the unit, rounded; a
+    // value that rounds up to the next unit is shown in it (1.0 MiB, not
+    // 1024.0 KiB).
+    let tenths = |unit: usize| {
+        let divisor = 1u128 << (10 * unit);
+        (u128::from(bytes) * 10 + divisor / 2) / divisor
+    };
+    let mut rounded = tenths(unit);
+    if rounded >= 10_240 && unit + 1 < UNITS.len() {
+        unit += 1;
+        rounded = tenths(unit);
+    }
+    format!("{}.{} {}", rounded / 10, rounded % 10, UNITS[unit])
 }
 
 /// A count with thousands separators.
@@ -268,6 +277,10 @@ mod tests {
         assert_eq!(iec(1024), "1.0 KiB");
         assert_eq!(iec(1536), "1.5 KiB");
         assert_eq!(iec(412 * (1 << 30) + 300 * (1 << 20)), "412.3 GiB");
+        // A value that rounds up to the next unit is shown in it.
+        assert_eq!(iec(1_048_575), "1.0 MiB");
+        assert_eq!(iec(1_048_524), "1023.9 KiB");
+        assert_eq!(iec(u64::MAX), "16384.0 PiB");
         assert_eq!(thousands(0), "0");
         assert_eq!(thousands(1_284_310), "1,284,310");
         assert_eq!(thousands(999), "999");
