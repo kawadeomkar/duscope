@@ -24,16 +24,19 @@ impl DirId {
     pub const ROOT: DirId = DirId(0);
 
     /// The id with this number.
+    #[must_use]
     pub const fn new(id: u32) -> DirId {
         DirId(id)
     }
 
     /// The id as a number.
+    #[must_use]
     pub const fn get(self) -> u32 {
         self.0
     }
 
     /// The id as an index into a side table.
+    #[must_use]
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -47,16 +50,19 @@ pub struct NameRef(Box<[u8]>);
 
 impl NameRef {
     /// A name holding a copy of these bytes.
+    #[must_use]
     pub fn new(bytes: &[u8]) -> NameRef {
         NameRef(bytes.into())
     }
 
     /// The name's bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
     /// The name as an `OsStr`, for joining onto a path.
+    #[must_use]
     pub fn as_os_str(&self) -> &OsStr {
         OsStr::from_bytes(&self.0)
     }
@@ -262,6 +268,7 @@ pub struct VolumeInfo {
 
 impl VolumeInfo {
     /// Whether the walk entered the volume.
+    #[must_use]
     pub fn entered(&self) -> bool {
         self.reason.is_none()
     }
@@ -291,6 +298,7 @@ pub enum VolumeClass {
 
 impl VolumeClass {
     /// The class as the index and the envelope spell it.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             VolumeClass::Local => "local",
@@ -315,6 +323,7 @@ pub enum Normalization {
 
 impl Normalization {
     /// The value as the index spells it.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Normalization::None => "none",
@@ -379,6 +388,7 @@ pub enum Skip {
 
 impl Skip {
     /// The reason as the index and the envelope spell it.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Skip::Firmlinked => "firmlinked",

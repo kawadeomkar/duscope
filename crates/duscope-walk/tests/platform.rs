@@ -2,6 +2,12 @@
 //! so they are ignored by default and run with `DUSCOPE_TEST_PLATFORM=1`
 //! (`just check-full`; the CI platform job runs them under sudo). On Linux
 //! they need root and skip without it.
+//!
+//! The file selects tests with `cfg(target_os)`, which the scanner keeps
+//! inside `src/platform/` elsewhere: building and mounting a filesystem
+//! takes different commands on each platform (`truncate`, `mkfs` and
+//! `mount` against `hdiutil`), and each test exercises one platform's
+//! mount table.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]

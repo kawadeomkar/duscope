@@ -54,6 +54,8 @@ pub trait Provider: Send + Sync {
     /// `errs` for each child that was listed but could not be read. The walk
     /// sets each entry's `parent` and `dir` and each error's `dir`.
     ///
+    /// # Errors
+    ///
     /// An `Err` means the directory itself could not be read: the walk
     /// discards whatever was appended and closes the directory with the
     /// error's number.
@@ -70,6 +72,11 @@ pub trait Provider: Send + Sync {
     /// those with [`stat_names`](Provider::stat_names) in batches of 1,024
     /// that any worker can take, so one wide directory keeps every worker
     /// busy. The default leaves nothing for later.
+    ///
+    /// # Errors
+    ///
+    /// The error of reading the directory itself, as for
+    /// [`read_dir`](Provider::read_dir).
     fn read_dir_split(
         &self,
         dir: &DirHandle,
@@ -89,6 +96,11 @@ pub trait Provider: Send + Sync {
     ///
     /// A provider that leaves nothing for later need not implement it; the
     /// default fails with `ErrorKind::Unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// The error of opening `dir` again; a name that cannot be read is an
+    /// error in `errs`, not an `Err`.
     fn stat_names(
         &self,
         dir: &DirHandle,
@@ -117,6 +129,10 @@ pub trait Provider: Send + Sync {
     }
 
     /// The volume holding `path`.
+    ///
+    /// # Errors
+    ///
+    /// The error of reading the volume of `path`.
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
 
     /// The volume mounted at `path`, whose entry reports the device `dev`,
@@ -126,6 +142,11 @@ pub trait Provider: Send + Sync {
     /// its sizes. A provider may find the mount by `dev`, which holds
     /// however the walk spelled the path. The default is
     /// [`volume`](Provider::volume).
+    ///
+    /// # Errors
+    ///
+    /// The error of reading the mount table, or the mount point when the
+    /// table does not have it.
     fn mount_info(&self, path: &Path, dev: u64) -> io::Result<VolumeInfo> {
         let _ = dev;
         self.volume(path)
@@ -134,6 +155,10 @@ pub trait Provider: Send + Sync {
     /// The entry of the walk root itself, not following a final symlink. Its
     /// name is the path's last component, or the whole path when it has none
     /// (`/`).
+    ///
+    /// # Errors
+    ///
+    /// The error of reading `path`, which ends the walk before it starts.
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry>;
 
     /// The workers a walk runs when [`WalkOptions::threads`] is 0: twice the
@@ -188,21 +213,25 @@ impl DirHandle {
     }
 
     /// The directory's device, as its entry reported it.
+    #[must_use]
     pub fn dev(&self) -> u64 {
         self.dev
     }
 
     /// The directory's inode number, as its entry reported it.
+    #[must_use]
     pub fn ino(&self) -> u64 {
         self.ino
     }
 
     /// The directory's mount id, as its entry reported it.
+    #[must_use]
     pub fn mnt_id(&self) -> u64 {
         self.mnt_id
     }
 
     /// The parent directory's handle; `None` for the root.
+    #[must_use]
     pub fn parent(&self) -> Option<&DirHandle> {
         self.parent.as_deref()
     }
@@ -213,17 +242,20 @@ impl DirHandle {
     }
 
     /// The directory's id.
+    #[must_use]
     pub fn id(&self) -> DirId {
         self.id
     }
 
     /// The directory's path: the root as given, joined with the names below
     /// it.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// How far below the root the directory is; the root is 0.
+    #[must_use]
     pub fn depth(&self) -> u32 {
         self.depth
     }
@@ -257,8 +289,10 @@ pub struct WalkSummary {
 /// under [`WalkOptions::fallback`], delivering every entry to `sink`.
 /// [`walk_with`] walks with a given provider.
 ///
-/// Returns [`WalkError::NoProvider`] on a platform other than Linux and
-/// macOS.
+/// # Errors
+///
+/// As [`walk_with`], and [`WalkError::NoProvider`] on a platform other
+/// than Linux and macOS.
 pub fn walk(
     root: &Path,
     opts: &WalkOptions,
@@ -372,6 +406,11 @@ struct Met {
 /// Workers poll [`WalkOptions::cancel`] before each directory; once it is set
 /// the walk stops and returns [`WalkError::Cancelled`]. A panic in a worker
 /// is resumed on this thread.
+///
+/// # Errors
+///
+/// The root cannot be read, a worker thread cannot start, the walk was
+/// cancelled ([`WalkError::Cancelled`]), or directory ids ran out.
 pub fn walk_with<P: Provider + ?Sized>(
     provider: &P,
     root: &Path,
