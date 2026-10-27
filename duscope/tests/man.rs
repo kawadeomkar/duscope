@@ -1,5 +1,6 @@
 //! P1-CLI-04: the manual page is clean under `mandoc -T lint`, and the
-//! completion scripts load in bash, zsh and fish.
+//! completion scripts load in bash, zsh and fish. Outside CI a missing
+//! program skips its check; in CI it fails it.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -12,6 +13,24 @@ use duscope_testkit::TestEnv;
 
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
+}
+
+/// Whether this is a CI run (`CI` set, and not `0` or `false`). CI installs
+/// every program these tests drive (ci.yml installs zsh, fish and mandoc),
+/// so there a missing one fails the test instead of skipping it, which a
+/// passing test's captured output would hide.
+fn in_ci() -> bool {
+    std::env::var("CI").is_ok_and(|v| !matches!(v.as_str(), "" | "0" | "false"))
+}
+
+/// Skips a check that needs `program`, which is not installed here; fails
+/// it in CI.
+fn missing(program: &str) {
+    assert!(
+        !in_ci(),
+        "{program} is not installed, and CI must run this check: install it in ci.yml"
+    );
+    eprintln!("skipped: {program} is not installed");
 }
 
 /// Whether `program` runs here.
@@ -40,7 +59,7 @@ fn p1_cli_04_the_page_is_clean_under_mandoc_lint() {
         .stdin(Stdio::null())
         .output();
     if mandoc.is_err() {
-        eprintln!("skipped: mandoc is not installed");
+        missing("mandoc");
         return;
     }
     let mut lint = StdCommand::new("mandoc")
@@ -82,7 +101,7 @@ fn p1_cli_04_completions_load_in_bash_zsh_and_fish() {
         ),
     ] {
         if !available(&env, shell) {
-            eprintln!("skipped: {shell} is not installed");
+            missing(shell);
             continue;
         }
         let script = duscope(&env).args(["completions", shell]).output().unwrap();
