@@ -107,8 +107,9 @@ pub struct ScanBlock {
     pub attrs: &'static str,
     /// Worker threads.
     pub thread_count: u64,
-    /// The root volume's filesystem type.
-    pub fs_type: String,
+    /// The root volume's filesystem type; null when the scan recorded no
+    /// volume.
+    pub fs_type: Option<String>,
     /// Whether the scan stayed on the root's filesystem (`-x`).
     pub device_confined: bool,
     /// Bytes on disk, hard links and clones counted once.

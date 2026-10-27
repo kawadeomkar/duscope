@@ -9,24 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use duscope_testkit::TestEnv;
-
-/// The golden file `name` under `duscope/tests/golden/`, compared with
-/// `actual`; with `DUSCOPE_TEST_UPDATE_GOLDEN=1` it is rewritten instead.
-fn golden(name: &str, actual: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name);
-    if std::env::var_os("DUSCOPE_TEST_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
-        fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(
-        actual, expected,
-        "golden {name} differs; rerun with DUSCOPE_TEST_UPDATE_GOLDEN=1 to regenerate"
-    );
-}
+use duscope_testkit::{TestEnv, golden};
 
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
@@ -367,4 +350,130 @@ fn p1_cli_02_a_usage_error_ranks_json_first() {
     assert_eq!(out.status.code(), Some(2));
     let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(envelope["error"]["code"], "usage");
+}
+
+#[test]
+fn p1_cli_02_a_root_given_as_a_link_is_read_where_it_leads() {
+    let env = TestEnv::new();
+    let links = fs::canonicalize(env.fixtures().case_root("symlinks")).unwrap();
+    let real_dir = links.join("real-dir");
+    let json = |path: &Path| -> serde_json::Value {
+        let out = duscope(&env)
+            .args(["top", "--files", "--json"])
+            .arg(path)
+            .current_dir(&links)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let real = json(&real_dir);
+    // A link to a directory, absolute or relative: the scan reads the
+    // directory, and the envelope says so beside the path as given.
+    for given in [links.join("to-dir"), PathBuf::from("to-dir")] {
+        let link = json(&given);
+        assert_eq!(link["scan"]["root"], real_dir.to_str().unwrap());
+        assert_eq!(link["query"]["path"], real_dir.to_str().unwrap());
+        assert_eq!(link["scan"]["root_as_given"], given.to_str().unwrap());
+        for key in [
+            "total_allocated_bytes",
+            "total_apparent_bytes",
+            "file_count",
+            "dir_count",
+        ] {
+            assert_eq!(link["scan"][key], real["scan"][key], "{key}");
+        }
+        assert_eq!(link["entries"], real["entries"]);
+        assert_eq!(link["entries"].as_array().unwrap().len(), 1);
+    }
+    // A regular file is one file, with no rows below it.
+    let file = json(&links.join("target.txt"));
+    assert_eq!(file["scan"]["file_count"], 1);
+    assert_eq!(file["scan"]["dir_count"], 0);
+    assert_eq!(file["entries"].as_array().unwrap().len(), 0);
+    // A link that leads nowhere is refused, not read as the link itself:
+    // p1_walk_08_a_root_link_that_leads_nowhere_fails.
+}
+
+#[test]
+fn p1_cli_02_warnings_stay_off_stdout_in_machine_formats() {
+    let env = TestEnv::new();
+    let fixtures = env.fixtures();
+    if !fixtures.unreadable_effective() {
+        eprintln!("skipped: mode 000 does not deny this process access");
+        return;
+    }
+    let tree = fixtures.case_root("unreadable");
+    // --json: one line on stdout with the warning inside the envelope, and
+    // the footer alone on stderr.
+    let out = duscope(&env)
+        .args(["top", "--json"])
+        .arg(&tree)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(envelope["warnings"][0]["code"], "partial_read");
+    assert_eq!(envelope["scan"]["error_count"], 1);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains(" allocated · "), "{stderr}");
+    // ndjson: the warning is in the end line.
+    let out = duscope(&env)
+        .args(["top", "--format", "ndjson"])
+        .arg(&tree)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let last: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!(last["warnings"][0]["code"], "partial_read");
+    assert_eq!(String::from_utf8(out.stderr).unwrap().lines().count(), 1);
+    // --plain: the warning and its hint on stderr, none of it on stdout.
+    let out = duscope(&env)
+        .args(["top", "--plain"])
+        .arg(&tree)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(!stdout.contains("could not be read"), "{stdout}");
+    assert!(!stdout.contains("hint:"), "{stdout}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("warning: 1 directories could not be read"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("hint: Rerun duscope"), "{stderr}");
+}
+
+#[test]
+fn p1_cli_02_strict_turns_a_partial_read_into_exit_4() {
+    let env = TestEnv::new();
+    let fixtures = env.fixtures();
+    if !fixtures.unreadable_effective() {
+        eprintln!("skipped: mode 000 does not deny this process access");
+        return;
+    }
+    let tree = fixtures.case_root("unreadable");
+    let out = duscope(&env)
+        .args(["top", "--strict", "--json"])
+        .arg(&tree)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "permission_denied");
+    // A tree read in full is no failure under --strict.
+    duscope(&env)
+        .args(["top", "--strict"])
+        .arg(fixtures.case_root("empty"))
+        .assert()
+        .code(0);
 }
