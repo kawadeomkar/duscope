@@ -1,0 +1,387 @@
+{
+  "package": "P1-BENCH-02",
+  "date": "2026-10-26",
+  "machine": {
+    "cpu": "Apple M5 Pro",
+    "darwin": "25.6.0",
+    "filesystem": "apfs",
+    "note": "a developer laptop under desktop load (load average 13-16); paired runs cancel the drift"
+  },
+  "rule": "clones stay on by default unless CLONEID|EXT_FLAGS add more than 10% to the warm T1 scan; PRIVATESIZE ships only if its own cost is under 10%, else it leaves FullAttrs (D23)",
+  "decision": {
+    "clones_default": "on",
+    "clones_cost_warm_t1": "+0.7% (duscope walker, 8 workers, median paired ratio 1.0065)",
+    "private_size": "not shipped: leaves FullAttrs",
+    "private_size_cost_warm_t1": "+35.6% (duscope walker, 8 workers, --attrs full, median paired ratio 1.3562)"
+  },
+  "walker": {
+    "binary": "duscope-walk's walk() at the P1-BENCH-02 commit, release build, default threads (8), warm",
+    "tree": "T1",
+    "clones": {
+      "compares": "--no-clones (off) against --clones (on)",
+      "pairs": 40,
+      "order": "alternating within each pair, swapped every other pair, after 3 unmeasured pairs",
+      "off_median_s": 1.5801,
+      "on_median_s": 1.5739,
+      "ratio_median": 1.0065,
+      "ratio_p25": 0.9962,
+      "ratio_p75": 1.0207,
+      "runs_s": [
+        [
+          1.5707,
+          1.5999
+        ],
+        [
+          1.5951,
+          1.5864
+        ],
+        [
+          1.6092,
+          1.6141
+        ],
+        [
+          1.5947,
+          1.5671
+        ],
+        [
+          1.5757,
+          1.5762
+        ],
+        [
+          1.5329,
+          1.5646
+        ],
+        [
+          1.5503,
+          1.5521
+        ],
+        [
+          1.5492,
+          1.5717
+        ],
+        [
+          1.5471,
+          1.5646
+        ],
+        [
+          1.5863,
+          1.6304
+        ],
+        [
+          1.584,
+          1.5429
+        ],
+        [
+          1.523,
+          1.5293
+        ],
+        [
+          1.5485,
+          1.5433
+        ],
+        [
+          1.5466,
+          1.5494
+        ],
+        [
+          1.5263,
+          1.5206
+        ],
+        [
+          1.5183,
+          1.5336
+        ],
+        [
+          1.5175,
+          1.5124
+        ],
+        [
+          1.5238,
+          1.5219
+        ],
+        [
+          1.5271,
+          2.1001
+        ],
+        [
+          2.0466,
+          3.9637
+        ],
+        [
+          1.8042,
+          1.9533
+        ],
+        [
+          2.578,
+          2.4846
+        ],
+        [
+          2.3201,
+          3.034
+        ],
+        [
+          2.6848,
+          4.0779
+        ],
+        [
+          1.7228,
+          2.7343
+        ],
+        [
+          2.4866,
+          1.8657
+        ],
+        [
+          1.6806,
+          1.6956
+        ],
+        [
+          1.6659,
+          1.8915
+        ],
+        [
+          1.5762,
+          1.5634
+        ],
+        [
+          1.5864,
+          1.5609
+        ],
+        [
+          1.617,
+          1.6386
+        ],
+        [
+          1.6016,
+          1.6215
+        ],
+        [
+          1.5677,
+          1.5615
+        ],
+        [
+          1.5678,
+          1.5637
+        ],
+        [
+          1.5574,
+          1.5355
+        ],
+        [
+          1.5731,
+          1.542
+        ],
+        [
+          1.5899,
+          1.6145
+        ],
+        [
+          1.5853,
+          1.6223
+        ],
+        [
+          1.5913,
+          1.6151
+        ],
+        [
+          1.5519,
+          1.5658
+        ]
+      ]
+    },
+    "private_size": {
+      "compares": "--attrs full --clones without PRIVATESIZE (off) against with it (on)",
+      "pairs": 30,
+      "order": "alternating within each pair, swapped every other pair, after 3 unmeasured pairs",
+      "off_median_s": 1.6709,
+      "on_median_s": 2.2286,
+      "ratio_median": 1.3562,
+      "ratio_p25": 1.299,
+      "ratio_p75": 1.3742,
+      "runs_s": [
+        [
+          1.536,
+          2.1108
+        ],
+        [
+          1.5174,
+          2.0743
+        ],
+        [
+          1.4764,
+          2.0221
+        ],
+        [
+          1.4966,
+          2.0123
+        ],
+        [
+          1.4915,
+          2.0471
+        ],
+        [
+          1.5167,
+          2.0552
+        ],
+        [
+          1.6014,
+          2.4187
+        ],
+        [
+          1.7193,
+          2.3035
+        ],
+        [
+          1.7335,
+          2.3898
+        ],
+        [
+          2.86,
+          3.29
+        ],
+        [
+          2.0167,
+          2.4285
+        ],
+        [
+          1.6196,
+          2.2231
+        ],
+        [
+          1.6174,
+          2.1955
+        ],
+        [
+          1.6183,
+          2.174
+        ],
+        [
+          1.6076,
+          2.1611
+        ],
+        [
+          1.6119,
+          2.1648
+        ],
+        [
+          1.5721,
+          2.1368
+        ],
+        [
+          1.5369,
+          2.1548
+        ],
+        [
+          1.8849,
+          2.4741
+        ],
+        [
+          1.8123,
+          2.4766
+        ],
+        [
+          1.8796,
+          2.6048
+        ],
+        [
+          1.6865,
+          2.4358
+        ],
+        [
+          1.6554,
+          2.1503
+        ],
+        [
+          3.2545,
+          2.3624
+        ],
+        [
+          3.5741,
+          2.2146
+        ],
+        [
+          2.4351,
+          2.4121
+        ],
+        [
+          2.4987,
+          3.773
+        ],
+        [
+          1.794,
+          3.3404
+        ],
+        [
+          3.3588,
+          3.8923
+        ],
+        [
+          2.5421,
+          2.2341
+        ]
+      ]
+    }
+  },
+  "gab_bench": {
+    "tool": "gab_bench",
+    "darwin": "25.6.0",
+    "cpu": "Apple M5 Pro",
+    "reps": 7,
+    "trees": [
+      {
+        "tree": "T1 (bench/.trees/T1: 100,000 directories, 400,000 sparse files)",
+        "entries": 500000,
+        "ns_per_entry": {
+          "lean": 7850.2,
+          "basic": 8143.7,
+          "clones": 8890.1,
+          "privatesize": 10684.7,
+          "fstatat": 12733.0
+        },
+        "clones_over_basic": 0.0917,
+        "privatesize_over_clones": 0.2019
+      },
+      {
+        "tree": "clones (gab_bench --make DIR 60000 10: 60,000 cp -c clones of one 64 KiB file in 10 directories)",
+        "entries": 60011,
+        "ns_per_entry": {
+          "lean": 739.9,
+          "basic": 829.4,
+          "clones": 1088.9,
+          "privatesize": 1554.6,
+          "fstatat": 1783.3
+        },
+        "clones_over_basic": 0.3128,
+        "privatesize_over_clones": 0.4277
+      },
+      {
+        "tree": "/Applications (a real tree: app bundles)",
+        "entries": 187585,
+        "ns_per_entry": {
+          "lean": 3457.8,
+          "basic": 3506.6,
+          "clones": 3845.9,
+          "privatesize": 4960.5,
+          "fstatat": 4606.5
+        },
+        "clones_over_basic": 0.0967,
+        "privatesize_over_clones": 0.2898
+      },
+      {
+        "tree": "~/.cargo (a real tree: registry sources)",
+        "entries": 53023,
+        "ns_per_entry": {
+          "lean": 3159.5,
+          "basic": 3328.3,
+          "clones": 3318.7,
+          "privatesize": 4837.2,
+          "fstatat": 4098.6
+        },
+        "clones_over_basic": -0.0029,
+        "privatesize_over_clones": 0.4576
+      }
+    ],
+    "command": "clang -O2 -Wall -Wextra -o gab_bench bench/gab_bench.c && ./gab_bench --reps 7 --json out.json TREE...",
+    "note": "single-threaded, warm, median ns per entry over 7 interleaved rounds; single-threaded medians on a busy machine swing by several percent between runs (T1 clones_over_basic measured -2.1% and +9.2% in two runs)"
+  }
+}

@@ -253,6 +253,32 @@ Within a file, `subject_ratio_p50` is the fairer comparison than the ratio of tw
 each of its ratios comes from runs a moment apart. The phase gates are judged on the nightly
 runners' cold and warm p50s, never on shared CI runners.
 
+## Attribute costs on macOS
+
+`gab_bench.c` measures what each `getattrlistbulk` attribute set costs per entry, apart from
+the rest of a scan (P1-BENCH-02). It walks the trees it is given single-threaded, warm, once
+per mode, in a rotated order each round, and reports the median nanoseconds per entry:
+
+| Mode | Attributes |
+| --- | --- |
+| `lean` | name, type and allocated size |
+| `basic` | duscope's basic list (P1-WALK-03) |
+| `clones` | `basic` plus `ATTR_CMNEXT_CLONEID` and `ATTR_CMNEXT_EXT_FLAGS` |
+| `privatesize` | `clones` plus `ATTR_CMNEXT_PRIVATESIZE` |
+| `fstatat` | `readdir` and `fstatat`, the reference |
+
+```sh
+clang -O2 -Wall -Wextra -o gab_bench bench/gab_bench.c
+./gab_bench --reps 7 --json out.json bench/.trees/T1 /Applications
+./gab_bench --make /tmp/gab_tree 60000 10    # 60,000 cp -c clones of one 64 KiB file
+```
+
+The decision (D23) is taken on duscope's own warm T1 scan, timed in alternating pairs, because
+single-threaded medians on a busy machine swing by several percent between runs.
+`results/clone-attributes-macos.json` holds both measurements and the decision:
+- **Clone attributes.** They add 0.7% to the warm T1 scan, so `--clones` stays on by default.
+- **`PRIVATESIZE`.** It adds 36%, so it is not read: it leaves `FullAttrs`.
+
 ## Files
 
 | File | Purpose |
@@ -267,3 +293,5 @@ runners' cold and warm p50s, never on shared CI runners.
 | `compare.py` | the regression check: a result file against the results before it on the same machine kind and tree |
 | `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |
 | `testdata/` | a real hyperfine 2.0.0 export and the hyperfine stand-in the tests use |
+| `gab_bench.c` | the per-entry cost of `getattrlistbulk` attribute sets on macOS |
+| `results/clone-attributes-macos.json` | P1-BENCH-02's measurement and the `--clones` and `PRIVATESIZE` decisions |

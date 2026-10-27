@@ -675,32 +675,6 @@ fn p1_walk_07_storage_flags_follow_the_filesystem() {
 }
 
 #[test]
-fn p1_walk_07_private_size_under_the_hidden_option() {
-    let env = TestEnv::new();
-    let root = env.fixtures().case_root("clones");
-    let opts = WalkOptions {
-        attrs: crate::Attrs::Full,
-        private_size: true,
-        ..WalkOptions::default()
-    };
-    let (entries, _) = walk_paths(&MacProvider::new(), &root, &opts);
-    let file = &entries[&root.join("original.img")];
-    assert!(file.full.unwrap().private_size.is_some());
-    let opts = WalkOptions {
-        attrs: crate::Attrs::Full,
-        ..WalkOptions::default()
-    };
-    let (entries, _) = walk_paths(&MacProvider::new(), &root, &opts);
-    assert_eq!(
-        entries[&root.join("original.img")]
-            .full
-            .unwrap()
-            .private_size,
-        None
-    );
-}
-
-#[test]
 fn p1_walk_07_apfs_has_clone_ids() {
     let env = TestEnv::new();
     let root = env.fixtures().root();

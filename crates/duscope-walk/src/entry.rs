@@ -176,11 +176,6 @@ pub struct FullAttrs {
     pub uid: u32,
     /// Owner group id.
     pub gid: u32,
-    /// The bytes freeing the file would return, its clone-shared blocks
-    /// left out (APFS `ATTR_CMNEXT_PRIVATESIZE`); read only under
-    /// [`WalkOptions::private_size`](crate::WalkOptions::private_size), a
-    /// hidden option until P1-BENCH-02 measures its cost.
-    pub private_size: Option<u64>,
 }
 
 /// One directory entry, as a provider reads it.
