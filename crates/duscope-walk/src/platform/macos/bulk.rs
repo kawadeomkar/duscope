@@ -389,6 +389,11 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
     if common & libc::ATTR_CMN_NAME != 0 {
         r.name = c.reference();
     }
+    if r.error != 0 {
+        // Only the name matters for an entry that could not be read, and
+        // the record need not hold the attributes after it.
+        return Some(r);
+    }
     if common & libc::ATTR_CMN_DEVID != 0 {
         r.dev = c.i32()?;
     }
@@ -406,10 +411,6 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
     }
     if common & libc::ATTR_CMN_FILEID != 0 {
         r.ino = c.u64()?;
-    }
-    if r.error != 0 {
-        // Only the name matters for an entry that could not be read.
-        return Some(r);
     }
     if r.objtype == ffi::VDIR {
         let dir = attrs.dirattr;
