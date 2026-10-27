@@ -4,6 +4,7 @@
 
 use std::ffi::OsString;
 
+use duscope_core::envelope::Warning;
 use duscope_core::query::{self, ByTypeQuery, Filters, TreeView, timegrammar};
 use duscope_core::rules::{Class, Classes};
 use duscope_treemap::cells::{Color, Depth};
@@ -13,7 +14,7 @@ use duscope_treemap::paint::{ColorBy, Footer, Glyphs, LsColors, PaintOpts, frame
 use super::scan::{self, Scanned};
 use super::{Exit, Failure};
 use crate::cli::{ColorBy as ColorByArg, MinTile, ScanArgs, TreemapWhen};
-use crate::out::{Output, emit_bytes};
+use crate::out::{Output, emit_bytes, stderr_line};
 
 /// The size assumed when stdout is not a terminal (`--treemap always`).
 const DEFAULT_SIZE: (u16, u16) = (80, 24);
@@ -175,16 +176,34 @@ pub fn draw(
         Glyphs::Unicode => "·",
         Glyphs::Ascii => "-",
     };
+    let warnings = scan::warnings(scanned);
     let footer = Footer {
         legend: legend(&view, &classes, size),
         summary: scan::footer(&block, scanned, output).replace('·', dot),
-        warning: scan::warnings(scanned)
-            .first()
-            .map(|w| format!("warning: {}", w.message)),
+        warning: frame_warning(&warnings),
         next: next_line(root.as_deref(), dot, columns),
     };
     let buffer = frame(&view, &opts, &footer, columns, rows);
-    emit_bytes(buffer.to_ansi(*depth).as_bytes())
+    emit_bytes(buffer.to_ansi(*depth).as_bytes())?;
+    // The frame has room for one warning; the others follow on stderr, as
+    // every other format writes them.
+    for warning in warnings.iter().skip(1) {
+        stderr_line(&format!("warning: {}", warning.message));
+        if let Some(hint) = &warning.hint {
+            stderr_line(&format!("hint: {hint}"));
+        }
+    }
+    Ok(())
+}
+
+/// The frame's warning row: the first warning, and how many more follow
+/// on stderr.
+fn frame_warning(warnings: &[Warning]) -> Option<String> {
+    let first = warnings.first()?;
+    Some(match warnings.len() - 1 {
+        0 => format!("warning: {}", first.message),
+        more => format!("warning: {} (+{more} more below)", first.message),
+    })
 }
 
 /// The `next` line: `top`, `by-type` and `stale` of the same tree, each
@@ -352,7 +371,10 @@ fn from_256(n: u8) -> Color {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{MapEnv, decide, foreground, from_256, ls_colors, next_line, shell_quote};
+    use super::{
+        MapEnv, Warning, decide, foreground, frame_warning, from_256, ls_colors, next_line,
+        shell_quote,
+    };
     use duscope_treemap::cells::{Color, Depth};
     use duscope_treemap::paint::Glyphs;
 
@@ -493,5 +515,26 @@ mod tests {
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote("/tmp/a-b_c.d"), "/tmp/a-b_c.d");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn p1_map_02_the_frame_shows_one_warning_and_counts_the_rest() {
+        let warning = |code: &'static str, message: &str| Warning {
+            code,
+            message: message.to_owned(),
+            count: None,
+            hint: None,
+        };
+        assert_eq!(frame_warning(&[]), None);
+        let partial = warning("partial_read", "2 directories could not be read");
+        assert_eq!(
+            frame_warning(std::slice::from_ref(&partial)).as_deref(),
+            Some("warning: 2 directories could not be read")
+        );
+        let mounts = warning("mounts_excluded", "1 mount was not entered");
+        assert_eq!(
+            frame_warning(&[partial, mounts]).as_deref(),
+            Some("warning: 2 directories could not be read (+1 more below)")
+        );
     }
 }
