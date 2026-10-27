@@ -512,8 +512,9 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
 }
 
 /// How long a walk has to stop after Ctrl-C before the process ends
-/// regardless: the 200 ms the conventions allow, less the time to notice.
-const INTERRUPT_GRACE: Duration = Duration::from_millis(150);
+/// regardless: half the 200 ms the conventions allow, which leaves room for
+/// a slow machine to notice the flag and end the process.
+const INTERRUPT_GRACE: Duration = Duration::from_millis(100);
 
 /// Ends the process with exit 130 once `flag` has been set for
 /// [`INTERRUPT_GRACE`], in case the walk is still finishing a directory.
@@ -522,7 +523,7 @@ fn watch_interrupt(flag: Arc<AtomicBool>) {
         .name("interrupt".to_owned())
         .spawn(move || {
             while !flag.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(5));
             }
             thread::sleep(INTERRUPT_GRACE);
             report_interrupt();
