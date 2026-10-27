@@ -2,7 +2,6 @@
 //! arena, then the roll-up. Until P1-CLI-03 brings the queries, every verb
 //! lists the root's largest children.
 
-use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -564,8 +563,7 @@ fn interrupt_flag() -> Arc<AtomicBool> {
 pub fn report_interrupt() {
     static REPORTED: AtomicBool = AtomicBool::new(false);
     if !REPORTED.swap(true, Ordering::SeqCst) {
-        // A closed stderr loses the line, not the exit code.
-        let _ = writeln!(std::io::stderr().lock(), "duscope: interrupted");
+        crate::out::stderr_line("duscope: interrupted");
     }
 }
 

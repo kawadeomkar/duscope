@@ -325,3 +325,46 @@ fn p1_cli_02_output_flags_go_before_or_after_the_verb() {
     // Without a verb they scan, as before.
     duscope(&env).arg("-x").arg(&tree).assert().success();
 }
+
+#[test]
+fn p1_cli_02_a_closed_stderr_is_no_panic() {
+    let env = TestEnv::new();
+    let root = home(&env);
+    // stdout and stderr into one pipe whose reader leaves after a byte:
+    // the footer then meets a closed stderr.
+    let mut child = env
+        .cmd()
+        .args(["top", "--format", "ndjson", "--threads", "4"])
+        .arg(&root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(0));
+    // A failure whose stderr is closed is still its exit code.
+    let mut child = env
+        .cmd()
+        .args(["top", "--plain", "/nonexistent/duscope"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+    assert_eq!(child.wait().unwrap().code(), Some(3));
+}
+
+#[test]
+fn p1_cli_02_a_usage_error_ranks_json_first() {
+    let env = TestEnv::new();
+    // --json and --plain conflict; the decision ranks --json first, so the
+    // usage error is the envelope.
+    let out = duscope(&env)
+        .args(["top", "--plain", "--json", "--no-such-flag"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "usage");
+}
