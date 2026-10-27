@@ -13,15 +13,15 @@ pub(super) use stat::from_stat;
 pub(super) use volume::of as volume;
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
-use std::sync::Once;
 
-use bulk::{Decoded, Outcome};
+use bulk::{Clock, Decoded, Outcome};
 use ffi::AttrBuf;
 
-use crate::platform::fallback::FallbackProvider;
+use crate::platform::fallback;
 use crate::platform::posix;
 use crate::{DirHandle, Entry, NameRef, Provider, ScanError, VolumeInfo, WalkOptions};
 
@@ -39,19 +39,29 @@ pub(crate) struct MacProvider {
     /// bulk read had answered this.
     #[cfg(test)]
     pretend: Option<Outcome>,
+    /// Time the probe on a clock where every refill waits on I/O.
+    #[cfg(test)]
+    waiting: bool,
+    /// How many directories the probe handed to the stat queue.
+    #[cfg(test)]
+    switched: std::sync::atomic::AtomicUsize,
 }
 
 impl MacProvider {
-    /// The provider. The first one made sets up the process: the
-    /// descriptor limit is raised and dataless files are never downloaded.
+    /// The provider. Making one sets up the process (see
+    /// [`platform::setup`](super::setup)).
     pub(crate) fn new() -> MacProvider {
-        static SETUP: Once = Once::new();
-        SETUP.call_once(|| {
-            posix::raise_nofile_limit();
-            // A failure leaves the default policy; nothing else can be done.
-            let _ = ffi::disable_dataless_materialization();
-        });
+        super::setup();
         MacProvider::default()
+    }
+}
+
+/// Turns off dataless-file materialisation for the process, so reading an
+/// iCloud placeholder's attributes never downloads it. A failure leaves the
+/// default policy, under which it can; it is logged.
+pub(super) fn keep_dataless_files() {
+    if let Err(e) = ffi::disable_dataless_materialization() {
+        log::warn!("cannot turn off dataless-file materialisation: {e}");
     }
 }
 
@@ -81,30 +91,58 @@ impl Provider for MacProvider {
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        let mut decoded = Vec::new();
+        let (out_start, errs_start) = (out.len(), errs.len());
         #[cfg(test)]
-        let pretend = self.pretend;
+        let (pretend, clock): (_, &dyn Clock) = (
+            self.pretend,
+            if self.waiting {
+                &tests::Waiting
+            } else {
+                &bulk::Clocks
+            },
+        );
         #[cfg(not(test))]
-        let pretend = None;
-        let outcome = match pretend {
-            Some(outcome) => outcome,
+        let (pretend, clock): (_, &dyn Clock) = (None, &bulk::Clocks);
+        let outcome = if let Some(outcome) = pretend {
+            outcome
+        } else {
             // The probe only pays off when other workers can share the
             // stat queue.
-            None => BULK.with_borrow_mut(|buf| {
-                bulk::read(fd.as_fd(), opts, buf, opts.threads != 1, &mut decoded)
-            })?,
+            let probe = (opts.threads != 1).then_some(clock);
+            SINGLE.with_borrow_mut(|single| {
+                BULK.with_borrow_mut(|buf| {
+                    bulk::read(fd.as_fd(), opts, buf, probe, &mut |item| {
+                        take(dir, fd.as_fd(), opts, single, item, out, errs);
+                    })
+                })
+            })?
         };
         match outcome {
             Outcome::Done => {}
-            // The fallback provider reads a filesystem without bulk reads.
-            Outcome::Unsupported => {
-                return FallbackProvider.read_dir_split(dir, opts, out, errs, later);
-            }
-            // Listed by name alone; the stat queue reads every entry, on
-            // every worker.
+            // The fallback reads a filesystem without bulk reads, through
+            // the descriptor already open.
+            Outcome::Unsupported => fallback::read_open(fd.as_fd(), dir, opts, out, errs, later)?,
+            // The probed refills' entries are kept; the rest of the
+            // directory is listed by name and every worker reads it from
+            // the stat queue.
             Outcome::IoBound => {
-                later.extend(posix::list_names(fd.as_fd())?);
-                return Ok(());
+                #[cfg(test)]
+                self.switched
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // A record without a name is listed again below.
+                let tail = errs.split_off(errs_start);
+                errs.extend(tail.into_iter().filter(|e| !e.name.as_bytes().is_empty()));
+                let seen: HashSet<&[u8]> = out[out_start..]
+                    .iter()
+                    .map(|e| e.name.as_bytes())
+                    .chain(errs[errs_start..].iter().map(|e| e.name.as_bytes()))
+                    .collect();
+                let names = posix::list_names(fd.as_fd())?;
+                later.extend(
+                    names
+                        .into_iter()
+                        .filter(|name| !seen.contains(name.as_bytes())),
+                );
             }
             // Each child is listed as an entry that cannot be read, as `du`
             // and the stat queue report them.
@@ -116,33 +154,8 @@ impl Provider for MacProvider {
                         errno: libc::EACCES,
                     });
                 }
-                return Ok(());
             }
         }
-        SINGLE.with_borrow_mut(|buf| {
-            for item in decoded {
-                match item {
-                    Decoded::Entry(entry) => out.push(entry),
-                    Decoded::Error(name, errno) => errs.push(ScanError {
-                        dir: dir.id(),
-                        name,
-                        errno,
-                    }),
-                    Decoded::Restat(name, boundary) => {
-                        match stat::entry_at(fd.as_fd(), &name, opts, buf) {
-                            Ok(mut entry) => {
-                                if let Some(boundary) = boundary {
-                                    entry.boundary = boundary;
-                                }
-                                out.push(entry);
-                            }
-                            Err(e) => errs.push(scan_error(dir, name, &e)),
-                        }
-                    }
-                    Decoded::Nameless => {}
-                }
-            }
-        });
         Ok(())
     }
 
@@ -155,9 +168,12 @@ impl Provider for MacProvider {
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
+        // One answer per batch: a filesystem that refuses attribute reads
+        // refuses them for every name.
+        let mut attrs = true;
         SINGLE.with_borrow_mut(|buf| {
             for name in names {
-                match stat::entry_at(fd.as_fd(), name, opts, buf) {
+                match stat::entry_at(fd.as_fd(), name, opts, buf, &mut attrs) {
                     Ok(entry) => out.push(entry),
                     Err(e) => errs.push(scan_error(dir, name.clone(), &e)),
                 }
@@ -179,6 +195,45 @@ impl Provider for MacProvider {
     /// (P1-BENCH-01) sets it.
     fn default_threads(&self) -> usize {
         8
+    }
+}
+
+/// Files one decoded bulk record under `dir`: an entry in `out`, anything
+/// that could not be read in `errs`. A record that must be read again is
+/// read by name, through the directory's descriptor.
+fn take(
+    dir: &DirHandle,
+    fd: BorrowedFd<'_>,
+    opts: &WalkOptions,
+    single: &mut AttrBuf,
+    item: Decoded,
+    out: &mut Vec<Entry>,
+    errs: &mut Vec<ScanError>,
+) {
+    match item {
+        Decoded::Entry(entry) => out.push(entry),
+        Decoded::Error(name, errno) => errs.push(ScanError {
+            dir: dir.id(),
+            name,
+            errno,
+        }),
+        Decoded::Restat(name, boundary) => match stat::entry_at(fd, &name, opts, single, &mut true)
+        {
+            Ok(mut entry) => {
+                if let Some(boundary) = boundary {
+                    entry.boundary = boundary;
+                }
+                out.push(entry);
+            }
+            Err(e) => errs.push(scan_error(dir, name, &e)),
+        },
+        // Nothing names the entry, so it is counted as an error with an
+        // empty name rather than dropped from the totals unseen.
+        Decoded::Nameless => errs.push(ScanError {
+            dir: dir.id(),
+            name: NameRef::new(b""),
+            errno: crate::EIO,
+        }),
     }
 }
 
