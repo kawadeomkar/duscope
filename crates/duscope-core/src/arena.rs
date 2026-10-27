@@ -82,7 +82,10 @@ pub struct DirRec {
     pub last_id: u32,
     /// The last pre-order id of the directory's own files.
     pub files_end: u32,
-    /// How far below the root; the root is 0.
+    /// How far below the root; the root is 0. It saturates at 65,535
+    /// (`u16::MAX`): a deeper directory, beyond `PATH_MAX` on both
+    /// platforms, records 65,535. The record has no spare bytes to widen it,
+    /// and the roll-up and the totals do not read it.
     pub depth: u16,
     /// Roll-up flags ([`DirRec::UPPER_BOUND`]).
     pub flags: u16,

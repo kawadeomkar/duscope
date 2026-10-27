@@ -183,6 +183,26 @@ fn p1_core_01_a_directory_met_before_its_entry_is_a_placeholder() {
 }
 
 #[test]
+fn p1_core_01_depth_saturates_at_u16_max() {
+    // A chain deeper than 65,535 directories (beyond PATH_MAX) records the
+    // largest depth the record holds.
+    let mut arena = Arena::new(Attrs::Basic);
+    let deepest = 70_000;
+    for id in 0..=deepest {
+        arena
+            .push(ScanEvent::Entry(Entry {
+                dir: Some(DirId::new(id)),
+                kind: Kind::Dir,
+                ..file("d", DirId::new(id.saturating_sub(1)))
+            }))
+            .unwrap();
+    }
+    assert_eq!(arena.dir(DirId::new(65_535)).depth, u16::MAX);
+    assert_eq!(arena.dir(DirId::new(deepest)).depth, u16::MAX);
+    assert_eq!(arena.dir(DirId::new(65_534)).depth, u16::MAX - 1);
+}
+
+#[test]
 fn p1_core_01_an_entry_without_full_attributes_reads_as_none() {
     // In a full scan, an entry the walk delivered without the full set is
     // not collected (NULL in the index), not owner 0 at the epoch.
