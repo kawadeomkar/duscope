@@ -368,3 +368,56 @@ fn p1_cli_02_a_usage_error_ranks_json_first() {
     let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(envelope["error"]["code"], "usage");
 }
+
+#[test]
+fn p1_cli_02_a_root_given_as_a_link_is_read_where_it_leads() {
+    let env = TestEnv::new();
+    let links = fs::canonicalize(env.fixtures().case_root("symlinks")).unwrap();
+    let real_dir = links.join("real-dir");
+    let json = |path: &Path| -> serde_json::Value {
+        let out = duscope(&env)
+            .args(["top", "--files", "--json"])
+            .arg(path)
+            .current_dir(&links)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let real = json(&real_dir);
+    // A link to a directory, absolute or relative: the scan reads the
+    // directory, and the envelope says so beside the path as given.
+    for given in [links.join("to-dir"), PathBuf::from("to-dir")] {
+        let link = json(&given);
+        assert_eq!(link["scan"]["root"], real_dir.to_str().unwrap());
+        assert_eq!(link["query"]["path"], real_dir.to_str().unwrap());
+        assert_eq!(link["scan"]["root_as_given"], given.to_str().unwrap());
+        for key in [
+            "total_allocated_bytes",
+            "total_apparent_bytes",
+            "file_count",
+            "dir_count",
+        ] {
+            assert_eq!(link["scan"][key], real["scan"][key], "{key}");
+        }
+        assert_eq!(link["entries"], real["entries"]);
+        assert_eq!(link["entries"].as_array().unwrap().len(), 1);
+    }
+    // A regular file is one file, with no rows below it.
+    let file = json(&links.join("target.txt"));
+    assert_eq!(file["scan"]["file_count"], 1);
+    assert_eq!(file["scan"]["dir_count"], 0);
+    assert_eq!(file["entries"].as_array().unwrap().len(), 0);
+    // A link that leads nowhere is read as the link itself.
+    let dangling = json(Path::new("dangling"));
+    assert_eq!(
+        dangling["scan"]["root"],
+        links.join("dangling").to_str().unwrap()
+    );
+    assert_eq!(dangling["scan"]["file_count"], 1);
+}

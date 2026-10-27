@@ -13,6 +13,7 @@ use duscope_core::envelope::{
     Envelope, QueryBlock, SCHEMA_VERSION, ScanBlock, Tool, TopEntry, VolumeEntry, Warning,
     name_fields,
 };
+use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::roll_up;
 use duscope_walk::{Attrs, DirId, Flags, Kind, WalkError, WalkOptions, WalkSummary, walk};
 use globset::{Glob, GlobSetBuilder};
@@ -30,6 +31,8 @@ pub struct Scanned {
     pub summary: WalkSummary,
     /// How long the walk and the roll-up took.
     pub elapsed: Duration,
+    /// The root, absolute, symbolic links resolved: the path the walk read.
+    pub root: PathBuf,
     /// The root as given.
     pub root_as_given: PathBuf,
     /// When the scan started and finished, Unix nanoseconds.
@@ -92,9 +95,7 @@ fn envelope(
     output: &Output,
 ) -> Envelope<TopEntry> {
     let arena = &scanned.arena;
-    let root = std::fs::canonicalize(&scanned.root_as_given)
-        .or_else(|_| std::path::absolute(&scanned.root_as_given))
-        .unwrap_or_else(|_| scanned.root_as_given.clone());
+    let root = &scanned.root;
     let totals = Totals::of(arena, EntryIdx::ROOT);
     let apparent = size_kind == "apparent";
     let root_total = if apparent {
@@ -152,7 +153,7 @@ fn envelope(
         ok: true,
         schema_version: SCHEMA_VERSION,
         tool: Tool::CURRENT,
-        scan: scan_block(scanned, walk_args, &root, &totals, size_kind),
+        scan: scan_block(scanned, walk_args, root, &totals, size_kind),
         query: QueryBlock {
             command: verb,
             path: root.to_string_lossy().into_owned(),
@@ -390,7 +391,7 @@ fn now_ns() -> i64 {
 
 /// Scans the tree `walk_args` names.
 pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failure> {
-    let root = match &walk_args.path {
+    let given = match &walk_args.path {
         Some(path) => path.clone(),
         None => std::env::current_dir().map_err(|e| {
             Failure::new(
@@ -400,6 +401,10 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             )
         })?,
     };
+    // A root given as a symbolic link, or through one, is read as the path
+    // it leads to; the envelope keeps the path as given beside it.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let ResolvedPath { real: root, .. } = resolve_path(&cwd, &given);
     let opts = options(walk_args, excludes)?;
     let started = Instant::now();
     let started_ns = now_ns();
@@ -412,7 +417,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             push_error = Some(e);
         }
     })
-    .map_err(|e| walk_failure(&root, e))?;
+    .map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
         return Err(Failure::new(Exit::Runtime, "io_error", e.to_string()));
     }
@@ -422,7 +427,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         return Err(Failure::new(
             Exit::Permission,
             "permission_denied",
-            format!("permission denied reading {}", root.display()),
+            format!("permission denied reading {}", given.display()),
         )
         .hint("Run duscope scan on a directory you can read"));
     }
@@ -431,7 +436,8 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         arena,
         summary,
         elapsed: started.elapsed(),
-        root_as_given: root,
+        root,
+        root_as_given: given,
         started_ns,
         finished_ns: now_ns(),
     })
