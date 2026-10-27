@@ -318,6 +318,11 @@ pub struct ByTypeEntry {
 pub struct Example {
     /// The file's absolute path, as lossy UTF-8.
     pub path: String,
+    /// Its name, as lossy UTF-8.
+    pub name: String,
+    /// The name's bytes in base64, only when they are not valid UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_raw: Option<String>,
     /// Its bytes on disk.
     pub allocated_bytes: u64,
     /// Its apparent bytes.

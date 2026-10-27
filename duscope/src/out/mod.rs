@@ -278,8 +278,13 @@ impl Row for TreeEntry {
 }
 
 impl Row for ByTypeEntry {
-    const FIELDS: &'static [&'static str] =
-        &["allocated_bytes", "apparent_bytes", "file_count", "class"];
+    const FIELDS: &'static [&'static str] = &[
+        "allocated_bytes",
+        "apparent_bytes",
+        "pct_of_root",
+        "file_count",
+        "class",
+    ];
     const COLUMNS: &'static [&'static str] = &["Size", "%", "Files", "Class"];
 
     fn plain(&self) -> Vec<Cow<'_, [u8]>> {
@@ -287,6 +292,7 @@ impl Row for ByTypeEntry {
         vec![
             number(self.allocated_bytes),
             number(self.apparent_bytes),
+            Cow::Owned(format!("{:.1}", self.pct_of_root).into_bytes()),
             number(self.file_count),
             Cow::Borrowed(self.class.as_bytes()),
         ]

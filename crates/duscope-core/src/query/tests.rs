@@ -664,6 +664,34 @@ fn p1_cli_03_filters_judge_the_row_top_lists() {
 }
 
 #[test]
+fn p1_cli_03_by_type_examples_carry_their_names() {
+    use std::os::unix::ffi::OsStrExt;
+    let mut tree = MemProvider::new("/p");
+    tree.file("photos/a.jpg", 3 * MIB).file(
+        Path::new(std::ffi::OsStr::from_bytes(b"photos/caf\xe9.jpg")),
+        2 * MIB,
+    );
+    let (arena, rollup) = scan(&tree);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/p"));
+    let classes = Classes::vendored();
+    let page = by_type(
+        &view,
+        &ByTypeQuery {
+            classes: &classes,
+            examples: 2,
+            filters: Filters::default(),
+            limit: None,
+            size: SizeKind::Apparent,
+        },
+    );
+    let examples = &page.entries[0].largest;
+    assert_eq!(examples[0].name, "a.jpg");
+    assert_eq!(examples[0].name_raw, None);
+    assert_eq!(examples[1].name, "caf\u{fffd}.jpg");
+    assert_eq!(examples[1].name_raw.as_deref(), Some("Y2Fm6S5qcGc="));
+}
+
+#[test]
 fn p1_cli_03_a_directory_rule_above_the_root_applies_below_it() {
     let mut tree = MemProvider::new("/p");
     tree.file("logo.png", 5 * MIB).file("index.js", MIB);

@@ -423,3 +423,24 @@ fn p1_cli_03_a_limit_above_100_is_a_usage_error() {
         .assert()
         .code(0);
 }
+
+#[test]
+fn p1_cli_03_by_type_plain_carries_the_share_of_the_root() {
+    let env = TestEnv::new();
+    let out = duscope(&env)
+        .args(["by-type", "--plain", "--header"])
+        .arg(env.fixtures().case_root("extensions"))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next(),
+        Some("allocated_bytes\tapparent_bytes\tpct_of_root\tfile_count\tclass")
+    );
+    let shares: f64 = lines
+        .map(|line| line.split('\t').nth(2).unwrap().parse::<f64>().unwrap())
+        .sum();
+    assert!((shares - 100.0).abs() < 1.0, "{text}");
+}
