@@ -102,6 +102,36 @@ fn p1_cli_03_top_lists_the_depth_frontier_with_cut_through() {
 }
 
 #[test]
+fn p1_cli_03_cut_through_reproduces_the_library_containers_example() {
+    // The proposal's `top ~` example: Library holds a Containers of 90% of
+    // its bytes, split between two apps so neither reaches 80% of it, and
+    // Movies has no subdirectory.
+    let mut tree = MemProvider::new("/home");
+    tree.file("Library/Containers/com.apple.mail/data.db", 5 * MIB)
+        .file("Library/Containers/com.example/data.db", 4 * MIB)
+        .file("Library/Preferences/p.plist", MIB)
+        .file("Movies/a.mov", 5 * MIB);
+    let (arena, rollup) = scan(&tree);
+    let view = view(&arena, &rollup, &tree);
+    let page = top(
+        &view,
+        &TopQuery {
+            cut_through: true,
+            ..TopQuery::default()
+        },
+    );
+    let rows: Vec<String> = page.entries.iter().map(|e| e.path.clone()).collect();
+    assert_eq!(paths(&rows), ["Library/Containers", "Movies"]);
+    assert_eq!(page.entries[0].via, ["/home/Library"]);
+    assert_eq!(page.entries[0].depth, 2);
+    assert!(page.entries[1].via.is_empty());
+    // --no-cut-through keeps strict depth.
+    let strict = top(&view, &TopQuery::default());
+    let rows: Vec<String> = strict.entries.iter().map(|e| e.path.clone()).collect();
+    assert_eq!(paths(&rows), ["Library", "Movies"]);
+}
+
+#[test]
 fn p1_cli_03_top_files_and_limits() {
     let tree = home();
     let (arena, rollup) = scan(&tree);

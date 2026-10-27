@@ -1,7 +1,7 @@
 //! P1-CLI-03: the phase-1 verbs on the arena: `--json` goldens on the
-//! fixture tree under the manifest's `DUSCOPE_TEST_NOW`, cut-through,
-//! `stale --atime` on a basic scan, `--strict`, and a closed pipe under
-//! long output.
+//! fixture tree under the manifest's `DUSCOPE_TEST_NOW`, `stale --atime` on
+//! a basic scan, `--strict`, and a closed pipe under long output. The
+//! cut-through example is a query test (`duscope-core`, `query/tests.rs`).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -121,43 +121,6 @@ fn p1_cli_03_json_goldens_for_the_four_verbs() {
 }
 
 #[test]
-fn p1_cli_03_cut_through_reproduces_the_library_containers_example() {
-    let env = TestEnv::new();
-    let home = env.tmp_dir().join("home");
-    // Library holds a Containers of more than 80% of its bytes; Movies
-    // has no subdirectory.
-    for (file, size) in [
-        ("Library/Containers/com.example/data.db", 9 << 20),
-        ("Library/Preferences/p.plist", 1 << 20),
-        ("Movies/a.mov", 5 << 20),
-    ] {
-        let path = home.join(file);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, vec![7u8; size]).unwrap();
-    }
-    let home = fs::canonicalize(home).unwrap();
-    let (_, value) = json(&env, &["top", home.to_str().unwrap()]);
-    let rows = value["entries"].as_array().unwrap();
-    let paths: Vec<&str> = rows.iter().map(|r| r["path"].as_str().unwrap()).collect();
-    let library = format!("{}/Library", home.display());
-    assert_eq!(
-        paths,
-        [
-            format!("{library}/Containers/com.example"),
-            format!("{}/Movies", home.display())
-        ]
-    );
-    assert_eq!(
-        rows[0]["via"],
-        serde_json::json!([library.clone(), format!("{library}/Containers")])
-    );
-    assert_eq!(rows[1]["via"], serde_json::json!([]));
-    // --no-cut-through keeps strict depth.
-    let (_, strict) = json(&env, &["top", home.to_str().unwrap(), "--no-cut-through"]);
-    assert_eq!(strict["entries"][0]["path"], library);
-}
-
-#[test]
 fn p1_cli_03_stale_atime_on_a_basic_scan_returns_attrs_not_collected() {
     let env = TestEnv::new();
     let root = env.fixtures().case_root("timestamps");
@@ -259,20 +222,19 @@ fn p1_cli_03_a_closed_pipe_under_long_output_exits_zero() {
 #[test]
 fn p1_cli_03_top_reports_the_depth_it_listed_and_takes_a_file_root() {
     let env = TestEnv::new();
-    let tree = env.tmp_dir().join("tree");
-    fs::create_dir_all(tree.join("a")).unwrap();
-    fs::write(tree.join("a/f"), "x").unwrap();
-    let tree = tree.to_str().unwrap();
+    let fixtures = env.fixtures();
+    let tree = fixtures.case_root("empty");
     // --depth 0 lists depth 1, and says so.
-    let (_, top) = json(&env, &["top", "--depth", "0", tree]);
+    let (_, top) = json(&env, &["top", "--depth", "0", tree.to_str().unwrap()]);
     assert_eq!(top["query"]["depth"], 1);
     // A file as the root: one row for top --files and tree, none for top.
-    let file = format!("{tree}/a/f");
-    let (_, files) = json(&env, &["top", "--files", &file]);
+    let file = fixtures.case_root("symlinks").join("target.txt");
+    let file = file.to_str().unwrap();
+    let (_, files) = json(&env, &["top", "--files", file]);
     assert_eq!(files["total_count"], 1);
-    let (_, dirs) = json(&env, &["top", &file]);
+    let (_, dirs) = json(&env, &["top", file]);
     assert_eq!(dirs["total_count"], 0);
-    let (_, rows) = json(&env, &["tree", &file]);
+    let (_, rows) = json(&env, &["tree", file]);
     assert_eq!(rows["entries"][0]["kind"], "file");
 }
 
