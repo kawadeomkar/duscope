@@ -73,14 +73,10 @@ impl Provider for FallbackProvider {
         Ok(from_stat(name, &posix::lstat(&posix::c_path(path)?)?))
     }
 
-    /// The platform provider's default, so the two compare like for like.
+    /// The platform provider's default, so the two compare like for like,
+    /// taken from the platform provider so it has one home.
     fn default_threads(&self) -> usize {
-        if cfg!(target_os = "macos") {
-            8
-        } else {
-            let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-            cpus.saturating_mul(2).clamp(4, 32)
-        }
+        super::native().map_or(1, |native| native.default_threads())
     }
 }
 
@@ -255,6 +251,12 @@ mod tests {
         } else {
             assert!(entries.iter().any(|e| e.kind == Kind::Dir && e.nlink >= 3));
         }
+    }
+
+    #[test]
+    fn p1_walk_04_the_fallback_threads_follow_the_platform_provider() {
+        let native = crate::platform::native().unwrap();
+        assert_eq!(FallbackProvider.default_threads(), native.default_threads());
     }
 
     #[test]
