@@ -68,7 +68,7 @@ pub struct EntryRec {
 
 /// One directory's record beside its entry: 48 bytes, the cumulative fields
 /// zero until the roll-up.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct DirRec {
     /// Total apparent bytes of the subtree, the directory included.
@@ -77,7 +77,7 @@ pub struct DirRec {
     pub cum_allocated: u64,
     /// The latest mtime in the subtree.
     pub max_mtime_ns: i64,
-    /// The directory's entry.
+    /// The directory's entry; [`DirRec::NO_ENTRY`] until it arrives.
     pub entry: u32,
     /// Non-directories in the subtree.
     pub n_files: u32,
@@ -87,7 +87,10 @@ pub struct DirRec {
     pub last_id: u32,
     /// The last pre-order id of the directory's own files.
     pub files_end: u32,
-    /// How far below the root; the root is 0.
+    /// How far below the root; the root is 0. It saturates at 65,535
+    /// (`u16::MAX`): a deeper directory, beyond `PATH_MAX` on both
+    /// platforms, records 65,535. The record has no spare bytes to widen it,
+    /// and the roll-up and the totals do not read it.
     pub depth: u16,
     /// Roll-up flags ([`DirRec::UPPER_BOUND`]).
     pub flags: u16,
@@ -99,6 +102,28 @@ impl DirRec {
     pub const UPPER_BOUND: u16 = 1;
     /// The directory could not be read.
     pub const UNREADABLE: u16 = 2;
+    /// The `entry` of a directory whose id the arena met before its entry
+    /// (workers number directories as they find them, so a higher id can
+    /// arrive first). A complete walk leaves none; a truncated stream can.
+    pub const NO_ENTRY: u32 = u32::MAX;
+}
+
+impl Default for DirRec {
+    /// A placeholder: no entry yet, every count zero.
+    fn default() -> DirRec {
+        DirRec {
+            cum_apparent: 0,
+            cum_allocated: 0,
+            max_mtime_ns: 0,
+            entry: DirRec::NO_ENTRY,
+            n_files: 0,
+            n_dirs: 0,
+            last_id: 0,
+            files_end: 0,
+            depth: 0,
+            flags: 0,
+        }
+    }
 }
 
 /// The `--attrs full` side record of one entry.
@@ -109,10 +134,23 @@ struct FullRec {
     btime_ns: i64,
     uid: u32,
     gid: u32,
+    /// [`FullRec::ABSENT`]'s `u32::MAX` when the entry came without full
+    /// attributes; `st_mode` fits 16 bits on both platforms, so no real
+    /// mode is that.
     mode: u32,
 }
 
 impl FullRec {
+    /// The record of an entry delivered without full attributes in a full
+    /// scan: read back as `None`, never as owner 0 and a 1970 access time.
+    const ABSENT: FullRec = FullRec {
+        atime_ns: 0,
+        btime_ns: i64::MIN,
+        uid: 0,
+        gid: 0,
+        mode: u32::MAX,
+    };
+
     fn new(full: &FullAttrs) -> FullRec {
         FullRec {
             atime_ns: full.atime_ns,
@@ -123,14 +161,14 @@ impl FullRec {
         }
     }
 
-    fn get(self) -> FullAttrs {
-        FullAttrs {
+    fn get(self) -> Option<FullAttrs> {
+        (self.mode != FullRec::ABSENT.mode).then_some(FullAttrs {
             atime_ns: self.atime_ns,
             btime_ns: (self.btime_ns != i64::MIN).then_some(self.btime_ns),
             mode: self.mode,
             uid: self.uid,
             gid: self.gid,
-        }
+        })
     }
 }
 
@@ -301,6 +339,12 @@ struct SharedRec {
     key: u64,
 }
 
+// The record sizes the memory budget rests on, checked by the compiler:
+// a field added to a record fails the build, not only a test.
+const _: () = assert!(size_of::<EntryRec>() == 48);
+const _: () = assert!(size_of::<DirRec>() == 48);
+const _: () = assert!(size_of::<SharedRec>() == 16);
+
 /// A clone group member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cloned {
@@ -433,16 +477,7 @@ impl Arena {
             rec.depth = depth;
         }
         if self.attrs == Attrs::Full {
-            let rec = entry.full.as_ref().map_or(
-                FullRec {
-                    atime_ns: 0,
-                    btime_ns: i64::MIN,
-                    uid: 0,
-                    gid: 0,
-                    mode: 0,
-                },
-                FullRec::new,
-            );
+            let rec = entry.full.as_ref().map_or(FullRec::ABSENT, FullRec::new);
             self.full.push(rec);
         }
         if idx == 0 {
@@ -490,9 +525,20 @@ impl Arena {
         self.entries.is_empty()
     }
 
-    /// Directories, the root included when it is one.
+    /// The directory ids the arena has a record for, the root included when
+    /// it is a directory: one more than the highest id met, which sizes a
+    /// table indexed by [`DirId`]. After a complete walk every one holds its
+    /// directory's entry; after a truncated stream an id whose entry never
+    /// arrived is a placeholder, which [`Arena::has_dir`] reports as absent.
     pub fn dir_count(&self) -> usize {
         self.dirs.len()
+    }
+
+    /// Whether `dir`'s entry is in the arena.
+    pub fn has_dir(&self, dir: DirId) -> bool {
+        self.dirs
+            .get(dir.index())
+            .is_some_and(|rec| rec.entry != DirRec::NO_ENTRY)
     }
 
     /// The attribute set the scan collected.
@@ -530,19 +576,23 @@ impl Arena {
             .unwrap_or_else(|| panic!("no entry {idx:?}"))
     }
 
-    /// The `--attrs full` attributes of `idx`; `None` in a basic scan.
+    /// The `--attrs full` attributes of `idx`; `None` in a basic scan, and
+    /// for an entry the walk delivered without them in a full scan.
     pub fn full(&self, idx: EntryIdx) -> Option<FullAttrs> {
-        self.full.get(idx.index()).map(|rec| rec.get())
+        self.full.get(idx.index()).and_then(|rec| rec.get())
     }
 
     /// The directory record of `dir`.
     ///
     /// # Panics
     ///
-    /// When `dir` is not a directory of this arena.
+    /// When `dir` is not a directory of this arena, or its entry never
+    /// arrived ([`Arena::has_dir`] is false): a placeholder must not pass
+    /// for a directory.
     pub fn dir(&self, dir: DirId) -> &DirRec {
         self.dirs
             .get(dir.index())
+            .filter(|rec| rec.entry != DirRec::NO_ENTRY)
             .unwrap_or_else(|| panic!("no directory {dir:?}"))
     }
 

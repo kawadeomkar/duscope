@@ -204,20 +204,36 @@ impl Mounts {
         };
     }
 
-    /// The volume mounted at `path` from its mountinfo line alone, sizes 0:
-    /// the mounted filesystem is not asked anything (`statx` with
-    /// `AT_NO_AUTOMOUNT` and `AT_STATX_DONT_SYNC` reads only what the
-    /// kernel holds).
+    /// The volume mounted at `path` from its mountinfo line, the mounted
+    /// filesystem asked nothing (`statx` with `AT_NO_AUTOMOUNT` and
+    /// `AT_STATX_DONT_SYNC` reads only what the kernel holds); the sizes of
+    /// a quiet class come from `statvfs`, else 0. `path` is the walk's
+    /// path: under a root given with `..` or relatively it is not the
+    /// mount point mountinfo lists, so the lookup by path misses and the
+    /// table is read again, once per mount (the walk keeps each mount's
+    /// answer). It is not resolved here, since resolving it would ask the
+    /// mounted filesystem; the binary resolves the root before the walk.
     pub(in crate::platform) fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
         let c_path = posix::c_path(path)?;
         let stx = statx::statx(None, &c_path, libc::STATX_MNT_ID | libc::STATX_INO)?;
         let mnt_id = (stx.stx_mask & libc::STATX_MNT_ID != 0).then_some(stx.stx_mnt_id);
         let mount = self.lookup(path, mnt_id, true)?;
+        // Sizes as macOS's mount table has them: read where that cannot
+        // wait on a server or describe a kernel table, else 0.
+        let quiet = !matches!(
+            class(&mount.fs_type.to_lowercase()),
+            VolumeClass::Network | VolumeClass::Kernel
+        );
+        let (total, free) = if quiet {
+            sizes(&c_path).unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
         Ok(describe(
             libc::makedev(stx.stx_dev_major, stx.stx_dev_minor),
             mount,
-            0,
-            0,
+            total,
+            free,
         ))
     }
 
@@ -232,21 +248,23 @@ impl Mounts {
         let mnt_id = (stx.stx_mask & libc::STATX_MNT_ID != 0).then_some(stx.stx_mnt_id);
         let real = fs::canonicalize(path)?;
         let mount = self.lookup(&real, mnt_id, false)?;
-        let vfs = posix::statvfs(&c_path)?;
-        // The fields are 32-bit on 32-bit targets.
-        #[allow(clippy::useless_conversion)]
-        let (frsize, blocks, avail) = (
-            u64::from(vfs.f_frsize),
-            u64::from(vfs.f_blocks),
-            u64::from(vfs.f_bavail),
-        );
-        Ok(describe(
-            entry.dev,
-            mount,
-            blocks.saturating_mul(frsize),
-            avail.saturating_mul(frsize),
-        ))
+        let (total, free) = sizes(&c_path)?;
+        Ok(describe(entry.dev, mount, total, free))
     }
+}
+
+/// The size and the bytes free of the filesystem holding `path`, from
+/// `statvfs`: free bytes are `f_bavail × f_frsize`.
+fn sizes(path: &std::ffi::CStr) -> io::Result<(u64, u64)> {
+    let vfs = posix::statvfs(path)?;
+    // The fields are 32-bit on 32-bit targets.
+    #[allow(clippy::useless_conversion)]
+    let (frsize, blocks, avail) = (
+        u64::from(vfs.f_frsize),
+        u64::from(vfs.f_blocks),
+        u64::from(vfs.f_bavail),
+    );
+    Ok((blocks.saturating_mul(frsize), avail.saturating_mul(frsize)))
 }
 
 /// A volume record from a mount and its sizes.

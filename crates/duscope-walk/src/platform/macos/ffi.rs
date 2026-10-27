@@ -239,6 +239,17 @@ pub(super) fn pathconf(path: &CStr, name: c_int) -> Option<libc::c_long> {
     (value >= 0).then_some(value)
 }
 
+/// The device a `statfs` record's `f_fsid` names: its first word, which
+/// macOS fills with the volume's own device (the device bulk reads report
+/// under `FSOPT_RETURN_REALDEV`).
+pub(super) fn fsid_dev(fs: &libc::statfs) -> u64 {
+    // SAFETY: fsid_t is `#[repr(C)] struct { [i32; 2] }` in <sys/mount.h>
+    // and in libc, so it has the layout of two i32s; libc keeps the field
+    // private, hence the copy.
+    let words: [i32; 2] = unsafe { std::mem::transmute(fs.f_fsid) };
+    super::bulk::dev(words[0])
+}
+
 /// Every mounted volume as the kernel last recorded it (`getfsstat(2)`
 /// with `MNT_NOWAIT`): no volume is asked for fresh statistics, so a dead
 /// network mount cannot block the call.
