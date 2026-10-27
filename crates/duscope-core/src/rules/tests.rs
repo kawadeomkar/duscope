@@ -357,14 +357,30 @@ fn p1_core_04_the_examples_in_docs_rules_md_parse() {
     let doc = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/rules.md"))
         .unwrap();
     let mut counts = BTreeMap::new();
-    let mut lines = doc.lines();
-    while let Some(line) = lines.next() {
-        let Some(kind) = line.strip_prefix("```toml ") else {
+    let mut lines = doc.lines().enumerate();
+    while let Some((index, line)) = lines.next() {
+        // Every TOML block is an example that must parse, so each names its
+        // kind; a bare ```toml fence would otherwise go unchecked.
+        let fence = line.trim_start();
+        if !fence
+            .get(..7)
+            .is_some_and(|f| f.eq_ignore_ascii_case("```toml"))
+        {
             continue;
-        };
-        let block: Vec<&str> = lines.by_ref().take_while(|l| *l != "```").collect();
+        }
+        let kind = fence[7..].trim();
+        assert!(
+            !kind.is_empty(),
+            "docs/rules.md:{}: a toml block without its kind (classes, caches or theme)",
+            index + 1
+        );
+        let block: Vec<&str> = lines
+            .by_ref()
+            .map(|(_, l)| l)
+            .take_while(|l| *l != "```")
+            .collect();
         let text = block.join("\n");
-        match kind.trim() {
+        match kind {
             "classes" => {
                 Classes::parse(&text, "docs/rules.md").unwrap();
             }
@@ -372,9 +388,12 @@ fn p1_core_04_the_examples_in_docs_rules_md_parse() {
                 Caches::parse(&text, "docs/rules.md").unwrap();
             }
             "theme" => check_theme(&text),
-            other => panic!("unknown example kind {other:?}"),
+            other => panic!(
+                "docs/rules.md:{}: unknown example kind {other:?}",
+                index + 1
+            ),
         }
-        *counts.entry(kind.trim().to_owned()).or_insert(0) += 1;
+        *counts.entry(kind.to_owned()).or_insert(0) += 1;
     }
     assert_eq!(
         counts.keys().map(String::as_str).collect::<Vec<_>>(),
