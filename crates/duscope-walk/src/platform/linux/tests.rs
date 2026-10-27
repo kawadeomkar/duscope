@@ -378,6 +378,16 @@ fn p1_walk_06_mount_info_reads_the_mount_table() {
         .unwrap();
     assert_eq!(info.class, crate::VolumeClass::Kernel);
     assert_eq!((info.total_bytes, info.free_bytes), (0, 0));
+    // A local mount's sizes are read, as macOS's mount table gives them.
+    let root = super::mounts::Mounts::default()
+        .mount_info(Path::new("/"))
+        .unwrap();
+    if !matches!(
+        root.class,
+        crate::VolumeClass::Network | crate::VolumeClass::Kernel
+    ) {
+        assert!(root.total_bytes > 0, "{root:?}");
+    }
 }
 
 #[test]

@@ -241,15 +241,20 @@ pub struct VolumeInfo {
     /// Mounted read-only.
     pub read_only: bool,
     /// Whether names differ by case alone; `None` where it cannot be told.
+    /// For a volume the walk did not enter it comes only from the type and
+    /// the mount options (Linux), or is `None` (macOS asks the volume).
     pub case_sensitive: Option<bool>,
     /// Whether names compare normalisation-insensitively (APFS, HFS+).
     pub normalization: Normalization,
     /// The mount options (`noatime`, `relatime`, …), for the
     /// `atime_unreliable` warning.
     pub options: Vec<String>,
-    /// The volume's size in bytes.
+    /// The volume's size in bytes. For a volume the walk did not enter,
+    /// what the platform has without asking a server or a kernel table:
+    /// the kernel's cached sizes on macOS, `statvfs` of a local mount on
+    /// Linux, and 0 for network and kernel mounts on both.
     pub total_bytes: u64,
-    /// Bytes free for an unprivileged user.
+    /// Bytes free for an unprivileged user, read as `total_bytes` is.
     pub free_bytes: u64,
     /// Why the walk did not enter the volume; `None` when it did.
     pub reason: Option<Skip>,
