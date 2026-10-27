@@ -7,10 +7,12 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::Stdio;
 
 use assert_cmd::Command;
+use duscope_core::query::timegrammar;
 use duscope_testkit::TestEnv;
 
 /// The golden file `name` under `duscope/tests/golden/`, compared with
@@ -79,6 +81,21 @@ fn p1_cli_03_json_goldens_for_the_four_verbs() {
     let root = fs::canonicalize(env.fixtures().path("home")).unwrap();
     let home = root.to_str().unwrap();
     let os = std::env::consts::OS;
+    // stale needs a file's ctime before its cutoff too, and a fixture's
+    // ctime is when the tree was built (only its mtime is set): the stale
+    // golden holds while the tree is built more than a year before the
+    // manifest's instant, DUSCOPE_TEST_NOW.
+    let now = timegrammar::parse_date(env.test_now()).unwrap().ns;
+    let cutoff = now - timegrammar::parse_age("1y").unwrap();
+    let built = fs::metadata(&root)
+        .unwrap()
+        .ctime()
+        .saturating_mul(1_000_000_000);
+    assert!(
+        built < cutoff,
+        "the fixture tree was built after {}, so stale lists none of it: move the manifest's instant later",
+        timegrammar::iso8601(cutoff)
+    );
     let cases: [(&str, Vec<&str>); 4] = [
         ("top", vec!["top", home, "--depth", "2", "--limit", "10"]),
         (
