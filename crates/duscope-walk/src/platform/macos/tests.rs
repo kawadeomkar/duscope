@@ -34,8 +34,8 @@ impl bulk::Clock for Waiting {
     }
 }
 
-/// Every entry of a walk by its path, and the paths of the directories that
-/// closed with an error.
+/// Every entry of a walk by its path, and the sorted paths of the
+/// directories that closed with an error.
 fn walk_paths(
     provider: &MacProvider,
     root: &Path,
@@ -63,6 +63,8 @@ fn walk_paths(
         _ => {}
     })
     .unwrap();
+    // Directories close in the order the workers finish them.
+    unreadable.sort();
     (entries, unreadable)
 }
 
