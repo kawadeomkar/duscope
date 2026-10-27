@@ -875,10 +875,6 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             entry.parent = dir.id;
             entry.dir = None;
             let is_dir = entry.kind == Kind::Dir;
-            let path = match resolved.get(i) {
-                Some(Some(real)) => real.clone(),
-                _ => dir.path.join(entry.name.as_os_str()),
-            };
             let rel = rel_of(&entry.name);
             let excluded = self
                 .excludes
@@ -898,6 +894,11 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     return None;
                 };
                 entry.dir = Some(id);
+                // The path only a directory needs: a file costs no copy.
+                let path = match resolved.get(i) {
+                    Some(Some(target)) => target.clone(),
+                    _ => dir.path.join(entry.name.as_os_str()),
+                };
                 let mut skip = excluded;
                 if skip.is_none() {
                     let met = adopted.volumes.len();
