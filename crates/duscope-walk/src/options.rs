@@ -6,6 +6,8 @@ use std::sync::atomic::AtomicBool;
 
 use globset::{Glob, GlobSet};
 
+use crate::IgnoreRules;
+
 /// Which attribute set a scan collects.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Attrs {
@@ -45,9 +47,15 @@ pub struct WalkOptions {
     pub attrs: Attrs,
     /// Collect clone ids where the filesystem has them.
     pub clones: bool,
-    /// Paths not to enter.
+    /// Paths to leave out (`--exclude`, `--exclude-from`), matched against
+    /// each entry's path relative to the root, `/`-separated: a directory
+    /// that matches is listed but not entered, a file is left out.
     pub excludes: GlobSet,
-    /// Cache directories not to enter.
+    /// Gitignore-syntax patterns to leave out (`--ignore-from`), matched the
+    /// same way.
+    pub ignore: IgnoreRules,
+    /// Cache directories not to enter (`--exclude-caches`); when there are
+    /// any, a directory holding a valid `CACHEDIR.TAG` is not entered either.
     pub exclude_caches: Vec<CacheRule>,
     /// Set to stop the walk. Workers poll it once per directory.
     pub cancel: Arc<AtomicBool>,
@@ -68,6 +76,7 @@ impl Default for WalkOptions {
             attrs: Attrs::Basic,
             clones: true,
             excludes: GlobSet::empty(),
+            ignore: IgnoreRules::default(),
             exclude_caches: Vec::new(),
             cancel: Arc::default(),
             fallback: false,

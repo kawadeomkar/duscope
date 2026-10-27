@@ -128,6 +128,20 @@ pub struct ScanBlock {
     pub incremental: bool,
     /// Every volume the scan met, entered or not.
     pub volumes: Vec<VolumeEntry>,
+    /// Files left out and directories not entered by the excludes
+    /// (`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`).
+    pub excluded_count: u64,
+    /// Each directory the excludes kept the scan out of, path bytewise.
+    pub excluded: Vec<ExcludedEntry>,
+}
+
+/// A directory the scan listed but did not enter because of an exclude.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExcludedEntry {
+    /// Its absolute path, as lossy UTF-8.
+    pub path: String,
+    /// `excluded` (a glob or ignore pattern) or `excluded_cache`.
+    pub reason: &'static str,
 }
 
 /// A volume the scan met.

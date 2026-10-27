@@ -2,6 +2,7 @@
 //! arena, then the roll-up. Until P1-CLI-03 brings the queries, every verb
 //! lists the root's largest children.
 
+use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,12 +12,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use duscope_core::arena::{Arena, DirRec, EntryIdx};
 use duscope_core::envelope::{
-    Envelope, QueryBlock, SCHEMA_VERSION, ScanBlock, Tool, TopEntry, VolumeEntry, Warning,
-    name_fields,
+    Envelope, ExcludedEntry, QueryBlock, SCHEMA_VERSION, ScanBlock, Tool, TopEntry, VolumeEntry,
+    Warning, name_fields,
 };
 use duscope_core::rollup::roll_up;
-use duscope_walk::{Attrs, DirId, Flags, Kind, WalkError, WalkOptions, WalkSummary, walk};
-use globset::{Glob, GlobSetBuilder};
+use duscope_core::rules::Caches;
+use duscope_walk::{
+    Attrs, DirId, Flags, IgnoreRules, Kind, Skip, WalkError, WalkOptions, WalkSummary, walk,
+};
+use globset::{Glob, GlobBuilder, GlobSetBuilder};
 
 use super::{Exit, Failure};
 use crate::cli::{AttrsArg, ProviderArg, QueryArgs, ScanArgs, SizeKind, WalkArgs};
@@ -221,7 +225,53 @@ fn scan_block(
                 free_bytes: v.free_bytes,
             })
             .collect(),
+        excluded_count: summary.excluded,
+        excluded: excluded(arena, root),
     }
+}
+
+/// The directories the excludes kept the scan out of, path bytewise.
+fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
+    let skipped: Vec<(DirId, &'static str)> = arena
+        .skipped()
+        .iter()
+        .filter(|(_, reason)| matches!(reason, Skip::Excluded | Skip::ExcludedCache))
+        .map(|(&dir, reason)| (dir, reason.as_str()))
+        .collect();
+    if skipped.is_empty() {
+        return Vec::new();
+    }
+    // Each directory's name and parent, to spell the paths.
+    let dirs: HashMap<DirId, (&[u8], DirId)> = arena
+        .entries()
+        .filter_map(|view| view.dir.map(|dir| (dir, (view.name, view.parent))))
+        .collect();
+    let path_of = |dir: DirId| {
+        let mut names = Vec::new();
+        let mut at = dir;
+        while at != DirId::ROOT {
+            let (name, parent) = dirs[&at];
+            names.push(name);
+            at = parent;
+        }
+        let mut path = root.as_os_str().as_bytes().to_vec();
+        for name in names.iter().rev() {
+            path.push(b'/');
+            path.extend_from_slice(name);
+        }
+        path
+    };
+    let mut rows: Vec<(Vec<u8>, &'static str)> = skipped
+        .into_iter()
+        .map(|(dir, reason)| (path_of(dir), reason))
+        .collect();
+    rows.sort();
+    rows.into_iter()
+        .map(|(path, reason)| ExcludedEntry {
+            path: String::from_utf8_lossy(&path).into_owned(),
+            reason,
+        })
+        .collect()
 }
 
 /// An entry's totals: a directory's subtree, or a file's own.
@@ -451,14 +501,36 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
 fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure> {
     let mut globs = GlobSetBuilder::new();
     for pattern in excludes {
-        let glob = Glob::new(pattern).map_err(|e| {
-            Failure::new(Exit::Usage, "usage", format!("--exclude {pattern:?}: {e}"))
-        })?;
-        globs.add(glob);
+        globs.add(exclude_glob(pattern, "--exclude")?);
+    }
+    for file in &args.exclude_from {
+        let text = read_flag_file(file, "--exclude-from")?;
+        for line in String::from_utf8_lossy(&text).lines() {
+            let line = line.trim();
+            if !line.is_empty() && !line.starts_with('#') {
+                globs.add(exclude_glob(line, "--exclude-from")?);
+            }
+        }
     }
     let excludes = globs
         .build()
         .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--exclude: {e}")))?;
+    let mut ignore = IgnoreRules::new();
+    for file in &args.ignore_from {
+        let text = read_flag_file(file, "--ignore-from")?;
+        ignore.add(&text, file).map_err(|e| {
+            Failure::new(
+                Exit::Usage,
+                "usage",
+                format!("--ignore-from {}: {e}", file.display()),
+            )
+        })?;
+    }
+    let exclude_caches = if args.exclude_caches {
+        Caches::vendored().compile()
+    } else {
+        Vec::new()
+    };
     Ok(WalkOptions {
         threads: args.threads.unwrap_or(0),
         follow_symlinks: args.follow_symlinks,
@@ -470,9 +542,38 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
         },
         clones: !args.no_clones,
         excludes,
-        exclude_caches: Vec::new(),
+        ignore,
+        exclude_caches,
         cancel: Arc::new(AtomicBool::new(false)),
         fallback: args.provider == Some(ProviderArg::Fallback),
+    })
+}
+
+/// An `--exclude` pattern as the walk matches it, against paths relative to
+/// the root: a pattern starting with `/` is anchored at the root; any other
+/// matches at every depth (`*.tmp` matches `a/b/c.tmp`). `*` stays within a
+/// path component and `**` crosses them; a trailing `/` is dropped.
+fn exclude_glob(pattern: &str, flag: &str) -> Result<Glob, Failure> {
+    let trimmed = pattern.trim_end_matches('/');
+    let glob = match trimmed.strip_prefix('/') {
+        Some(anchored) => anchored.to_owned(),
+        None => format!("**/{trimmed}"),
+    };
+    GlobBuilder::new(&glob)
+        .literal_separator(true)
+        .build()
+        .map_err(|e| Failure::new(Exit::Usage, "usage", format!("{flag} {pattern:?}: {e}")))
+}
+
+/// The contents of a file a flag names; a file that cannot be read is a
+/// usage error.
+fn read_flag_file(file: &Path, flag: &str) -> Result<Vec<u8>, Failure> {
+    std::fs::read(file).map_err(|e| {
+        Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("{flag} {}: {e}", file.display()),
+        )
     })
 }
 

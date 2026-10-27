@@ -370,6 +370,10 @@ pub enum Skip {
     /// A mount of a directory already on the path (a bind mount of an
     /// ancestor), which would loop.
     BindCycle,
+    /// It matches `--exclude`, `--exclude-from` or `--ignore-from`.
+    Excluded,
+    /// A cache directory, under `--exclude-caches`.
+    ExcludedCache,
 }
 
 impl Skip {
@@ -381,6 +385,8 @@ impl Skip {
             Skip::Network => "network",
             Skip::OneFileSystem => "one_file_system",
             Skip::BindCycle => "bind_cycle",
+            Skip::Excluded => "excluded",
+            Skip::ExcludedCache => "excluded_cache",
         }
     }
 }

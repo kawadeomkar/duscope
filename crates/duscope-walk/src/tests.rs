@@ -288,6 +288,7 @@ proptest! {
                 unreadable_dirs: 0,
                 entry_errors: 0,
                 vanished: 0,
+                excluded: 0,
                 skipped_dirs: 0,
                 volumes: 1,
                 mounts_excluded: 0,
