@@ -45,8 +45,11 @@ impl MacProvider {
         static SETUP: Once = Once::new();
         SETUP.call_once(|| {
             posix::raise_nofile_limit();
-            // A failure leaves the default policy; nothing else can be done.
-            let _ = ffi::disable_dataless_materialization();
+            // A failure leaves the default policy, under which reading a
+            // dataless file's attributes can download it.
+            if let Err(e) = ffi::disable_dataless_materialization() {
+                log::warn!("cannot turn off dataless-file materialisation: {e}");
+            }
         });
         MacProvider::default()
     }
