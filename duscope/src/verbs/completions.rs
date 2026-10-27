@@ -174,7 +174,7 @@ mod tests {
     use clap::CommandFactory;
     use clap_complete::Shell;
 
-    use super::{script, strip, typed};
+    use super::{hidden_flags, script, strip, typed};
     use crate::cli::Cli;
 
     #[test]
@@ -210,8 +210,49 @@ mod tests {
         }
     }
 
+    /// Whether `script` offers `flag` (`--save`, `-i`): as a word of its
+    /// own in any shell's syntax, as fish's `-l save` or `-s i`, or as a
+    /// name in fish's argparse spec (`save`, `cursor=`, `i/interactive`).
+    fn offers(script: &str, flag: &str) -> bool {
+        let long = flag.strip_prefix("--");
+        let short = flag.strip_prefix('-').filter(|_| long.is_none());
+        script.lines().any(|line| {
+            let words: Vec<&str> = line
+                .split(|c: char| c.is_whitespace() || "'\"()[]=:+*,{}|;\\".contains(c))
+                .filter(|w| !w.is_empty())
+                .collect();
+            let fish = words.windows(2).any(|pair| match pair {
+                ["-l", name] => Some(*name) == long,
+                ["-s", name] => Some(*name) == short,
+                _ => false,
+            });
+            let spec = line.trim_start().starts_with("string join")
+                && line.split_whitespace().any(|spec| {
+                    spec.trim_end_matches('=')
+                        .split('/')
+                        .any(|name| Some(name) == long || Some(name) == short)
+                });
+            words.contains(&flag) || fish || spec
+        })
+    }
+
     #[test]
     fn p1_cli_04_completions_leave_hidden_flags_out() {
+        let mut command = Cli::command();
+        command.build();
+        // Every flag the clap tree hides, so a flag hidden later is checked
+        // too; the test-only and later-phase ones are among them.
+        let hidden = hidden_flags(&command);
+        for flag in [
+            "--provider",
+            "--test-now",
+            "--cursor",
+            "--interactive",
+            "-i",
+            "--save",
+        ] {
+            assert!(hidden.iter().any(|h| h == flag), "{flag}: {hidden:?}");
+        }
         for shell in [
             Shell::Bash,
             Shell::Zsh,
@@ -220,21 +261,11 @@ mod tests {
             Shell::PowerShell,
         ] {
             let text = String::from_utf8(script(shell)).unwrap();
-            // fish spells a long flag `-l follow-symlinks`.
-            assert!(text.contains("follow-symlinks"), "{shell}");
-            for hidden in ["provider", "test-now", "cursor", "interactive", "save"] {
-                // As each shell offers a flag: `--save`, fish's `-l save`
-                // and its argparse spec's `save` or `cursor=`.
-                let forms = [
-                    format!("--{hidden}"),
-                    format!(" -l {hidden}"),
-                    format!(" {hidden}="),
-                    format!(" {hidden} "),
-                    format!("/{hidden} "),
-                ];
-                for form in &forms {
-                    assert!(!text.contains(form.as_str()), "{shell} offers {form:?}");
-                }
+            // The check finds a visible flag in each shell's spelling.
+            assert!(offers(&text, "--follow-symlinks"), "{shell}");
+            assert!(offers(&text, "-x"), "{shell}");
+            for flag in &hidden {
+                assert!(!offers(&text, flag), "{shell} offers {flag}");
             }
         }
     }
