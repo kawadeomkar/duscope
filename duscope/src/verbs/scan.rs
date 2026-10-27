@@ -64,6 +64,18 @@ pub fn list(
     output: &Output,
 ) -> Result<(), Failure> {
     let scanned = scan(walk_args, excludes)?;
+    // --strict: a directory that could not be read fails the command.
+    if query.is_some_and(|q| q.strict) && scanned.summary.unreadable_dirs > 0 {
+        return Err(Failure::new(
+            Exit::Permission,
+            "permission_denied",
+            format!(
+                "{} directories could not be read, and --strict asks for all of them",
+                scanned.summary.unreadable_dirs
+            ),
+        )
+        .hint("Run without --strict to accept totals that leave them out"));
+    }
     let size_kind = size_kind(walk_args);
     let envelope = envelope(&scanned, walk_args, verb, query, files, size_kind, output);
     let footer = footer(&envelope.scan, &scanned, output);

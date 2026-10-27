@@ -474,3 +474,28 @@ fn p1_cli_02_warnings_stay_off_stdout_in_machine_formats() {
     );
     assert!(stderr.contains("hint: Rerun duscope"), "{stderr}");
 }
+
+#[test]
+fn p1_cli_02_strict_turns_a_partial_read_into_exit_4() {
+    let env = TestEnv::new();
+    let fixtures = env.fixtures();
+    if !fixtures.unreadable_effective() {
+        eprintln!("skipped: mode 000 does not deny this process access");
+        return;
+    }
+    let tree = fixtures.case_root("unreadable");
+    let out = duscope(&env)
+        .args(["top", "--strict", "--json"])
+        .arg(&tree)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "permission_denied");
+    // A tree read in full is no failure under --strict.
+    duscope(&env)
+        .args(["top", "--strict"])
+        .arg(fixtures.case_root("empty"))
+        .assert()
+        .code(0);
+}
