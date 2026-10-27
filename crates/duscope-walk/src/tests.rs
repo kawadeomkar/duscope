@@ -787,7 +787,7 @@ impl Provider for Mounted<'_> {
         Ok(volume)
     }
 
-    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+    fn mount_info(&self, path: &Path, _dev: u64) -> io::Result<VolumeInfo> {
         self.mount_info_calls.lock().unwrap().push(path.to_owned());
         let mut volume = self.inner.volume(path)?;
         if let Some(mount) = self.mount_of(path) {
@@ -974,8 +974,8 @@ fn p1_walk_06_skipped_mounts_are_never_asked_for_sizes() {
     assert_eq!(sized, [PathBuf::from("/mem"), PathBuf::from("/mem/disk")]);
     let info = provider.mount_info_calls.lock().unwrap().len();
     assert_eq!(
-        info, 5,
-        "each crossing classified once, each skipped volume described once"
+        info, 3,
+        "each crossing classified once; a skipped volume's row reuses it"
     );
     let excluded: Vec<u64> = events
         .iter()

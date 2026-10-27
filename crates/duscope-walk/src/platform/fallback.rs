@@ -89,13 +89,13 @@ impl Provider for FallbackProvider {
     }
 
     #[cfg(target_os = "linux")]
-    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+    fn mount_info(&self, path: &Path, _dev: u64) -> io::Result<VolumeInfo> {
         self.mounts.mount_info(path)
     }
 
     #[cfg(target_os = "macos")]
-    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
-        mount_info(path)
+    fn mount_info(&self, path: &Path, dev: u64) -> io::Result<VolumeInfo> {
+        mount_info(path, dev)
     }
 
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {

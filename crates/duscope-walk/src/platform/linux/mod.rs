@@ -158,7 +158,7 @@ impl Provider for LinuxProvider {
         self.mounts.volume(path)
     }
 
-    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+    fn mount_info(&self, path: &Path, _dev: u64) -> io::Result<VolumeInfo> {
         self.mounts.mount_info(path)
     }
 

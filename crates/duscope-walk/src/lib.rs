@@ -119,12 +119,15 @@ pub trait Provider: Send + Sync {
     /// The volume holding `path`.
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
 
-    /// The volume mounted at `path`, read where the platform can without
-    /// touching the mounted filesystem, with its sizes left 0: the walk
-    /// classifies a mount with it before deciding whether to enter, so a
-    /// dead network mount it leaves alone is never asked for its sizes. The
-    /// default is [`volume`](Provider::volume).
-    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+    /// The volume mounted at `path`, whose entry reports the device `dev`,
+    /// read where the platform can without touching the mounted filesystem:
+    /// the walk classifies a mount with it before deciding whether to
+    /// enter, so a dead network mount it leaves alone is never asked for
+    /// its sizes. A provider may find the mount by `dev`, which holds
+    /// however the walk spelled the path. The default is
+    /// [`volume`](Provider::volume).
+    fn mount_info(&self, path: &Path, dev: u64) -> io::Result<VolumeInfo> {
+        let _ = dev;
         self.volume(path)
     }
 
@@ -355,9 +358,11 @@ struct Walk<'a, P: ?Sized> {
 }
 
 /// A mount the walk has met.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Met {
-    class: Option<VolumeClass>,
+    /// What [`Provider::mount_info`] said, read once per mount; `None`
+    /// when it could not be read.
+    info: Option<VolumeInfo>,
     reported: bool,
 }
 
@@ -422,7 +427,7 @@ pub fn walk_with<P: Provider + ?Sized>(
         mounts: Mutex::new(HashMap::from([(
             root_mnt_id,
             Met {
-                class: None,
+                info: None,
                 reported: true,
             },
         )])),
@@ -659,6 +664,11 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     /// is no crossing for `-x`); then whatever the provider skips. A mount's
     /// volume is added to `volumes` the first time it is met, read in full
     /// only when the walk enters it. `None` enters.
+    ///
+    /// The bind-cycle test walks the directory's ancestors, one pointer per
+    /// level (bounded by `PATH_MAX`); a mount is classified once, and the
+    /// classification is kept for the volume row of a mount that is not
+    /// entered.
     fn decide(
         &self,
         dir: &DirHandle,
@@ -677,7 +687,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 self.provider.skip(dir, entry, self.opts)
             };
         }
-        let class = self.class(entry.mnt_id, path);
+        let met = self.met(entry, path);
+        let class = met.as_ref().map(|info| info.class);
         let skip = match class {
             _ if cycle => Some(Skip::BindCycle),
             Some(VolumeClass::Kernel) => Some(Skip::Kernel),
@@ -695,10 +706,10 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         let provider_skip = skip.is_some_and(|s| s == Skip::Firmlinked);
         if !provider_skip && self.claim(entry.mnt_id) {
             let volume = match skip {
-                None => self.provider.volume(path),
-                Some(_) => self.provider.mount_info(path),
+                None => self.provider.volume(path).ok(),
+                Some(_) => met,
             };
-            if let Ok(mut volume) = volume {
+            if let Some(mut volume) = volume {
                 volume.dev = entry.dev;
                 volume.mnt_id = entry.mnt_id;
                 volume.reason = skip;
@@ -708,28 +719,29 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         skip
     }
 
-    /// The class of the mount `mnt_id` at `path`, read with
-    /// [`Provider::mount_info`] the first time the mount is met; `None` when
-    /// it cannot be read.
-    fn class(&self, mnt_id: u64, path: &Path) -> Option<VolumeClass> {
+    /// What [`Provider::mount_info`] says of the mount `entry` crossed into
+    /// at `path`, read the first time the mount is met; `None` when it
+    /// cannot be read.
+    fn met(&self, entry: &Entry, path: &Path) -> Option<VolumeInfo> {
         if let Some(met) = self
             .mounts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&mnt_id)
+            .get(&entry.mnt_id)
         {
-            return met.class;
+            return met.info.clone();
         }
-        let class = self.provider.mount_info(path).ok().map(|v| v.class);
+        let info = self.provider.mount_info(path, entry.dev).ok();
         self.mounts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .entry(mnt_id)
+            .entry(entry.mnt_id)
             .or_insert(Met {
-                class,
+                info,
                 reported: false,
             })
-            .class
+            .info
+            .clone()
     }
 
     /// Claims the report of the volume of `mnt_id`: true for the one caller
@@ -737,7 +749,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     fn claim(&self, mnt_id: u64) -> bool {
         let mut mounts = self.mounts.lock().unwrap_or_else(PoisonError::into_inner);
         let met = mounts.entry(mnt_id).or_insert(Met {
-            class: None,
+            info: None,
             reported: false,
         });
         !std::mem::replace(&mut met.reported, true)

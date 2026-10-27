@@ -315,8 +315,8 @@ impl Provider for MacProvider {
         volume::of(path)
     }
 
-    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
-        volume::mount_info(path)
+    fn mount_info(&self, path: &Path, dev: u64) -> io::Result<VolumeInfo> {
+        volume::mount_info(path, dev)
     }
 
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {

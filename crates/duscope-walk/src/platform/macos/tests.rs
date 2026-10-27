@@ -981,13 +981,40 @@ fn p1_walk_06_mount_classes() {
 #[test]
 fn p1_walk_06_mount_info_reads_the_mount_table() {
     // The boot volume is mounted at /; its record comes from getfsstat.
-    let info = super::volume::mount_info(Path::new("/")).unwrap();
+    let dev = |path: &str| {
+        crate::Provider::root(
+            &MacProvider::new(),
+            Path::new(path),
+            &WalkOptions::default(),
+        )
+        .unwrap()
+        .dev
+    };
+    let info = super::volume::mount_info(Path::new("/"), dev("/")).unwrap();
     assert_eq!(info.mount_point, Path::new("/"));
     assert_eq!(info.class, crate::VolumeClass::Local);
     assert!(
         info.total_bytes > 0,
         "MNT_NOWAIT still gives the cached sizes"
     );
+}
+
+#[test]
+fn p1_walk_06_a_mount_reached_by_another_path_is_found_by_its_device() {
+    // The Data volume's mount point spelled through `..`: no getfsstat row
+    // has that path, so the row is found by the device the entry reports,
+    // with its cached sizes, and nothing is asked of the mount itself.
+    let data = Path::new("/System/Volumes/Data");
+    if !data.exists() {
+        return;
+    }
+    let dev = crate::Provider::root(&MacProvider::new(), data, &WalkOptions::default())
+        .unwrap()
+        .dev;
+    let spelled = Path::new("/System/../System/Volumes/Data");
+    let info = super::volume::mount_info(spelled, dev).unwrap();
+    assert_eq!(info.mount_point, data);
+    assert!(info.total_bytes > 0, "the getfsstat row's cached sizes");
 }
 
 #[test]
