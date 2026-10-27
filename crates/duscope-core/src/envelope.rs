@@ -107,8 +107,9 @@ pub struct ScanBlock {
     pub attrs: &'static str,
     /// Worker threads.
     pub thread_count: u64,
-    /// The root volume's filesystem type.
-    pub fs_type: String,
+    /// The root volume's filesystem type; null when the scan recorded no
+    /// volume.
+    pub fs_type: Option<String>,
     /// Whether the scan stayed on the root's filesystem (`-x`).
     pub device_confined: bool,
     /// Bytes on disk, hard links and clones counted once.
@@ -318,6 +319,11 @@ pub struct ByTypeEntry {
 pub struct Example {
     /// The file's absolute path, as lossy UTF-8.
     pub path: String,
+    /// Its name, as lossy UTF-8.
+    pub name: String,
+    /// The name's bytes in base64, only when they are not valid UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_raw: Option<String>,
     /// Its bytes on disk.
     pub allocated_bytes: u64,
     /// Its apparent bytes.

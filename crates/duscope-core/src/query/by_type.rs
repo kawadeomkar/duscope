@@ -15,7 +15,7 @@
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::envelope::{ByTypeEntry, Example};
+use crate::envelope::{ByTypeEntry, Example, name_fields};
 use crate::rules::{Class, Classes, ext};
 
 use super::{Filters, Node, Page, SizeKind, TreeView, abs_path, pct};
@@ -85,8 +85,11 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
                     .iter()
                     .map(|&(_, id)| {
                         let node = view.node(id);
+                        let (name, name_raw) = name_fields(&view.name(id));
                         Example {
                             path: String::from_utf8_lossy(&abs_path(view, id)).into_owned(),
+                            name,
+                            name_raw,
                             allocated_bytes: node.allocated,
                             apparent_bytes: node.apparent,
                         }

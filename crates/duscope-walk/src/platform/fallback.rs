@@ -8,7 +8,6 @@
 //! `getattrlist` returns: the filesystems that refuse bulk reads (SMB,
 //! FUSE) have none.
 
-use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
@@ -57,12 +56,7 @@ impl Provider for FallbackProvider {
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        let mut names = posix::list_names(fd.as_fd())?;
-        if names.len() > STAT_BATCH {
-            later.extend(names.drain(STAT_BATCH..));
-        }
-        self.read_names(fd.as_fd(), dir, &names, opts, out, errs);
-        Ok(())
+        self.read_open(fd.as_fd(), dir, opts, out, errs, later)
     }
 
     fn stat_names(
@@ -74,7 +68,7 @@ impl Provider for FallbackProvider {
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        self.read_names(fd.as_fd(), dir, names, opts, out, errs);
+        self.read_names(fd.as_fd(), dir, names.iter().cloned(), opts, out, errs);
         Ok(())
     }
 
@@ -95,13 +89,13 @@ impl Provider for FallbackProvider {
     }
 
     #[cfg(target_os = "linux")]
-    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
+    fn mount_info(&self, path: &Path, _dev: u64) -> io::Result<VolumeInfo> {
         self.mounts.mount_info(path)
     }
 
     #[cfg(target_os = "macos")]
-    fn mount_info(&self, path: &Path) -> io::Result<VolumeInfo> {
-        mount_info(path)
+    fn mount_info(&self, path: &Path, dev: u64) -> io::Result<VolumeInfo> {
+        mount_info(path, dev)
     }
 
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
@@ -115,45 +109,60 @@ impl Provider for FallbackProvider {
         Ok(entry)
     }
 
-    /// The platform provider's default, so the two compare like for like.
+    /// The platform provider's default, so the two compare like for like,
+    /// taken from the platform provider so it has one home.
     fn default_threads(&self) -> usize {
-        if cfg!(target_os = "macos") {
-            8
-        } else {
-            let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-            cpus.saturating_mul(2).clamp(4, 32)
-        }
+        super::native().map_or(1, |native| native.default_threads())
     }
 }
 
 impl FallbackProvider {
-    /// Reads `names` in the directory open on `fd`: an entry or an error each.
+    /// Lists the directory open on `fd` through that descriptor, reads the
+    /// first 1,024 entries and leaves the rest in `later`. The macOS
+    /// provider calls it with the descriptor its refused bulk read was made
+    /// on, so the directory is never opened by path a second time.
+    pub(crate) fn read_open(
+        &self,
+        fd: BorrowedFd<'_>,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+        later: &mut Vec<NameRef>,
+    ) -> io::Result<()> {
+        let mut names = posix::list_names(fd)?;
+        if names.len() > STAT_BATCH {
+            later.extend(names.drain(STAT_BATCH..));
+        }
+        self.read_names(fd, dir, names, opts, out, errs);
+        Ok(())
+    }
+
+    /// Reads `names` in the directory open on `fd`: an entry or an error
+    /// each, each name moving into its entry or error.
     // Only Linux reads the mount table.
     #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_self))]
     fn read_names(
         &self,
         fd: BorrowedFd<'_>,
         dir: &DirHandle,
-        names: &[NameRef],
+        names: impl IntoIterator<Item = NameRef>,
         opts: &WalkOptions,
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) {
         for name in names {
-            let stat = CString::new(name.as_bytes())
-                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
-                .and_then(|c_name| posix::lstat_at(fd, &c_name));
-            match stat {
+            match posix::with_c_name(name.as_bytes(), |c_name| posix::lstat_at(fd, c_name)) {
                 Ok(stat) => {
                     #[allow(unused_mut)] // only Linux fills in the mount id
-                    let mut entry = from_stat(name.clone(), &stat, opts.attrs);
+                    let mut entry = from_stat(name, &stat, opts.attrs);
                     #[cfg(target_os = "linux")]
                     self.mounts.fill_mnt_id(&mut entry, dir);
                     out.push(entry);
                 }
                 Err(e) => errs.push(ScanError {
                     dir: dir.id(),
-                    name: name.clone(),
+                    name,
                     errno: e.raw_os_error().unwrap_or(crate::EIO),
                 }),
             }
@@ -169,9 +178,12 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
+    use std::os::fd::AsFd;
+
     use duscope_testkit::TestEnv;
 
     use super::FallbackProvider;
+    use crate::platform::posix;
     use crate::{
         Boundary, DirId, Entry, Flags, Kind, Provider, ScanEvent, Share, WalkOptions, walk,
         walk_with,
@@ -241,7 +253,8 @@ mod tests {
         }
         if cfg!(target_os = "macos") {
             // stat names no volume, so the fallback's mount id is the
-            // device; the bulk read's is the volume's fsid.
+            // volume group's shared device; the bulk read's is the
+            // volume's own device (FSOPT_RETURN_REALDEV).
             entry.mnt_id = 0;
             // ATTR_DIR_LINKCOUNT counts a directory's hard links (1 on
             // APFS); st_nlink also counts its subdirectories.
@@ -292,14 +305,14 @@ mod tests {
             ..WalkOptions::default()
         };
         let mut entries = Vec::new();
-        let (_, stats_before) = crate::platform::posix::calls::now();
+        let (_, stats_before, _) = crate::platform::posix::calls::now();
         walk(&root, &opts, |event| {
             if let ScanEvent::Entry(entry) = event {
                 entries.push(entry);
             }
         })
         .unwrap();
-        let (_, stats_after) = crate::platform::posix::calls::now();
+        let (_, stats_after, _) = crate::platform::posix::calls::now();
         assert!(entries.len() > 200);
         // What only the fallback does: read the root with lstat on this
         // thread (Linux reads it with statx otherwise), and report st_nlink
@@ -309,5 +322,40 @@ mod tests {
         } else {
             assert!(entries.iter().any(|e| e.kind == Kind::Dir && e.nlink >= 3));
         }
+    }
+
+    #[test]
+    fn p1_walk_04_the_fallback_threads_follow_the_platform_provider() {
+        let native = crate::platform::native().unwrap();
+        assert_eq!(
+            FallbackProvider::default().default_threads(),
+            native.default_threads()
+        );
+    }
+
+    #[test]
+    fn p1_walk_04_a_directory_is_listed_through_its_open_descriptor() {
+        // The directory is swapped for another after it was opened: the
+        // listing and every entry still come from the one opened.
+        let env = TestEnv::new();
+        let dir = env.tmp_dir().join("swapped");
+        std::fs::create_dir(&dir).unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        let fd = posix::open_dir(&dir).unwrap();
+        std::fs::rename(&dir, env.tmp_dir().join("moved")).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("c"), "c").unwrap();
+        let handle = crate::DirHandle::detached(dir, 0);
+        let (mut out, mut errs, mut later) = (Vec::new(), Vec::new(), Vec::new());
+        let opts = WalkOptions::default();
+        FallbackProvider::default()
+            .read_open(fd.as_fd(), &handle, &opts, &mut out, &mut errs, &mut later)
+            .unwrap();
+        let mut names: Vec<&[u8]> = out.iter().map(|e| e.name.as_bytes()).collect();
+        names.sort_unstable();
+        assert_eq!(names, [b"a", b"b"]);
+        assert!(errs.is_empty() && later.is_empty());
     }
 }

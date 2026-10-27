@@ -39,6 +39,7 @@ gix-ignore = { version = "=0.24.1", default-features = false }
 jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 globset = { version = "=0.4.20", default-features = false }
 libc = "=0.2.191"
+log = "=0.4.34"
 thiserror = "2.0.21"
 # Default features off: no `cjk`, whose ambiguous-width variant the map does not use.
 unicode-width = { version = "=0.2.2", default-features = false }

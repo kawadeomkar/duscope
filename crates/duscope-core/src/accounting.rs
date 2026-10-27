@@ -169,6 +169,28 @@ fn groups<'a>(
     })
 }
 
+/// Sorts `order`, indexes into one of the arena's side lists, by the
+/// group key `item` gives, then each group by pre-order id. The sort reads
+/// one side record per key and no pre-order id; only the groups, a few
+/// entries each, read ids. It allocates nothing: the charging keeps 4
+/// bytes a link at its peak, where cached keys would take 16 to 24 more.
+fn sort_groups(order: &mut [u32], rollup: &RollUp, item: impl Fn(usize) -> ((u64, u64), EntryIdx)) {
+    order.sort_unstable_by_key(|&i| item(i as usize).0);
+    let mut rest = &mut order[..];
+    while let Some(&first) = rest.first() {
+        let key = item(first as usize).0;
+        let len = rest
+            .iter()
+            .take_while(|&&i| item(i as usize).0 == key)
+            .count();
+        let (group, tail) = rest.split_at_mut(len);
+        if len > 1 {
+            group.sort_unstable_by_key(|&i| rollup.id_of(item(i as usize).1));
+        }
+        rest = tail;
+    }
+}
+
 /// `0..len` as `u32` indexes; the arena holds fewer than 2^32 entries.
 fn indexes(len: usize) -> impl Iterator<Item = u32> {
     (0..u32::try_from(len).unwrap_or(u32::MAX)).take(len)
@@ -199,9 +221,9 @@ pub fn charge(arena: &mut Arena, rollup: &RollUp) -> Charges {
         indexes(arena.linked_len())
             .filter(|&i| !overlays.contains(&arena.linked_at(i as usize).dev)),
     );
-    links.sort_unstable_by_key(|&i| {
-        let link = arena.linked_at(i as usize);
-        (link.dev, link.ino, rollup.id_of(link.entry))
+    sort_groups(&mut links, rollup, |i| {
+        let link = arena.linked_at(i);
+        ((link.dev, link.ino), link.entry)
     });
     let mut previous = None;
     for &i in &links {
@@ -226,9 +248,9 @@ pub fn charge(arena: &mut Arena, rollup: &RollUp) -> Charges {
             .linked_away
             .contains(arena.cloned_at(i as usize).entry)
     }));
-    clones.sort_unstable_by_key(|&i| {
-        let clone = arena.cloned_at(i as usize);
-        (clone.dev, clone.clone_id, rollup.id_of(clone.entry))
+    sort_groups(&mut clones, rollup, |i| {
+        let clone = arena.cloned_at(i);
+        ((clone.dev, clone.clone_id), clone.entry)
     });
     let mut clone_uncharged = Vec::new();
     let mut previous = None;

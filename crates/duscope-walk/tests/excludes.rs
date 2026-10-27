@@ -274,3 +274,60 @@ fn p1_walk_09_a_fifo_named_cachedir_tag_does_not_stall_the_walk() {
     assert!(skipped.is_empty(), "{skipped:?}");
     assert!(entries.contains(&"cache/CACHEDIR.TAG".to_owned()));
 }
+
+#[test]
+fn p1_walk_09_a_tagged_directory_in_memory_is_kept_out() {
+    // The provider answers for CACHEDIR.TAG, so the rule is tested without
+    // a file system: a tagged directory is listed but not entered, and only
+    // when a cache rule turns the check on.
+    let mut tree = MemProvider::new("/t");
+    tree.file("build/out.o", 10)
+        .file("src/main.rs", 10)
+        .cachedir_tag("build");
+    let opts = WalkOptions {
+        exclude_caches: vec![CacheRule {
+            name: Glob::new("never-matches").unwrap(),
+            markers: vec![OsString::from("x")],
+        }],
+        ..WalkOptions::default()
+    };
+    let (entries, skipped, _) = mem_walk(&tree, &opts);
+    assert_eq!(
+        skipped,
+        BTreeMap::from([("build".to_owned(), Skip::ExcludedCache)])
+    );
+    assert!(!entries.contains(&"build/out.o".to_owned()));
+    let (entries, skipped, _) = mem_walk(&tree, &WalkOptions::default());
+    assert!(skipped.is_empty());
+    assert!(entries.contains(&"build/out.o".to_owned()));
+}
+
+#[test]
+fn p1_walk_09_links_followed_in_memory() {
+    // The provider resolves links too, so --follow-symlinks is tested
+    // without a file system: a link to a directory is entered, one that
+    // leads nowhere stays a link, and one to itself is an ELOOP error.
+    let mut tree = MemProvider::new("/t");
+    tree.file("real/x", 10)
+        .link("to-real", "real")
+        .link("nowhere", "missing")
+        .link("self", "self");
+    let opts = WalkOptions {
+        follow_symlinks: true,
+        ..WalkOptions::default()
+    };
+    let root = tree.root_path().to_owned();
+    let mut errors = Vec::new();
+    let (entries, _, _) = walked(&root, |sink| {
+        walk_with(&tree, &root, &opts, |event| {
+            if let ScanEvent::Error(error) = &event {
+                errors.push((error.name.as_bytes().to_vec(), error.errno));
+            }
+            sink(event);
+        })
+        .unwrap()
+    });
+    assert!(entries.contains(&"to-real/x".to_owned()), "{entries:?}");
+    assert!(entries.contains(&"nowhere".to_owned()));
+    assert_eq!(errors, [(b"self".to_vec(), libc::ELOOP)]);
+}
