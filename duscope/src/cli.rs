@@ -255,6 +255,10 @@ pub struct ScanArgs {
     #[arg(long, help_heading = "Output")]
     pub pool_files: bool,
 
+    /// The smallest tile the treemap draws, in half-cell units
+    #[arg(long, value_enum, value_name = "UNITS", help_heading = "Output")]
+    pub min_tile: Option<MinTile>,
+
     /// Save the scan as an index and print its id
     // The index arrives in phase 2.
     #[arg(long, hide = true)]
@@ -394,6 +398,20 @@ pub enum TreemapWhen {
     Always,
     /// In pixels, where the terminal shows images
     Pixels,
+}
+
+/// `--min-tile`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MinTile {
+    /// One unit: every tile that rounds to a unit (the default)
+    #[value(name = "1")]
+    One,
+    /// Two units
+    #[value(name = "2")]
+    Two,
+    /// Four units: a calmer picture
+    #[value(name = "4")]
+    Four,
 }
 
 /// `--color-by`.

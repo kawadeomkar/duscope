@@ -112,6 +112,14 @@ Output:
       --pool-files
           Pool files into their directory's tile
 
+      --min-tile <UNITS>
+          The smallest tile the treemap draws, in half-cell units
+
+          Possible values:
+          - 1: One unit: every tile that rounds to a unit (the default)
+          - 2: Two units
+          - 4: Four units: a calmer picture
+
       --json
           Print the JSON envelope (--format json)
 

@@ -13,7 +13,10 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod cells;
 mod gp;
+pub mod packs;
+pub mod paint;
 mod squarify;
 
 pub use gp::layout_gp;
