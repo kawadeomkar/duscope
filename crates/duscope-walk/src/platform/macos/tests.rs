@@ -934,6 +934,9 @@ fn p1_walk_07_a_scan_of_system_skips_the_firmlinks_below_it() {
 #[test]
 #[ignore = "reads the whole disk; DUSCOPE_TEST_PLATFORM=1"]
 fn p1_walk_07_a_scan_of_slash_counts_users_once() {
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none() {
+        return;
+    }
     let env = TestEnv::new();
     let mut dirs: BTreeMap<crate::DirId, PathBuf> = BTreeMap::new();
     let (mut users, mut under_data, mut skipped) = (0u64, 0u64, Vec::new());
@@ -1016,6 +1019,9 @@ fn p1_walk_05_no_creation_time_is_none_through_lstat_too() {
 
 #[test]
 fn p1_walk_07_a_modified_clone_may_share_but_names_no_group() {
+    // Built in a private directory, not the shared fixture tree: the case
+    // needs a clone written to in place, and a case added to the fixture
+    // manifest would change the totals of every golden file.
     let env = TestEnv::new();
     let dir = env.tmp_dir().join("clones");
     std::fs::create_dir_all(&dir).unwrap();
