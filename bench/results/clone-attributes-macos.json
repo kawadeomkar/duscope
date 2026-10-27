@@ -15,7 +15,7 @@
     "private_size_cost_warm_t1": "+35.6% (duscope walker, 8 workers, --attrs full, median paired ratio 1.3562)"
   },
   "walker": {
-    "binary": "duscope-walk's walk() at the P1-BENCH-02 commit, release build, default threads (8), warm",
+    "binary": "crates/duscope-walk/examples/clone_pairs.rs: duscope-walk's walk(), release build, default threads (8), warm; cargo run --release -p duscope-walk --example clone_pairs -- bench/.trees/T1 40",
     "tree": "T1",
     "clones": {
       "compares": "--no-clones (off) against --clones (on)",
@@ -318,6 +318,183 @@
         [
           2.5421,
           2.2341
+        ]
+      ],
+      "note": "measured on 2026-10-26, before PRIVATESIZE was removed from the scanner; with the attribute no longer requestable these pairs cannot be re-run, and gab_bench's privatesize mode measures the same attribute per entry"
+    }
+  },
+  "walker_rerun": {
+    "date": "2026-10-27",
+    "note": "the clone pairs re-run with the committed driver on the same machine (load average about 3); they confirm the decision",
+    "clones": {
+      "compares": "--no-clones (off) against --clones (on)",
+      "pairs": 40,
+      "order": "alternating within each pair, swapped every other pair, after 3 unmeasured pairs",
+      "off_median_s": 1.4785,
+      "on_median_s": 1.4794,
+      "ratio_median": 1.0012,
+      "ratio_p25": 0.9936,
+      "ratio_p75": 1.0048,
+      "runs_s": [
+        [
+          1.4838,
+          1.4672
+        ],
+        [
+          1.4749,
+          1.4589
+        ],
+        [
+          1.4785,
+          1.4737
+        ],
+        [
+          1.4697,
+          1.4824
+        ],
+        [
+          1.4798,
+          1.4956
+        ],
+        [
+          1.4812,
+          1.468
+        ],
+        [
+          1.4692,
+          1.4715
+        ],
+        [
+          1.4834,
+          1.4718
+        ],
+        [
+          1.4872,
+          1.4738
+        ],
+        [
+          1.482,
+          1.4851
+        ],
+        [
+          1.4776,
+          1.4794
+        ],
+        [
+          1.4738,
+          1.4809
+        ],
+        [
+          1.4915,
+          1.505
+        ],
+        [
+          1.4675,
+          1.4815
+        ],
+        [
+          1.4796,
+          1.4673
+        ],
+        [
+          1.4702,
+          1.4713
+        ],
+        [
+          1.5074,
+          1.4862
+        ],
+        [
+          1.4813,
+          1.496
+        ],
+        [
+          1.47,
+          1.4727
+        ],
+        [
+          1.4629,
+          1.4789
+        ],
+        [
+          1.484,
+          1.4957
+        ],
+        [
+          1.4872,
+          1.4928
+        ],
+        [
+          1.4758,
+          1.4628
+        ],
+        [
+          1.4679,
+          1.4749
+        ],
+        [
+          1.4868,
+          1.483
+        ],
+        [
+          1.464,
+          1.4892
+        ],
+        [
+          1.4873,
+          1.4873
+        ],
+        [
+          1.4782,
+          1.4754
+        ],
+        [
+          1.4745,
+          1.4723
+        ],
+        [
+          1.4821,
+          1.4724
+        ],
+        [
+          1.483,
+          1.4858
+        ],
+        [
+          1.4768,
+          1.4799
+        ],
+        [
+          1.4764,
+          1.4794
+        ],
+        [
+          1.4768,
+          1.4803
+        ],
+        [
+          1.48,
+          1.478
+        ],
+        [
+          1.4728,
+          1.4818
+        ],
+        [
+          1.4765,
+          1.4725
+        ],
+        [
+          1.4791,
+          1.4649
+        ],
+        [
+          1.4891,
+          1.4797
+        ],
+        [
+          1.4731,
+          1.4698
         ]
       ]
     }

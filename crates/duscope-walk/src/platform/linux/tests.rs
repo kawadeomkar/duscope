@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::thread::{self, ThreadId};
-use std::time::Duration;
 
 use duscope_testkit::TestEnv;
 
 use super::mounts::{Mount, parse_mountinfo};
 use super::{LinuxProvider, dents};
+use crate::tests::Gate;
 use crate::{
     DirHandle, DirId, Entry, Kind, NameRef, Provider, STAT_BATCH, ScanError, ScanEvent, VolumeInfo,
     WalkOptions, walk_with,
@@ -114,15 +114,20 @@ fn p1_walk_02_one_statx_per_entry() {
     summary.replace(walk_with(&provider, &root, &opts, |_| {}).unwrap());
     let summary = summary.unwrap();
     // Every listed name is read once, the root included; nothing else is
-    // stat'ed, by statx or otherwise (the provider makes no lstat call).
+    // stat'ed, by statx or otherwise (the provider makes no lstat call),
+    // except a directory's own subvolume where a child reports one (btrfs
+    // and bcachefs on 6.10 and later; never on the CI runners' ext4).
     let calls = provider.statx_calls.load(Ordering::Relaxed) as u64;
-    assert_eq!(calls, summary.entries + summary.entry_errors);
+    let subvol = provider.subvol_reads.load(Ordering::Relaxed) as u64;
+    assert_eq!(calls, summary.entries + summary.entry_errors + subvol);
 }
 
 /// Records which threads read the stat batches of the wrapped provider.
 struct Threads<'a> {
     inner: &'a LinuxProvider,
     batches: Mutex<Vec<(usize, ThreadId)>>,
+    /// Each worker's first batch waits here until every worker has one.
+    gate: Gate,
 }
 
 impl Provider for Threads<'_> {
@@ -159,9 +164,7 @@ impl Provider for Threads<'_> {
             .lock()
             .unwrap()
             .push((names.len(), thread::current().id()));
-        // A batch of empty files is quick on a warm cache; this keeps the
-        // other workers in the race for the rest.
-        thread::sleep(Duration::from_millis(1));
+        self.gate.pass();
         self.inner.stat_names(dir, names, opts, out, errs)
     }
 
@@ -179,11 +182,12 @@ fn p1_walk_02_a_wide_directory_is_read_by_every_worker() {
     let env = TestEnv::new();
     let root = env.fixtures().case_root("wide-directory");
     let inner = LinuxProvider::new();
+    let workers = 4;
     let provider = Threads {
         inner: &inner,
         batches: Mutex::new(Vec::new()),
+        gate: Gate::new(workers),
     };
-    let workers = 4;
     let opts = WalkOptions {
         threads: workers,
         ..WalkOptions::default()
@@ -374,4 +378,37 @@ fn p1_walk_06_mount_info_reads_the_mount_table() {
         .unwrap();
     assert_eq!(info.class, crate::VolumeClass::Kernel);
     assert_eq!((info.total_bytes, info.free_bytes), (0, 0));
+}
+
+#[test]
+fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
+    // SAFETY: statx is plain data; all zeros is a valid value.
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    stx.stx_mode = u16::try_from(libc::S_IFDIR).unwrap();
+    let with = |stx: &libc::statx, bit: libc::c_int| {
+        let mut stx = *stx;
+        let bit = u64::from(bit.cast_unsigned());
+        stx.stx_attributes_mask |= bit;
+        stx.stx_attributes |= bit;
+        super::statx::entry(NameRef::from("d"), &stx, crate::Attrs::Basic)
+    };
+    let plain = super::statx::entry(NameRef::from("d"), &stx, crate::Attrs::Basic);
+    assert_eq!(plain.boundary, crate::Boundary::None);
+    assert!(plain.flags.is_empty());
+    let root = with(&stx, libc::STATX_ATTR_MOUNT_ROOT);
+    assert_eq!(root.boundary, crate::Boundary::Mount);
+    assert!(root.flags.contains(crate::Flags::MOUNT_ROOT));
+    // An automount point not yet triggered is a boundary, not a mount root.
+    let auto = with(&stx, libc::STATX_ATTR_AUTOMOUNT);
+    assert_eq!(auto.boundary, crate::Boundary::Mount);
+    assert!(!auto.flags.contains(crate::Flags::MOUNT_ROOT));
+    let packed = with(&stx, libc::STATX_ATTR_COMPRESSED);
+    assert!(packed.flags.contains(crate::Flags::COMPRESSED));
+    // An attribute the kernel does not vouch for in the mask is not read.
+    let mut unvouched = stx;
+    unvouched.stx_attributes |= u64::from(libc::STATX_ATTR_AUTOMOUNT.cast_unsigned());
+    assert_eq!(
+        super::statx::entry(NameRef::from("d"), &unvouched, crate::Attrs::Basic).boundary,
+        crate::Boundary::None
+    );
 }

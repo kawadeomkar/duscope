@@ -21,9 +21,9 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Once, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
-use bulk::{Decoded, Outcome};
+use bulk::{Clock, Decoded, Outcome};
 use ffi::AttrBuf;
 
 use crate::platform::fallback::FallbackProvider;
@@ -46,23 +46,41 @@ thread_local! {
 pub(crate) struct MacProvider {
     /// Set when `--clones` reads a directory on a volume without clone ids.
     clones_unavailable: AtomicBool,
+    /// The walk root as given and its real path, resolved once.
+    root: Mutex<Option<(PathBuf, Option<PathBuf>)>>,
     /// Test knobs: read every directory through the stat queue as if the
     /// bulk read had answered this.
     #[cfg(test)]
     pretend: Option<Outcome>,
+    /// Time the probe on a clock where every refill waits on I/O.
+    #[cfg(test)]
+    waiting: bool,
+    /// How many directories the probe handed to the stat queue.
+    #[cfg(test)]
+    switched: std::sync::atomic::AtomicUsize,
 }
 
 impl MacProvider {
-    /// The provider. The first one made sets up the process: the
-    /// descriptor limit is raised and dataless files are never downloaded.
+    /// The provider. Making one sets up the process (see
+    /// [`platform::setup`](super::setup)).
     pub(crate) fn new() -> MacProvider {
-        static SETUP: Once = Once::new();
-        SETUP.call_once(|| {
-            posix::raise_nofile_limit();
-            // A failure leaves the default policy; nothing else can be done.
-            let _ = ffi::disable_dataless_materialization();
-        });
+        super::setup();
         MacProvider::default()
+    }
+
+    /// The real path of the walk root `given`, which may hold `..` or be
+    /// relative, resolved once per root: the firmlink decisions compare
+    /// absolute, normalised paths.
+    fn real_root(&self, given: &Path) -> Option<PathBuf> {
+        let mut root = self.root.lock().ok()?;
+        match &*root {
+            Some((cached, real)) if cached == given => real.clone(),
+            _ => {
+                let real = fs::canonicalize(given).ok();
+                *root = Some((given.to_owned(), real.clone()));
+                real
+            }
+        }
     }
 
     /// Notes whether the volume of the directory open on `fd`, which holds
@@ -88,7 +106,9 @@ impl MacProvider {
 }
 
 /// The firmlinks of the System volume (`/usr/share/firmlinks`: a source
-/// path and its place on the Data volume per line).
+/// path and its place on the Data volume per line). This system table and
+/// Linux's `/proc/self/mountinfo` are the only files the scanner reads
+/// beside the `CACHEDIR.TAG` check: they describe the layout, not the data.
 fn firmlinks() -> &'static [PathBuf] {
     static FIRMLINKS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     FIRMLINKS.get_or_init(|| {
@@ -103,6 +123,9 @@ fn firmlinks() -> &'static [PathBuf] {
     })
 }
 
+/// Where the Data volume is mounted in the boot volume group.
+const DATA_MOUNT: &str = "/System/Volumes/Data";
+
 /// The device of the Data volume: the one the firmlinks lead to.
 fn data_volume() -> Option<u64> {
     static DATA: OnceLock<Option<u64>> = OnceLock::new();
@@ -112,6 +135,15 @@ fn data_volume() -> Option<u64> {
             Some(bulk::dev(stat.st_dev))
         })
     })
+}
+
+/// Turns off dataless-file materialisation for the process, so reading an
+/// iCloud placeholder's attributes never downloads it. A failure leaves the
+/// default policy, under which it can; it is logged.
+pub(super) fn keep_dataless_files() {
+    if let Err(e) = ffi::disable_dataless_materialization() {
+        log::warn!("cannot turn off dataless-file materialisation: {e}");
+    }
 }
 
 impl Provider for MacProvider {
@@ -140,34 +172,63 @@ impl Provider for MacProvider {
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        let mut decoded = Vec::new();
+        let (out_start, errs_start) = (out.len(), errs.len());
         #[cfg(test)]
-        let pretend = self.pretend;
+        let (pretend, clock): (_, &dyn Clock) = (
+            self.pretend,
+            if self.waiting {
+                &tests::Waiting
+            } else {
+                &bulk::Clocks
+            },
+        );
         #[cfg(not(test))]
-        let pretend = None;
-        let outcome = match pretend {
-            Some(outcome) => outcome,
+        let (pretend, clock): (_, &dyn Clock) = (None, &bulk::Clocks);
+        let outcome = if let Some(outcome) = pretend {
+            outcome
+        } else {
             // The probe only pays off when other workers can share the
             // stat queue.
-            None => BULK.with_borrow_mut(|buf| {
-                bulk::read(fd.as_fd(), opts, buf, opts.threads != 1, &mut decoded)
-            })?,
+            let probe = (opts.threads != 1).then_some(clock);
+            SINGLE.with_borrow_mut(|single| {
+                BULK.with_borrow_mut(|buf| {
+                    bulk::read(fd.as_fd(), opts, buf, probe, &mut |item| {
+                        take(dir, fd.as_fd(), opts, single, item, out, errs);
+                    })
+                })
+            })?
         };
         match outcome {
             Outcome::Done => {}
-            // The fallback provider reads a filesystem without bulk reads,
-            // and reads no clone ids.
+            // The fallback reads a filesystem without bulk reads, through
+            // the descriptor already open, and reads no clone ids.
             Outcome::Unsupported => {
                 if opts.clones {
                     self.clones_unavailable.store(true, Ordering::Relaxed);
                 }
-                return FallbackProvider::default().read_dir_split(dir, opts, out, errs, later);
+                FallbackProvider::default().read_open(fd.as_fd(), dir, opts, out, errs, later)?;
             }
-            // Listed by name alone; the stat queue reads every entry, on
-            // every worker.
+            // The probed refills' entries are kept; the rest of the
+            // directory is listed by name and every worker reads it from
+            // the stat queue.
             Outcome::IoBound => {
-                later.extend(posix::list_names(fd.as_fd())?);
-                return Ok(());
+                #[cfg(test)]
+                self.switched
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // A record without a name is listed again below.
+                let tail = errs.split_off(errs_start);
+                errs.extend(tail.into_iter().filter(|e| !e.name.as_bytes().is_empty()));
+                let seen: HashSet<&[u8]> = out[out_start..]
+                    .iter()
+                    .map(|e| e.name.as_bytes())
+                    .chain(errs[errs_start..].iter().map(|e| e.name.as_bytes()))
+                    .collect();
+                let names = posix::list_names(fd.as_fd())?;
+                later.extend(
+                    names
+                        .into_iter()
+                        .filter(|name| !seen.contains(name.as_bytes())),
+                );
             }
             // Each child is listed as an entry that cannot be read, as `du`
             // and the stat queue report them.
@@ -179,35 +240,13 @@ impl Provider for MacProvider {
                         errno: libc::EACCES,
                     });
                 }
-                return Ok(());
             }
         }
-        SINGLE.with_borrow_mut(|buf| {
-            for item in decoded {
-                match item {
-                    Decoded::Entry(entry) => out.push(entry),
-                    Decoded::Error(name, errno) => errs.push(ScanError {
-                        dir: dir.id(),
-                        name,
-                        errno,
-                    }),
-                    Decoded::Restat(name, boundary) => {
-                        match stat::entry_at(fd.as_fd(), &name, opts, buf) {
-                            Ok(mut entry) => {
-                                if let Some(boundary) = boundary {
-                                    entry.boundary = boundary;
-                                }
-                                out.push(entry);
-                            }
-                            Err(e) => errs.push(scan_error(dir, name, &e)),
-                        }
-                    }
-                    Decoded::Nameless => {}
-                }
-            }
-        });
         if opts.clones
-            && let Some(entry) = out.iter().find(|e| e.boundary == Boundary::None)
+            && outcome != Outcome::Unsupported
+            && let Some(entry) = out[out_start..]
+                .iter()
+                .find(|e| e.boundary == Boundary::None)
         {
             self.check_clones(fd.as_fd(), entry.dev);
         }
@@ -223,9 +262,12 @@ impl Provider for MacProvider {
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
+        // One answer per batch: a filesystem that refuses attribute reads
+        // refuses them for every name.
+        let mut attrs = true;
         SINGLE.with_borrow_mut(|buf| {
             for name in names {
-                match stat::entry_at(fd.as_fd(), name, opts, buf) {
+                match stat::entry_at(fd.as_fd(), name, opts, buf, &mut attrs) {
                     Ok(entry) => out.push(entry),
                     Err(e) => errs.push(scan_error(dir, name.clone(), &e)),
                 }
@@ -234,19 +276,35 @@ impl Provider for MacProvider {
         Ok(())
     }
 
-    /// A scan whose root holds every firmlink (a scan of `/`) reaches the
-    /// Data volume through them, so the volume's own mount point,
-    /// `/System/Volumes/Data`, is listed but not entered: nothing is counted
-    /// twice. A scan rooted inside the Data volume is ordinary.
-    fn skip(&self, dir: &DirHandle, entry: &Entry, _opts: &WalkOptions) -> Option<Skip> {
-        if entry.boundary != Boundary::Mount || Some(entry.dev) != data_volume() {
+    /// The Data volume is reached two ways: through its own mount point,
+    /// `/System/Volumes/Data`, and through the firmlinks (`/Users`,
+    /// `/Applications`, `/System/Library/Caches` ...). Whichever way the
+    /// scan does not need is listed but not entered, so nothing is counted
+    /// twice. A root that holds every firmlink (a scan of `/`) keeps the
+    /// firmlinks and skips the mount point; a root that holds the mount
+    /// point but not every firmlink (a scan of `/System`) enters the mount
+    /// point and skips the firmlinks below the root. A scan rooted inside
+    /// the Data volume is ordinary. Under `-x` the mount point stays out
+    /// (another volume), so the firmlinks are the way in and are kept.
+    fn skip(&self, dir: &DirHandle, entry: &Entry, opts: &WalkOptions) -> Option<Skip> {
+        if Some(entry.dev) != data_volume() {
             return None;
         }
+        let firmlink = match entry.boundary {
+            Boundary::Mount => false,
+            Boundary::Firmlink => true,
+            _ => return None,
+        };
         let depth = usize::try_from(dir.depth()).ok()?;
-        let root = dir.path().ancestors().nth(depth)?;
+        let root = self.real_root(dir.path().ancestors().nth(depth)?)?;
         let sources: Vec<&PathBuf> = firmlinks().iter().filter(|s| s.exists()).collect();
-        (!sources.is_empty() && sources.iter().all(|source| source.starts_with(root)))
-            .then_some(Skip::Firmlinked)
+        let every = !sources.is_empty() && sources.iter().all(|source| source.starts_with(&root));
+        let skip = if firmlink {
+            !every && !opts.one_file_system && Path::new(DATA_MOUNT).starts_with(&root)
+        } else {
+            every
+        };
+        skip.then_some(Skip::Firmlinked)
     }
 
     fn clones_unavailable(&self, _opts: &WalkOptions) -> bool {
@@ -270,6 +328,45 @@ impl Provider for MacProvider {
     /// (P1-BENCH-01) sets it.
     fn default_threads(&self) -> usize {
         8
+    }
+}
+
+/// Files one decoded bulk record under `dir`: an entry in `out`, anything
+/// that could not be read in `errs`. A record that must be read again is
+/// read by name, through the directory's descriptor.
+fn take(
+    dir: &DirHandle,
+    fd: BorrowedFd<'_>,
+    opts: &WalkOptions,
+    single: &mut AttrBuf,
+    item: Decoded,
+    out: &mut Vec<Entry>,
+    errs: &mut Vec<ScanError>,
+) {
+    match item {
+        Decoded::Entry(entry) => out.push(entry),
+        Decoded::Error(name, errno) => errs.push(ScanError {
+            dir: dir.id(),
+            name,
+            errno,
+        }),
+        Decoded::Restat(name, boundary) => match stat::entry_at(fd, &name, opts, single, &mut true)
+        {
+            Ok(mut entry) => {
+                if let Some(boundary) = boundary {
+                    entry.boundary = boundary;
+                }
+                out.push(entry);
+            }
+            Err(e) => errs.push(scan_error(dir, name, &e)),
+        },
+        // Nothing names the entry, so it is counted as an error with an
+        // empty name rather than dropped from the totals unseen.
+        Decoded::Nameless => errs.push(ScanError {
+            dir: dir.id(),
+            name: NameRef::new(b""),
+            errno: crate::EIO,
+        }),
     }
 }
 
