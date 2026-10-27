@@ -10,11 +10,14 @@ const POOL: usize = usize::MAX;
 /// Lays out `items` (`(weight, id)`, any order) in `area`: every child
 /// whose tile would be under `min_tile` units in either direction, and
 /// every child of weight 0, goes into the `+N small` pool. With
-/// [`Algorithm::Squarify`] the pool is placed last, at the bottom right; the
-/// bisection places it by its weight. A pool too small to show is laid out
-/// as if it weighed more, up to the smallest tile's weight, and takes that
-/// child when even that is not enough. Children of equal weight keep their
-/// order.
+/// [`Algorithm::Squarify`] the tiles are the largest children (tile sizes
+/// follow weights, so the first tile too small pools everything after it)
+/// and the pool is placed last, at the bottom right. With
+/// [`Algorithm::Gp`] a tile's size depends on where the balanced tree puts
+/// it, so only the tiles too small are pooled, and the bisection places the
+/// pool by its weight. A pool too small to show is laid out as if it weighed
+/// more, up to the smallest tile's weight, and takes that child when even
+/// that is not enough. Children of equal weight keep their order.
 pub fn layout(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min_tile: u16) -> Layout {
     let mut sorted = items.to_vec();
     sorted.sort_by(|a, b| b.0.cmp(&a.0));
@@ -22,24 +25,25 @@ pub fn layout(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min_tile
         return Layout::default();
     }
     let min = min_tile.max(1);
-    // The children with tiles are a prefix of `sorted`; the rest are pooled.
-    let mut kept = if area.fits(min) {
-        sorted.iter().take_while(|&&(weight, _)| weight > 0).count()
-    } else {
-        0
-    };
+    // Which of `sorted` go into the pool; the rest have tiles. Both keep
+    // the order of `sorted`.
+    let fits = area.fits(min);
+    let mut pooled: Vec<bool> = sorted.iter().map(|&(w, _)| w == 0 || !fits).collect();
     // The weight the pool is laid out with, when more than its own.
     let mut boost = None;
     loop {
-        let (head, pool) = sorted.split_at(kept);
+        // Indexes into `sorted`.
+        let (head, pool): (Vec<usize>, Vec<usize>) = (0..sorted.len()).partition(|&i| !pooled[i]);
+        let pool_items: Vec<(u64, usize)> = pool.iter().map(|&i| sorted[i]).collect();
         if head.is_empty() {
             return Layout {
                 tiles: Vec::new(),
-                small: Some(small(pool, area)),
+                small: Some(small(&pool_items, area)),
             };
         }
-        let pool_weight = sum(pool);
-        let mut placing = head.to_vec();
+        let head_items: Vec<(u64, usize)> = head.iter().map(|&i| sorted[i]).collect();
+        let pool_weight = sum(&pool_items);
+        let mut placing = head_items.clone();
         if !pool.is_empty() {
             placing.push((boost.unwrap_or(pool_weight).max(pool_weight), POOL));
         }
@@ -49,13 +53,20 @@ pub fn layout(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min_tile
             Algorithm::Squarify => squarify::in_order(&placing, area),
             Algorithm::Gp => layout_gp(&placing, area),
         };
-        // The first child, largest first, whose tile is too small: it and
-        // everything after it go into the pool.
-        if let Some(first) = placed[..head.len()]
+        let too_small: Vec<usize> = placed[..head.len()]
             .iter()
-            .position(|&(_, rect)| !rect.fits(min))
-        {
-            kept = first;
+            .zip(&head)
+            .filter(|&(&(_, rect), _)| !rect.fits(min))
+            .map(|(_, &i)| i)
+            .collect();
+        if let Some(&first) = too_small.first() {
+            match algorithm {
+                // The first child, largest first, whose tile is too small:
+                // it and everything after it go into the pool.
+                Algorithm::Squarify => pooled[first..].fill(true),
+                // Each child whose tile is too small.
+                Algorithm::Gp => too_small.iter().for_each(|&i| pooled[i] = true),
+            }
             boost = None;
             continue;
         }
@@ -64,18 +75,22 @@ pub fn layout(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min_tile
             Some(&(_, rect)) if !rect.fits(min) => {
                 // Double the boost up to the smallest tile's weight, which
                 // is tried too; past it the pool takes that tile.
-                let smallest = head.last().map_or(0, |&(w, _)| w);
+                let smallest = head_items.last().map_or(0, |&(w, _)| w);
                 if boost.unwrap_or(0) < smallest {
-                    let more = boost
-                        .map_or_else(|| pool_share(head, area, min), |b: u64| b.saturating_mul(2));
+                    let more = boost.map_or_else(
+                        || pool_share(&head_items, area, min),
+                        |b: u64| b.saturating_mul(2),
+                    );
                     boost = Some(more.min(smallest));
                 } else {
-                    kept -= 1;
+                    if let Some(&last) = head.last() {
+                        pooled[last] = true;
+                    }
                     boost = None;
                 }
                 continue;
             }
-            Some(&(_, rect)) => Some(small(pool, rect)),
+            Some(&(_, rect)) => Some(small(&pool_items, rect)),
         };
         let tiles = placed[..head.len()]
             .iter()

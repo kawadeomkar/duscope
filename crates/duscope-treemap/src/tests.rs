@@ -2,6 +2,7 @@
 //! every tile at least `--min-tile` units, and lay out the proposal's
 //! mockup as it is drawn.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use proptest::prelude::*;
@@ -63,8 +64,24 @@ fn area() -> impl Strategy<Value = Rect> {
 }
 
 fn check(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min: u16) -> Result<(), String> {
-    let laid = layout(items, area, algorithm, min);
-    covers_exactly(&laid, area)?;
+    verify(
+        &layout(items, area, algorithm, min),
+        items,
+        area,
+        algorithm,
+        min,
+    )
+}
+
+/// What [`check`] checks, of a layout already made.
+fn verify(
+    laid: &Layout,
+    items: &[(u64, usize)],
+    area: Rect,
+    algorithm: Algorithm,
+    min: u16,
+) -> Result<(), String> {
+    covers_exactly(laid, area)?;
     // Every child is either a tile or in the pool, once.
     let mut ids: Vec<usize> = laid.tiles.iter().map(|t| t.id).collect();
     ids.extend(laid.small.iter().flat_map(|s| s.ids.iter().copied()));
@@ -72,17 +89,23 @@ fn check(items: &[(u64, usize)], area: Rect, algorithm: Algorithm, min: u16) -> 
     if ids != (0..items.len()).collect::<Vec<_>>() {
         return Err(format!("children placed: {ids:?}"));
     }
-    // The tiles are the largest children, largest first, equal weights in
-    // their order; the pool holds the rest, largest first.
+    // The tiles and the pool each keep the children largest first, equal
+    // weights in their order. Squarify's tiles are the largest children.
     let mut sorted = items.to_vec();
     sorted.sort_by(|a, b| b.0.cmp(&a.0));
     let order: Vec<usize> = sorted.iter().map(|&(_, id)| id).collect();
     let tiles: Vec<usize> = laid.tiles.iter().map(|t| t.id).collect();
-    if order[..tiles.len()] != tiles[..] {
+    let with_tiles: HashSet<usize> = tiles.iter().copied().collect();
+    let (in_order, pool): (Vec<usize>, Vec<usize>) =
+        order.iter().partition(|&id| with_tiles.contains(id));
+    if in_order != tiles {
         return Err(format!("tiles {tiles:?}, order {order:?}"));
     }
+    if algorithm == Algorithm::Squarify && order[..tiles.len()] != tiles[..] {
+        return Err(format!("tiles {tiles:?} are not the largest of {order:?}"));
+    }
     if let Some(small) = &laid.small
-        && order[tiles.len()..] != small.ids[..]
+        && pool != small.ids
     {
         return Err(format!("pool {:?}, order {order:?}", small.ids));
     }
@@ -226,5 +249,33 @@ fn p1_map_01_the_pool_tries_the_smallest_tiles_weight() {
         // at that weight exactly, the pool fits beside six tiles.
         let laid = layout(&items, Rect::new(0, 0, 59, 13), algorithm, 4);
         assert_eq!(laid.tiles.len(), 6, "{algorithm:?}");
+    }
+}
+
+#[test]
+fn p1_map_01_bisection_pools_only_the_tiles_too_small() {
+    // A wide directory: tile sizes under the bisection do not follow the
+    // weights, so pooling everything after the first tile too small would
+    // leave none.
+    let items: Vec<(u64, usize)> = (0..100_000)
+        .zip(0..)
+        .map(|(i, id)| (100_000 - i, id))
+        .collect();
+    let area = Rect::new(0, 0, 300, 200);
+    let bisected = layout(&items, area, Algorithm::Gp, 1);
+    assert!(
+        bisected.tiles.len() > 1_000,
+        "{} tiles",
+        bisected.tiles.len()
+    );
+    verify(&bisected, &items, area, Algorithm::Gp, 1).unwrap();
+    // Weights that saturate a u64 when added keep their proportions.
+    let huge = [(u64::MAX, 0), (u64::MAX, 1), (u64::MAX, 2), (1, 3)];
+    let area = Rect::new(0, 0, 80, 36);
+    for algorithm in [Algorithm::Squarify, Algorithm::Gp] {
+        let laid = layout(&huge, area, algorithm, 1);
+        assert_eq!(laid.tiles.len(), 3, "{algorithm:?}");
+        assert_eq!(laid.small.map(|s| s.ids), Some(vec![3]), "{algorithm:?}");
+        check(&huge, area, algorithm, 1).unwrap();
     }
 }
