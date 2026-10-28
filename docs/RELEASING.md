@@ -77,7 +77,12 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
 5. **Homebrew.** `release.yml` opens the version-bump pull request in
    `kawadeomkar/homebrew-tap` (the tap has no `autobump.yml`, so the two never race). Let the
    tap's `tests.yml` build the bottles on it, then run the tap's `publish.yml` on the pull
-   request, which merges it with the bottle block.
+   request, which merges it with the bottle block. A re-run of the release opens no second
+   pull request: the job stops when the formula is already at the tag or its bump pull request
+   is open. The job needs `Formula/duscope.rb` in the tap to bump; the first one, for v0.1.0,
+   is committed to the tap by hand once the tag exists (v0.0.1's placeholder binary has no
+   `man`, `completions` or `top` for the formula's install and test), and the job then finds it
+   at the tag.
 
 6. **apt.** `apt.yml` picks up the `.deb` assets, rebuilds the repository with `reprepro`,
    signs it with the subkey (it fails when the subkey expires within 60 days) and publishes it

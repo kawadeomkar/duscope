@@ -1142,3 +1142,46 @@ fn p1_pkg_01_the_deb_runners_are_dist_workspaces() {
         );
     }
 }
+
+#[test]
+fn p1_pkg_02_the_tap_bump_follows_the_release_without_a_fork() {
+    let jobs = jobs(&read(WORKFLOW));
+    let homebrew = job(&jobs, "homebrew");
+    assert!(homebrew.needs().contains(&"host"));
+    let condition = homebrew.key("if").unwrap();
+    assert!(
+        condition.contains("announcement_is_prerelease"),
+        "{condition}"
+    );
+    let script = homebrew.step_script("Open the version-bump pull request in the tap");
+    assert!(script.contains("brew bump-formula-pr"));
+    assert!(
+        script.contains("--no-fork"),
+        "a fine-grained tap token cannot fork"
+    );
+}
+
+#[test]
+fn p1_pkg_02_a_rerun_opens_no_second_bump() {
+    let jobs = jobs(&read(WORKFLOW));
+    let homebrew = job(&jobs, "homebrew");
+    let script = homebrew.step_script("Open the version-bump pull request in the tap");
+    let at = |needle: &str| {
+        script
+            .find(needle)
+            .unwrap_or_else(|| panic!("the homebrew step has no `{needle}`:\n{script}"))
+    };
+    // Before bumping: the formula already at the tag, or the bump pull
+    // request (on the branch bump-formula-pr pushes) already open, ends the
+    // step with success.
+    let bump = at("brew bump-formula-pr");
+    assert!(at("grep -qF \"\\\"$url\\\"\" \"$formula\"") < bump);
+    assert!(
+        at(
+            "gh pr list --repo kawadeomkar/homebrew-tap --state open --head \"bump-duscope-$version\""
+        ) < bump
+    );
+    assert_eq!(script.matches("exit 0").count(), 2, "{script}");
+    // A tap without the formula fails with what to do, not brew's own error.
+    assert!(at("Formula/duscope.rb to bump") < bump);
+}

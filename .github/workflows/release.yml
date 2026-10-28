@@ -19,6 +19,8 @@
 #   publish-crates
 #                the six crates on crates.io, in dependency order, through
 #                trusted publishing (no standing token; docs/RELEASING.md)
+#   homebrew     the version-bump pull request in kawadeomkar/homebrew-tap
+#                (P1-PKG-02); the tap's own workflows build and publish bottles
 #   announce     nothing more yet (dist's last phase)
 #
 # Every job needs verify-tag, directly or through plan, and the jobs that use
@@ -608,6 +610,54 @@ jobs:
             for _ in $(seq 24); do published "$crate" "$version" && break; sleep 5; done
             published "$crate" "$version" || { echo "::error::$crate $version did not reach the crates.io index"; exit 1; }
           done
+
+  # The tap's version bump (P1-PKG-02): brew bump-formula-pr points the formula at
+  # the tag's source archive and opens the pull request in kawadeomkar/homebrew-tap,
+  # whose tests.yml builds the bottles and publish.yml merges them (the tap has no
+  # autobump.yml, so the two never race). Not for a pre-release. A re-run of the
+  # release finds the formula at the tag, or its bump pull request open, and stops
+  # there without opening another.
+  homebrew:
+    needs:
+      - plan
+      - host
+    if: ${{ needs.plan.outputs.publishing == 'true' && !fromJson(needs.host.outputs.val).announcement_is_prerelease }}
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
+      HOMEBREW_NO_INSTALL_FROM_API: "1"
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Open the version-bump pull request in the tap
+        env:
+          # Reads the tap's pull requests, which the tap token may.
+          GH_TOKEN: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          url="https://github.com/kawadeomkar/duscope/archive/refs/tags/$TAG.tar.gz"
+          brew tap kawadeomkar/tap
+          formula="$(brew --repository kawadeomkar/tap)/Formula/duscope.rb"
+          [[ -f $formula ]] || {
+            echo "::error::kawadeomkar/tap has no Formula/duscope.rb to bump; commit the formula to the tap (docs/RELEASING.md, step 5)"
+            exit 1
+          }
+          if grep -qF "\"$url\"" "$formula"; then
+            echo "::notice::the tap's formula is already at $TAG"
+            exit 0
+          fi
+          # bump-formula-pr pushes the branch bump-duscope-<version>; a second run
+          # would fail on the duplicate pull request and the existing branch.
+          open=$(gh pr list --repo kawadeomkar/homebrew-tap --state open --head "bump-duscope-$version" --json url --jq '.[0].url // empty')
+          if [[ -n $open ]]; then
+            echo "::notice::the tap's bump pull request for $TAG is already open: $open"
+            exit 0
+          fi
+          # --no-fork: the token may push a branch to the tap and open the pull
+          # request there, and cannot create a fork (docs/RELEASING.md, Secrets).
+          brew bump-formula-pr --no-browse --no-audit --no-fork --url "$url" kawadeomkar/tap/duscope
 
   announce:
     needs:
