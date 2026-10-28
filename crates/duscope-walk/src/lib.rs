@@ -19,6 +19,7 @@ mod entry;
 mod errors;
 mod mem;
 mod options;
+mod platform;
 mod scheduler;
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,7 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
@@ -60,6 +62,42 @@ pub trait Provider: Send + Sync {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()>;
+
+    /// Reads `dir` as [`read_dir`](Provider::read_dir) does, but may list
+    /// some children by name alone and leave them in `later`. The walk reads
+    /// those with [`stat_names`](Provider::stat_names) in batches of 1,024
+    /// that any worker can take, so one wide directory keeps every worker
+    /// busy. The default leaves nothing for later.
+    fn read_dir_split(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+        later: &mut Vec<NameRef>,
+    ) -> io::Result<()> {
+        let _ = later;
+        self.read_dir(dir, opts, out, errs)
+    }
+
+    /// Reads `names`, children of `dir` that
+    /// [`read_dir_split`](Provider::read_dir_split) left for later, appending
+    /// an entry or an error for each. An `Err` means `dir` itself could not be
+    /// opened, and the walk records the error against every name.
+    ///
+    /// A provider that leaves nothing for later need not implement it; the
+    /// default fails with `ErrorKind::Unsupported`.
+    fn stat_names(
+        &self,
+        dir: &DirHandle,
+        names: &[NameRef],
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        let _ = (dir, names, opts, out, errs);
+        Err(io::ErrorKind::Unsupported.into())
+    }
 
     /// The volume holding `path`.
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
@@ -120,18 +158,17 @@ pub struct WalkSummary {
 }
 
 /// Walks `root` with this platform's provider, delivering every entry to
-/// `sink`.
+/// `sink`. [`walk_with`] walks with a given provider.
 ///
-/// No provider is built yet: the Linux and macOS providers arrive with
-/// P1-WALK-02 and P1-WALK-03, and until then this returns
-/// [`WalkError::NoProvider`]. [`walk_with`] walks with a given provider.
+/// Returns [`WalkError::NoProvider`] on a platform without one; the Linux
+/// provider arrives with P1-WALK-02.
 pub fn walk(
     root: &Path,
     opts: &WalkOptions,
     sink: impl FnMut(ScanEvent),
 ) -> Result<WalkSummary, WalkError> {
-    let _ = (root, opts, sink);
-    Err(WalkError::NoProvider)
+    let provider = platform::native().ok_or(WalkError::NoProvider)?;
+    walk_with(&*provider, root, opts, sink)
 }
 
 /// The result queue holds this many directory batches per worker, as in
@@ -146,14 +183,41 @@ const POLL: Duration = Duration::from_millis(50);
 /// `EIO` is 5 on Linux and macOS alike.
 const EIO: i32 = 5;
 
-/// A job for the pool: read one directory.
+/// The names one [`Job::Stat`] reads: the Linux floor's batch size, which
+/// spreads a wide directory's per-entry calls over every worker.
+const STAT_BATCH: usize = 1024;
+
+/// Cuts the names a directory's read left for later into [`Job::Stat`]
+/// batches of at most [`STAT_BATCH`], each in a Vec of its own size.
+/// Splitting one Vec repeatedly would leave every batch holding the capacity
+/// of all the names after it: a million names would hold about 8 GB.
+fn stat_batches(later: Vec<NameRef>) -> impl Iterator<Item = Vec<NameRef>> {
+    let mut names = later.into_iter();
+    std::iter::from_fn(move || {
+        let batch: Vec<NameRef> = names.by_ref().take(STAT_BATCH).collect();
+        (!batch.is_empty()).then_some(batch)
+    })
+}
+
+/// A job for the pool.
 enum Job {
+    /// Read one directory.
     ReadDir(DirHandle),
+    /// Read a batch of names a directory's read left for later.
+    Stat(Arc<Split>, Vec<NameRef>),
+}
+
+/// A directory whose read left names for [`Job::Stat`]s.
+struct Split {
+    dir: DirHandle,
+    /// The directory's read plus its stat jobs not yet done; the part that
+    /// takes it to 0 closes the directory.
+    parts: AtomicUsize,
 }
 
 /// What workers send to the sink's thread.
 enum Event {
-    /// One directory's entries and errors, which also closes it.
+    /// Entries and errors of one directory, which may also close it.
     Batch(Batch),
     /// Every directory has been read.
     Finished,
@@ -163,6 +227,9 @@ struct Batch {
     dir: DirId,
     entries: Vec<Entry>,
     errors: Vec<ScanError>,
+    /// Whether this is the directory's last batch.
+    closes: bool,
+    /// Why the directory could not be read; only on a closing batch.
     errno: Option<i32>,
 }
 
@@ -170,7 +237,7 @@ struct Batch {
 struct Walk<'a, P: ?Sized> {
     provider: &'a P,
     opts: &'a WalkOptions,
-    /// Directories queued or being read; the worker that takes it to 0 sends
+    /// Jobs queued or running; the worker that takes it to 0 sends
     /// [`Event::Finished`] (upstream's `Root::pending`).
     pending: AtomicUsize,
     /// The next directory id; the root has 0.
@@ -266,7 +333,6 @@ pub fn walk_with<P: Provider + ?Sized>(
 fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEvent)) {
     summary.entries += batch.entries.len() as u64;
     summary.entry_errors += batch.errors.len() as u64;
-    summary.unreadable_dirs += u64::from(batch.errno.is_some());
     for entry in batch.entries {
         summary.dirs += u64::from(entry.dir.is_some());
         sink(ScanEvent::Entry(entry));
@@ -274,43 +340,136 @@ fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEv
     for error in batch.errors {
         sink(ScanEvent::Error(error));
     }
-    sink(ScanEvent::DirClosed {
-        dir: batch.dir,
-        errno: batch.errno,
-    });
+    if batch.closes {
+        summary.unreadable_dirs += u64::from(batch.errno.is_some());
+        sink(ScanEvent::DirClosed {
+            dir: batch.dir,
+            errno: batch.errno,
+        });
+    }
 }
 
 impl<P: Provider + ?Sized> Walk<'_, P> {
-    /// Reads one directory, sends its batch, then makes its subdirectories
-    /// stealable: parent first, as upstream's `Order::ParentFirst`, so the
-    /// sink sees a directory's entry before anything inside it.
     fn run(&self, job: Job, worker: &Worker<Job>, shared: &PoolShared<Job, Event>) {
-        let Job::ReadDir(dir) = job;
         if self.opts.cancel.load(Ordering::Relaxed) {
             shared.stop();
             return;
         }
-        let (mut entries, mut errors) = (Vec::new(), Vec::new());
-        let errno = match self
-            .provider
-            .read_dir(&dir, self.opts, &mut entries, &mut errors)
-        {
+        match job {
+            Job::ReadDir(dir) => self.read_dir(&dir, worker, shared),
+            Job::Stat(split, names) => self.stat(&split, names, worker, shared),
+        }
+        if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
+            shared.events.send(Event::Finished).ok();
+        }
+    }
+
+    /// Reads one directory, sends its batch, then makes its subdirectories
+    /// and any stat jobs stealable: parent first, as upstream's
+    /// `Order::ParentFirst`, so the sink sees a directory's entry before
+    /// anything inside it.
+    fn read_dir(&self, dir: &DirHandle, worker: &Worker<Job>, shared: &PoolShared<Job, Event>) {
+        let (mut entries, mut errors, mut later) = (Vec::new(), Vec::new(), Vec::new());
+        let errno = match self.provider.read_dir_split(
+            dir,
+            self.opts,
+            &mut entries,
+            &mut errors,
+            &mut later,
+        ) {
             Ok(()) => None,
             Err(e) => {
                 entries.clear();
                 errors.clear();
+                later.clear();
                 Some(e.raw_os_error().unwrap_or(EIO))
             }
         };
         let mut jobs = Vec::new();
-        for entry in &mut entries {
+        if !self.adopt(dir, &mut entries, &mut errors, &mut jobs, shared) {
+            return;
+        }
+        let split = (!later.is_empty()).then(|| {
+            let split = Arc::new(Split {
+                dir: dir.clone(),
+                parts: AtomicUsize::new(later.len().div_ceil(STAT_BATCH) + 1),
+            });
+            for names in stat_batches(later) {
+                jobs.push(Job::Stat(Arc::clone(&split), names));
+            }
+            split
+        });
+        let batch = Batch {
+            dir: dir.id,
+            entries,
+            errors,
+            closes: split.is_none(),
+            errno,
+        };
+        self.send(batch, jobs, worker, shared);
+        if let Some(split) = split {
+            Self::finish_part(&split, shared);
+        }
+    }
+
+    /// Reads a batch of names a directory's read left for later.
+    fn stat(
+        &self,
+        split: &Split,
+        names: Vec<NameRef>,
+        worker: &Worker<Job>,
+        shared: &PoolShared<Job, Event>,
+    ) {
+        let (mut entries, mut errors) = (Vec::new(), Vec::new());
+        if let Err(e) =
+            self.provider
+                .stat_names(&split.dir, &names, self.opts, &mut entries, &mut errors)
+        {
+            entries.clear();
+            let errno = e.raw_os_error().unwrap_or(EIO);
+            errors = names
+                .into_iter()
+                .map(|name| ScanError {
+                    dir: split.dir.id,
+                    name,
+                    errno,
+                })
+                .collect();
+        }
+        let mut jobs = Vec::new();
+        if !self.adopt(&split.dir, &mut entries, &mut errors, &mut jobs, shared) {
+            return;
+        }
+        let batch = Batch {
+            dir: split.dir.id,
+            entries,
+            errors,
+            closes: false,
+            errno: None,
+        };
+        self.send(batch, jobs, worker, shared);
+        Self::finish_part(split, shared);
+    }
+
+    /// Sets the parent of `dir`'s new entries and errors, numbers its
+    /// subdirectories and queues a read of each. False when the ids ran out,
+    /// which stops the walk.
+    fn adopt(
+        &self,
+        dir: &DirHandle,
+        entries: &mut [Entry],
+        errors: &mut [ScanError],
+        jobs: &mut Vec<Job>,
+        shared: &PoolShared<Job, Event>,
+    ) -> bool {
+        for entry in entries {
             entry.parent = dir.id;
             entry.dir = None;
             if entry.kind == Kind::Dir {
                 let Some(id) = self.allocate_dir() else {
                     self.out_of_ids.store(true, Ordering::Relaxed);
                     shared.stop();
-                    return;
+                    return false;
                 };
                 entry.dir = Some(id);
                 jobs.push(Job::ReadDir(DirHandle {
@@ -320,23 +479,42 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 }));
             }
         }
-        for error in &mut errors {
+        for error in errors {
             error.dir = dir.id;
         }
+        true
+    }
+
+    /// Sends a batch, then makes the jobs it found stealable.
+    fn send(
+        &self,
+        batch: Batch,
+        jobs: Vec<Job>,
+        worker: &Worker<Job>,
+        shared: &PoolShared<Job, Event>,
+    ) {
         self.pending.fetch_add(jobs.len(), Ordering::Relaxed);
-        let batch = Batch {
-            dir: dir.id,
-            entries,
-            errors,
-            errno,
-        };
         if shared.events.send(Event::Batch(batch)).is_err() {
             shared.stop();
             return;
         }
         scheduler::schedule_jobs(jobs, worker, shared);
-        if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
-            shared.events.send(Event::Finished).ok();
+    }
+
+    /// Marks one part of a split directory done, after its batch was sent;
+    /// the last part closes the directory, so the close follows every entry.
+    fn finish_part(split: &Split, shared: &PoolShared<Job, Event>) {
+        if split.parts.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let close = Batch {
+                dir: split.dir.id,
+                entries: Vec::new(),
+                errors: Vec::new(),
+                closes: true,
+                errno: None,
+            };
+            if shared.events.send(Event::Batch(close)).is_err() {
+                shared.stop();
+            }
         }
     }
 
