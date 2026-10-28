@@ -280,8 +280,10 @@ jobs:
       - name: Peak RSS within budget
         if: ${{ !cancelled() }}
         run: |
+          # The warm runs' trees on the internal disk: a peak does not depend on
+          # the disk, and the image is slow even warm (bench/README.md, "Cold runs").
           home=${BENCH_HOME:-$HOME/duscope-bench}
-          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees-volume/trees" CARGO_TARGET_DIR="$home/target" \
+          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
             caffeinate -is cargo test --release --locked -p duscope --test suite \
             -- --ignored --exact --nocapture p1_test_01_peak_rss_per_entry_on_the_bench_trees
       # P0-TEST-01's acceptance check, here because a quiet machine can hold the
