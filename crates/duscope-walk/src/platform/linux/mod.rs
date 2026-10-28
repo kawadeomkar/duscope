@@ -147,6 +147,12 @@ impl Provider for LinuxProvider {
         Ok(())
     }
 
+    /// Clone ids are read only on APFS; on Linux, `explain --clones` finds
+    /// shared extents on demand.
+    fn clones_unavailable(&self, _opts: &WalkOptions) -> bool {
+        true
+    }
+
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
         volume(path)
     }

@@ -15,7 +15,9 @@ use duscope_testkit::TestEnv;
 use super::bulk::{self, Decoded, Outcome, Probe, Request};
 use super::{MacProvider, ffi, stat};
 use crate::platform::posix;
-use crate::{Boundary, DirHandle, DirId, Entry, Flags, Kind, ScanEvent, WalkOptions, walk_with};
+use crate::{
+    Boundary, DirHandle, DirId, Entry, Flags, Kind, ScanEvent, Share, WalkOptions, walk_with,
+};
 
 /// A clock on which every bulk refill waits on I/O: each reading moves the
 /// wall clock 10 ms and the CPU clock 1 µs.
@@ -145,15 +147,29 @@ fn same_as_bulk_reads(queued: &MacProvider) {
     // Directory ids follow the order the workers found directories in. The
     // fallback provider reports a directory's st_nlink, which counts its
     // subdirectories; ATTR_DIR_LINKCOUNT does not.
-    let unnumbered = |entry: &Entry| Entry {
-        parent: crate::DirId::ROOT,
-        dir: entry.dir.map(|_| crate::DirId::ROOT),
-        nlink: if queued.pretend == Some(Outcome::Unsupported) && entry.kind == Kind::Dir {
-            0
-        } else {
-            entry.nlink
-        },
-        ..entry.clone()
+    let unnumbered = |entry: &Entry| {
+        let mut entry = Entry {
+            parent: crate::DirId::ROOT,
+            dir: entry.dir.map(|_| crate::DirId::ROOT),
+            ..entry.clone()
+        };
+        if queued.pretend == Some(Outcome::Unsupported) {
+            if entry.kind == Kind::Dir {
+                entry.nlink = 0;
+            }
+            // The fallback reads no clone ids or extended flags.
+            entry
+                .flags
+                .remove(Flags::SPARSE | Flags::PURGEABLE | Flags::MAY_SHARE | Flags::SHARES_ALL);
+            if matches!(entry.share, Share::Clone(_) | Share::MayShare) {
+                entry.share = if entry.nlink > 1 {
+                    Share::Hardlink
+                } else {
+                    Share::None
+                };
+            }
+        }
+        entry
     };
     for (path, entry) in &bulk {
         assert_eq!(
@@ -700,6 +716,289 @@ fn p1_walk_05_full_attrs_add_no_calls_per_entry() {
 }
 
 #[test]
+fn p1_walk_07_clones_carry_equal_clone_ids() {
+    let env = TestEnv::new();
+    if !env.fixtures().built("clones") {
+        return;
+    }
+    let root = env.fixtures().case_root("clones");
+    let (entries, _) = walk_paths(&MacProvider::new(), &root, &WalkOptions::default());
+    let share = |rel: &str| entries[&root.join(rel)].share;
+    let Share::Clone(id) = share("original.img") else {
+        panic!("not a clone: {:?}", share("original.img"));
+    };
+    assert_eq!(share("clone-1.img"), Share::Clone(id));
+    assert_eq!(share("nested/clone-2.img"), Share::Clone(id));
+    for rel in ["original.img", "clone-1.img", "nested/clone-2.img"] {
+        assert!(
+            entries[&root.join(rel)].flags.contains(Flags::MAY_SHARE),
+            "{rel}"
+        );
+    }
+
+    // Without --clones the attributes are not asked for.
+    let opts = WalkOptions {
+        clones: false,
+        ..WalkOptions::default()
+    };
+    let (plain, _) = walk_paths(&MacProvider::new(), &root, &opts);
+    let original = &plain[&root.join("original.img")];
+    assert_eq!(original.share, Share::None);
+    assert!(!original.flags.contains(Flags::MAY_SHARE));
+}
+
+#[test]
+fn p1_walk_07_storage_flags_follow_the_filesystem() {
+    let env = TestEnv::new();
+    let fixtures = env.fixtures();
+    let (entries, _) = walk_paths(
+        &MacProvider::new(),
+        &fixtures.root(),
+        &WalkOptions::default(),
+    );
+    if fixtures.built("compressed") {
+        let file = &entries[&fixtures.case_root("compressed").join("text-1m.txt")];
+        assert!(file.flags.contains(Flags::COMPRESSED), "{:?}", file.flags);
+    }
+    if fixtures.built("sparse") {
+        let file = &entries[&fixtures.case_root("sparse").join("hole-only.bin")];
+        assert!(file.flags.contains(Flags::SPARSE), "{:?}", file.flags);
+    }
+    // Each flag agrees with st_flags, where stat reports it.
+    for (path, entry) in &entries {
+        let st = lstat(path);
+        assert_eq!(
+            entry.flags.contains(Flags::COMPRESSED),
+            st.st_flags & libc::UF_COMPRESSED != 0,
+            "{path:?}"
+        );
+    }
+}
+
+#[test]
+fn p1_walk_07_private_size_under_the_hidden_option() {
+    let env = TestEnv::new();
+    let root = env.fixtures().case_root("clones");
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        private_size: true,
+        ..WalkOptions::default()
+    };
+    let (entries, _) = walk_paths(&MacProvider::new(), &root, &opts);
+    let file = &entries[&root.join("original.img")];
+    assert!(file.full.unwrap().private_size.is_some());
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    let (entries, _) = walk_paths(&MacProvider::new(), &root, &opts);
+    assert_eq!(
+        entries[&root.join("original.img")]
+            .full
+            .unwrap()
+            .private_size,
+        None
+    );
+}
+
+#[test]
+fn p1_walk_07_apfs_has_clone_ids() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let summary = walk_with(&MacProvider::new(), &root, &WalkOptions::default(), |_| {}).unwrap();
+    let apfs = volume_of(&root).fs_type == "apfs";
+    assert_eq!(summary.clones_unavailable, !apfs);
+    let opts = WalkOptions {
+        clones: false,
+        ..WalkOptions::default()
+    };
+    let summary = walk_with(&MacProvider::new(), &root, &opts, |_| {}).unwrap();
+    assert!(!summary.clones_unavailable, "only asked of --clones");
+}
+
+fn volume_of(path: &Path) -> crate::VolumeInfo {
+    crate::Provider::volume(&MacProvider::new(), path).unwrap()
+}
+
+/// The entries of one directory, read by the provider.
+fn read_one(path: &str, depth: u32) -> Vec<Entry> {
+    let dir = crate::DirHandle {
+        id: crate::DirId::ROOT,
+        path: PathBuf::from(path),
+        depth,
+    };
+    let (mut out, mut errs) = (Vec::new(), Vec::new());
+    crate::Provider::read_dir(
+        &MacProvider::new(),
+        &dir,
+        &WalkOptions::default(),
+        &mut out,
+        &mut errs,
+    )
+    .unwrap();
+    out
+}
+
+#[test]
+fn p1_walk_07_firmlinks_carry_the_firmlink_boundary() {
+    let firmlinks = super::firmlinks();
+    if firmlinks.is_empty() {
+        return;
+    }
+    let slash = read_one("/", 0);
+    let users = slash
+        .iter()
+        .find(|e| e.name.as_bytes() == b"Users")
+        .unwrap();
+    assert_eq!(users.boundary, Boundary::Firmlink);
+    assert_eq!(users.kind, Kind::Dir);
+    // Read by name, the firmlink is the directory it shows: on the Data
+    // volume, not the System volume holding /.
+    assert_eq!(users.dev, bulk::dev(lstat(Path::new("/Users")).st_dev));
+    assert_eq!(Some(users.dev), super::data_volume());
+    let system = slash
+        .iter()
+        .find(|e| e.name.as_bytes() == b"System")
+        .unwrap();
+    assert_eq!(system.boundary, Boundary::None);
+}
+
+#[test]
+fn p1_walk_07_a_scan_of_slash_skips_the_data_volume_mount() {
+    if super::data_volume().is_none() || !Path::new("/System/Volumes/Data").exists() {
+        return;
+    }
+    let provider = MacProvider::new();
+    let opts = WalkOptions::default();
+    let skip_in = |path: &str, root_depth: u32| {
+        // /System/Volumes, read as `path` in a scan rooted `root_depth`
+        // levels up.
+        let dir = crate::DirHandle {
+            id: crate::DirId::ROOT,
+            path: PathBuf::from(path),
+            depth: root_depth,
+        };
+        let data = read_one("/System/Volumes", root_depth)
+            .into_iter()
+            .find(|e| e.name.as_bytes() == b"Data")
+            .unwrap();
+        assert_eq!(data.boundary, Boundary::Mount);
+        crate::Provider::skip(&provider, &dir, &data, &opts)
+    };
+    let skip = |root_depth| skip_in("/System/Volumes", root_depth);
+    // Rooted at /: every firmlink lies under the root.
+    assert_eq!(skip(2), Some(crate::Skip::Firmlinked));
+    // Rooted at /System/Volumes or /System: the volume is the only way in.
+    assert_eq!(skip(0), None);
+    assert_eq!(skip(1), None);
+    // A root spelled /System/.. is /: the decision is made on its real path.
+    assert_eq!(
+        skip_in("/System/../System/Volumes", 2),
+        Some(crate::Skip::Firmlinked)
+    );
+}
+
+#[test]
+fn p1_walk_07_a_scan_of_system_skips_the_firmlinks_below_it() {
+    // A scan rooted at /System enters the Data volume through its mount
+    // point, so the firmlinks under /System/Library, which lead into the
+    // same volume, are listed but not entered; a scan of / keeps them.
+    let Some(caches) = read_one("/System/Library", 1)
+        .into_iter()
+        .find(|e| e.name.as_bytes() == b"Caches" && e.boundary == Boundary::Firmlink)
+    else {
+        return; // no /System/Library/Caches firmlink on this system
+    };
+    let provider = MacProvider::new();
+    let skip = |root_depth| {
+        let dir = crate::DirHandle {
+            id: crate::DirId::ROOT,
+            path: PathBuf::from("/System/Library"),
+            depth: root_depth,
+        };
+        crate::Provider::skip(&provider, &dir, &caches, &WalkOptions::default())
+    };
+    assert_eq!(skip(1), Some(crate::Skip::Firmlinked), "rooted at /System");
+    assert_eq!(skip(2), None, "rooted at /");
+    assert_eq!(
+        skip(0),
+        None,
+        "rooted at /System/Library: no mount point below"
+    );
+}
+
+/// A scan of `/` on the machine running the test: `/Users` is counted once,
+/// through its firmlink, and `/System/Volumes/Data` is listed but not
+/// entered. It reads the whole disk, so it runs only with
+/// `DUSCOPE_TEST_PLATFORM=1` (`just check-full`).
+#[test]
+#[ignore = "reads the whole disk; DUSCOPE_TEST_PLATFORM=1"]
+fn p1_walk_07_a_scan_of_slash_counts_users_once() {
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none() {
+        return;
+    }
+    let env = TestEnv::new();
+    let mut dirs: BTreeMap<crate::DirId, PathBuf> = BTreeMap::new();
+    let (mut users, mut under_data, mut skipped) = (0u64, 0u64, Vec::new());
+    let mut seen = std::collections::HashSet::new();
+    walk_with(
+        &MacProvider::new(),
+        Path::new("/"),
+        &WalkOptions::default(),
+        |event| match event {
+            ScanEvent::Entry(entry) => {
+                let path = if entry.dir == Some(crate::DirId::ROOT) {
+                    PathBuf::from("/")
+                } else {
+                    dirs[&entry.parent].join(entry.name.as_os_str())
+                };
+                if let Some(id) = entry.dir {
+                    dirs.insert(id, path.clone());
+                }
+                let first = entry.kind == Kind::Dir
+                    || entry.nlink < 2
+                    || seen.insert((entry.dev, entry.ino));
+                if path.starts_with("/Users") && first {
+                    users += entry.allocated;
+                }
+                // Path::starts_with compares components: count what lies
+                // below the mount point, not the mount point itself.
+                if path.starts_with("/System/Volumes/Data")
+                    && path != Path::new("/System/Volumes/Data")
+                {
+                    under_data += 1;
+                }
+            }
+            ScanEvent::Skipped { dir, reason } => skipped.push((dirs[&dir].clone(), reason)),
+            _ => {}
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        under_data, 0,
+        "nothing under the Data volume's mount point is read"
+    );
+    assert!(skipped.contains(&(
+        PathBuf::from("/System/Volumes/Data"),
+        crate::Skip::Firmlinked
+    )));
+    let out = env.command("du").args(["-skx", "/Users"]).output().unwrap();
+    let du: u64 = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let ours = users.div_ceil(1024);
+    // /Users changes while it is read; the two agree to within 2%.
+    assert!(
+        ours.abs_diff(du) * 50 <= du,
+        "/Users: {ours} KiB read, du -skx says {du} KiB"
+    );
+}
+
+#[test]
 fn p1_walk_05_no_creation_time_is_none_through_lstat_too() {
     // devfs keeps no creation time: the bulk read leaves ATTR_CMN_CRTIME
     // out, and lstat reports 0.
@@ -716,6 +1015,53 @@ fn p1_walk_05_no_creation_time_is_none_through_lstat_too() {
     assert_eq!(entry.full.unwrap().btime_ns, None);
     let root = crate::Provider::root(&MacProvider::new(), null, &opts).unwrap();
     assert_eq!(root.full.unwrap().btime_ns, None, "the native read agrees");
+}
+
+#[test]
+fn p1_walk_07_a_modified_clone_may_share_but_names_no_group() {
+    // Built in a private directory, not the shared fixture tree: the case
+    // needs a clone written to in place, and a case added to the fixture
+    // manifest would change the totals of every golden file.
+    let env = TestEnv::new();
+    let dir = env.tmp_dir().join("clones");
+    std::fs::create_dir_all(&dir).unwrap();
+    let original = dir.join("original.bin");
+    std::fs::write(&original, vec![7u8; 1 << 20]).unwrap();
+    let cp = |name: &str| {
+        let out = env
+            .command("cp")
+            .arg("-c")
+            .arg(&original)
+            .arg(dir.join(name))
+            .output()
+            .unwrap();
+        out.status.success()
+    };
+    if !cp("pure.bin") || !cp("partial.bin") {
+        return; // not APFS
+    }
+    // Overwrite the first 64 KiB of one clone in place.
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("partial.bin"))
+            .unwrap();
+        file.write_all(&vec![9u8; 64 * 1024]).unwrap();
+        file.sync_all().unwrap();
+    }
+    let (entries, _) = walk_paths(&MacProvider::new(), &dir, &WalkOptions::default());
+    let share = |name: &str| entries[&dir.join(name)].share;
+    let Share::Clone(id) = share("original.bin") else {
+        panic!("{:?}", share("original.bin"));
+    };
+    assert_eq!(share("pure.bin"), Share::Clone(id));
+    assert_eq!(share("partial.bin"), Share::MayShare);
+    assert!(
+        entries[&dir.join("partial.bin")]
+            .flags
+            .contains(Flags::MAY_SHARE)
+    );
 }
 
 #[test]

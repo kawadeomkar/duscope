@@ -14,18 +14,27 @@ pub(super) use volume::of as volume;
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::fs;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use bulk::{Clock, Decoded, Outcome};
 use ffi::AttrBuf;
 
 use crate::platform::fallback;
 use crate::platform::posix;
-use crate::{DirHandle, Entry, NameRef, Provider, ScanError, VolumeInfo, WalkOptions};
+use crate::{
+    Boundary, DirHandle, Entry, NameRef, Provider, ScanError, Skip, VolumeInfo, WalkOptions,
+};
 
 thread_local! {
+    /// The devices each worker has checked for clone ids.
+    static CHECKED: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
     /// Each worker's bulk buffer, reused for every directory it reads.
     static BULK: RefCell<AttrBuf> = RefCell::new(AttrBuf::new(bulk::BUFFER_BYTES));
     /// Each worker's buffer for single-entry reads.
@@ -35,6 +44,10 @@ thread_local! {
 /// The macOS provider.
 #[derive(Debug, Default)]
 pub(crate) struct MacProvider {
+    /// Set when `--clones` reads a directory on a volume without clone ids.
+    clones_unavailable: AtomicBool,
+    /// The walk root as given and its real path, resolved once.
+    root: Mutex<Option<(PathBuf, Option<PathBuf>)>>,
     /// Test knobs: read every directory through the stat queue as if the
     /// bulk read had answered this.
     #[cfg(test)]
@@ -54,6 +67,74 @@ impl MacProvider {
         super::setup();
         MacProvider::default()
     }
+
+    /// The real path of the walk root `given`, which may hold `..` or be
+    /// relative, resolved once per root: the firmlink decisions compare
+    /// absolute, normalised paths.
+    fn real_root(&self, given: &Path) -> Option<PathBuf> {
+        let mut root = self.root.lock().ok()?;
+        match &*root {
+            Some((cached, real)) if cached == given => real.clone(),
+            _ => {
+                let real = fs::canonicalize(given).ok();
+                *root = Some((given.to_owned(), real.clone()));
+                real
+            }
+        }
+    }
+
+    /// Notes whether the volume of the directory open on `fd`, which holds
+    /// an entry on device `dev`, has clone ids; each worker checks a device
+    /// once.
+    fn check_clones(&self, fd: BorrowedFd<'_>, dev: u64) {
+        if !CHECKED.with_borrow_mut(|checked| checked.insert(dev)) {
+            return;
+        }
+        let apfs = ffi::fstatfs(fd).is_ok_and(|fs| {
+            let name: Vec<u8> = fs
+                .f_fstypename
+                .iter()
+                .take_while(|&&c| c != 0)
+                .map(|&c| c.cast_unsigned())
+                .collect();
+            name == bulk::CLONE_FS.as_bytes()
+        });
+        if !apfs {
+            self.clones_unavailable.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The firmlinks of the System volume (`/usr/share/firmlinks`: a source
+/// path and its place on the Data volume per line). This system table and
+/// Linux's `/proc/self/mountinfo` are the only files the scanner reads
+/// beside the `CACHEDIR.TAG` check: they describe the layout, not the data.
+fn firmlinks() -> &'static [PathBuf] {
+    static FIRMLINKS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    FIRMLINKS.get_or_init(|| {
+        let Ok(text) = fs::read("/usr/share/firmlinks") else {
+            return Vec::new();
+        };
+        text.split(|&b| b == b'\n')
+            .filter_map(|line| line.split(|&b| b == b'\t').next())
+            .filter(|source| source.starts_with(b"/"))
+            .map(|source| PathBuf::from(OsStr::from_bytes(source)))
+            .collect()
+    })
+}
+
+/// Where the Data volume is mounted in the boot volume group.
+const DATA_MOUNT: &str = "/System/Volumes/Data";
+
+/// The device of the Data volume: the one the firmlinks lead to.
+fn data_volume() -> Option<u64> {
+    static DATA: OnceLock<Option<u64>> = OnceLock::new();
+    *DATA.get_or_init(|| {
+        firmlinks().iter().find_map(|source| {
+            let stat = posix::lstat(&posix::c_path(source).ok()?).ok()?;
+            Some(bulk::dev(stat.st_dev))
+        })
+    })
 }
 
 /// Turns off dataless-file materialisation for the process, so reading an
@@ -120,8 +201,13 @@ impl Provider for MacProvider {
         match outcome {
             Outcome::Done => {}
             // The fallback reads a filesystem without bulk reads, through
-            // the descriptor already open.
-            Outcome::Unsupported => fallback::read_open(fd.as_fd(), dir, opts, out, errs, later)?,
+            // the descriptor already open, and reads no clone ids.
+            Outcome::Unsupported => {
+                if opts.clones {
+                    self.clones_unavailable.store(true, Ordering::Relaxed);
+                }
+                fallback::read_open(fd.as_fd(), dir, opts, out, errs, later)?;
+            }
             // The probed refills' entries are kept; the rest of the
             // directory is listed by name and every worker reads it from
             // the stat queue.
@@ -156,6 +242,14 @@ impl Provider for MacProvider {
                 }
             }
         }
+        if opts.clones
+            && outcome != Outcome::Unsupported
+            && let Some(entry) = out[out_start..]
+                .iter()
+                .find(|e| e.boundary == Boundary::None)
+        {
+            self.check_clones(fd.as_fd(), entry.dev);
+        }
         Ok(())
     }
 
@@ -180,6 +274,40 @@ impl Provider for MacProvider {
             }
         });
         Ok(())
+    }
+
+    /// The Data volume is reached two ways: through its own mount point,
+    /// `/System/Volumes/Data`, and through the firmlinks (`/Users`,
+    /// `/Applications`, `/System/Library/Caches` ...). Whichever way the
+    /// scan does not need is listed but not entered, so nothing is counted
+    /// twice. A root that holds every firmlink (a scan of `/`) keeps the
+    /// firmlinks and skips the mount point; a root that holds the mount
+    /// point but not every firmlink (a scan of `/System`) enters the mount
+    /// point and skips the firmlinks below the root. A scan rooted inside
+    /// the Data volume is ordinary.
+    fn skip(&self, dir: &DirHandle, entry: &Entry, _opts: &WalkOptions) -> Option<Skip> {
+        if Some(entry.dev) != data_volume() {
+            return None;
+        }
+        let firmlink = match entry.boundary {
+            Boundary::Mount => false,
+            Boundary::Firmlink => true,
+            _ => return None,
+        };
+        let depth = usize::try_from(dir.depth()).ok()?;
+        let root = self.real_root(dir.path().ancestors().nth(depth)?)?;
+        let sources: Vec<&PathBuf> = firmlinks().iter().filter(|s| s.exists()).collect();
+        let every = !sources.is_empty() && sources.iter().all(|source| source.starts_with(&root));
+        let skip = if firmlink {
+            !every && Path::new(DATA_MOUNT).starts_with(&root)
+        } else {
+            every
+        };
+        skip.then_some(Skip::Firmlinked)
+    }
+
+    fn clones_unavailable(&self, _opts: &WalkOptions) -> bool {
+        self.clones_unavailable.load(Ordering::Relaxed)
     }
 
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {

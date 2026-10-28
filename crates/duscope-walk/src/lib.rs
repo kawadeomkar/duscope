@@ -37,7 +37,7 @@ use std::time::Duration;
 use crossbeam_deque::Worker;
 
 pub use entry::{
-    Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, ScanEvent, Share, VolumeInfo,
+    Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, ScanEvent, Share, Skip, VolumeInfo,
 };
 pub use errors::{ScanError, WalkError};
 pub use mem::MemProvider;
@@ -99,6 +99,21 @@ pub trait Provider: Send + Sync {
         Err(io::ErrorKind::Unsupported.into())
     }
 
+    /// Whether the walk lists `entry`, a directory just read from `dir`,
+    /// without entering it, and why. The default enters every directory.
+    fn skip(&self, dir: &DirHandle, entry: &Entry, opts: &WalkOptions) -> Option<Skip> {
+        let _ = (dir, entry, opts);
+        None
+    }
+
+    /// Whether `--clones` was asked of a filesystem that has no clone ids,
+    /// for the `clones_unavailable` warning; asked once the walk is done.
+    /// The default: never.
+    fn clones_unavailable(&self, opts: &WalkOptions) -> bool {
+        let _ = opts;
+        false
+    }
+
     /// The volume holding `path`.
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
 
@@ -153,6 +168,11 @@ pub struct WalkSummary {
     pub unreadable_dirs: u64,
     /// Entries listed but not read ([`ScanEvent::Error`]).
     pub entry_errors: u64,
+    /// Directories listed but not entered ([`ScanEvent::Skipped`]).
+    pub skipped_dirs: u64,
+    /// `--clones` met a filesystem without clone ids
+    /// ([`Provider::clones_unavailable`]).
+    pub clones_unavailable: bool,
     /// The worker threads the walk ran.
     pub threads: usize,
 }
@@ -233,6 +253,8 @@ struct Batch {
     dir: DirId,
     entries: Vec<Entry>,
     errors: Vec<ScanError>,
+    /// Directories among `entries` the walk does not enter.
+    skipped: Vec<(DirId, Skip)>,
     /// Whether this is the directory's last batch.
     closes: bool,
     /// Why the directory could not be read; only on a closing batch.
@@ -325,6 +347,7 @@ pub fn walk_with<P: Provider + ?Sized>(
             panic::resume_unwind(worker_panic);
         }
         if finished {
+            summary.clones_unavailable = opts.clones && provider.clones_unavailable(opts);
             Ok(summary)
         } else if state.out_of_ids.load(Ordering::Relaxed) {
             Err(WalkError::TooManyDirectories)
@@ -345,6 +368,11 @@ fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEv
     }
     for error in batch.errors {
         sink(ScanEvent::Error(error));
+    }
+    summary.skipped_dirs += batch.skipped.len() as u64;
+    for (dir, reason) in batch.skipped {
+        sink(ScanEvent::Skipped { dir, reason });
+        sink(ScanEvent::DirClosed { dir, errno: None });
     }
     if batch.closes {
         summary.unreadable_dirs += u64::from(batch.errno.is_some());
@@ -392,9 +420,9 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             }
         };
         let mut jobs = Vec::new();
-        if !self.adopt(dir, &mut entries, &mut errors, &mut jobs, shared) {
+        let Some(skipped) = self.adopt(dir, &mut entries, &mut errors, &mut jobs, shared) else {
             return;
-        }
+        };
         let split = (!later.is_empty()).then(|| {
             let split = Arc::new(Split {
                 dir: dir.clone(),
@@ -409,6 +437,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             dir: dir.id,
             entries,
             errors,
+            skipped,
             closes: split.is_none(),
             errno,
         };
@@ -443,13 +472,15 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 .collect();
         }
         let mut jobs = Vec::new();
-        if !self.adopt(&split.dir, &mut entries, &mut errors, &mut jobs, shared) {
+        let Some(skipped) = self.adopt(&split.dir, &mut entries, &mut errors, &mut jobs, shared)
+        else {
             return;
-        }
+        };
         let batch = Batch {
             dir: split.dir.id,
             entries,
             errors,
+            skipped,
             closes: false,
             errno: None,
         };
@@ -458,8 +489,9 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     }
 
     /// Sets the parent of `dir`'s new entries and errors, numbers its
-    /// subdirectories and queues a read of each. False when the ids ran out,
-    /// which stops the walk.
+    /// subdirectories and queues a read of each the provider does not skip.
+    /// Returns the skipped ones, or `None` when the ids ran out, which stops
+    /// the walk.
     fn adopt(
         &self,
         dir: &DirHandle,
@@ -467,7 +499,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         errors: &mut [ScanError],
         jobs: &mut Vec<Job>,
         shared: &PoolShared<Job, Event>,
-    ) -> bool {
+    ) -> Option<Vec<(DirId, Skip)>> {
+        let mut skipped = Vec::new();
         for entry in entries {
             entry.parent = dir.id;
             entry.dir = None;
@@ -475,9 +508,13 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 let Some(id) = self.allocate_dir() else {
                     self.out_of_ids.store(true, Ordering::Relaxed);
                     shared.stop();
-                    return false;
+                    return None;
                 };
                 entry.dir = Some(id);
+                if let Some(reason) = self.provider.skip(dir, entry, self.opts) {
+                    skipped.push((id, reason));
+                    continue;
+                }
                 jobs.push(Job::ReadDir(DirHandle {
                     id,
                     path: dir.path.join(entry.name.as_os_str()),
@@ -488,7 +525,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         for error in errors {
             error.dir = dir.id;
         }
-        true
+        Some(skipped)
     }
 
     /// Sends a batch, then makes the jobs it found stealable.
@@ -515,6 +552,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 dir: split.dir.id,
                 entries: Vec::new(),
                 errors: Vec::new(),
+                skipped: Vec::new(),
                 closes: true,
                 errno: None,
             };
