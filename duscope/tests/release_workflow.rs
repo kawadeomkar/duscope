@@ -240,6 +240,8 @@ fn p0_ci_02_token_is_widened_only_where_a_job_needs_it() {
             vec!["attestations: write", "id-token: write"],
         ),
         ("deb", vec!["attestations: write", "id-token: write"]),
+        // Trusted publishing to crates.io (DEV-22).
+        ("publish-crates", vec!["id-token: write"]),
     ]
     .into();
     for job in jobs(&workflow) {
