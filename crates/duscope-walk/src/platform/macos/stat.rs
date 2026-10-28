@@ -3,7 +3,6 @@
 //! filesystem cannot answer it. The stat queue, mount points, the walk root
 //! and records with missing attributes come through here.
 
-use std::ffi::CString;
 use std::io;
 use std::os::fd::BorrowedFd;
 use std::path::Path;
@@ -25,27 +24,28 @@ pub(super) fn entry_at(
     opts: &WalkOptions,
     buf: &mut AttrBuf,
 ) -> io::Result<Entry> {
-    let c_name = CString::new(name.as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
-    let mut request = Request::single(opts);
-    let mut read = ffi::getattrlistat(dir, &c_name, &request.attrs, buf, request.options);
-    if let Err(e) = &read
-        && request.extended()
-        && bulk::unsupported(e)
-    {
-        request = request.without_extended();
-        read = ffi::getattrlistat(dir, &c_name, &request.attrs, buf, request.options);
-    }
-    match read {
-        Ok(()) => {
-            if let Some(entry) = decode(buf, &request, name)? {
-                return Ok(entry);
-            }
+    posix::with_c_name(name.as_bytes(), |c_name| {
+        let mut request = Request::single(opts);
+        let mut read = ffi::getattrlistat(dir, c_name, &request.attrs, buf, request.options);
+        if let Err(e) = &read
+            && request.extended()
+            && bulk::unsupported(e)
+        {
+            request = request.without_extended();
+            read = ffi::getattrlistat(dir, c_name, &request.attrs, buf, request.options);
         }
-        Err(e) if !bulk::unsupported(&e) => return Err(e),
-        Err(_) => {}
-    }
-    let stat = ffi::lstat_at(dir, &c_name)?;
-    Ok(from_stat(name.clone(), &stat))
+        match read {
+            Ok(()) => {
+                if let Some(entry) = decode(buf, &request, name)? {
+                    return Ok(entry);
+                }
+            }
+            Err(e) if !bulk::unsupported(&e) => return Err(e),
+            Err(_) => {}
+        }
+        let stat = ffi::lstat_at(dir, c_name)?;
+        Ok(from_stat(name.clone(), &stat))
+    })
 }
 
 /// The entry at `path`, not following a final symlink, named `name`.
