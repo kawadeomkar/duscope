@@ -4,7 +4,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::process::{Command as StdCommand, Stdio};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,17 +12,6 @@ use duscope_testkit::TestEnv;
 
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
-}
-
-/// Holds the tests of this file to one at a time: the Ctrl-C test times
-/// how fast an interrupted scan exits, and the other tests' scans of the
-/// fixture tree, run beside it on a runner with few CPUs, slowed that
-/// exit past the bound with nothing wrong in the scan.
-fn serial() -> MutexGuard<'static, ()> {
-    static SERIAL: Mutex<()> = Mutex::new(());
-    // A test that failed holding the lock leaves it poisoned; the next
-    // one still runs.
-    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn envelope(env: &TestEnv, args: &[&str]) -> serde_json::Value {
@@ -38,7 +26,6 @@ fn envelope(env: &TestEnv, args: &[&str]) -> serde_json::Value {
 
 #[test]
 fn p1_walk_08_an_unreadable_directory_counts_one_error() {
-    let _serial = serial();
     let env = TestEnv::new();
     let fixtures = env.fixtures();
     if !fixtures.unreadable_effective() {
@@ -60,7 +47,6 @@ fn p1_walk_08_an_unreadable_directory_counts_one_error() {
 
 #[test]
 fn p1_walk_08_a_symlink_cycle_terminates_under_follow_symlinks() {
-    let _serial = serial();
     let env = TestEnv::new();
     let root = env.fixtures().case_root("symlinks");
     let root = root.to_str().unwrap();
@@ -80,7 +66,6 @@ fn p1_walk_08_a_symlink_cycle_terminates_under_follow_symlinks() {
 
 #[test]
 fn p1_walk_08_a_root_given_as_a_symlink_is_resolved() {
-    let _serial = serial();
     let env = TestEnv::new();
     let target =
         std::fs::canonicalize(env.fixtures().case_root("symlinks").join("real-dir")).unwrap();
@@ -95,7 +80,6 @@ fn p1_walk_08_a_root_given_as_a_symlink_is_resolved() {
 
 #[test]
 fn p1_walk_08_a_root_link_that_leads_nowhere_fails() {
-    let _serial = serial();
     let env = TestEnv::new();
     let links = env.fixtures().case_root("symlinks");
     // Dangling: not found (exit 3), as a missing path is.
@@ -120,7 +104,6 @@ fn p1_walk_08_a_root_link_that_leads_nowhere_fails() {
 
 #[test]
 fn p1_walk_08_sigint_exits_130_within_200_ms() {
-    let _serial = serial();
     let env = TestEnv::new();
     let tree = env.fixtures().root();
     // macOS checks a newly built binary on its first launch, which can
@@ -177,7 +160,6 @@ fn p1_walk_08_sigint_exits_130_within_200_ms() {
 
 #[test]
 fn p1_walk_08_an_ignored_sigint_is_left_ignored() {
-    let _serial = serial();
     let env = TestEnv::new();
     let tree = env.fixtures().root();
     duscope(&env).arg("--version").assert().success();

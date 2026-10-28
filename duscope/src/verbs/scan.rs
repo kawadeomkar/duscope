@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -495,31 +495,28 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
     }
 }
 
-/// How long a walk has to stop after Ctrl-C before the process ends
-/// regardless: half the 200 ms the conventions allow, which leaves room for
-/// a slow machine to notice the flag and end the process.
-const INTERRUPT_GRACE: Duration = Duration::from_millis(100);
-
 /// Ctrl-C during a walk. While armed, SIGINT sets `flag`, the walk's
-/// cancellation flag, and a watcher thread ends the process with exit 130
-/// if the walk has not stopped [`INTERRUPT_GRACE`] later; the watcher
-/// blocks until SIGINT or the stand-down, without polling. Dropping it once
-/// the walk is over ends the watcher, so a Ctrl-C while the result is
-/// written lets it finish rather than cut it off from another thread.
-/// Where SIGINT was inherited ignored (a background job), or the watcher
-/// cannot be started, Ctrl-C keeps its usual effect and the flag is never
-/// set.
+/// cancellation flag, and a watcher thread reports it and ends the process
+/// with exit 130 at once. A scan writes nothing until its walk is over, so
+/// there is nothing to finish first, and waiting for the walk to wind down
+/// took over 200 ms on machines whose timers overshoot. The watcher blocks
+/// until SIGINT or the stand-down, without polling. Dropping the guard once
+/// the walk is over ends the watcher; the two share a lock, so a Ctrl-C
+/// while the result is written lets it finish rather than cut it off from
+/// another thread. Where SIGINT was inherited ignored (a background job),
+/// or the watcher cannot be started, Ctrl-C keeps its usual effect and the
+/// flag is never set.
 struct Interrupts {
     flag: Arc<AtomicBool>,
-    /// Set once the walk is over, for a watcher woken by a late SIGINT.
-    over: Arc<AtomicBool>,
+    /// Set once the walk is over, under the lock the watcher exits under.
+    over: Arc<Mutex<bool>>,
     armed: bool,
 }
 
 impl Interrupts {
     fn arm() -> Interrupts {
         let flag = Arc::new(AtomicBool::new(false));
-        let over = Arc::new(AtomicBool::new(false));
+        let over = Arc::new(Mutex::new(false));
         let armed = matches!(duscope_walk::cancel_on_interrupt(&flag), Ok(true));
         if armed {
             let walk_over = Arc::clone(&over);
@@ -527,8 +524,10 @@ impl Interrupts {
                 .name("interrupt".to_owned())
                 .spawn(move || {
                     if duscope_walk::wait_for_interrupt() {
-                        thread::sleep(INTERRUPT_GRACE);
-                        if !walk_over.load(Ordering::SeqCst) {
+                        // Held until the exit, so the walk cannot end and its
+                        // result start between this check and the exit.
+                        let over = walk_over.lock().unwrap_or_else(PoisonError::into_inner);
+                        if !*over {
                             report_interrupt();
                             std::process::exit(i32::from(Exit::Interrupted.code()));
                         }
@@ -550,7 +549,7 @@ impl Interrupts {
 impl Drop for Interrupts {
     fn drop(&mut self) {
         if self.armed {
-            self.over.store(true, Ordering::SeqCst);
+            *self.over.lock().unwrap_or_else(PoisonError::into_inner) = true;
             duscope_walk::stand_down_interrupt();
         }
     }
