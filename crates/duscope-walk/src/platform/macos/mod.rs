@@ -121,7 +121,7 @@ impl Provider for MacProvider {
             Outcome::Done => {}
             // The fallback reads a filesystem without bulk reads, through
             // the descriptor already open.
-            Outcome::Unsupported => fallback::read_open(fd.as_fd(), dir, out, errs, later)?,
+            Outcome::Unsupported => fallback::read_open(fd.as_fd(), dir, opts, out, errs, later)?,
             // The probed refills' entries are kept; the rest of the
             // directory is listed by name and every worker reads it from
             // the stat queue.

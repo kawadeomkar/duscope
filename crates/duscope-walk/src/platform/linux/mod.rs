@@ -71,7 +71,7 @@ impl LinuxProvider {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             match statx::statx_at(fd, &name, mask) {
                 Ok(stx) => {
-                    let mut entry = statx::entry(name, &stx);
+                    let mut entry = statx::entry(name, &stx, opts.attrs);
                     if entry.kind == Kind::Dir && stx.stx_mask & libc::STATX_SUBVOL != 0 {
                         let parent = *dir_subvol.get_or_insert_with(|| {
                             #[cfg(test)]
@@ -157,7 +157,7 @@ impl Provider for LinuxProvider {
         self.statx_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let stx = statx::statx(None, &posix::c_path(path)?, statx::mask(opts))?;
-        Ok(statx::entry(name, &stx))
+        Ok(statx::entry(name, &stx, opts.attrs))
     }
 }
 
@@ -168,7 +168,7 @@ impl Provider for LinuxProvider {
 pub(super) fn volume(path: &Path) -> io::Result<VolumeInfo> {
     let c_path = posix::c_path(path)?;
     let stx = statx::statx(None, &c_path, statx::BASIC)?;
-    let entry = statx::entry(NameRef::new(b""), &stx);
+    let entry = statx::entry(NameRef::new(b""), &stx, crate::Attrs::Basic);
     let mountinfo = fs::read("/proc/self/mountinfo")?;
     let mounts = parse_mountinfo(&mountinfo);
     let mount = if entry.mnt_id == 0 {

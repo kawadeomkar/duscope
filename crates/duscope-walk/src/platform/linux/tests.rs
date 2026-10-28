@@ -280,6 +280,61 @@ fn p1_walk_02_the_volume_comes_from_mountinfo_and_statvfs() {
 }
 
 #[test]
+fn p1_walk_05_full_attrs_match_lstat() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    let entries = walk_paths(&LinuxProvider::new(), &root, &opts);
+    let ns = |s: i64, n: i64| s * 1_000_000_000 + n;
+    for (path, entry) in &entries {
+        let meta = fs::symlink_metadata(path).unwrap();
+        let full = entry
+            .full
+            .unwrap_or_else(|| panic!("no full attributes: {path:?}"));
+        assert_eq!(full.mode, meta.mode(), "mode {path:?}");
+        assert_eq!(
+            (full.uid, full.gid),
+            (meta.uid(), meta.gid()),
+            "owner {path:?}"
+        );
+        assert_eq!(
+            full.atime_ns,
+            ns(meta.atime(), meta.atime_nsec()),
+            "atime {path:?}"
+        );
+        // std reads the creation time with statx too; None where the
+        // filesystem keeps none.
+        let created = meta.created().ok().map(|time| {
+            let since = time.duration_since(std::time::UNIX_EPOCH).unwrap();
+            i64::try_from(since.as_nanos()).unwrap()
+        });
+        assert_eq!(full.btime_ns, created, "btime {path:?}");
+    }
+    let basic = walk_paths(&LinuxProvider::new(), &root, &WalkOptions::default());
+    assert!(basic.values().all(|entry| entry.full.is_none()));
+}
+
+#[test]
+fn p1_walk_05_full_attrs_add_no_calls() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let count = |attrs| {
+        let provider = LinuxProvider::new();
+        let opts = WalkOptions {
+            attrs,
+            ..WalkOptions::default()
+        };
+        walk_with(&provider, &root, &opts, |_| {}).unwrap();
+        provider.statx_calls.load(Ordering::Relaxed)
+    };
+    // The five attributes are mask bits of the same statx.
+    assert_eq!(count(crate::Attrs::Full), count(crate::Attrs::Basic));
+}
+
+#[test]
 fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
     // SAFETY: statx is plain data; all zeros is a valid value.
     let mut stx: libc::statx = unsafe { std::mem::zeroed() };
@@ -289,9 +344,9 @@ fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
         let bit = u64::from(bit.cast_unsigned());
         stx.stx_attributes_mask |= bit;
         stx.stx_attributes |= bit;
-        super::statx::entry(NameRef::from("d"), &stx)
+        super::statx::entry(NameRef::from("d"), &stx, crate::Attrs::Basic)
     };
-    let plain = super::statx::entry(NameRef::from("d"), &stx);
+    let plain = super::statx::entry(NameRef::from("d"), &stx, crate::Attrs::Basic);
     assert_eq!(plain.boundary, crate::Boundary::None);
     assert!(plain.flags.is_empty());
     let root = with(&stx, libc::STATX_ATTR_MOUNT_ROOT);
@@ -307,7 +362,7 @@ fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
     let mut unvouched = stx;
     unvouched.stx_attributes |= u64::from(libc::STATX_ATTR_AUTOMOUNT.cast_unsigned());
     assert_eq!(
-        super::statx::entry(NameRef::from("d"), &unvouched).boundary,
+        super::statx::entry(NameRef::from("d"), &unvouched, crate::Attrs::Basic).boundary,
         crate::Boundary::None
     );
 }

@@ -10,7 +10,7 @@ use std::path::Path;
 use super::bulk::{self, Decoded, Fields, Request};
 use super::ffi::{self, AttrBuf};
 use crate::platform::posix;
-use crate::{Entry, Kind, NameRef, WalkOptions};
+use crate::{Attrs, Entry, FullAttrs, Kind, NameRef, WalkOptions};
 
 /// The buffer for one entry's record: the fixed attributes and a name of up
 /// to 255 characters of four UTF-8 bytes each fit with room to spare.
@@ -50,7 +50,7 @@ pub(super) fn entry_at(
             }
         }
         let stat = posix::lstat_at(dir, c_name)?;
-        Ok(from_stat(name.clone(), &stat))
+        Ok(from_stat(name.clone(), &stat, opts.attrs))
     })
 }
 
@@ -77,7 +77,7 @@ pub(super) fn entry_of_path(path: &Path, name: NameRef, opts: &WalkOptions) -> i
         Err(_) => {}
     }
     let stat = posix::lstat(&c_path)?;
-    Ok(from_stat(name, &stat))
+    Ok(from_stat(name, &stat, opts.attrs))
 }
 
 /// The entry in a single-entry record, named `name`; `None` when the record
@@ -98,8 +98,9 @@ fn decode(buf: &AttrBuf, request: &Request, name: &NameRef) -> io::Result<Option
     })
 }
 
-/// The entry an `lstat` describes.
-pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat) -> Entry {
+/// The entry an `lstat` describes, with the `--attrs full` set under
+/// `attrs`.
+pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat, attrs: Attrs) -> Entry {
     let kind = match stat.st_mode & libc::S_IFMT {
         libc::S_IFDIR => Kind::Dir,
         libc::S_IFREG => Kind::File,
@@ -122,5 +123,15 @@ pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat) -> Entry 
         dev: bulk::dev(stat.st_dev),
         ino: stat.st_ino,
         bsd_flags: stat.st_flags,
+        full: (attrs == Attrs::Full).then(|| FullAttrs {
+            atime_ns: time(stat.st_atime, stat.st_atime_nsec),
+            // macOS reports a birth time of 0 where the filesystem keeps
+            // none (devfs, autofs, some network and FUSE volumes).
+            btime_ns: (stat.st_birthtime != 0 || stat.st_birthtime_nsec != 0)
+                .then(|| time(stat.st_birthtime, stat.st_birthtime_nsec)),
+            mode: u32::from(stat.st_mode),
+            uid: stat.st_uid,
+            gid: stat.st_gid,
+        }),
     })
 }

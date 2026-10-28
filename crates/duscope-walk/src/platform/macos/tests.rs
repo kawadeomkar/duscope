@@ -84,7 +84,7 @@ fn p1_walk_03_every_entry_matches_lstat() {
     );
     for (path, entry) in &entries {
         let st = lstat(path);
-        let kind = super::stat::from_stat(entry.name.clone(), &st).kind;
+        let kind = super::stat::from_stat(entry.name.clone(), &st, crate::Attrs::Basic).kind;
         assert_eq!(entry.kind, kind, "{path:?}");
         let allocated = match kind {
             Kind::Socket | Kind::Fifo | Kind::Char | Kind::Block => 0,
@@ -565,6 +565,157 @@ fn p1_walk_03_an_unsearchable_directory_lists_its_children_as_errors() {
     );
     // empty-closed/ (mode 000) cannot be opened at all.
     assert_eq!(closed_with, [libc::EACCES]);
+}
+
+/// Counts the calls the wrapped provider makes on the walk's threads:
+/// (bulk reads, reads of one entry, other calls).
+struct Counting<'a> {
+    inner: &'a MacProvider,
+    calls: std::sync::Mutex<(usize, usize, usize)>,
+}
+
+impl Counting<'_> {
+    fn count<T>(&self, call: impl FnOnce() -> T) -> T {
+        let before = posix::calls::now();
+        let result = call();
+        let after = posix::calls::now();
+        let mut calls = self.calls.lock().unwrap();
+        calls.0 += after.0 - before.0;
+        calls.1 += after.1 - before.1;
+        calls.2 += after.2 - before.2;
+        result
+    }
+}
+
+impl crate::Provider for Counting<'_> {
+    fn read_dir(
+        &self,
+        dir: &crate::DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<crate::ScanError>,
+    ) -> std::io::Result<()> {
+        self.count(|| self.inner.read_dir(dir, opts, out, errs))
+    }
+
+    fn read_dir_split(
+        &self,
+        dir: &crate::DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<crate::ScanError>,
+        later: &mut Vec<crate::NameRef>,
+    ) -> std::io::Result<()> {
+        self.count(|| self.inner.read_dir_split(dir, opts, out, errs, later))
+    }
+
+    fn stat_names(
+        &self,
+        dir: &crate::DirHandle,
+        names: &[crate::NameRef],
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<crate::ScanError>,
+    ) -> std::io::Result<()> {
+        self.count(|| self.inner.stat_names(dir, names, opts, out, errs))
+    }
+
+    fn volume(&self, path: &Path) -> std::io::Result<crate::VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> std::io::Result<Entry> {
+        self.count(|| self.inner.root(path, opts))
+    }
+}
+
+#[test]
+fn p1_walk_05_full_attrs_match_lstat() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    let (entries, _) = walk_paths(&MacProvider::new(), &root, &opts);
+    let ns = |s: i64, n: i64| s * 1_000_000_000 + n;
+    for (path, entry) in &entries {
+        let st = lstat(path);
+        let full = entry
+            .full
+            .unwrap_or_else(|| panic!("no full attributes: {path:?}"));
+        assert_eq!(full.mode, u32::from(st.st_mode), "mode {path:?}");
+        assert_eq!(
+            (full.uid, full.gid),
+            (st.st_uid, st.st_gid),
+            "owner {path:?}"
+        );
+        assert_eq!(
+            full.atime_ns,
+            ns(st.st_atime, st.st_atime_nsec),
+            "atime {path:?}"
+        );
+        assert_eq!(
+            full.btime_ns,
+            Some(ns(st.st_birthtime, st.st_birthtime_nsec)),
+            "btime {path:?}"
+        );
+    }
+    let (basic, _) = walk_paths(&MacProvider::new(), &root, &WalkOptions::default());
+    assert!(basic.values().all(|entry| entry.full.is_none()));
+}
+
+#[test]
+fn p1_walk_05_full_attrs_add_no_calls_per_entry() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let count = |attrs| {
+        let provider = Counting {
+            inner: &MacProvider::new(),
+            calls: std::sync::Mutex::new((0, 0, 0)),
+        };
+        // One worker: the probe, which can send a directory to the stat
+        // queue depending on how busy the machine is, runs only with more.
+        let opts = WalkOptions {
+            attrs,
+            threads: 1,
+            ..WalkOptions::default()
+        };
+        walk_with(&provider, &root, &opts, |_| {}).unwrap();
+        provider.calls.into_inner().unwrap()
+    };
+    let (basic_bulk, basic_entry, basic_other) = count(crate::Attrs::Basic);
+    let (full_bulk, full_entry, full_other) = count(crate::Attrs::Full);
+    // The same reads of single entries (the root, mount points, records
+    // that lack an attribute) and the same opens. Records grow by 44 bytes
+    // under --attrs full, so a big directory takes a few more refills of
+    // the same 64 KiB buffer: 0.4% more on the fixture tree, bounded here
+    // at 5%, which no call per entry could stay under.
+    assert_eq!(full_entry, basic_entry);
+    assert_eq!(full_other, basic_other);
+    assert!(
+        basic_bulk <= full_bulk && full_bulk * 100 <= basic_bulk * 105,
+        "bulk reads: {basic_bulk} basic, {full_bulk} full"
+    );
+}
+
+#[test]
+fn p1_walk_05_no_creation_time_is_none_through_lstat_too() {
+    // devfs keeps no creation time: the bulk read leaves ATTR_CMN_CRTIME
+    // out, and lstat reports 0.
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    let null = Path::new("/dev/null");
+    let st = lstat(null);
+    if st.st_birthtime != 0 {
+        return;
+    }
+    let entry = super::stat::from_stat(crate::NameRef::from("null"), &st, opts.attrs);
+    assert_eq!(entry.full.unwrap().btime_ns, None);
+    let root = crate::Provider::root(&MacProvider::new(), null, &opts).unwrap();
+    assert_eq!(root.full.unwrap().btime_ns, None, "the native read agrees");
 }
 
 #[test]

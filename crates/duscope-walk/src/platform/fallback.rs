@@ -42,25 +42,25 @@ impl Provider for FallbackProvider {
     fn read_dir_split(
         &self,
         dir: &DirHandle,
-        _opts: &WalkOptions,
+        opts: &WalkOptions,
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        read_open(fd.as_fd(), dir, out, errs, later)
+        read_open(fd.as_fd(), dir, opts, out, errs, later)
     }
 
     fn stat_names(
         &self,
         dir: &DirHandle,
         names: &[NameRef],
-        _opts: &WalkOptions,
+        opts: &WalkOptions,
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        read_names(fd.as_fd(), dir, names.iter().cloned(), out, errs);
+        read_names(fd.as_fd(), dir, names.iter().cloned(), opts, out, errs);
         Ok(())
     }
 
@@ -68,9 +68,13 @@ impl Provider for FallbackProvider {
         volume(path)
     }
 
-    fn root(&self, path: &Path, _opts: &WalkOptions) -> io::Result<Entry> {
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
         let name = NameRef::from(path.file_name().unwrap_or(path.as_os_str()));
-        Ok(from_stat(name, &posix::lstat(&posix::c_path(path)?)?))
+        Ok(from_stat(
+            name,
+            &posix::lstat(&posix::c_path(path)?)?,
+            opts.attrs,
+        ))
     }
 
     /// The platform provider's default, so the two compare like for like,
@@ -87,6 +91,7 @@ impl Provider for FallbackProvider {
 pub(crate) fn read_open(
     fd: BorrowedFd<'_>,
     dir: &DirHandle,
+    opts: &WalkOptions,
     out: &mut Vec<Entry>,
     errs: &mut Vec<ScanError>,
     later: &mut Vec<NameRef>,
@@ -95,7 +100,7 @@ pub(crate) fn read_open(
     if names.len() > STAT_BATCH {
         later.extend(names.drain(STAT_BATCH..));
     }
-    read_names(fd, dir, names, out, errs);
+    read_names(fd, dir, names, opts, out, errs);
     Ok(())
 }
 
@@ -105,12 +110,13 @@ fn read_names(
     fd: BorrowedFd<'_>,
     dir: &DirHandle,
     names: impl IntoIterator<Item = NameRef>,
+    opts: &WalkOptions,
     out: &mut Vec<Entry>,
     errs: &mut Vec<ScanError>,
 ) {
     for name in names {
         match posix::with_c_name(name.as_bytes(), |c_name| posix::lstat_at(fd, c_name)) {
-            Ok(stat) => out.push(from_stat(name, &stat)),
+            Ok(stat) => out.push(from_stat(name, &stat, opts.attrs)),
             Err(e) => errs.push(ScanError {
                 dir: dir.id(),
                 name,
@@ -279,7 +285,8 @@ mod tests {
             depth: 0,
         };
         let (mut out, mut errs, mut later) = (Vec::new(), Vec::new(), Vec::new());
-        super::read_open(fd.as_fd(), &handle, &mut out, &mut errs, &mut later).unwrap();
+        let opts = WalkOptions::default();
+        super::read_open(fd.as_fd(), &handle, &opts, &mut out, &mut errs, &mut later).unwrap();
         let mut names: Vec<&[u8]> = out.iter().map(|e| e.name.as_bytes()).collect();
         names.sort_unstable();
         assert_eq!(names, [b"a", b"b"]);

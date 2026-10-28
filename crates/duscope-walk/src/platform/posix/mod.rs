@@ -98,6 +98,8 @@ fn parked(mut open: impl FnMut() -> libc::c_int) -> io::Result<OwnedFd> {
     let mut parked = Duration::ZERO;
     let mut pause = Duration::from_millis(1);
     loop {
+        #[cfg(test)]
+        calls::other();
         let fd = open();
         if fd >= 0 {
             // SAFETY: `fd` was just returned by `open` and is owned by
@@ -146,6 +148,8 @@ fn retry(mut call: impl FnMut() -> libc::c_int) -> io::Result<()> {
 /// `fstatat(2)` of `name` in the directory open on `dir`, not following a
 /// final symlink.
 pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
+    #[cfg(test)]
+    calls::entry();
     let mut stat = MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `dir` is open for the borrow, `name` is NUL-terminated, and
     // `stat` is writable for one `struct stat`.
@@ -163,6 +167,8 @@ pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::sta
 
 /// `lstat(2)` of `path`.
 pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
+    #[cfg(test)]
+    calls::entry();
     let mut stat = MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `path` is NUL-terminated and `stat` is writable for one
     // `struct stat`.
@@ -231,6 +237,43 @@ fn set_errno(value: libc::c_int) {
         {
             *libc::__error() = value;
         }
+    }
+}
+
+/// Per-thread counts of the system calls the providers make, for the tests
+/// that count them: bulk reads, reads of one entry, and every other call
+/// a walk makes per directory (opening it, duplicating its descriptor).
+#[cfg(test)]
+// Only the macOS tests count bulk reads.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod calls {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(crate) static BULK: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static ENTRY: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static OTHER: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn bulk() {
+        BULK.with(|n| n.set(n.get() + 1));
+    }
+
+    pub(crate) fn entry() {
+        ENTRY.with(|n| n.set(n.get() + 1));
+    }
+
+    pub(crate) fn other() {
+        OTHER.with(|n| n.set(n.get() + 1));
+    }
+
+    /// This thread's counts so far: (bulk, entry, other).
+    pub(crate) fn now() -> (usize, usize, usize) {
+        (
+            BULK.with(Cell::get),
+            ENTRY.with(Cell::get),
+            OTHER.with(Cell::get),
+        )
     }
 }
 
