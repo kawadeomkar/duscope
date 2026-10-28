@@ -1,0 +1,110 @@
+# duscope's cache rules (P1-CORE-04): what `caches` reports and what
+# `scan --exclude-caches` does not enter. Schema and rules: docs/rules.md.
+#
+# Each [[rule]] names a directory (`name`, a name or a glob) and what
+# confirms it is a cache: a marker file in one of its ancestors (`markers`,
+# any one of them), or an ancestor path its parent ends with (`under`), or a
+# valid CACHEDIR.TAG inside it (`cachedir_tag`). A name without its marker is
+# not reported unless `--loose`. `regenerable_by` comes from a fixed set:
+# "npm install", "cargo build", "pip install", "gradle build",
+# "cmake --build", "pod install", "composer install", "xcodebuild",
+# "unknown".
+
+[[rule]]
+name = "node_modules"
+markers = ["package.json"]
+regenerable_by = "npm install"
+
+[[rule]]
+name = ".next"
+markers = ["package.json"]
+regenerable_by = "npm install"
+
+[[rule]]
+name = ".nuxt"
+markers = ["package.json"]
+regenerable_by = "npm install"
+
+[[rule]]
+name = ".turbo"
+markers = ["package.json"]
+regenerable_by = "npm install"
+
+[[rule]]
+name = ".parcel-cache"
+markers = ["package.json"]
+regenerable_by = "npm install"
+
+[[rule]]
+name = "target"
+markers = ["Cargo.toml"]
+regenerable_by = "cargo build"
+
+[[rule]]
+name = ".venv"
+markers = ["pyproject.toml", "setup.py", "requirements.txt"]
+regenerable_by = "pip install"
+
+[[rule]]
+name = "venv"
+markers = ["pyproject.toml", "setup.py", "requirements.txt"]
+regenerable_by = "pip install"
+
+[[rule]]
+name = "__pycache__"
+markers = ["pyproject.toml", "setup.py", "requirements.txt"]
+regenerable_by = "pip install"
+
+[[rule]]
+name = ".mypy_cache"
+markers = ["pyproject.toml", "setup.py", "requirements.txt"]
+regenerable_by = "pip install"
+
+[[rule]]
+name = ".pytest_cache"
+markers = ["pyproject.toml", "setup.py", "requirements.txt"]
+regenerable_by = "pip install"
+
+[[rule]]
+name = ".ruff_cache"
+markers = ["pyproject.toml", "setup.py", "requirements.txt"]
+regenerable_by = "pip install"
+
+[[rule]]
+name = ".tox"
+markers = ["pyproject.toml", "setup.py", "requirements.txt"]
+regenerable_by = "pip install"
+
+[[rule]]
+name = "build"
+markers = ["build.gradle", "build.gradle.kts"]
+regenerable_by = "gradle build"
+
+[[rule]]
+name = ".gradle"
+markers = ["build.gradle", "build.gradle.kts"]
+regenerable_by = "gradle build"
+
+[[rule]]
+name = "build"
+markers = ["CMakeLists.txt"]
+regenerable_by = "cmake --build"
+
+[[rule]]
+name = "Pods"
+markers = ["Podfile"]
+regenerable_by = "pod install"
+
+[[rule]]
+name = "vendor"
+markers = ["composer.json"]
+regenerable_by = "composer install"
+
+[[rule]]
+name = "DerivedData"
+under = "Library/Developer/Xcode"
+regenerable_by = "xcodebuild"
+
+[[rule]]
+cachedir_tag = true
+regenerable_by = "unknown"

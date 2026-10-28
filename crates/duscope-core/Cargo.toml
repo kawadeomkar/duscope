@@ -12,9 +12,14 @@ include.workspace = true
 
 [dependencies]
 duscope-walk.workspace = true
+globset.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 cargo_metadata.workspace = true
+duscope-testkit.workspace = true
 schemars.workspace = true
 serde_json.workspace = true
 
