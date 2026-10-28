@@ -11,6 +11,9 @@ cargo_deny_version := "0.20.2"
 cargo_fuzz_version := "0.13.2"
 cargo_llvm_cov_version := "0.9.1"
 cargo_deb_version := "3.8.0"
+# Embeds the dependency list in the binary `just deb` builds, as release.yml's
+# cargo-dist builds do.
+cargo_auditable_version := "0.7.7"
 cargo_dist_version := "0.33.1"
 # The commit of dist's v0.33.1 tag: a tag can move, a commit cannot.
 cargo_dist_rev := "665cb7d48902a30386857f8f679e1b1942876f06"
@@ -37,7 +40,9 @@ setup:
       Linux)
         sudo=""; [[ $(id -u) -eq 0 ]] || sudo=sudo
         $sudo apt-get update -qq
-        $sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential mandoc lintian libxml2-utils reprepro jq ;;
+        $sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential mandoc lintian libxml2-utils reprepro jq musl-tools
+        # The musl target the release builds and `just deb` use.
+        rustup target add "$(uname -m)-unknown-linux-musl" ;;
       *) echo "setup: unsupported platform $(uname -s)" >&2; exit 1 ;;
     esac
     installed=$(rustup run stable cargo install --list)
@@ -49,6 +54,7 @@ setup:
     install cargo-fuzz {{cargo_fuzz_version}} cargo-fuzz@{{cargo_fuzz_version}}
     install cargo-llvm-cov {{cargo_llvm_cov_version}} cargo-llvm-cov@{{cargo_llvm_cov_version}}
     install cargo-deb {{cargo_deb_version}} cargo-deb@{{cargo_deb_version}}
+    install cargo-auditable {{cargo_auditable_version}} cargo-auditable@{{cargo_auditable_version}}
     install hyperfine {{hyperfine_version}} hyperfine@{{hyperfine_version}}
     # dist releases after 0.32 are published on GitHub only, not on crates.io.
     install cargo-dist {{cargo_dist_version}} --git https://github.com/axodotdev/cargo-dist --rev {{cargo_dist_rev}} cargo-dist
@@ -183,6 +189,50 @@ golden *args:
 bench *args:
     bench/run.sh {{args}}
 
-# Build the .deb packages (P1-PKG-01)
-deb *args:
-    @echo "deb: not yet implemented (P1-PKG-01)" >&2; exit 1
+# Build the .deb package of a musl target (default: this machine's) into target/debian/ (P1-PKG-01; Linux); `binary`: a musl binary to package instead of building one; `assets`: `reuse` packages the man page and completions already in target/deb-assets/
+deb target="" binary="" assets="write":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [[ $(uname -s) == Linux ]] || { echo "deb: builds on Linux (musl-tools and the musl target installed)" >&2; exit 1; }
+    target={{quote(target)}}
+    [[ -n $target ]] || target="$(uname -m | sed 's/^arm64$/aarch64/')-unknown-linux-musl"
+    case $target in x86_64-*) arch=amd64 ;; aarch64-*) arch=arm64 ;; *) echo "deb: no Debian architecture for $target" >&2; exit 1 ;; esac
+    mode={{quote(assets)}}
+    [[ $mode == write || $mode == reuse ]] || { echo "deb: assets is write or reuse, not $mode" >&2; exit 1; }
+    # The man page and completions, from a host build of the same commit. Only
+    # release.yml, whose deb-assets job wrote them for both packages, reuses them.
+    assets=target/deb-assets
+    case $mode in
+      write)
+        cargo build --release --locked -p duscope
+        mkdir -p "$assets"
+        target/release/duscope man > "$assets/duscope.1"
+        target/release/duscope completions bash > "$assets/duscope.bash"
+        target/release/duscope completions zsh > "$assets/_duscope"
+        target/release/duscope completions fish > "$assets/duscope.fish" ;;
+      reuse)
+        for file in duscope.1 duscope.bash _duscope duscope.fish; do
+          [[ -s $assets/$file ]] || { echo "deb: $assets/$file is missing; leave out \`reuse\` to write it" >&2; exit 1; }
+        done ;;
+    esac
+    # cargo-deb packages target/<target>/release/duscope. release.yml passes the
+    # binary cargo-dist built for the release archive; otherwise build one the
+    # same way, with cargo-auditable embedding the dependency list.
+    binary={{quote(binary)}}
+    packaged="target/$target/release/duscope"
+    if [[ -z $binary ]]; then
+      cargo auditable build --release --locked -p duscope --target "$target"
+    elif [[ $binary != "$packaged" ]]; then
+      mkdir -p "target/$target/release"
+      cp "$binary" "$packaged"
+      chmod 755 "$packaged"
+    fi
+    debian/changelog.sh
+    # The package is version X.Y.Z-1 in a file named duscope_X.Y.Z_<arch>.deb; a
+    # pre-release X.Y.Z-rc.1 becomes X.Y.Z~rc.1, which dpkg sorts before X.Y.Z,
+    # as debian/changelog.sh writes it.
+    version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1 | sed 's/-/~/')
+    deb="target/debian/duscope_${version}_${arch}.deb"
+    mkdir -p target/debian
+    cargo deb --locked -p duscope --target "$target" --no-build --no-strip --deb-version "$version-1" --output "$deb"
+    ls "$deb"

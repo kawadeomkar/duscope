@@ -1,0 +1,9 @@
+# Statically linked with musl on purpose: one binary runs on every Debian and
+# Ubuntu release, glibc or not, and depends on no other package.
+duscope: statically-linked-binary [usr/bin/duscope]
+# The x86_64 musl binary is the same static binary built as a static PIE,
+# which lintian reads as a shared object with no dependencies; the arm64 one
+# is a plain static executable and gets the tag above.
+duscope: shared-library-lacks-prerequisites [usr/bin/duscope]
+# So the package has no dependency, and cargo-deb writes the field empty.
+duscope: empty-field Depends

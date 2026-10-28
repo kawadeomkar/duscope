@@ -231,13 +231,15 @@ fn p0_ci_02_token_is_widened_only_where_a_job_needs_it() {
         ["  contents: read"],
         "the workflow-wide permissions are `contents: read` alone"
     );
-    // host creates the GitHub Release; build-local-artifacts attests the archives.
+    // host creates the GitHub Release; build-local-artifacts attests the
+    // archives, and deb the packages.
     let expected: BTreeMap<&str, Vec<&str>> = [
         ("host", vec!["contents: write"]),
         (
             "build-local-artifacts",
             vec!["attestations: write", "id-token: write"],
         ),
+        ("deb", vec!["attestations: write", "id-token: write"]),
     ]
     .into();
     for job in jobs(&workflow) {
@@ -931,4 +933,210 @@ fn p0_ci_02_verify_tag_refuses_an_unassembled_changelog() {
         Release::Fragment,
         Some("changelog.d still holds fragments (changelog.d/P9-X-01.md)"),
     );
+}
+
+#[test]
+fn p1_pkg_01_the_release_waits_for_the_debs() {
+    let jobs = jobs(&read(WORKFLOW));
+    let host = job(&jobs, "host");
+    assert!(host.needs().contains(&"deb-install"));
+    // deb-install runs whenever the release publishes, so a skipped one means
+    // a .deb failed: the release must not take that as fine.
+    let condition = host.key("if").unwrap();
+    assert!(
+        condition.contains("needs.deb-install.result == 'success'"),
+        "{condition}"
+    );
+    assert!(
+        !condition.contains("needs.deb-install.result == 'skipped'"),
+        "{condition}"
+    );
+    let deb = job(&jobs, "deb").lines.join("\n");
+    assert!(deb.contains("lintian --fail-on error,warning"));
+    assert!(deb.contains("just deb"));
+    let install = job(&jobs, "deb-install").lines.join("\n");
+    for check in [
+        "duscope top /usr --json",
+        "cmp - <(duscope man)",
+        "<(duscope completions bash)",
+    ] {
+        assert!(install.contains(check), "deb-install lacks {check:?}");
+    }
+}
+
+/// The `- name: <step>` step's `if:` in a job, if it has one.
+fn step_condition<'a>(job: &'a Job, step: &str) -> Option<&'a str> {
+    let at = job
+        .lines
+        .iter()
+        .position(|line| line.trim() == format!("- name: {step}"))
+        .unwrap_or_else(|| panic!("job `{}` has no step `{step}`", job.id));
+    let indent = job.lines[at].len() - job.lines[at].trim_start().len() + 2;
+    job.lines[at + 1..]
+        .iter()
+        .take_while(|line| line.len() - line.trim_start().len() >= indent)
+        .find_map(|line| line.trim().strip_prefix("if:"))
+        .map(str::trim)
+}
+
+#[test]
+fn p1_pkg_01_the_debs_build_on_pull_requests() {
+    let jobs = jobs(&read(WORKFLOW));
+    // No .deb job waits for a tag: a pull request builds, lints and installs
+    // the packages, so the release is not the first run of the pipeline.
+    for id in ["deb-assets", "deb", "deb-install"] {
+        if let Some(condition) = job(&jobs, id).key("if") {
+            assert!(
+                !condition.contains("publishing == 'true'"),
+                "job `{id}` runs only when publishing: {condition}"
+            );
+        }
+    }
+    // deb packages a build of its own only where there is no release archive
+    // to take the binary from, which on a tag is never.
+    let deb = job(&jobs, "deb");
+    let condition = deb.key("if").unwrap();
+    assert!(
+        condition.contains(
+            "needs.build-local-artifacts.result == 'success' || (needs.plan.outputs.publishing != 'true' && needs.build-local-artifacts.result == 'skipped')"
+        ),
+        "{condition}"
+    );
+    // A pull request's packages are not attested.
+    assert_eq!(
+        step_condition(deb, "Attest"),
+        Some("${{ needs.plan.outputs.publishing == 'true' }}")
+    );
+    let install = job(&jobs, "deb-install").key("if").unwrap();
+    assert!(
+        install.contains("needs.deb.result == 'success'"),
+        "{install}"
+    );
+}
+
+#[test]
+fn p1_pkg_01_the_deb_packages_the_release_archives_binary() {
+    let workflow = read(WORKFLOW);
+    let jobs = jobs(&workflow);
+    let deb = job(&jobs, "deb");
+    assert!(deb.needs().contains(&"build-local-artifacts"));
+    let text = deb.lines.join("\n");
+    assert!(
+        text.contains("pattern: artifacts-build-local-*${{ matrix.target }}*"),
+        "deb does not fetch its target's release archive"
+    );
+    for step in ["Fetch the release archive", "Unpack the release binary"] {
+        assert_eq!(
+            step_condition(deb, step),
+            Some("${{ needs.build-local-artifacts.result == 'success' }}"),
+            "step `{step}`"
+        );
+    }
+    assert!(text.contains("BINARY: ${{ steps.binary.outputs.path }}"));
+    assert!(text.contains("just deb \"$TARGET\" \"$BINARY\" reuse"));
+    // Without a binary, `just deb` builds one as dist does, with
+    // cargo-auditable, and writes the man page and completions afresh unless
+    // told to reuse them.
+    let justfile = read("justfile");
+    let recipe: Vec<&str> = justfile
+        .lines()
+        .skip_while(|line| !line.starts_with("deb "))
+        .take_while(|line| !line.is_empty())
+        .collect();
+    assert!(
+        recipe[0].starts_with("deb target=\"\" binary=\"\" assets=\"write\":"),
+        "{}",
+        recipe[0]
+    );
+    assert!(
+        recipe
+            .iter()
+            .any(|l| l.contains("cargo auditable build --release --locked -p duscope --target")),
+        "just deb builds without cargo-auditable"
+    );
+    assert!(
+        !recipe.iter().any(|l| l.contains("[[ ! -s $assets")),
+        "just deb reuses assets it was not told to"
+    );
+    // release.yml installs the cargo-deb and cargo-auditable the justfile pins.
+    let pin = |name: &str| {
+        justfile
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name} := ")))
+            .map(|value| value.trim_matches('"').to_owned())
+    };
+    assert_eq!(
+        workflow_env(&workflow, "CARGO_DEB_VERSION"),
+        pin("cargo_deb_version")
+    );
+    assert_eq!(
+        workflow_env(&workflow, "CARGO_AUDITABLE_VERSION"),
+        pin("cargo_auditable_version")
+    );
+}
+
+/// The `key: value` pairs of each `- ` entry of a job's matrix `include:`.
+fn matrix_include(job: &Job) -> Vec<BTreeMap<String, String>> {
+    let mut entries: Vec<BTreeMap<String, String>> = Vec::new();
+    let mut lines = job
+        .lines
+        .iter()
+        .skip_while(|line| line.trim() != "include:")
+        .skip(1)
+        .peekable();
+    // The entries are the lines indented at least as deep as the first dash.
+    let Some(first) = lines.peek() else {
+        return entries;
+    };
+    let indent = first.len() - first.trim_start().len();
+    for line in lines.take_while(|line| line.len() - line.trim_start().len() >= indent) {
+        let trimmed = line.trim();
+        let Some((key, value)) = trimmed.trim_start_matches("- ").split_once(": ") else {
+            continue;
+        };
+        if trimmed.starts_with("- ") {
+            entries.push(BTreeMap::new());
+        }
+        if let Some(entry) = entries.last_mut() {
+            entry.insert(key.to_owned(), value.trim_matches('"').to_owned());
+        }
+    }
+    entries
+}
+
+#[test]
+fn p1_pkg_01_the_deb_runners_are_dist_workspaces() {
+    let config = read(DIST_CONFIG);
+    let jobs = jobs(&read(WORKFLOW));
+    let deb = matrix_include(job(&jobs, "deb"));
+    let install = matrix_include(job(&jobs, "deb-install"));
+    let musl: Vec<&&str> = TARGETS
+        .iter()
+        .filter(|t| t.ends_with("-linux-musl"))
+        .collect();
+    assert_eq!(deb.len(), musl.len(), "deb builds {deb:?}");
+    for target in musl {
+        // The runner dist-workspace.toml builds the target's archive on.
+        let runner = dist_value(&config, target).unwrap();
+        let runner = quoted(&runner)[0];
+        let arch = match target.split('-').next() {
+            Some("x86_64") => "amd64",
+            Some("aarch64") => "arm64",
+            other => panic!("no Debian architecture for {other:?}"),
+        };
+        let entry = deb
+            .iter()
+            .find(|e| e.get("target").map(String::as_str) == Some(target))
+            .unwrap_or_else(|| panic!("deb does not build {target}"));
+        assert_eq!(entry["runner"], runner, "deb builds {target} elsewhere");
+        assert_eq!(entry["arch"], arch, "deb names {target}'s architecture");
+        let installs = install
+            .iter()
+            .find(|e| e.get("arch").map(String::as_str) == Some(arch))
+            .unwrap_or_else(|| panic!("deb-install does not install {arch}"));
+        assert_eq!(
+            installs["runner"], runner,
+            "deb-install runs {arch} elsewhere"
+        );
+    }
 }

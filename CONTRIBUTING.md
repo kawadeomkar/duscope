@@ -57,6 +57,7 @@ disagree, so a pin changes in both places in the same pull request.
 | `cargo-fuzz` | 0.13.2 | `just setup` | fuzz targets, on nightly |
 | `cargo-llvm-cov` | 0.9.1 | `just setup` | coverage |
 | `cargo-deb` | 3.8.0 | `just setup` | the `.deb` packages |
+| `cargo-auditable` | 0.7.7 | `just setup` | the dependency list embedded in the binary `just deb` packages, as in the release archives |
 | `cargo-dist` | 0.33.1 | `just setup`, from the GitHub tag (later releases are not on crates.io) | release builds (the `dist` command) |
 | `hyperfine` | 2.0.0 | `just setup` | the benchmark harness |
 | `mandoc` | system package | `just setup` (apt) on Linux; ships with macOS | linting the man page |

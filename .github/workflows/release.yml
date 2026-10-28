@@ -11,7 +11,11 @@
 #                with cargo-auditable and attested
 #   build-global-artifacts
 #                the shell installer and the checksums
-#   host         the GitHub Release, its notes from CHANGELOG.md
+#   deb-assets   the man page and completions, written once by a host build
+#   deb          the .deb of each musl target with cargo-deb, from the binary of
+#                that target's archive, lintian-clean and attested (P1-PKG-01)
+#   deb-install  each .deb installed and run in Debian 12 and Ubuntu 22.04
+#   host         the GitHub Release, its notes from CHANGELOG.md, with the .debs
 #   publish-crates
 #                the six crates on crates.io, in dependency order
 #   announce     nothing more yet (dist's last phase)
@@ -36,8 +40,8 @@
 name: Release
 
 on:
-  # Pull requests run verify-tag (nothing to verify) and `dist plan`, which checks
-  # dist-workspace.toml against the workspace.
+  # Pull requests run verify-tag (nothing to verify), `dist plan`, which checks
+  # dist-workspace.toml against the workspace, and the three .deb jobs.
   pull_request:
   push:
     tags:
@@ -55,6 +59,8 @@ env:
   DIST_INSTALLER_SHA256: "a7b3b0812d624a09a534ba272aa8e04c801e56a83d553327a4a8632bc03abb94"
   # Embeds the dependency list in each binary (`cargo auditable`).
   CARGO_AUDITABLE_VERSION: "0.7.7"
+  # The .deb builder, at the justfile's pin.
+  CARGO_DEB_VERSION: "3.8.0"
 
 jobs:
   verify-tag:
@@ -307,14 +313,188 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
+  # The man page and completions both .debs carry, written once by a host build
+  # of the commit (P1-PKG-01). The three .deb jobs run on pull requests too, so a
+  # release is never the first run of the packaging; only the attestation and
+  # the GitHub Release are a tag's alone.
+  deb-assets:
+    needs:
+      - plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Write the man page and completions
+        run: |
+          rustup toolchain install --profile minimal
+          cargo build --release --locked -p duscope
+          mkdir -p target/deb-assets
+          target/release/duscope man > target/deb-assets/duscope.1
+          target/release/duscope completions bash > target/deb-assets/duscope.bash
+          target/release/duscope completions zsh > target/deb-assets/_duscope
+          target/release/duscope completions fish > target/deb-assets/duscope.fish
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deb-assets
+          path: target/deb-assets/
+          if-no-files-found: error
+
+  # The .deb of each musl target: cargo-deb on the binary of that target's
+  # release archive, lintian-clean, attested. A pull request, which builds no
+  # archives (dist's pr-run-mode is plan), packages a build of its own made the
+  # same way; a tag never does. Its artifact is named artifacts-*, so host
+  # attaches it to the GitHub Release with the archives.
+  deb:
+    name: deb (${{ matrix.arch }})
+    needs:
+      - plan
+      - build-local-artifacts
+      - deb-assets
+    # always(): build-local-artifacts is skipped on a pull request, which would
+    # otherwise skip this job too.
+    if: ${{ always() && needs.plan.result == 'success' && needs.deb-assets.result == 'success' && (needs.build-local-artifacts.result == 'success' || (needs.plan.outputs.publishing != 'true' && needs.build-local-artifacts.result == 'skipped')) }}
+    strategy:
+      fail-fast: false
+      # The runner of each target is dist-workspace.toml's; a test holds the two
+      # (and deb-install's) in step.
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # Attests the packages (Sigstore through the OIDC token).
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain, the musl target, musl-tools and lintian
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install --profile minimal
+          rustup target add "$TARGET"
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q musl-tools lintian
+      - name: Install cargo-deb, cargo-auditable and just
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-deb@${{ env.CARGO_DEB_VERSION }},cargo-auditable@${{ env.CARGO_AUDITABLE_VERSION }},just@${{ env.JUST_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: deb-assets
+          path: target/deb-assets/
+      - name: Fetch the release archive
+        if: ${{ needs.build-local-artifacts.result == 'success' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-build-local-*${{ matrix.target }}*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Unpack the release binary
+        id: binary
+        if: ${{ needs.build-local-artifacts.result == 'success' }}
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t archives < <(find target/distrib -maxdepth 1 -type f -name "duscope-$TARGET.tar.*" ! -name '*.sha256')
+          (( ${#archives[@]} == 1 )) || { echo "::error::expected one archive for $TARGET in target/distrib, found ${#archives[@]}"; exit 1; }
+          mkdir -p target/release-binary
+          tar -xf "${archives[0]}" -C target/release-binary
+          mapfile -t binaries < <(find target/release-binary -type f -name duscope)
+          (( ${#binaries[@]} == 1 )) || { echo "::error::expected one duscope in ${archives[0]}, found ${#binaries[@]}"; exit 1; }
+          echo "path=${binaries[0]}" >> "$GITHUB_OUTPUT"
+      - name: Use the reproducible build environment
+        run: just repro-env target | tee -a "$GITHUB_ENV"
+      - name: Build the package
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ steps.binary.outputs.path }}
+        run: just deb "$TARGET" "$BINARY" reuse
+      - name: Lintian
+        # initial-upload-closes-no-bugs fires while debian/changelog has a single
+        # entry (before the first release after v0.0.1); the package is not
+        # uploaded to Debian, so there is no bug to close.
+        run: lintian --fail-on error,warning --display-info --suppress-tags initial-upload-closes-no-bugs target/debian/*.deb
+      - name: Attest
+        if: ${{ needs.plan.outputs.publishing == 'true' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: "target/debian/*.deb"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-deb-${{ matrix.arch }}
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  # Each package installed with apt in a clean Debian 12 and Ubuntu 22.04, where
+  # it runs, and carries the man page and completions this build prints.
+  deb-install:
+    name: deb-install (${{ matrix.image }}, ${{ matrix.arch }})
+    needs:
+      - plan
+      - deb
+    # always(): on a pull request a job above deb is skipped, which would skip
+    # this one too; it runs when deb succeeded.
+    if: ${{ always() && needs.plan.result == 'success' && needs.deb.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "ubuntu:22.04"]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: artifacts-deb-${{ matrix.arch }}
+          path: debs/
+      - name: Install and run
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          # Ubuntu's container image leaves man pages out; a real system has them.
+          rm -f /etc/dpkg/dpkg.cfg.d/excludes
+          apt-get update -q
+          apt-get install -y -q ./debs/duscope_*.deb
+          duscope top /usr --json > top.json
+          grep -q '"ok":true' top.json
+          zcat /usr/share/man/man1/duscope.1.gz | cmp - <(duscope man)
+          cmp /usr/share/bash-completion/completions/duscope <(duscope completions bash)
+          cmp /usr/share/zsh/vendor-completions/_duscope <(duscope completions zsh)
+          cmp /usr/share/fish/vendor_completions.d/duscope.fish <(duscope completions fish)
+          echo "$(. /etc/os-release && echo "$PRETTY_NAME"): duscope $(dpkg-query -W -f='${Version}' duscope) installs and runs"
+
   # Determines if we should publish/announce
   host:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - deb-install
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    # and the .debs built and installed: deb-install runs whenever publishing is, so
+    # "skipped" there means a job it needs failed, and the release waits for a fix.
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && needs.deb-install.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-24.04"
