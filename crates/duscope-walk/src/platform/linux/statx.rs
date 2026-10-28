@@ -61,9 +61,21 @@ fn statx_with(
     let at = dir.map_or(libc::AT_FDCWD, |fd| fd.as_raw_fd());
     let mut buf = MaybeUninit::<libc::statx>::uninit();
     loop {
+        // The system call itself rather than libc's wrapper, which the musl
+        // Rust links statically (the release builds) does not have.
         // SAFETY: `at` is AT_FDCWD or a descriptor open for the borrow,
-        // `name` is NUL-terminated, and `buf` is writable for one statx.
-        let rc = unsafe { libc::statx(at, name.as_ptr(), flags, mask, buf.as_mut_ptr()) };
+        // `name` is NUL-terminated, and `buf` is writable for one statx;
+        // the arguments are the system call's, in its order.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_statx,
+                at,
+                name.as_ptr(),
+                flags,
+                mask,
+                buf.as_mut_ptr(),
+            )
+        };
         if rc == 0 {
             // SAFETY: statx succeeded, so it filled the struct.
             return Ok(unsafe { buf.assume_init() });
@@ -84,25 +96,9 @@ pub(super) fn statx_at(dir: BorrowedFd<'_>, name: &NameRef, mask: u32) -> io::Re
 /// The subvolume of the directory open on `dir`, when the kernel and the
 /// filesystem report one (6.10; btrfs and bcachefs).
 pub(super) fn subvol_of(dir: BorrowedFd<'_>) -> Option<u64> {
-    let at = dir.as_raw_fd();
-    let mut buf = MaybeUninit::<libc::statx>::uninit();
-    // SAFETY: `at` is a descriptor open for the borrow, the empty name is
-    // NUL-terminated (AT_EMPTY_PATH reads `at` itself), and `buf` is
-    // writable for one statx.
-    let rc = unsafe {
-        libc::statx(
-            at,
-            c"".as_ptr(),
-            libc::AT_EMPTY_PATH | libc::AT_STATX_DONT_SYNC,
-            libc::STATX_SUBVOL,
-            buf.as_mut_ptr(),
-        )
-    };
-    if rc != 0 {
-        return None;
-    }
-    // SAFETY: statx succeeded, so it filled the struct.
-    let stx = unsafe { buf.assume_init() };
+    // The empty name with AT_EMPTY_PATH reads `dir` itself.
+    let flags = libc::AT_EMPTY_PATH | libc::AT_STATX_DONT_SYNC;
+    let stx = statx_with(Some(dir), c"", libc::STATX_SUBVOL, flags).ok()?;
     (stx.stx_mask & libc::STATX_SUBVOL != 0).then_some(stx.stx_subvol)
 }
 

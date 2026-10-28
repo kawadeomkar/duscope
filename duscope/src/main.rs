@@ -17,6 +17,13 @@ use cli::{Cli, TreemapWhen, Verb};
 use out::Output;
 use verbs::{Exit, Failure};
 
+/// The musl builds (the Linux archives and `.deb`s) allocate with mimalloc:
+/// musl's allocator serialises the walk's workers. macOS keeps the system
+/// allocator. P1-BENCH-03 measured both (bench/results/allocator.json).
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let cli = match parse() {
         Ok(cli) => cli,

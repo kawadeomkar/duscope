@@ -25,6 +25,11 @@ duscope-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# musl's allocator serialises under many workers; P1-BENCH-03 measured the gain
+# (bench/results/allocator.json).
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc.workspace = true
+
 [dev-dependencies]
 assert_cmd.workspace = true
 cargo_metadata.workspace = true

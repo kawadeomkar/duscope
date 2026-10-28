@@ -1,0 +1,7 @@
+allocated_bytes	apparent_bytes	mtime	ctime	atime	kind	path
+7340032	7340032	2035-08-20T00:00:00Z	<built>		file	<root>/Movies/holiday-2035.mov
+6291456	6291456	2034-01-02T00:00:00Z	<built>		file	<root>/Movies/wedding.mp4
+4194304	4194304	2035-01-02T00:00:00Z	<built>		file	<root>/Movies/lecture-01.mkv
+4194304	4194304	2035-01-02T00:00:00Z	<built>		file	<root>/Movies/lecture-02.mkv
+3145728	3145728	2035-01-02T00:00:00Z	<built>		file	<root>/Downloads/Xcode_16.1.xip
+1572864	1572864	2034-10-24T00:00:00Z	<built>		file	<root>/Downloads/ubuntu-24.04.1-live-server-arm64.iso

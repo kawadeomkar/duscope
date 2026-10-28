@@ -127,6 +127,73 @@ pub fn golden(name: &str, actual: &str) {
     );
 }
 
+/// `text`, a command's output, without what differs between runs, machines
+/// and releases, for a golden file: the root's path as `<root>`, the scan's
+/// times, the version, every `volumes` array (sizes and free space), and
+/// the scan's duration in a table's footer.
+///
+/// # Panics
+///
+/// When `root` is not valid UTF-8.
+pub fn normalize(text: &str, root: &Path) -> String {
+    let root = root
+        .to_str()
+        .unwrap_or_else(|| panic!("duscope-testkit: {} is not UTF-8", root.display()));
+    let mut text = text.replace(root, "<root>");
+    for (key, placeholder) in [
+        ("\"started_at\":\"", "<time>"),
+        ("\"finished_at\":\"", "<time>"),
+        ("\"name\":\"duscope\",\"version\":\"", "<version>"),
+    ] {
+        replace_values(&mut text, key, '"', placeholder);
+    }
+    let key = "\"volumes\":[";
+    let mut from = 0;
+    while let Some(at) = text[from..].find(key) {
+        let start = from + at + key.len() - 1;
+        let mut depth = 0;
+        let mut end = text.len();
+        for (i, c) in text[start..].char_indices() {
+            match c {
+                '[' | '{' => depth += 1,
+                ']' | '}' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                end = start + i + 1;
+                break;
+            }
+        }
+        text.replace_range(start..end, "[\"<volumes>\"]");
+        from = start;
+    }
+    // A table's footer: `220.6 MiB allocated · … · 0.21 s, 4 threads`.
+    if let Some(at) = text.find(" s, ")
+        && let Some(dot) = text[..at].rfind(" · ")
+    {
+        text.replace_range(dot + " · ".len()..at, "<secs>");
+    }
+    text
+}
+
+/// Replaces with `placeholder` the value after each `key` in `text`, up to
+/// the next `end`.
+///
+/// # Panics
+///
+/// When a value has no `end`.
+pub fn replace_values(text: &mut String, key: &str, end: char, placeholder: &str) {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(key) {
+        let start = from + at + key.len();
+        let len = text[start..]
+            .find(end)
+            .unwrap_or_else(|| panic!("duscope-testkit: no {end:?} after {key}"));
+        text.replace_range(start..start + len, placeholder);
+        from = start + placeholder.len();
+    }
+}
+
 /// A test's private environment. Dropping it removes its temporary
 /// directory (restoring permissions first) and releases the fixture tree.
 #[derive(Debug)]

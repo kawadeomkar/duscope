@@ -29,7 +29,8 @@ use ffi::AttrBuf;
 use crate::platform::fallback::FallbackProvider;
 use crate::platform::posix;
 use crate::{
-    Boundary, DirHandle, Entry, NameRef, Provider, ScanError, Skip, VolumeInfo, WalkOptions,
+    Boundary, DirHandle, Entry, Flush, NameRef, Provider, STREAM_CHUNK, ScanError, Skip,
+    VolumeInfo, WalkOptions,
 };
 
 thread_local! {
@@ -175,8 +176,25 @@ impl Provider for MacProvider {
         errs: &mut Vec<ScanError>,
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
+        self.read_dir_streaming(dir, opts, out, errs, later, &mut |_, _, _| {})
+    }
+
+    /// Reads the directory in bulk, turning each record into an entry as its
+    /// refill is decoded and flushing them every [`STREAM_CHUNK`].
+    fn read_dir_streaming(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+        later: &mut Vec<NameRef>,
+        flush: &mut Flush<'_>,
+    ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
         let (out_start, errs_start) = (out.len(), errs.len());
+        // The device of the first entry that is no boundary, for the clone
+        // check: the entries may have been flushed by the time it runs.
+        let mut clone_dev = None;
         #[cfg(test)]
         let (pretend, clock): (_, &dyn Clock) = (
             self.pretend,
@@ -196,8 +214,19 @@ impl Provider for MacProvider {
             let probe = (opts.threads != 1).then_some(clock);
             SINGLE.with_borrow_mut(|single| {
                 BULK.with_borrow_mut(|buf| {
-                    bulk::read(fd.as_fd(), opts, buf, probe, &mut |item| {
+                    bulk::read(fd.as_fd(), opts, buf, probe, &mut |item, settled| {
                         take(dir, fd.as_fd(), opts, single, item, out, errs);
+                        if clone_dev.is_none()
+                            && let Some(entry) = out.last().filter(|e| e.boundary == Boundary::None)
+                        {
+                            clone_dev = Some(entry.dev);
+                        }
+                        // Not before the probe can no longer switch: a switch
+                        // keeps what was decoded, which must still be here to
+                        // be told from the names left to read.
+                        if settled && out.len() + errs.len() >= STREAM_CHUNK {
+                            flush(out, errs, later);
+                        }
                     })
                 })
             })?
@@ -213,8 +242,8 @@ impl Provider for MacProvider {
                 FallbackProvider::default().read_open(fd.as_fd(), dir, opts, out, errs, later)?;
             }
             // The probed refills' entries are kept; the rest of the
-            // directory is listed by name and every worker reads it from
-            // the stat queue.
+            // directory is listed by name, handed to the walk as it is
+            // listed, and every worker reads it from the stat queue.
             Outcome::IoBound => {
                 #[cfg(test)]
                 self.switched
@@ -222,17 +251,19 @@ impl Provider for MacProvider {
                 // A record without a name is listed again below.
                 let tail = errs.split_off(errs_start);
                 errs.extend(tail.into_iter().filter(|e| !e.name.as_bytes().is_empty()));
-                let seen: HashSet<&[u8]> = out[out_start..]
+                let seen: HashSet<NameRef> = out[out_start..]
                     .iter()
-                    .map(|e| e.name.as_bytes())
-                    .chain(errs[errs_start..].iter().map(|e| e.name.as_bytes()))
+                    .map(|e| e.name.clone())
+                    .chain(errs[errs_start..].iter().map(|e| e.name.clone()))
                     .collect();
-                let names = posix::list_names(fd.as_fd())?;
-                later.extend(
-                    names
-                        .into_iter()
-                        .filter(|name| !seen.contains(name.as_bytes())),
-                );
+                posix::each_name(fd.as_fd(), &mut |name| {
+                    if !seen.contains(&name) {
+                        later.push(name);
+                        if later.len() >= STREAM_CHUNK {
+                            flush(out, errs, later);
+                        }
+                    }
+                })?;
             }
             // Each child is listed as an entry that cannot be read, as `du`
             // and the stat queue report them.
@@ -248,11 +279,9 @@ impl Provider for MacProvider {
         }
         if opts.clones
             && outcome != Outcome::Unsupported
-            && let Some(entry) = out[out_start..]
-                .iter()
-                .find(|e| e.boundary == Boundary::None)
+            && let Some(dev) = clone_dev
         {
-            self.check_clones(fd.as_fd(), entry.dev);
+            self.check_clones(fd.as_fd(), dev);
         }
         Ok(())
     }
@@ -329,10 +358,13 @@ impl Provider for MacProvider {
         stat::entry_of_path(path, name, opts)
     }
 
-    /// dua-cli's macOS default since 2.40.0, until the phase-1 thread sweep
-    /// (P1-BENCH-01) sets it.
+    /// The thread sweep's count (P1-BENCH-01), from bench-macos's
+    /// `bench/results/thread-sweep-macos-arm64.json` by the rule in
+    /// `bench/sweep.py`: the smallest count whose warm T1 p50 is within 5% of
+    /// the best (20, against 24's 1.29 s), rounded to the nearest of 4, 8, 16
+    /// and 32. It replaces D40's provisional 8.
     fn default_threads(&self) -> usize {
-        8
+        16
     }
 }
 

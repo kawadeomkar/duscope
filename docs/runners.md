@@ -143,7 +143,10 @@ The tools the harness needs, installed as `runner`: git, curl, tar and Python
 line tools, `xcode-select --install`), rustup with the stable toolchain
 (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 --profile minimal`) for the competitors built from source, and hyperfine 2.0.0
-(`cargo install --locked hyperfine@2.0.0`, the version `just setup` pins). The
+(`cargo install --locked hyperfine@2.0.0`, the version `just setup` pins). On
+bench-linux also `musl-tools` (`sudo apt-get install musl-tools`, done by the
+`dev` user): each night builds duscope for the musl target, the binary the Linux
+packages ship, and the job adds the target to the toolchain itself. The
 harness installs the competitors itself, under `BENCH_HOME`. After the harness,
 each bench job builds the fixture tree and fails when it takes 30 s or more
 (P0-TEST-01's budget, which shared CI runners only report): rustup installs the

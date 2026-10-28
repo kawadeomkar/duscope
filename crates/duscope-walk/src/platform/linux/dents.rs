@@ -26,11 +26,13 @@ impl DentBuf {
 }
 
 /// Appends the name of every entry of the directory open on `dir` to
-/// `names`, without `.` and `..`.
+/// `names`, without `.` and `..`, handing `names` to `drain` after each
+/// buffer, which may take some.
 pub(super) fn list(
     dir: BorrowedFd<'_>,
     buf: &mut DentBuf,
     names: &mut Vec<NameRef>,
+    drain: &mut dyn FnMut(&mut Vec<NameRef>),
 ) -> io::Result<()> {
     loop {
         let len = buf.0.len() * 8;
@@ -56,6 +58,7 @@ pub(super) fn list(
         }
         let read = usize::try_from(read).map_err(|_| io::ErrorKind::InvalidData)?;
         parse(&buf.bytes()[..read.min(len)], names)?;
+        drain(names);
     }
 }
 

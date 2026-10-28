@@ -25,7 +25,7 @@ Options:
 
 Scan:
       --threads <N>
-          Worker threads (default: the platform's choice)
+          Worker threads (default: the platform's, from its thread sweep)
           
           [env: DUSCOPE_THREADS=]
 

@@ -8,7 +8,6 @@ size_budget := "8000000"
 
 # Developer tools installed by `just setup`, mirrored in CONTRIBUTING.md.
 cargo_deny_version := "0.20.2"
-cargo_insta_version := "1.49.0"
 cargo_fuzz_version := "0.13.2"
 cargo_llvm_cov_version := "0.9.1"
 cargo_deb_version := "3.8.0"
@@ -47,7 +46,6 @@ setup:
       rustup run stable cargo install --locked "${@:3}"
     }
     install cargo-deny {{cargo_deny_version}} cargo-deny@{{cargo_deny_version}}
-    install cargo-insta {{cargo_insta_version}} cargo-insta@{{cargo_insta_version}}
     install cargo-fuzz {{cargo_fuzz_version}} cargo-fuzz@{{cargo_fuzz_version}}
     install cargo-llvm-cov {{cargo_llvm_cov_version}} cargo-llvm-cov@{{cargo_llvm_cov_version}}
     install cargo-deb {{cargo_deb_version}} cargo-deb@{{cargo_deb_version}}
@@ -64,7 +62,26 @@ check: fmt clippy test docs deny
 # check, plus the advisory database and the ignored platform tests (what CI runs)
 check-full: check
     just deny advisories
-    DUSCOPE_TEST_PLATFORM=1 cargo test --workspace -- --ignored
+    just platform-tests
+
+# The ignored platform tests, named here: an #[ignore]d test joins them (and CI's platform
+# job) only when it is listed. They mount filesystems, attach images and scan /, need root
+# and skip without it; CI runs each test binary under `sudo -E`. Built in release for the
+# scan of /. The system-tree du parity and the RSS budget run in nightly-bench.yml.
+platform-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tests=(
+      p1_walk_06_linux_mounts_are_crossed_confined_and_cycles_stopped
+      p1_walk_06_linux_mount_ids_hold_for_same_device_binds_and_reused_ids
+      p1_walk_06_macos_an_exfat_image_is_crossed_and_confined
+      platform::macos::tests::p1_walk_07_a_scan_of_slash_counts_users_once
+    )
+    cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
+    # Two of the four are built on each OS; a renamed test must not drop out unnoticed.
+    found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
+    [[ $found -eq 2 ]] || { echo "platform-tests: $found of this platform's 2 tests found; update the list" >&2; exit 1; }
+    cargo_test -- --ignored --exact "${tests[@]}"
 
 fmt:
     cargo fmt --all --check
@@ -104,12 +121,19 @@ test-crate crate:
 docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
-# Release build and the stripped binary size against the budget
-size:
+# Release build and the stripped binary size against the budget; a target (x86_64-unknown-linux-musl) builds that one
+size target="":
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --release --locked -p duscope
-    bytes=$(wc -c < target/release/duscope | tr -d ' ')
+    target={{quote(target)}}
+    if [[ -n $target ]]; then
+      cargo build --release --locked -p duscope --target "$target"
+      binary=target/$target/release/duscope
+    else
+      cargo build --release --locked -p duscope
+      binary=target/release/duscope
+    fi
+    bytes=$(wc -c < "$binary" | tr -d ' ')
     awk -v b="$bytes" -v l={{size_budget}} 'BEGIN { printf "duscope: %d bytes stripped, %.2f MB of the %.2f MB budget\n", b, b / 1e6, l / 1e6 }'
     (( bytes <= {{size_budget}} )) || { echo "size: over budget" >&2; exit 1; }
 
@@ -148,9 +172,12 @@ repro-env target_dir="target/repro":
 fixtures *args:
     cargo run --quiet --locked -p mktree -- {{args}}
 
-# Regenerate golden files after an intended output change (P1-TEST-01)
+# Regenerate this platform's golden files after an intended output change, then list what changed (duscope/tests/golden/README.md); arguments filter the tests
 golden *args:
-    @echo "golden: not yet implemented (P1-TEST-01)" >&2; exit 1
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DUSCOPE_TEST_UPDATE_GOLDEN=1 cargo test --workspace -- {{args}}
+    git status --short -- duscope/tests/golden
 
 # Run the hyperfine harness on the seeded trees (bench/README.md); no arguments: T1, du and diskus, warm
 bench *args:

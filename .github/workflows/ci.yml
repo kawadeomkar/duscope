@@ -10,10 +10,10 @@
 # is pinned to a full commit SHA with its version in a comment.
 #
 # Required checks (branch protection on main, applied from docs/github-settings.md):
-# fmt; clippy and test on the three runners; the test locale leg on the three
-# runners; msrv (pinned) and msrv (stable); deny; docs; schemas; size on macos-26
-# and ubuntu-24.04; build-time; repro; changelog. Not required: intel-mac (best
-# effort) and size-comment (it only posts the size).
+# fmt; clippy, test, platform and bench-regression on the three runners; the test
+# locale leg on the three runners; msrv (pinned) and msrv (stable); deny; docs;
+# schemas; size on macos-26 and ubuntu-24.04; build-time; repro; changelog. Not
+# required: intel-mac (best effort) and size-comment (it only posts the size).
 
 name: CI
 
@@ -52,6 +52,8 @@ env:
   RUST_BACKTRACE: "1"
   # The task runner every job uses (the justfile pins the cargo tools, not just itself).
   JUST_VERSION: "1.59.0"
+  # The benchmark runner bench-regression drives, as `just setup` pins it.
+  HYPERFINE_VERSION: "2.0.0"
   # The markdown link checker of the docs job, verified against this checksum.
   LYCHEE_VERSION: "0.24.2"
   LYCHEE_SHA256: "1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a"
@@ -160,11 +162,158 @@ jobs:
           grep -Eiq '^fr_FR\.utf-?8$' <<<"$locales" || { echo "::error::fr_FR.UTF-8 is not available on this runner"; exit 1; }
           date
           just test
+      # A golden test that failed leaves this runner's goldens, regenerated, as an
+      # artifact: the copies for an OS the author does not have at hand
+      # (duscope/tests/golden/README.md).
+      - name: Regenerate the goldens after a failure
+        if: failure() && matrix.leg == 'default'
+        run: just golden || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure() && matrix.leg == 'default'
+        with:
+          name: goldens-${{ matrix.os }}
+          path: duscope/tests/golden/
+          retention-days: 14
       # The fixture tree (P0-TEST-01) is built in this job by the tests that use it,
       # and not cached between runs: actions/cache's tar archive would restore its
       # sparse files fully allocated, its clones as copies and its compressed files
       # uncompressed, and drop its socket, so a restored tree would not be the tree
-      # its record describes. The du parity tests run here once P1-TEST-01 lands.
+      # its record describes. The du parity tests on the fixture tree run here.
+
+  platform:
+    # The tests that mount filesystems (loop devices, tmpfs, bind mounts, an exFAT
+    # image), attach disk images and scan the real / on macOS: ignored by default
+    # and run as root here (P1-TEST-01), by name, through `just platform-tests`,
+    # the recipe `just check-full` runs. The system-tree du parity and the bench
+    # trees' RSS run in nightly-bench.yml, on the bench runners, not on pull
+    # requests.
+    name: platform (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --profile minimal && rustc --version
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install exfatprogs
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q exfatprogs
+      - name: The platform tests, as root
+        run: |
+          # Built as the runner's user; each test binary runs under sudo, which
+          # mounting needs, keeping the environment the testkit reads.
+          host=$(rustc -vV | sed -n 's/^host: //p' | tr 'a-z-' 'A-Z_')
+          export "CARGO_TARGET_${host}_RUNNER=sudo -E"
+          just platform-tests
+
+  bench-regression:
+    # The harness on T1 against the last five results of this job on pushes to main
+    # (DEV-20, bench/compare.py): duscope's p50 against runs on the same machine, and
+    # its ratio to each competitor against the bench runners' nightly ratios. A
+    # regression beyond 15% fails only when a second measurement reproduces it.
+    # main keeps its result whatever the comparison says, so a slowdown merged on
+    # purpose fails pull requests only until main's own results make up most of the
+    # five (three pushes).
+    name: bench-regression (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Reading the result files earlier runs on main left as artifacts.
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --profile minimal && rustc --version
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: hyperfine@${{ env.HYPERFINE_VERSION }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build duscope
+        run: cargo build --release --locked -p duscope
+      - name: Measure T1
+        id: measure
+        run: |
+          file=$(bench/run.sh run --subject duscope --tool-path "duscope=$PWD/target/release/duscope" \
+            --trees T1 --competitors diskus --mode warm \
+            --trees-dir "$RUNNER_TEMP/trees" --tools-dir "$RUNNER_TEMP/tools" --results-dir "$RUNNER_TEMP/results")
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+      - name: Fetch the baselines
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OS: ${{ matrix.os }}
+        run: |
+          base="$RUNNER_TEMP/baselines"
+          mkdir -p "$base"
+          # This job's result files from the last five pushes to main that kept one,
+          # whatever else in those runs failed. Only pushes: a pull request from a
+          # fork's branch named main is a pull_request run, never a push to this main.
+          ids=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
+            --event push --status completed --limit 20 --json databaseId --jq '.[].databaseId')
+          found=0
+          for id in $ids; do
+            if gh run download "$id" --repo "$GITHUB_REPOSITORY" --name "bench-regression-$OS" \
+              --dir "$base/$id" 2>/dev/null; then
+              found=$((found + 1))
+              (( found < 5 )) || break
+            fi
+          done
+          echo "$found baseline result(s) from main"
+          # The bench runners' nightly results, for the ratio checks.
+          if git fetch --quiet --depth 1 origin bench-results; then
+            git worktree add --quiet "$base/nightly" FETCH_HEAD
+          else
+            echo "no bench-results branch yet"
+          fi
+      - name: Compare with main
+        env:
+          FILE: ${{ steps.measure.outputs.file }}
+        run: |
+          shopt -s nullglob
+          baselines=("$RUNNER_TEMP"/baselines/*/)
+          compare() {
+            python3 bench/compare.py "$1" "${baselines[@]}" --tree T1 --last 5 --tolerance 0.15
+          }
+          status=0
+          compare "$FILE" || status=$?
+          if (( status == 1 )); then
+            echo "::warning title=bench-regression::beyond 15% on the first measurement; measuring again"
+            again=$(bench/run.sh run --subject duscope --tool-path "duscope=$PWD/target/release/duscope" \
+              --trees T1 --competitors diskus --mode warm \
+              --trees-dir "$RUNNER_TEMP/trees" --tools-dir "$RUNNER_TEMP/tools" \
+              --out "$RUNNER_TEMP/results/again.json")
+            status=0
+            compare "$again" || status=$?
+          fi
+          exit "$status"
+      # A push to main keeps its result as a baseline for the pull requests after it,
+      # even when the comparison failed: main's speed is what later changes answer to.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.measure.outputs.file != '' }}
+        with:
+          name: bench-regression-${{ matrix.os }}
+          path: ${{ steps.measure.outputs.file }}
+          if-no-files-found: error
+          retention-days: 90
 
   msrv:
     name: msrv (${{ matrix.toolchain }})
@@ -320,11 +469,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The two binaries the budget holds (the spec's arm64 macOS and x86_64
+        # musl); the musl build also keeps the release targets linking.
         include:
           - os: macos-26
             key: macos
+            target: ""
           - os: ubuntu-24.04
             key: ubuntu
+            target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     outputs:
@@ -342,17 +495,25 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install the musl target and musl-tools
+        if: matrix.target != ''
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup target add "$TARGET"
+          sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q musl-tools
       - name: just size
         id: size
         env:
           KEY: ${{ matrix.key }}
           OS: ${{ matrix.os }}
+          TARGET: ${{ matrix.target }}
         run: |
           set +e
-          just size 2>&1 | tee "$RUNNER_TEMP/size.log"
+          just size "$TARGET" 2>&1 | tee "$RUNNER_TEMP/size.log"
           status=${PIPESTATUS[0]}
           set -e
-          host=$(rustc -vV | sed -n 's/^host: //p')
+          host=${TARGET:-$(rustc -vV | sed -n 's/^host: //p')}
           line=$(grep -m1 '^duscope: ' "$RUNNER_TEMP/size.log" || echo "no size reported")
           (( status == 0 )) || line="$line; FAILED (just size exited $status)"
           echo "$KEY=$line ($host)" >> "$GITHUB_OUTPUT"

@@ -82,7 +82,7 @@ pub struct WalkArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// Worker threads (default: the platform's choice)
+    /// Worker threads (default: the platform's, from its thread sweep)
     #[arg(long, env = "DUSCOPE_THREADS", value_parser = parse_threads, value_name = "N")]
     pub threads: Option<usize>,
 

@@ -1082,3 +1082,247 @@ fn p1_walk_06_a_handle_walks_back_to_the_root() {
         (1, Some(0))
     );
 }
+
+/// Reads like a provider of a wide directory that streams: the first `keep`
+/// children as entries, flushed every 7, the rest as names left for later,
+/// flushed every 1,500 (not a multiple of a stat batch). With `fail`, the
+/// read of `wide` ends with that error after flushing; with `cancel`, the
+/// flag is set once its first flush has returned.
+struct Streaming<'a> {
+    inner: &'a MemProvider,
+    keep: usize,
+    fail: Option<i32>,
+    cancel: Option<&'a AtomicBool>,
+}
+
+impl Provider for Streaming<'_> {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn read_dir_streaming(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+        later: &mut Vec<NameRef>,
+        flush: &mut Flush<'_>,
+    ) -> io::Result<()> {
+        let mut all = Vec::new();
+        self.inner.read_dir(dir, opts, &mut all, errs)?;
+        let mut flush =
+            |out: &mut Vec<Entry>, errs: &mut Vec<ScanError>, later: &mut Vec<NameRef>| {
+                flush(out, errs, later);
+                if let Some(cancel) = self.cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            };
+        for (i, entry) in all.into_iter().enumerate() {
+            if i < self.keep {
+                out.push(entry);
+                if out.len() == 7 {
+                    flush(out, errs, later);
+                }
+            } else {
+                later.push(entry.name);
+                if later.len() == 1_500 {
+                    flush(out, errs, later);
+                }
+            }
+        }
+        match self.fail {
+            Some(errno) if dir.path().ends_with("wide") => Err(io::Error::from_raw_os_error(errno)),
+            _ => Ok(()),
+        }
+    }
+
+    fn stat_names(
+        &self,
+        dir: &DirHandle,
+        names: &[NameRef],
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        let wanted: HashSet<&NameRef> = names.iter().collect();
+        let mut all = Vec::new();
+        self.inner.read_dir(dir, opts, &mut all, errs)?;
+        out.extend(all.into_iter().filter(|entry| wanted.contains(&entry.name)));
+        Ok(())
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+}
+
+#[test]
+fn p1_test_01_a_streamed_directory_arrives_whole_and_closes_last() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..20_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    for i in 0..3 {
+        tree.file(format!("wide/sub{i}/inside"), 1);
+    }
+    for keep in [0, 100, 30_000] {
+        let provider = Streaming {
+            inner: &tree,
+            keep,
+            fail: None,
+            cancel: None,
+        };
+        let opts = WalkOptions {
+            threads: 4,
+            ..WalkOptions::default()
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+        let summary = result.unwrap();
+        // replay checks that every entry follows its parent and precedes
+        // the parent's close, and that each directory closes once.
+        let (paths, _) = replay(tree.root_path(), &events);
+        assert_eq!(
+            sorted(paths.iter().map(PathBuf::as_path)),
+            sorted(tree.paths()),
+            "keep {keep}"
+        );
+        assert_eq!(summary.entries, tree.entry_count() as u64, "keep {keep}");
+    }
+}
+
+#[test]
+fn p1_test_01_a_read_failing_after_a_flush_closes_with_its_errno() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..5_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    // With names left for later, the last stat job closes the directory;
+    // without, the read's own last batch does.
+    for keep in [20, 3_000, 30_000] {
+        let provider = Streaming {
+            inner: &tree,
+            keep,
+            fail: Some(libc::EACCES),
+            cancel: None,
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+        result.unwrap();
+        let (_, dirs) = replay(tree.root_path(), &events);
+        let wide = id_of(&dirs, "/mem/wide");
+        let closed = events.iter().find_map(|e| match e {
+            ScanEvent::DirClosed { dir, errno } if *dir == wide => Some(*errno),
+            _ => None,
+        });
+        assert_eq!(closed, Some(Some(libc::EACCES)), "keep {keep}");
+    }
+}
+
+#[test]
+fn p1_test_01_names_up_to_22_bytes_are_held_in_place() {
+    assert_eq!(std::mem::size_of::<NameRef>(), 24);
+    let short = NameRef::from("f0131638");
+    let edge = NameRef::from("exactly-twenty-two-byt");
+    let long = NameRef::from("a-name-longer-than-twenty-two-bytes");
+    assert_eq!(edge.as_bytes().len(), 22);
+    for name in [&short, &edge, &long] {
+        assert_eq!(NameRef::new(name.as_bytes()), *name);
+    }
+    // Order, equality and hashing are by bytes, whichever way a name is
+    // held.
+    let mut names = vec![long.clone(), short.clone(), edge.clone()];
+    names.sort();
+    assert_eq!(names, [long.clone(), edge.clone(), short.clone()]);
+    let set: HashSet<NameRef> = [short.clone(), NameRef::new(b"f0131638")].into();
+    assert_eq!(set.len(), 1);
+    assert_eq!(
+        format!("{long:?}"),
+        "\"a-name-longer-than-twenty-two-bytes\""
+    );
+}
+
+#[test]
+fn p1_test_01_a_directory_vanishing_after_a_flush_is_reported() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..5_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    // With names left for later (keep 20) the last stat job closes the
+    // directory; without (keep 30,000) the read's own last batch does.
+    for keep in [20, 30_000] {
+        let provider = Streaming {
+            inner: &tree,
+            keep,
+            fail: Some(libc::ENOENT),
+            cancel: None,
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+        let summary = result.unwrap();
+        let (_, dirs) = replay(tree.root_path(), &events);
+        let wide = id_of(&dirs, "/mem/wide");
+        let vanished = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Vanished { dir, name: None } if *dir == wide))
+            .count();
+        assert_eq!((vanished, summary.vanished), (1, 1), "keep {keep}");
+    }
+}
+
+#[test]
+fn p1_test_01_a_cancel_during_a_streamed_read_ends_the_walk() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..5_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    // The first flush sends stat jobs (keep 0: one batch of the 1,500 names
+    // it carries, which a worker may still read) or 7 entries (keep 100).
+    for (keep, most) in [(0, STAT_BATCH), (100, 7)] {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let provider = Streaming {
+            inner: &tree,
+            keep,
+            fail: None,
+            cancel: Some(&cancel),
+        };
+        let opts = WalkOptions {
+            threads: 4,
+            cancel: Arc::clone(&cancel),
+            ..WalkOptions::default()
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+        assert!(
+            matches!(result, Err(WalkError::Cancelled)),
+            "keep {keep}: {result:?}"
+        );
+        // Nothing after the first flush is sent, and the directory never
+        // closes: the walk is ending.
+        let wide = events
+            .iter()
+            .find_map(|e| match e {
+                ScanEvent::Entry(entry) if entry.name.as_bytes() == b"wide" => entry.dir,
+                _ => None,
+            })
+            .expect("wide is listed with the root");
+        let inside = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Entry(entry) if entry.parent == wide))
+            .count();
+        assert!(inside <= most, "keep {keep}: {inside} entries of wide");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ScanEvent::DirClosed { dir, .. } if *dir == wide)),
+            "keep {keep}: wide closed after the cancel"
+        );
+    }
+}

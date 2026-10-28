@@ -392,8 +392,10 @@ fn p0_bench_02_nightly_runs_at_03_17_pacific_on_main_only() {
         );
         let script = bench.step_script("Run the harness");
         assert!(
-            script.contains("bench/run.sh run --subject du "),
-            "{label} runs the harness with du as the subject"
+            script.contains(
+                "bench/run.sh run --subject duscope --tool-path \"duscope=$DUSCOPE_BIN\""
+            ),
+            "{label} runs the harness with duscope, built from the checkout, as the subject"
         );
         if *platform == "macos" {
             assert!(

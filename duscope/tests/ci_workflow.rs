@@ -31,6 +31,12 @@ const REQUIRED_CHECKS: &[&str] = &[
     "test (macos-26, locale)",
     "test (ubuntu-24.04, locale)",
     "test (ubuntu-24.04-arm, locale)",
+    "platform (macos-26)",
+    "platform (ubuntu-24.04)",
+    "platform (ubuntu-24.04-arm)",
+    "bench-regression (macos-26)",
+    "bench-regression (ubuntu-24.04)",
+    "bench-regression (ubuntu-24.04-arm)",
     "msrv (pinned)",
     "msrv (stable)",
     "deny",
@@ -64,6 +70,7 @@ const RECIPES: &[(&str, &str)] = &[
     ("docs", "docs"),
     ("size", "size"),
     ("repro", "repro"),
+    ("platform", "platform-tests"),
 ];
 
 fn read(relative: &str) -> String {
@@ -502,4 +509,51 @@ fn p0_ci_01_settings_todos_carry_their_command_or_owner() {
         );
     }
     assert!(items > 0, "no checklist items in {SETTINGS}");
+}
+
+#[test]
+fn p1_test_01_the_platform_job_runs_the_ignored_tests_as_root() {
+    let jobs = jobs(&read(WORKFLOW));
+    let job = |id: &str| {
+        jobs.iter()
+            .find(|j| j.id == id)
+            .unwrap_or_else(|| panic!("ci.yml has no `{id}` job"))
+            .lines
+            .join("\n")
+    };
+    // The platform tests skip quietly unless asked for and run as root, so
+    // the job is only worth something with all three: the recipe asks for
+    // them by name, and the job runs each test binary under sudo.
+    let platform = job("platform");
+    assert!(
+        platform.contains("_RUNNER=sudo -E"),
+        "the platform job does not run the tests under sudo"
+    );
+    let justfile = read("justfile");
+    let recipe: Vec<&str> = justfile
+        .lines()
+        .skip_while(|line| !line.starts_with("platform-tests:"))
+        .skip(1)
+        .take_while(|line| line.starts_with(' '))
+        .collect();
+    let recipe = recipe.join("\n");
+    for needed in ["DUSCOPE_TEST_PLATFORM=1", "--release", "--ignored --exact"] {
+        assert!(
+            recipe.contains(needed),
+            "just platform-tests lacks {needed:?}"
+        );
+    }
+    // Baselines come from pushes to main only, and main keeps its result
+    // whatever the comparison says.
+    let bench = job("bench-regression");
+    assert!(
+        bench.contains("--event push"),
+        "bench-regression takes pull requests' results"
+    );
+    assert!(
+        bench.contains(
+            "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        ),
+        "bench-regression drops main's result when the comparison fails"
+    );
 }

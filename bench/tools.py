@@ -87,6 +87,11 @@ PINS: Dict[str, Tool] = {
         "du", None, ("du", "-sk", "{tree}"), system="/usr/bin/du",
         version_args=("--version",),
     ),
+    # The subject from phase 1: built from the checkout, never installed.
+    "duscope": Tool(
+        "duscope", None, ("duscope", "scan", "--json", "--treemap", "never", "{tree}"),
+        skip="built from this checkout: pass --tool-path duscope=target/release/duscope",
+    ),
     "diskus": Tool(
         "diskus", "0.9.0", ("diskus", "{tree}"),
         releases=_tarballs("sharkdp/diskus", "v0.9.0", "diskus-v0.9.0", "diskus", {
@@ -166,7 +171,7 @@ PINS: Dict[str, Tool] = {
     ),
 }
 
-COMPETITORS = tuple(name for name in PINS if name != "du")
+COMPETITORS = tuple(name for name in PINS if name not in ("du", "duscope"))
 
 
 def platform_key() -> str:

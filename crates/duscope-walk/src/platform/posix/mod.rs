@@ -219,12 +219,23 @@ pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
     Ok(unsafe { stat.assume_init() })
 }
 
-/// The names in the directory open on `dir`, without `.` and `..`, read
-/// with `readdir` through a duplicate of the descriptor, so the listing is
-/// of the directory the descriptor holds, not of whatever its path names
-/// by now. The listing starts from the beginning, wherever an earlier read
-/// of the descriptor left off.
+/// The names in the directory open on `dir`, without `.` and `..`; see
+/// [`each_name`].
 pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>> {
+    let mut names = Vec::new();
+    each_name(dir, &mut |name| names.push(name))?;
+    Ok(names)
+}
+
+/// Calls `each` with the name of every entry in the directory open on
+/// `dir`, without `.` and `..`, read with `readdir` through a duplicate of
+/// the descriptor, so the listing is of the directory the descriptor holds,
+/// not of whatever its path names by now. The listing starts from the
+/// beginning, wherever an earlier read of the descriptor left off.
+pub(crate) fn each_name(
+    dir: BorrowedFd<'_>,
+    each: &mut dyn FnMut(crate::NameRef),
+) -> io::Result<()> {
     // SAFETY: `dir` is open for the borrow; F_DUPFD_CLOEXEC returns a new
     // descriptor or -1. The duplicate waits for a free descriptor as an
     // open does.
@@ -242,7 +253,6 @@ pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>>
     // SAFETY: `stream` is live; the duplicate shares the descriptor's
     // offset, which a bulk read may have moved.
     unsafe { libc::rewinddir(stream) };
-    let mut names = Vec::new();
     let result = loop {
         set_errno(0);
         // SAFETY: `stream` is a live directory stream until closedir below.
@@ -259,12 +269,12 @@ pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>>
         // NUL-terminated and lives until the next readdir call.
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if name != b"." && name != b".." {
-            names.push(crate::NameRef::new(name));
+            each(crate::NameRef::new(name));
         }
     };
     // SAFETY: `stream` came from fdopendir and is closed once.
     unsafe { libc::closedir(stream) };
-    result.map(|()| names)
+    result
 }
 
 /// Sets the calling thread's `errno`.
