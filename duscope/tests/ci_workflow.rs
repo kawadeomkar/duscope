@@ -21,8 +21,8 @@ const JOB_BUDGET_MINUTES: u32 = 20;
 
 /// The required checks as branch protection names them: the job name with its
 /// matrix values, as in the PUT of docs/github-settings.md. Every check a pull
-/// request runs is required: each job of ci.yml, then the jobs of release.yml
-/// that are not [`TAG_ONLY_JOBS`].
+/// request runs is required but the [`OPTIONAL_JOBS`]: each other job of
+/// ci.yml, then the jobs of release.yml that are not [`TAG_ONLY_JOBS`].
 const REQUIRED_CHECKS: &[&str] = &[
     "fmt",
     "clippy (macos-26)",
@@ -50,7 +50,6 @@ const REQUIRED_CHECKS: &[&str] = &[
     "build-time",
     "repro",
     "changelog",
-    "intel-mac",
     "size-comment",
     "verify-tag",
     "plan",
@@ -62,6 +61,10 @@ const REQUIRED_CHECKS: &[&str] = &[
     "deb-install (ubuntu:22.04, amd64)",
     "deb-install (ubuntu:22.04, arm64)",
 ];
+
+/// Jobs of ci.yml that run on every pull request but do not gate a merge:
+/// intel-mac builds on GitHub's best-effort Intel macOS runner.
+const OPTIONAL_JOBS: &[&str] = &["intel-mac"];
 
 /// The jobs of release.yml that run only for a tag: pull requests report them
 /// skipped, so they are not required.
@@ -313,6 +316,9 @@ fn p0_ci_01_spec_jobs_exist() {
             "neither ci.yml nor release.yml has a `{id}` job"
         );
     }
+    for id in OPTIONAL_JOBS {
+        assert!(ci.contains(*id), "ci.yml has no `{id}` job: {ci:?}");
+    }
     for id in TAG_ONLY_JOBS {
         assert!(
             release.contains(*id),
@@ -322,11 +328,14 @@ fn p0_ci_01_spec_jobs_exist() {
     let unclassified: Vec<&String> = ci
         .iter()
         .chain(&release)
-        .filter(|id| !required.contains(id.as_str()) && !TAG_ONLY_JOBS.contains(&id.as_str()))
+        .filter(|id| {
+            let id = id.as_str();
+            !required.contains(id) && !OPTIONAL_JOBS.contains(&id) && !TAG_ONLY_JOBS.contains(&id)
+        })
         .collect();
     assert!(
         unclassified.is_empty(),
-        "jobs neither required (docs/github-settings.md) nor tag-only: {unclassified:?}"
+        "jobs neither required (docs/github-settings.md), optional nor tag-only: {unclassified:?}"
     );
 }
 
@@ -499,11 +508,12 @@ fn p0_ci_01_settings_require_exactly_the_required_checks() {
     );
 
     // The names the jobs a pull request runs report, from each job's `name:`
-    // and matrix, are exactly the required checks: every job of ci.yml, and
-    // release.yml's but the tag-only ones.
+    // and matrix, are exactly the required checks: ci.yml's jobs but the
+    // optional ones, and release.yml's but the tag-only ones.
     let release = jobs(&read(RELEASE_WORKFLOW));
     let reported: BTreeSet<String> = jobs(&read(WORKFLOW))
         .iter()
+        .filter(|job| !OPTIONAL_JOBS.contains(&job.id.as_str()))
         .chain(
             release
                 .iter()

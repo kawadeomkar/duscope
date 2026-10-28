@@ -17,8 +17,8 @@ under [Auditing](#auditing) read it again.
 - [x] Linear history is required.
 - [x] Force pushes and deletion of `main` are blocked.
 - [x] Required status checks, with "Require branches to be up to date before
-  merging" (`strict`). Every check a pull request runs is required, so nothing
-  merges until all of them pass. The checks are every job of
+  merging" (`strict`). Every check a pull request runs is required but one, so
+  nothing merges until they all pass. The checks are the jobs of
   [ci.yml](../.github/workflows/ci.yml):
   - `fmt`
   - `clippy` on the three runners
@@ -32,7 +32,6 @@ under [Auditing](#auditing) read it again.
   - `build-time`
   - `repro`
   - `changelog`
-  - `intel-mac`
 
   and the jobs of [release.yml](../.github/workflows/release.yml) that run on
   pull requests:
@@ -42,16 +41,18 @@ under [Auditing](#auditing) read it again.
 
   release.yml's other jobs (`build-local-artifacts`, `build-global-artifacts`,
   `host`, `publish-crates`, `homebrew` and `announce`) run only for a tag, and
-  pull requests report them skipped. `intel-mac` builds on GitHub's best-effort
-  Intel macOS runner: while that runner is unavailable, pull requests wait for
-  it. This PUT replaces the whole protection of `main`, so it restates the
-  settings above unchanged. `app_id` 15368 is GitHub Actions, so only a workflow
-  run can report these checks.
+  pull requests report them skipped. `intel-mac` runs on every pull request but
+  is not required: it builds on GitHub's best-effort Intel macOS runner, which
+  would otherwise hold up every merge while it is unavailable, and once GitHub
+  retires it. release.yml builds the x86_64 macOS archive again for a tag, so a
+  broken Intel build still stops a release. This PUT replaces the whole
+  protection of `main`, so it restates the settings above unchanged. `app_id`
+  15368 is GitHub Actions, so only a workflow run can report these checks.
 
   Applied with 20 checks, `schemas` included, on 2026-10-25. On 2026-10-27
   `intel-mac`, `size-comment`, `plan` and `verify-tag` were added, and, once
-  phase 1 had merged, `platform`, `bench-regression` and the `.deb` jobs: the 37
-  checks below.
+  phase 1 had merged, `platform`, `bench-regression` and the `.deb` jobs. On
+  2026-10-28 `intel-mac` was made optional again, leaving the 36 checks below.
 
   ```sh
   gh api -X PUT repos/kawadeomkar/duscope/branches/main/protection --input - <<'EOF'
@@ -85,7 +86,6 @@ under [Auditing](#auditing) read it again.
         { "context": "build-time", "app_id": 15368 },
         { "context": "repro", "app_id": 15368 },
         { "context": "changelog", "app_id": 15368 },
-        { "context": "intel-mac", "app_id": 15368 },
         { "context": "size-comment", "app_id": 15368 },
         { "context": "verify-tag", "app_id": 15368 },
         { "context": "plan", "app_id": 15368 },
@@ -227,7 +227,8 @@ the check names. Update the PUT above in the same pull request:
 job a pull request runs reports from its `name:` and matrix (its id, for a job
 with neither), and fails unless they are exactly the checks in the PUT. A new
 release.yml job that runs only for a tag goes on the test's tag-only list
-instead. When the author runs the PUT depends on the change:
+instead, and a ci.yml job that should not gate a merge on its optional list.
+When the author runs the PUT depends on the change:
 
 - A check is added: after the merge. Until then branch protection does not wait
   for the new check.
