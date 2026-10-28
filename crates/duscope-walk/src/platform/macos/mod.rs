@@ -358,10 +358,13 @@ impl Provider for MacProvider {
         stat::entry_of_path(path, name, opts)
     }
 
-    /// dua-cli's macOS default since 2.40.0, until the phase-1 thread sweep
-    /// (P1-BENCH-01) sets it.
+    /// The thread sweep's count (P1-BENCH-01), from bench-macos's
+    /// `bench/results/thread-sweep-macos-arm64.json` by the rule in
+    /// `bench/sweep.py`: the smallest count whose warm T1 p50 is within 5% of
+    /// the best (20, against 24's 1.29 s), rounded to the nearest of 4, 8, 16
+    /// and 32. It replaces D40's provisional 8.
     fn default_threads(&self) -> usize {
-        8
+        16
     }
 }
 

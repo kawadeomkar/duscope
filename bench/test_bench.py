@@ -18,6 +18,7 @@ from unittest import mock
 
 import harness
 import measure
+import sweep
 import tools
 import trees
 
@@ -268,6 +269,29 @@ class Harness(unittest.TestCase):
         self.assertIsInstance(facts["logical_cpus"], int)
         self.assertTrue(re.match(r"^(Darwin|Linux) ", str(facts["kernel"])))
         self.assertIn(harness.platform_name(), ("macos", "linux"))
+
+
+
+class Sweep(unittest.TestCase):
+    @staticmethod
+    def rows(p50s, tree="T1", mode="warm"):
+        return [{"tree": tree, "mode": mode, "threads": n, "p50_s": p50} for n, p50 in p50s.items()]
+
+    def test_p1_bench_01_the_rule_takes_the_smallest_count_near_the_best(self):
+        # Best 0.39 s at 16; 4 is within 5% (0.4 <= 0.4095), and is a target.
+        rows = self.rows({1: 1.0, 2: 0.6, 4: 0.4, 6: 0.41, 8: 0.405, 16: 0.39})
+        self.assertEqual(sweep.default_threads(rows), 4)
+        # Rows of other trees and modes do not count.
+        rows += self.rows({1: 0.1}, tree="T3") + self.rows({1: 0.1}, mode="cold")
+        self.assertEqual(sweep.default_threads(rows), 4)
+
+    def test_p1_bench_01_the_count_rounds_to_4_8_16_or_32(self):
+        def chosen(smallest):
+            return sweep.default_threads(self.rows({smallest: 1.0, 64: 1.0}))
+        self.assertEqual([chosen(n) for n in (1, 5, 6, 7, 12, 13, 24, 25, 48)], [4, 4, 4, 8, 8, 16, 16, 32, 32])
+
+    def test_p1_bench_01_no_warm_t1_rows_give_no_default(self):
+        self.assertIsNone(sweep.default_threads(self.rows({4: 1.0}, mode="cold")))
 
 
 if __name__ == "__main__":

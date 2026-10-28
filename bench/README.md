@@ -33,6 +33,7 @@ for release binaries, and rustup with the stable toolchain for the competitors b
 | `verify` | walk built trees and compare them with their stamps |
 | `tools` | list the pinned tools and how each installs on each platform |
 | `show FILE` | print a result file as a table |
+| `sweep` | measure duscope at each thread count and apply the defaults rule ([The thread sweep](#the-thread-sweep)) |
 
 Options of `run` (most also apply to `build`, `install` and `verify`):
 
@@ -288,6 +289,29 @@ the committed driver (`walker_rerun`, +0.1%), and the decision:
 - **Clone attributes.** They add 0.7% to the warm T1 scan, so `--clones` stays on by default.
 - **`PRIVATESIZE`.** It adds 36%, so it is not read: it leaves `FullAttrs`.
 
+## The thread sweep
+
+`bench/run.sh sweep --duscope target/release/duscope` measures duscope alone at each thread count
+(1 to 8, then 10, 12, 16, 20, 24, 32, 48 and 64; `--threads` takes another list) on each tree,
+warm and cold by default, five runs each, and writes
+`bench/results/thread-sweep-<platform>-<arch>.json`: the usual header, one row per tree, mode and
+thread count (the result file's row fields plus `threads`), and `default`. On scaled trees
+(`--scale` below 1) it is a smoke run: the file is `thread-sweep-<platform>-<arch>-x<scale>.json`
+and `default` is null.
+
+The default is set by a fixed rule (P1-BENCH-01): among the warm T1 rows, the smallest thread
+count whose p50 is within 5% of the best p50, rounded to the nearest of 4, 8, 16 and 32, ties to
+the smaller. The bench runners run the sweep on a dispatch of `nightly-bench.yml` with `sweep`
+ticked, in place of the harness (so the day's nightly result stays as it was), which leaves each
+runner's file as a `thread-sweep-<platform>` artifact. A full dispatch (three trees, warm and
+cold, a cache drop before every cold run) may not fit the job's 300 minutes on bench-linux:
+dispatch one tree at a time with `trees`, T1 first, since the rule reads only its warm rows.
+Above 8 the sweep samples counts rather than taking every one; the rule rounds to 4, 8, 16 or 32,
+so the gaps would not change its answer. The author
+commits the files, each platform provider's `default_threads` takes the rule's count and cites
+the file, and `duscope/tests/thread_sweep.rs` fails when a committed file and the default
+disagree. `--threads` and `DUSCOPE_THREADS` still override.
+
 ## Files
 
 | File | Purpose |
@@ -303,4 +327,5 @@ the committed driver (`walker_rerun`, +0.1%), and the decision:
 | `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |
 | `testdata/` | a real hyperfine 2.0.0 export and the hyperfine stand-in the tests use |
 | `gab_bench.c` | the per-entry cost of `getattrlistbulk` attribute sets on macOS |
+| `sweep.py` | the thread sweep and the rule that sets a platform's default thread count |
 | `results/clone-attributes-macos.json` | P1-BENCH-02's measurement and the `--clones` and `PRIVATESIZE` decisions |
