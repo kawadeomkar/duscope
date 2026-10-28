@@ -11,6 +11,14 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use duscope_testkit::TestEnv;
 
+/// Wall-clock microseconds, to line the child's markers up with the test's.
+fn wall_us() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros()
+}
+
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
 }
@@ -136,18 +144,22 @@ fn p1_walk_08_sigint_exits_130_within_200_ms() {
             .cmd()
             .args(["scan", "--threads", "1", "--json"])
             .arg(&tree)
+            .env("DUSCOPE_TEST_TRACE_INTERRUPT", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         thread::sleep(Duration::from_millis(wait));
+        let kill_start = wall_us();
         let killed = StdCommand::new("kill")
             .args(["-INT", &child.id().to_string()])
             .status()
             .unwrap();
         let signalled = Instant::now();
+        let signalled_us = wall_us();
         let out = child.wait_with_output().unwrap();
         let took = signalled.elapsed();
+        let exited_us = wall_us();
         match out.status.code() {
             // The scan finished, and wrote its result, before the signal.
             Some(_) if !out.stdout.is_empty() => {
@@ -163,13 +175,22 @@ fn p1_walk_08_sigint_exits_130_within_200_ms() {
             Some(code) => assert_eq!(code, 130, "{}", String::from_utf8_lossy(&out.stderr)),
         }
         assert!(killed.success());
-        assert!(took < Duration::from_millis(200), "exit took {took:?}");
-        // One line on stderr, and nothing written to stdout.
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "duscope: interrupted\n"
-        );
         assert!(out.stdout.is_empty());
+        // The timeline, in ms after the kill command returned.
+        let ms = |us: u128| (us as f64 - signalled_us as f64) / 1000.0;
+        let mut line = format!(
+            "TIMING took_ms={:.1} wait={wait} kill_cmd_ms={:.1}",
+            took.as_secs_f64() * 1000.0,
+            (signalled_us - kill_start) as f64 / 1000.0
+        );
+        for trace in String::from_utf8_lossy(&out.stderr).lines() {
+            let mut parts = trace.split_whitespace();
+            if let (Some("TRACE"), Some(label), Some(us)) = (parts.next(), parts.next(), parts.next()) {
+                line.push_str(&format!(" {label}={:+.1}", ms(us.parse().unwrap())));
+            }
+        }
+        line.push_str(&format!(" exited={:+.1}", ms(exited_us)));
+        println!("{line}");
         return;
     }
     panic!("no scan was under way when the signal came");

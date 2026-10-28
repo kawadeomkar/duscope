@@ -286,7 +286,9 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             push_error = Some(e);
         }
     });
+    trace("walk-returned");
     drop(interrupts);
+    trace("interrupts-dropped");
     let summary = walked.map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
         return Err(Failure::new(Exit::Runtime, "io_error", e.to_string()));
@@ -527,9 +529,12 @@ impl Interrupts {
                 .name("interrupt".to_owned())
                 .spawn(move || {
                     if duscope_walk::wait_for_interrupt() {
+                        trace("watcher-woke");
                         thread::sleep(INTERRUPT_GRACE);
+                        trace("grace-over");
                         if !walk_over.load(Ordering::SeqCst) {
                             report_interrupt();
+                            trace("forced-exit");
                             std::process::exit(i32::from(Exit::Interrupted.code()));
                         }
                     }
@@ -553,6 +558,17 @@ impl Drop for Interrupts {
             self.over.store(true, Ordering::SeqCst);
             duscope_walk::stand_down_interrupt();
         }
+    }
+}
+
+/// Throwaway instrumentation: with `DUSCOPE_TEST_TRACE_INTERRUPT` set, a
+/// marker and the wall-clock time in microseconds on stderr.
+pub fn trace(label: &str) {
+    if std::env::var_os("DUSCOPE_TEST_TRACE_INTERRUPT").is_some() {
+        let us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros());
+        let _ = io::Write::write_all(&mut io::stderr(), format!("TRACE {label} {us}\n").as_bytes());
     }
 }
 

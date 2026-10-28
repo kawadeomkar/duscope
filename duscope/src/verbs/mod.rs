@@ -6,7 +6,7 @@ mod query;
 mod scan;
 mod treemap;
 
-pub use scan::report_interrupt;
+pub use scan::{report_interrupt, trace};
 
 use std::fmt;
 

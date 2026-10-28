@@ -47,6 +47,7 @@ fn main() -> ExitCode {
         // Ctrl-C is the user's own doing: one line on stderr, no envelope.
         Err(failure) if failure.exit == Exit::Interrupted => {
             verbs::report_interrupt();
+            verbs::trace("main-return");
             ExitCode::from(failure.exit.code())
         }
         Err(failure) => {
