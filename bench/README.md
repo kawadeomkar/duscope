@@ -11,7 +11,11 @@ is one of the competitors. Without `--subject`, the subject is `du`.
 
 ```sh
 just bench                      # T1, du against diskus, warm caches, 10 runs each
-just bench --trees all --competitors all --mode both    # the nightly matrix
+cargo build --release -p duscope
+just bench --subject duscope --tool-path duscope=target/release/duscope   # duscope against diskus
+just bench --subject duscope --tool-path duscope=target/release/duscope --trees all --competitors all --mode both
+                                # the nightly matrix
+bench/run.sh sweep --duscope target/release/duscope    # the thread sweep
 bench/run.sh show bench/results/2026-10-23-macos.json   # a result file as a table
 ```
 
@@ -311,6 +315,17 @@ so the gaps would not change its answer. The author
 commits the files, each platform provider's `default_threads` takes the rule's count and cites
 the file, and `duscope/tests/thread_sweep.rs` fails when a committed file and the default
 disagree. `--threads` and `DUSCOPE_THREADS` still override.
+
+## The allocator
+
+P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
+alternating runs each, and kept mimalloc where it gains at least 2% (musl) or 10% (macOS);
+`results/allocator.json` holds the runs. On the musl build (aarch64, a Debian 12 container on
+an Apple M5 Pro) mimalloc took the p50 from 3.04 s to 0.41 s, 86.6% faster, so the Linux
+archives and `.deb`s allocate with it, built with arena eager commit and transparent huge pages
+off (`.cargo/config.toml`), which keeps a scan's peak with `--attrs full` at 120–135 bytes per
+entry on T1–T3, within the RSS budget, where mimalloc's defaults reached 168–244. On macOS
+(arm64, APFS) it gained 1.7% (4.16 s to 4.09 s), so macOS keeps the system allocator.
 
 ## Files
 
