@@ -3,13 +3,11 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # Stripped release binary budget in bytes: the larger of the two release targets
-# CI holds to it, measured at phase 1 plus 10% (P1-REL-01). arm64 macOS was
-# 3,566,208 bytes. x86_64 musl is estimated at 4.70 MB: aarch64 musl measured
-# 3,815,584 bytes (mimalloc included), scaled by 1.233, x86_64 over arm64 in the
-# size job's run 40352275456 (4,354,928 and 3,533,056 bytes); plus 10% is 5.17 MB,
-# so 5.2 MB until the size job's x86_64 musl figure replaces the estimate. The
+# CI holds to it, measured at phase 1 plus 10% (P1-REL-01). The size job's run
+# 40636394745 on main measured x86_64 musl at 4,770,544 bytes (mimalloc
+# included) and arm64 macOS at 3,665,520; plus 10% is 5,247,598, so 5.25 MB. The
 # spec's ceiling stays 8 MB.
-size_budget := "5200000"
+size_budget := "5250000"
 
 # Developer tools installed by `just setup`, mirrored in CONTRIBUTING.md.
 cargo_deny_version := "0.20.2"
