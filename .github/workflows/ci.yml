@@ -57,9 +57,11 @@ env:
   # The markdown link checker of the docs job, verified against this checksum.
   LYCHEE_VERSION: "0.24.2"
   LYCHEE_SHA256: "1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a"
-  # Cold release build budget in seconds; tightened after phase 1 to the measured
-  # value plus 10% (the size budget lives in the justfile as size_budget).
-  BUILD_TIME_BUDGET_SECS: "90"
+  # Cold release build budget in seconds: the phase-1 code measured plus 10%
+  # (P1-REL-01), under the spec's 90 s ceiling. This job measured 56.6 s on the
+  # P1-CLI-04 branch (run 40352275456); plus 10% is 62.26 s, rounded up to 63 s.
+  # The size budget lives in the justfile as size_budget.
+  BUILD_TIME_BUDGET_SECS: "63"
 
 jobs:
   fmt:
