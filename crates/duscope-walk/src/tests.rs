@@ -1305,23 +1305,19 @@ fn p1_test_01_a_cancel_during_a_streamed_read_ends_the_walk() {
             "keep {keep}: {result:?}"
         );
         // Nothing after the first flush is sent, and the directory never
-        // closes: the walk is ending.
-        let wide = events
-            .iter()
-            .find_map(|e| match e {
-                ScanEvent::Entry(entry) if entry.name.as_bytes() == b"wide" => entry.dir,
-                _ => None,
-            })
-            .expect("wide is listed with the root");
+        // closes: the walk is ending. Every entry below the root is inside
+        // wide, which is not looked up by its own entry: the walk stops with
+        // batches still queued, so the batch that lists wide can be dropped
+        // too, when a worker reads wide before the sink receives it.
         let inside = events
             .iter()
-            .filter(|e| matches!(e, ScanEvent::Entry(entry) if entry.parent == wide))
+            .filter(|e| matches!(e, ScanEvent::Entry(entry) if entry.parent != DirId::ROOT))
             .count();
         assert!(inside <= most, "keep {keep}: {inside} entries of wide");
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, ScanEvent::DirClosed { dir, .. } if *dir == wide)),
+                .any(|e| matches!(e, ScanEvent::DirClosed { dir, .. } if *dir != DirId::ROOT)),
             "keep {keep}: wide closed after the cancel"
         );
     }
