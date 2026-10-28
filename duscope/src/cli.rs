@@ -239,10 +239,14 @@ pub struct ScanArgs {
     pub treemap: Option<TreemapWhen>,
 
     /// What colours the treemap's tiles
+    ///
+    /// lscolors takes LS_COLORS' *suffix= and ex= (with --attrs full) entries
     #[arg(long, value_enum, value_name = "BY", help_heading = "Output")]
     pub color_by: Option<ColorBy>,
 
-    /// The colours: a theme name (mocha, dracula, …) or a theme file
+    /// The colours: a theme name or the path of a theme file
+    ///
+    /// mocha|tokyo-night|dracula|gruvbox|light|terminal-native|no-color
     #[arg(
         long,
         env = "DUSCOPE_THEME",
@@ -254,6 +258,10 @@ pub struct ScanArgs {
     /// Pool files into their directory's tile
     #[arg(long, help_heading = "Output")]
     pub pool_files: bool,
+
+    /// The smallest tile the treemap draws, in half-cell units
+    #[arg(long, value_enum, value_name = "UNITS", help_heading = "Output")]
+    pub min_tile: Option<MinTile>,
 
     /// Save the scan as an index and print its id
     // The index arrives in phase 2.
@@ -396,6 +404,20 @@ pub enum TreemapWhen {
     Pixels,
 }
 
+/// `--min-tile`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MinTile {
+    /// One unit: every tile that rounds to a unit (the default)
+    #[value(name = "1")]
+    One,
+    /// Two units
+    #[value(name = "2")]
+    Two,
+    /// Four units: a calmer picture
+    #[value(name = "4")]
+    Four,
+}
+
 /// `--color-by`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ColorBy {
@@ -407,7 +429,7 @@ pub enum ColorBy {
     Level,
     /// Age
     Age,
-    /// LS_COLORS
+    /// LS_COLORS, else file class
     Lscolors,
 }
 
