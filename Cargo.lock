@@ -397,6 +397,9 @@ name = "duscope-treemap"
 version = "0.0.1"
 dependencies = [
  "duscope-core",
+ "proptest",
+ "serde",
+ "toml",
 ]
 
 [[package]]
