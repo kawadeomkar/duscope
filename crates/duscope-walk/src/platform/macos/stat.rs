@@ -17,33 +17,39 @@ use crate::{Entry, Kind, NameRef, WalkOptions};
 pub(super) const BUFFER_BYTES: usize = 4096;
 
 /// The entry `name` in the directory open on `dir`. A mount point's name
-/// resolves to the root of the mounted volume.
+/// resolves to the root of the mounted volume. `attrs` says whether
+/// `getattrlistat` answers in this directory: it turns false when the call
+/// is refused, so the rest of a batch on a filesystem without attribute
+/// reads costs one `fstatat` per name instead of two calls.
 pub(super) fn entry_at(
     dir: BorrowedFd<'_>,
     name: &NameRef,
     opts: &WalkOptions,
     buf: &mut AttrBuf,
+    attrs: &mut bool,
 ) -> io::Result<Entry> {
     posix::with_c_name(name.as_bytes(), |c_name| {
-        let mut request = Request::single(opts);
-        let mut read = ffi::getattrlistat(dir, c_name, &request.attrs, buf, request.options);
-        if let Err(e) = &read
-            && request.extended()
-            && bulk::unsupported(e)
-        {
-            request = request.without_extended();
-            read = ffi::getattrlistat(dir, c_name, &request.attrs, buf, request.options);
-        }
-        match read {
-            Ok(()) => {
-                if let Some(entry) = decode(buf, &request, name)? {
-                    return Ok(entry);
-                }
+        if *attrs {
+            let mut request = Request::single(opts);
+            let mut read = ffi::getattrlistat(dir, c_name, &request.attrs, buf, request.options);
+            if let Err(e) = &read
+                && request.extended()
+                && bulk::unsupported(e)
+            {
+                request = request.without_extended();
+                read = ffi::getattrlistat(dir, c_name, &request.attrs, buf, request.options);
             }
-            Err(e) if !bulk::unsupported(&e) => return Err(e),
-            Err(_) => {}
+            match read {
+                Ok(()) => {
+                    if let Some(entry) = decode(buf, &request, name)? {
+                        return Ok(entry);
+                    }
+                }
+                Err(e) if !bulk::unsupported(&e) => return Err(e),
+                Err(_) => *attrs = false,
+            }
         }
-        let stat = ffi::lstat_at(dir, c_name)?;
+        let stat = posix::lstat_at(dir, c_name)?;
         Ok(from_stat(name.clone(), &stat))
     })
 }
@@ -70,7 +76,7 @@ pub(super) fn entry_of_path(path: &Path, name: NameRef, opts: &WalkOptions) -> i
         Err(e) if !bulk::unsupported(&e) => return Err(e),
         Err(_) => {}
     }
-    let stat = ffi::lstat(&c_path)?;
+    let stat = posix::lstat(&c_path)?;
     Ok(from_stat(name, &stat))
 }
 
@@ -93,7 +99,7 @@ fn decode(buf: &AttrBuf, request: &Request, name: &NameRef) -> io::Result<Option
 }
 
 /// The entry an `lstat` describes.
-pub(super) fn from_stat(name: NameRef, stat: &libc::stat) -> Entry {
+pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat) -> Entry {
     let kind = match stat.st_mode & libc::S_IFMT {
         libc::S_IFDIR => Kind::Dir,
         libc::S_IFREG => Kind::File,

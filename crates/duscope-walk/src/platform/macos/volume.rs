@@ -12,10 +12,10 @@ use crate::platform::posix;
 
 /// The volume holding `path`. Free bytes are `f_bavail × f_bsize`, what an
 /// unprivileged user can still write.
-pub(super) fn of(path: &Path) -> io::Result<VolumeInfo> {
+pub(in crate::platform) fn of(path: &Path) -> io::Result<VolumeInfo> {
     let c_path = posix::c_path(path)?;
     let fs = ffi::statfs(&c_path)?;
-    let dev = bulk::dev(ffi::lstat(&c_path)?.st_dev);
+    let dev = bulk::dev(posix::lstat(&c_path)?.st_dev);
     let block = u64::from(fs.f_bsize);
     Ok(VolumeInfo {
         dev,

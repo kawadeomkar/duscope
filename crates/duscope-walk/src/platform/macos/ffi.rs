@@ -207,34 +207,6 @@ pub(super) fn getattrlist(
     Ok(())
 }
 
-/// `fstatat(2)` of `name` in the directory open on `dir`, not following a
-/// final symlink.
-pub(super) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
-    let mut stat = MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: `dir` is open for the borrow, `name` is NUL-terminated, and
-    // `stat` is writable for one `struct stat`.
-    retry(|| unsafe {
-        libc::fstatat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            stat.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    })?;
-    // SAFETY: fstatat succeeded, so it filled the struct.
-    Ok(unsafe { stat.assume_init() })
-}
-
-/// `lstat(2)` of `path`.
-pub(super) fn lstat(path: &CStr) -> io::Result<libc::stat> {
-    let mut stat = MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: `path` is NUL-terminated and `stat` is writable for one
-    // `struct stat`.
-    retry(|| unsafe { libc::lstat(path.as_ptr(), stat.as_mut_ptr()) })?;
-    // SAFETY: lstat succeeded, so it filled the struct.
-    Ok(unsafe { stat.assume_init() })
-}
-
 /// `statfs(2)` of the volume holding `path`.
 pub(super) fn statfs(path: &CStr) -> io::Result<libc::statfs> {
     let mut stat = MaybeUninit::<libc::statfs>::uninit();

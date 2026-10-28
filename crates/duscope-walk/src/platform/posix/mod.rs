@@ -1,9 +1,10 @@
 //! Calls both platforms make the same way: opening a directory to read and
 //! raising the descriptor limit.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Once;
@@ -86,13 +87,21 @@ pub(crate) fn with_c_name<R>(
 pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
     let path = c_path(path)?;
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `path` is a NUL-terminated C string that outlives the call.
+    parked(|| unsafe { libc::open(path.as_ptr(), flags) })
+}
+
+/// The descriptor `open` returns, retrying on `EINTR` and parking on
+/// `EMFILE` or `ENFILE` with a growing pause, for up to [`PARK_LIMIT`] in
+/// all, until another worker closes one.
+fn parked(mut open: impl FnMut() -> libc::c_int) -> io::Result<OwnedFd> {
     let mut parked = Duration::ZERO;
     let mut pause = Duration::from_millis(1);
     loop {
-        // SAFETY: `path` is a NUL-terminated C string that outlives the call.
-        let fd = unsafe { libc::open(path.as_ptr(), flags) };
+        let fd = open();
         if fd >= 0 {
-            // SAFETY: `fd` was just returned by open and is owned by nothing else.
+            // SAFETY: `fd` was just returned by `open` and is owned by
+            // nothing else.
             return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
         }
         let error = io::Error::last_os_error();
@@ -110,8 +119,8 @@ pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
 
 /// `statvfs(3)` of the filesystem holding `path`.
 #[cfg(target_os = "linux")]
-pub(crate) fn statvfs(path: &std::ffi::CStr) -> io::Result<libc::statvfs> {
-    let mut buf = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+pub(crate) fn statvfs(path: &CStr) -> io::Result<libc::statvfs> {
+    let mut buf = MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: `path` is NUL-terminated and `buf` is writable for one
     // `struct statvfs`.
     if unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) } != 0 {
@@ -119,6 +128,110 @@ pub(crate) fn statvfs(path: &std::ffi::CStr) -> io::Result<libc::statvfs> {
     }
     // SAFETY: statvfs succeeded, so it filled the struct.
     Ok(unsafe { buf.assume_init() })
+}
+
+/// Retries a call that returns -1 with `errno` on `EINTR`.
+fn retry(mut call: impl FnMut() -> libc::c_int) -> io::Result<()> {
+    loop {
+        if call() == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// `fstatat(2)` of `name` in the directory open on `dir`, not following a
+/// final symlink.
+pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `dir` is open for the borrow, `name` is NUL-terminated, and
+    // `stat` is writable for one `struct stat`.
+    retry(|| unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    })?;
+    // SAFETY: fstatat succeeded, so it filled the struct.
+    Ok(unsafe { stat.assume_init() })
+}
+
+/// `lstat(2)` of `path`.
+pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stat` is writable for one
+    // `struct stat`.
+    retry(|| unsafe { libc::lstat(path.as_ptr(), stat.as_mut_ptr()) })?;
+    // SAFETY: lstat succeeded, so it filled the struct.
+    Ok(unsafe { stat.assume_init() })
+}
+
+/// The names in the directory open on `dir`, without `.` and `..`, read
+/// with `readdir` through a duplicate of the descriptor, so the listing is
+/// of the directory the descriptor holds, not of whatever its path names
+/// by now. The listing starts from the beginning, wherever an earlier read
+/// of the descriptor left off.
+pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>> {
+    // SAFETY: `dir` is open for the borrow; F_DUPFD_CLOEXEC returns a new
+    // descriptor or -1. The duplicate waits for a free descriptor as an
+    // open does.
+    let dup =
+        parked(|| unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) })?.into_raw_fd();
+    // SAFETY: `dup` is a descriptor this function owns; fdopendir takes it
+    // over on success, and on failure it is closed here.
+    let stream = unsafe { libc::fdopendir(dup) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so `dup` is still ours to close.
+        unsafe { libc::close(dup) };
+        return Err(error);
+    }
+    // SAFETY: `stream` is live; the duplicate shares the descriptor's
+    // offset, which a bulk read may have moved.
+    unsafe { libc::rewinddir(stream) };
+    let mut names = Vec::new();
+    let result = loop {
+        set_errno(0);
+        // SAFETY: `stream` is a live directory stream until closedir below.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            break if error.raw_os_error() == Some(0) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: readdir returned a valid entry whose d_name is
+        // NUL-terminated and lives until the next readdir call.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(crate::NameRef::new(name));
+        }
+    };
+    // SAFETY: `stream` came from fdopendir and is closed once.
+    unsafe { libc::closedir(stream) };
+    result.map(|()| names)
+}
+
+/// Sets the calling thread's `errno`.
+fn set_errno(value: libc::c_int) {
+    // SAFETY: the errno location is the calling thread's own int.
+    unsafe {
+        #[cfg(target_os = "linux")]
+        {
+            *libc::__errno_location() = value;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            *libc::__error() = value;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,7 +244,9 @@ mod tests {
 
     use duscope_testkit::TestEnv;
 
-    use super::{NOFILE_TARGET, OPEN_MAX, open_dir, raise_nofile_limit, with_c_name};
+    use std::os::fd::AsFd;
+
+    use super::{NOFILE_TARGET, OPEN_MAX, list_names, open_dir, raise_nofile_limit, with_c_name};
 
     /// The directory the child process opens under a full descriptor table.
     const CHILD_DIR: &str = "DUSCOPE_TEST_EMFILE_DIR";
@@ -194,6 +309,7 @@ mod tests {
         let Some(dir) = std::env::var_os(CHILD_DIR).map(PathBuf::from) else {
             return;
         };
+        let dir_fd = open_dir(&dir).unwrap();
         let mut limit = nofile();
         limit.rlim_cur = limit.rlim_cur.min(64);
         // SAFETY: `limit` is a valid rlimit that setrlimit only reads.
@@ -217,6 +333,24 @@ mod tests {
         held.pop();
         let (result, waited) = opener.join().unwrap();
         result.expect("the open parked until a descriptor freed, then succeeded");
+        assert!(waited >= Duration::from_millis(150), "it waited {waited:?}");
+        // Fill the table again: listing through a held descriptor needs a
+        // duplicate, which parks the same way.
+        let full = loop {
+            match File::open("/dev/null") {
+                Ok(file) => held.push(file),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(full.raw_os_error(), Some(libc::EMFILE));
+        let listing = thread::spawn(move || {
+            let start = Instant::now();
+            (list_names(dir_fd.as_fd()).map(drop), start.elapsed())
+        });
+        thread::sleep(Duration::from_millis(200));
+        held.pop();
+        let (result, waited) = listing.join().unwrap();
+        result.expect("the duplicate parked until a descriptor freed, then succeeded");
         assert!(waited >= Duration::from_millis(150), "it waited {waited:?}");
     }
 

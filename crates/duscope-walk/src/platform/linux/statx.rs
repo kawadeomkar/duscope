@@ -86,9 +86,9 @@ pub(super) fn mask(_opts: &WalkOptions) -> u32 {
     BASIC
 }
 
-/// The entry a `statx` describes.
-pub(super) fn entry(name: NameRef, stx: &libc::statx) -> Entry {
-    let kind = match u32::from(stx.stx_mode) & libc::S_IFMT {
+/// The kind of an `st_mode` / `stx_mode`.
+fn kind(mode: u32) -> Kind {
+    match mode & libc::S_IFMT {
         libc::S_IFDIR => Kind::Dir,
         libc::S_IFREG => Kind::File,
         libc::S_IFLNK => Kind::Symlink,
@@ -97,17 +97,30 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx) -> Entry {
         libc::S_IFCHR => Kind::Char,
         libc::S_IFBLK => Kind::Block,
         _ => Kind::Unknown,
-    };
-    // Devices, sockets and pipes hold no blocks of their own.
-    let allocated = match kind {
+    }
+}
+
+/// The bytes allocated to an entry of `kind` with `blocks` 512-byte
+/// blocks: devices, sockets and pipes hold none of their own.
+fn allocated(kind: Kind, blocks: u64) -> u64 {
+    match kind {
         Kind::Socket | Kind::Fifo | Kind::Char | Kind::Block => 0,
-        _ => stx.stx_blocks.saturating_mul(512),
-    };
-    let share = if kind != Kind::Dir && stx.stx_nlink > 1 {
+        _ => blocks.saturating_mul(512),
+    }
+}
+
+/// Whether a non-directory with `nlink` links may share its blocks.
+fn share(kind: Kind, nlink: u64) -> Share {
+    if kind != Kind::Dir && nlink > 1 {
         Share::Hardlink
     } else {
         Share::None
-    };
+    }
+}
+
+/// The entry a `statx` describes.
+pub(super) fn entry(name: NameRef, stx: &libc::statx) -> Entry {
+    let kind = kind(u32::from(stx.stx_mode));
     let attribute = |bit: c_int| {
         let bit = u64::from(bit.cast_unsigned());
         stx.stx_attributes_mask & bit != 0 && stx.stx_attributes & bit != 0
@@ -130,14 +143,14 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx) -> Entry {
         dir: None,
         kind,
         apparent: stx.stx_size,
-        allocated,
+        allocated: allocated(kind, stx.stx_blocks),
         mtime_ns: ns(stx.stx_mtime),
         ctime_ns: ns(stx.stx_ctime),
         nlink: stx.stx_nlink,
         dev: libc::makedev(stx.stx_dev_major, stx.stx_dev_minor),
         ino: stx.stx_ino,
         mnt_id,
-        share,
+        share: share(kind, u64::from(stx.stx_nlink)),
         boundary: if mount_root || automount {
             Boundary::Mount
         } else {
@@ -148,8 +161,41 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx) -> Entry {
     }
 }
 
+/// The entry an `lstat` describes: what `statx` reports, less the mount id
+/// and the attribute flags, which `stat` does not carry.
+pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat) -> Entry {
+    let kind = kind(stat.st_mode);
+    // `st_nlink` is 64-bit on x86_64 and 32-bit on aarch64.
+    #[allow(clippy::useless_conversion)]
+    let nlink = u64::from(stat.st_nlink);
+    Entry {
+        name,
+        parent: DirId::ROOT,
+        dir: None,
+        kind,
+        apparent: u64::try_from(stat.st_size).unwrap_or(0),
+        allocated: allocated(kind, u64::try_from(stat.st_blocks).unwrap_or(0)),
+        mtime_ns: time_ns(stat.st_mtime, stat.st_mtime_nsec),
+        ctime_ns: time_ns(stat.st_ctime, stat.st_ctime_nsec),
+        nlink: u32::try_from(nlink).unwrap_or(u32::MAX),
+        dev: stat.st_dev,
+        ino: stat.st_ino,
+        mnt_id: 0,
+        share: share(kind, nlink),
+        boundary: Boundary::None,
+        flags: Flags::empty(),
+        full: None,
+    }
+}
+
 /// A `statx` time as Unix nanoseconds, saturating at the ends of `i64`.
 fn ns(time: libc::statx_timestamp) -> i64 {
-    let ns = i128::from(time.tv_sec) * 1_000_000_000 + i128::from(time.tv_nsec);
+    time_ns(time.tv_sec, i64::from(time.tv_nsec))
+}
+
+/// Seconds and nanoseconds as Unix nanoseconds, saturating at the ends of
+/// `i64`.
+fn time_ns(sec: i64, nsec: i64) -> i64 {
+    let ns = i128::from(sec) * 1_000_000_000 + i128::from(nsec);
     i64::try_from(ns).unwrap_or(if ns < 0 { i64::MIN } else { i64::MAX })
 }

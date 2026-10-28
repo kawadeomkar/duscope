@@ -51,6 +51,10 @@ pub struct WalkOptions {
     pub exclude_caches: Vec<CacheRule>,
     /// Set to stop the walk. Workers poll it once per directory.
     pub cancel: Arc<AtomicBool>,
+    /// Read every directory with the fallback provider, `readdir` and
+    /// `fstatat`, instead of this platform's own (`--provider fallback`, a
+    /// hidden flag for tests).
+    pub fallback: bool,
 }
 
 impl Default for WalkOptions {
@@ -66,6 +70,7 @@ impl Default for WalkOptions {
             excludes: GlobSet::empty(),
             exclude_caches: Vec::new(),
             cancel: Arc::default(),
+            fallback: false,
         }
     }
 }

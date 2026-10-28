@@ -4,6 +4,8 @@
 
 mod dents;
 mod statx;
+
+pub(super) use statx::from_stat;
 #[cfg(test)]
 mod tests;
 
@@ -14,7 +16,6 @@ use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
 
 use dents::DentBuf;
 
@@ -41,10 +42,10 @@ pub(crate) struct LinuxProvider {
 }
 
 impl LinuxProvider {
-    /// The provider. The first one made raises the descriptor limit.
+    /// The provider. Making one sets up the process (see
+    /// [`platform::setup`](super::setup)).
     pub(crate) fn new() -> LinuxProvider {
-        static SETUP: Once = Once::new();
-        SETUP.call_once(posix::raise_nofile_limit);
+        super::setup();
         LinuxProvider::default()
     }
 
@@ -164,7 +165,7 @@ impl Provider for LinuxProvider {
 /// mount id `statx` reports (5.8), else by the longest mount point the
 /// path's real path starts with; sizes from `statvfs`, free bytes being
 /// `f_bavail × f_frsize`.
-fn volume(path: &Path) -> io::Result<VolumeInfo> {
+pub(super) fn volume(path: &Path) -> io::Result<VolumeInfo> {
     let c_path = posix::c_path(path)?;
     let stx = statx::statx(None, &c_path, statx::BASIC)?;
     let entry = statx::entry(NameRef::new(b""), &stx);

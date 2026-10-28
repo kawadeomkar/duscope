@@ -1,6 +1,6 @@
 //! The macOS provider: `getattrlistbulk(2)` with the basic attribute list,
-//! and a stat queue for directories the bulk read cannot serve or that wait
-//! on I/O.
+//! a stat queue for directories that wait on I/O, and the fallback provider
+//! for filesystems without bulk reads.
 
 mod bulk;
 mod ffi;
@@ -9,18 +9,19 @@ mod stat;
 mod tests;
 mod volume;
 
+pub(super) use stat::from_stat;
+pub(super) use volume::of as volume;
+
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::fs;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::Once;
 
 use bulk::{Clock, Decoded, Outcome};
 use ffi::AttrBuf;
 
+use crate::platform::fallback;
 use crate::platform::posix;
 use crate::{DirHandle, Entry, NameRef, Provider, ScanError, VolumeInfo, WalkOptions};
 
@@ -47,19 +48,20 @@ pub(crate) struct MacProvider {
 }
 
 impl MacProvider {
-    /// The provider. The first one made sets up the process: the
-    /// descriptor limit is raised and dataless files are never downloaded.
+    /// The provider. Making one sets up the process (see
+    /// [`platform::setup`](super::setup)).
     pub(crate) fn new() -> MacProvider {
-        static SETUP: Once = Once::new();
-        SETUP.call_once(|| {
-            posix::raise_nofile_limit();
-            // A failure leaves the default policy, under which reading a
-            // dataless file's attributes can download it.
-            if let Err(e) = ffi::disable_dataless_materialization() {
-                log::warn!("cannot turn off dataless-file materialisation: {e}");
-            }
-        });
+        super::setup();
         MacProvider::default()
+    }
+}
+
+/// Turns off dataless-file materialisation for the process, so reading an
+/// iCloud placeholder's attributes never downloads it. A failure leaves the
+/// default policy, under which it can; it is logged.
+pub(super) fn keep_dataless_files() {
+    if let Err(e) = ffi::disable_dataless_materialization() {
+        log::warn!("cannot turn off dataless-file materialisation: {e}");
     }
 }
 
@@ -117,6 +119,9 @@ impl Provider for MacProvider {
         };
         match outcome {
             Outcome::Done => {}
+            // The fallback reads a filesystem without bulk reads, through
+            // the descriptor already open.
+            Outcome::Unsupported => fallback::read_open(fd.as_fd(), dir, out, errs, later)?,
             // The probed refills' entries are kept; the rest of the
             // directory is listed by name and every worker reads it from
             // the stat queue.
@@ -132,27 +137,20 @@ impl Provider for MacProvider {
                     .map(|e| e.name.as_bytes())
                     .chain(errs[errs_start..].iter().map(|e| e.name.as_bytes()))
                     .collect();
-                for entry in fs::read_dir(dir.path())? {
-                    let name = entry?.file_name();
-                    if !seen.contains(name.as_bytes()) {
-                        later.push(NameRef::from(name.as_os_str()));
-                    }
-                }
-            }
-            // Listed by name alone; the stat queue reads every entry, on
-            // every worker.
-            Outcome::Unsupported => {
-                for entry in fs::read_dir(dir.path())? {
-                    later.push(NameRef::from(entry?.file_name().as_os_str()));
-                }
+                let names = posix::list_names(fd.as_fd())?;
+                later.extend(
+                    names
+                        .into_iter()
+                        .filter(|name| !seen.contains(name.as_bytes())),
+                );
             }
             // Each child is listed as an entry that cannot be read, as `du`
             // and the stat queue report them.
             Outcome::Unsearchable => {
-                for entry in fs::read_dir(dir.path())? {
+                for name in posix::list_names(fd.as_fd())? {
                     errs.push(ScanError {
                         dir: dir.id(),
-                        name: NameRef::from(entry?.file_name().as_os_str()),
+                        name,
                         errno: libc::EACCES,
                     });
                 }
@@ -170,9 +168,12 @@ impl Provider for MacProvider {
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
+        // One answer per batch: a filesystem that refuses attribute reads
+        // refuses them for every name.
+        let mut attrs = true;
         SINGLE.with_borrow_mut(|buf| {
             for name in names {
-                match stat::entry_at(fd.as_fd(), name, opts, buf) {
+                match stat::entry_at(fd.as_fd(), name, opts, buf, &mut attrs) {
                     Ok(entry) => out.push(entry),
                     Err(e) => errs.push(scan_error(dir, name.clone(), &e)),
                 }
@@ -216,7 +217,8 @@ fn take(
             name,
             errno,
         }),
-        Decoded::Restat(name, boundary) => match stat::entry_at(fd, &name, opts, single) {
+        Decoded::Restat(name, boundary) => match stat::entry_at(fd, &name, opts, single, &mut true)
+        {
             Ok(mut entry) => {
                 if let Some(boundary) = boundary {
                     entry.boundary = boundary;

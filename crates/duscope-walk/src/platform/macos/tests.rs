@@ -69,7 +69,7 @@ fn walk_paths(
 }
 
 fn lstat(path: &Path) -> libc::stat {
-    ffi::lstat(&CString::new(path.as_os_str().as_bytes()).unwrap()).unwrap()
+    posix::lstat(&CString::new(path.as_os_str().as_bytes()).unwrap()).unwrap()
 }
 
 #[test]
@@ -142,10 +142,17 @@ fn same_as_bulk_reads(queued: &MacProvider) {
         );
     }
     assert_eq!(bulk.len(), queue.len());
-    // Directory ids follow the order the workers found directories in.
+    // Directory ids follow the order the workers found directories in. The
+    // fallback provider reports a directory's st_nlink, which counts its
+    // subdirectories; ATTR_DIR_LINKCOUNT does not.
     let unnumbered = |entry: &Entry| Entry {
         parent: crate::DirId::ROOT,
         dir: entry.dir.map(|_| crate::DirId::ROOT),
+        nlink: if queued.pretend == Some(Outcome::Unsupported) && entry.kind == Kind::Dir {
+            0
+        } else {
+            entry.nlink
+        },
         ..entry.clone()
     };
     for (path, entry) in &bulk {
@@ -158,8 +165,9 @@ fn same_as_bulk_reads(queued: &MacProvider) {
     assert_eq!(bulk_unreadable, queue_unreadable);
 }
 
-/// The fixture tree read through the stat queue as if every directory's
-/// bulk read had answered `pretend`.
+/// The fixture tree read as if every directory's bulk read had answered
+/// `pretend`: through the stat queue for `IoBound`, through the fallback
+/// provider for `Unsupported` (`ENOTSUP`).
 fn same_through_the_stat_queue(pretend: Outcome) {
     same_as_bulk_reads(&MacProvider {
         pretend: Some(pretend),
@@ -173,7 +181,7 @@ fn p1_walk_03_the_stat_queue_reads_what_bulk_reads_read() {
 }
 
 #[test]
-fn p1_walk_03_enotsup_rereads_the_directory_by_name() {
+fn p1_walk_03_enotsup_rereads_the_directory_through_the_fallback() {
     same_through_the_stat_queue(Outcome::Unsupported);
 }
 
@@ -557,4 +565,13 @@ fn p1_walk_03_an_unsearchable_directory_lists_its_children_as_errors() {
     );
     // empty-closed/ (mode 000) cannot be opened at all.
     assert_eq!(closed_with, [libc::EACCES]);
+}
+
+#[test]
+fn p1_walk_04_the_fallback_provider_turns_dataless_downloads_off() {
+    assert!(crate::platform::fallback().is_some());
+    assert_eq!(
+        ffi::dataless_policy().unwrap(),
+        ffi::IOPOL_MATERIALIZE_DATALESS_FILES_OFF
+    );
 }
