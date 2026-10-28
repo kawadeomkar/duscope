@@ -16,30 +16,43 @@ under [Auditing](#auditing) read it again.
 - [x] Administrators are included (`enforce_admins`), so nobody bypasses the rules.
 - [x] Linear history is required.
 - [x] Force pushes and deletion of `main` are blocked.
-- [ ] Required status checks, with "Require branches to be up to date before
-  merging" (`strict`). The checks are the jobs of
-  [ci.yml](../.github/workflows/ci.yml) that the spec marks required:
+- [x] Required status checks, with "Require branches to be up to date before
+  merging" (`strict`). Every check a pull request runs is required but one, so
+  nothing merges until they all pass. The checks are the jobs of
+  [ci.yml](../.github/workflows/ci.yml):
   - `fmt`
   - `clippy` on the three runners
   - `test` on the three runners, plus its locale leg on each
-  - `platform` and `bench-regression` on the three runners (from phase 1)
+  - `platform` and `bench-regression` on the three runners
   - `msrv (pinned)` and `msrv (stable)`
   - `deny`
   - `docs`
   - `schemas`
-  - `size` on `macos-26` and `ubuntu-24.04`
+  - `size` on `macos-26` and `ubuntu-24.04`, and `size-comment`
   - `build-time`
   - `repro`
   - `changelog`
 
-  `intel-mac` (best effort) and `size-comment` (it only posts the size) are not
-  required. This PUT replaces the whole protection of `main`, so it restates the
-  settings above unchanged. `app_id` 15368 is GitHub Actions, so only a workflow
-  run can report these checks.
+  and the jobs of [release.yml](../.github/workflows/release.yml) that run on
+  pull requests:
+  - `verify-tag` and `plan`
+  - `deb-assets`, and `deb` for amd64 and arm64
+  - `deb-install` in Debian 12 and Ubuntu 22.04, on each architecture
 
-  Applied with 20 checks, `schemas` included, on 2026-10-25. P1-TEST-01 adds
-  `platform` and `bench-regression` on the three runners: the author runs the
-  26-check PUT below once it merges, then ticks this item.
+  release.yml's other jobs (`build-local-artifacts`, `build-global-artifacts`,
+  `host`, `publish-crates`, `homebrew` and `announce`) run only for a tag, and
+  pull requests report them skipped. `intel-mac` runs on every pull request but
+  is not required: it builds on GitHub's best-effort Intel macOS runner, which
+  would otherwise hold up every merge while it is unavailable, and once GitHub
+  retires it. release.yml builds the x86_64 macOS archive again for a tag, so a
+  broken Intel build still stops a release. This PUT replaces the whole
+  protection of `main`, so it restates the settings above unchanged. `app_id`
+  15368 is GitHub Actions, so only a workflow run can report these checks.
+
+  Applied with 20 checks, `schemas` included, on 2026-10-25. On 2026-10-27
+  `intel-mac`, `size-comment`, `plan` and `verify-tag` were added, and, once
+  phase 1 had merged, `platform`, `bench-regression` and the `.deb` jobs. On
+  2026-10-28 `intel-mac` was made optional again, leaving the 36 checks below.
 
   ```sh
   gh api -X PUT repos/kawadeomkar/duscope/branches/main/protection --input - <<'EOF'
@@ -72,7 +85,17 @@ under [Auditing](#auditing) read it again.
         { "context": "size (ubuntu-24.04)", "app_id": 15368 },
         { "context": "build-time", "app_id": 15368 },
         { "context": "repro", "app_id": 15368 },
-        { "context": "changelog", "app_id": 15368 }
+        { "context": "changelog", "app_id": 15368 },
+        { "context": "size-comment", "app_id": 15368 },
+        { "context": "verify-tag", "app_id": 15368 },
+        { "context": "plan", "app_id": 15368 },
+        { "context": "deb-assets", "app_id": 15368 },
+        { "context": "deb (amd64)", "app_id": 15368 },
+        { "context": "deb (arm64)", "app_id": 15368 },
+        { "context": "deb-install (debian:12, amd64)", "app_id": 15368 },
+        { "context": "deb-install (debian:12, arm64)", "app_id": 15368 },
+        { "context": "deb-install (ubuntu:22.04, amd64)", "app_id": 15368 },
+        { "context": "deb-install (ubuntu:22.04, arm64)", "app_id": 15368 }
       ]
     },
     "enforce_admins": true,
@@ -198,11 +221,14 @@ under [Auditing](#auditing) read it again.
 
 ## Changing the required checks
 
-A renamed job, a new matrix entry or a new required job changes the check names.
-Update the PUT above in the same pull request:
+A renamed job, a new matrix entry or a new job in ci.yml or release.yml changes
+the check names. Update the PUT above in the same pull request:
 `p0_ci_01_settings_require_exactly_the_required_checks` works out the name each
-job reports from its `name:` and matrix, and fails unless they are exactly the
-checks in the PUT. When the author runs the PUT depends on the change:
+job a pull request runs reports from its `name:` and matrix (its id, for a job
+with neither), and fails unless they are exactly the checks in the PUT. A new
+release.yml job that runs only for a tag goes on the test's tag-only list
+instead, and a ci.yml job that should not gate a merge on its optional list.
+When the author runs the PUT depends on the change:
 
 - A check is added: after the merge. Until then branch protection does not wait
   for the new check.

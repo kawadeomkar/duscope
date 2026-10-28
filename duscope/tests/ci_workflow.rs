@@ -13,13 +13,16 @@ use std::fs;
 use std::path::Path;
 
 const WORKFLOW: &str = ".github/workflows/ci.yml";
+const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 const SETTINGS: &str = "docs/github-settings.md";
 
 /// The per-job budget recorded in ci.yml.
 const JOB_BUDGET_MINUTES: u32 = 20;
 
 /// The required checks as branch protection names them: the job name with its
-/// matrix values, as in the PUT of docs/github-settings.md.
+/// matrix values, as in the PUT of docs/github-settings.md. Every check a pull
+/// request runs is required but the [`OPTIONAL_JOBS`]: each other job of
+/// ci.yml, then the jobs of release.yml that are not [`TAG_ONLY_JOBS`].
 const REQUIRED_CHECKS: &[&str] = &[
     "fmt",
     "clippy (macos-26)",
@@ -47,10 +50,32 @@ const REQUIRED_CHECKS: &[&str] = &[
     "build-time",
     "repro",
     "changelog",
+    "size-comment",
+    "verify-tag",
+    "plan",
+    "deb-assets",
+    "deb (amd64)",
+    "deb (arm64)",
+    "deb-install (debian:12, amd64)",
+    "deb-install (debian:12, arm64)",
+    "deb-install (ubuntu:22.04, amd64)",
+    "deb-install (ubuntu:22.04, arm64)",
 ];
 
-/// Jobs that run but do not gate a merge.
-const OPTIONAL_JOBS: &[&str] = &["intel-mac", "size-comment"];
+/// Jobs of ci.yml that run on every pull request but do not gate a merge:
+/// intel-mac builds on GitHub's best-effort Intel macOS runner.
+const OPTIONAL_JOBS: &[&str] = &["intel-mac"];
+
+/// The jobs of release.yml that run only for a tag: pull requests report them
+/// skipped, so they are not required.
+const TAG_ONLY_JOBS: &[&str] = &[
+    "build-local-artifacts",
+    "build-global-artifacts",
+    "host",
+    "publish-crates",
+    "homebrew",
+    "announce",
+];
 
 /// The runners of the spec: the three first-class ones and best-effort Intel macOS.
 const RUNNERS: &[&str] = &[
@@ -119,9 +144,9 @@ impl Job {
     }
 
     /// The combinations of the job's `strategy.matrix`: the cross product of
-    /// its `key: [a, b]` lists, or its `include:` entries (`- key: value`
-    /// with the entry's other keys below); one empty combination without a
-    /// matrix. ci.yml uses no other form, and the parser refuses a mix.
+    /// its `key: [a, b]` lists, with its `include:` entries (`- key: value`
+    /// with the entry's other keys below) expanded as GitHub does; one empty
+    /// combination without a matrix. Values lose their quotes.
     fn combinations(&self) -> Vec<BTreeMap<String, String>> {
         let mut lists: Vec<(String, Vec<String>)> = Vec::new();
         let mut include: Vec<BTreeMap<String, String>> = Vec::new();
@@ -154,32 +179,28 @@ impl Job {
                     if entry.starts_with("- ") {
                         include.push(BTreeMap::new());
                     }
+                    let value = value.trim_matches('"').to_owned();
                     include.last_mut().unwrap().insert(key, value);
                 }
                 _ => {
                     let values = value
                         .trim_matches(['[', ']'])
                         .split(',')
-                        .map(|v| v.trim().to_owned())
+                        .map(|v| v.trim().trim_matches('"').to_owned())
                         .filter(|v| !v.is_empty())
                         .collect();
                     lists.push((key, values));
                 }
             }
         }
-        assert!(
-            lists.is_empty() || include.is_empty(),
-            "job `{}` mixes matrix lists and include, which this parser does not expand",
-            self.id
-        );
-        if !include.is_empty() {
+        if lists.is_empty() && !include.is_empty() {
             return include;
         }
         let mut combinations = vec![BTreeMap::new()];
-        for (key, values) in lists {
+        for (key, values) in &lists {
             let mut next = Vec::new();
             for combination in &combinations {
-                for value in &values {
+                for value in values {
                     let mut extended = combination.clone();
                     extended.insert(key.clone(), value.clone());
                     next.push(extended);
@@ -187,18 +208,43 @@ impl Job {
             }
             combinations = next;
         }
+        // An include entry beside lists adds its keys to every combination
+        // whose list values it matches, or is a combination of its own when
+        // it matches none.
+        let crossed = combinations.len();
+        for entry in include {
+            let mut matched = false;
+            for combination in &mut combinations[..crossed] {
+                let fits = entry.iter().all(|(key, value)| {
+                    lists.iter().all(|(listed, _)| listed != key)
+                        || combination.get(key) == Some(value)
+                });
+                if fits {
+                    combination.extend(entry.clone());
+                    matched = true;
+                }
+            }
+            if !matched {
+                combinations.push(entry);
+            }
+        }
         combinations
     }
 
     /// The check names the job reports: its `name:` with each
-    /// `${{ matrix.<key> }}` filled in, once per matrix combination.
+    /// `${{ matrix.<key> }}` filled in, once per matrix combination. A job
+    /// without a name and without a matrix reports its id.
     fn check_names(&self) -> Vec<String> {
-        let template = job_key(self, "name")
-            .unwrap_or_else(|| panic!("job `{}` has no name: GitHub would make one up", self.id));
-        self.combinations()
+        let combinations = self.combinations();
+        let template = match job_key(self, "name") {
+            Some(name) => name.to_owned(),
+            None if combinations.len() == 1 && combinations[0].is_empty() => self.id.clone(),
+            None => panic!("job `{}` has no name: GitHub would make one up", self.id),
+        };
+        combinations
             .iter()
             .map(|combination| {
-                let mut name = template.to_owned();
+                let mut name = template.clone();
                 for (key, value) in combination {
                     name = name.replace(&format!("${{{{ matrix.{key} }}}}"), value);
                 }
@@ -258,21 +304,38 @@ fn required_job_ids() -> BTreeSet<&'static str> {
 
 #[test]
 fn p0_ci_01_spec_jobs_exist() {
-    let ids: BTreeSet<String> = jobs(&read(WORKFLOW)).into_iter().map(|j| j.id).collect();
-    for id in required_job_ids().iter().chain(OPTIONAL_JOBS) {
-        assert!(ids.contains(*id), "ci.yml has no `{id}` job: {ids:?}");
-    }
-    let classified: BTreeSet<&str> = required_job_ids()
+    let ci: BTreeSet<String> = jobs(&read(WORKFLOW)).into_iter().map(|j| j.id).collect();
+    let release: BTreeSet<String> = jobs(&read(RELEASE_WORKFLOW))
         .into_iter()
-        .chain(OPTIONAL_JOBS.iter().copied())
+        .map(|j| j.id)
         .collect();
-    let unclassified: Vec<&String> = ids
+    let required = required_job_ids();
+    for id in &required {
+        assert!(
+            ci.contains(*id) || release.contains(*id),
+            "neither ci.yml nor release.yml has a `{id}` job"
+        );
+    }
+    for id in OPTIONAL_JOBS {
+        assert!(ci.contains(*id), "ci.yml has no `{id}` job: {ci:?}");
+    }
+    for id in TAG_ONLY_JOBS {
+        assert!(
+            release.contains(*id),
+            "release.yml has no `{id}` job: {release:?}"
+        );
+    }
+    let unclassified: Vec<&String> = ci
         .iter()
-        .filter(|id| !classified.contains(id.as_str()))
+        .chain(&release)
+        .filter(|id| {
+            let id = id.as_str();
+            !required.contains(id) && !OPTIONAL_JOBS.contains(&id) && !TAG_ONLY_JOBS.contains(&id)
+        })
         .collect();
     assert!(
         unclassified.is_empty(),
-        "jobs neither required (docs/github-settings.md) nor listed as optional: {unclassified:?}"
+        "jobs neither required (docs/github-settings.md), optional nor tag-only: {unclassified:?}"
     );
 }
 
@@ -444,17 +507,24 @@ fn p0_ci_01_settings_require_exactly_the_required_checks() {
         "branches must be up to date before merging"
     );
 
-    // The names the jobs of ci.yml report, from each job's `name:` and matrix,
-    // are exactly the required checks plus the optional jobs' names.
+    // The names the jobs a pull request runs report, from each job's `name:`
+    // and matrix, are exactly the required checks: ci.yml's jobs but the
+    // optional ones, and release.yml's but the tag-only ones.
+    let release = jobs(&read(RELEASE_WORKFLOW));
     let reported: BTreeSet<String> = jobs(&read(WORKFLOW))
         .iter()
         .filter(|job| !OPTIONAL_JOBS.contains(&job.id.as_str()))
+        .chain(
+            release
+                .iter()
+                .filter(|job| !TAG_ONLY_JOBS.contains(&job.id.as_str())),
+        )
         .flat_map(Job::check_names)
         .collect();
     let required: BTreeSet<String> = REQUIRED_CHECKS.iter().map(|&c| c.to_owned()).collect();
     assert_eq!(
         reported, required,
-        "the check names ci.yml's required jobs report differ from the required checks"
+        "the check names pull requests report differ from the required checks"
     );
 }
 
@@ -465,7 +535,13 @@ fn p0_ci_01_check_names_come_from_the_name_and_matrix() {
                     leg: [x, y]\n    runs-on: ${{ matrix.os }}\n  size:\n    name: size \
                     (${{ matrix.os }})\n    strategy:\n      matrix:\n        include:\n          \
                     - os: m\n            key: mac\n          - os: u\n            key: ubuntu\n    \
-                    runs-on: ${{ matrix.os }}\n  fmt:\n    name: fmt\n    runs-on: u\n";
+                    runs-on: ${{ matrix.os }}\n  fmt:\n    name: fmt\n    runs-on: u\n  \
+                    install:\n    name: install (${{ matrix.image }}, ${{ matrix.arch }}, \
+                    ${{ matrix.runner }})\n    strategy:\n      matrix:\n        \
+                    image: [\"d:12\", u]\n        arch: [amd64, arm64]\n        include:\n          \
+                    - arch: amd64\n            runner: x\n          - arch: arm64\n            \
+                    runner: y\n          - arch: riscv\n            image: d:12\n            \
+                    runner: z\n    runs-on: ${{ matrix.runner }}\n  plan:\n    runs-on: u\n";
     let names: Vec<Vec<String>> = jobs(workflow).iter().map(Job::check_names).collect();
     assert_eq!(
         names,
@@ -473,6 +549,17 @@ fn p0_ci_01_check_names_come_from_the_name_and_matrix() {
             vec!["test (a, x)", "test (a, y)", "test (b, x)", "test (b, y)"],
             vec!["size (m)", "size (u)"],
             vec!["fmt"],
+            // An include entry extends the combinations it matches, and one
+            // that matches none is a combination of its own.
+            vec![
+                "install (d:12, amd64, x)",
+                "install (d:12, arm64, y)",
+                "install (u, amd64, x)",
+                "install (u, arm64, y)",
+                "install (d:12, riscv, z)",
+            ],
+            // A job without a name or a matrix reports its id.
+            vec!["plan"],
         ]
     );
 }
