@@ -51,6 +51,8 @@ Options of `run` (most also apply to `build`, `install` and `verify`):
 | `--tool-path NAME=PATH` | | use this executable for a pinned tool instead of installing it; its `--version` must name the pin, except dumac's, which has no version to check and is recorded at its pinned commit (repeatable) |
 | `--mode warm\|cold\|both` | `warm` | page cache warm, dropped before every run, or both |
 | `--cold-cmd CMD` | `bench/drop-caches.sh` | the command that drops the caches before each cold run; it may not be empty |
+| `--cold-trees-dir DIR` | `--trees-dir` | where the trees the cold runs measure live, built there as in `--trees-dir` ([Cold runs](#cold-runs)) |
+| `--cold-competitors LIST` | `--competitors` | the pinned tools paired with the subject in cold runs, `all` or `none`; `--command` tools run in both modes |
 | `--runs N` | `10` | measured runs of each tool in each pair |
 | `--warmup N` | `2` | unmeasured runs of each tool at the start of each warm pair |
 | `--jobs N` | `4` | processes that create the trees' files |
@@ -177,6 +179,16 @@ from the cache of the volume it is stored on. `hdiutil` needs no root for an ima
 Both tools of a pair read through the image alike, so the ratios the gates use compare like with
 like. `--cold-cmd` takes any other command too.
 
+The image is slow even warm, so the runner measures only the cold runs on it. macOS keeps at most
+`kern.maxvnodes` vnodes (263,168 on the bench Mac), fewer than T1's 500,000 entries, so a warm run
+looks up much of the tree's metadata again, which on the image is slow. `du` on T1 took 2.85 s
+warm on the internal disk and 13 s warm on the image, where every
+competitor took 7 to 10 s, and T2's runs took a minute each. The runner passes
+`--cold-trees-dir` (the image) and keeps `--trees-dir` on the internal disk, so warm runs measure
+the disk a user scans. It also passes `--cold-competitors dua,du`: dua is the competitor gate 1's
+macOS cold target names and `du` is every result's reference, and pairing all eight tools cold
+on the image would take more than the job's 300 minutes.
+
 ## Result file
 
 A run writes `<results-dir>/<date>-<platform>.json`, where `<date>` is the UTC date the run
@@ -211,6 +223,7 @@ Every field is always present; a field that does not apply is `null`. Times are 
 | `harness.runs` | integer | `--runs` |
 | `harness.warmup` | integer | `--warmup` |
 | `harness.cold_command` | string or null | the cache-drop command, when the run had cold runs |
+| `harness.cold_competitors` | array of string or null | `--cold-competitors`, when the run had cold runs and the option; null when cold runs paired the subject with `--competitors` |
 | `trees` | array of object | the trees measured |
 | `trees[].name` | string | `T1`, `T2` or `T3` |
 | `trees[].shape` | string | `gdu`, `fdu-balanced` or `flat` |
@@ -220,7 +233,8 @@ Every field is always present; a field that does not apply is `null`. Times are 
 | `trees[].files` | integer | regular files |
 | `trees[].apparent_bytes` | integer | the sum of the files' sizes |
 | `trees[].digest` | string | the build's digest: equal digests mean identical trees |
-| `trees[].filesystem` | string or null | the filesystem type holding the tree, such as `apfs` or `ext4` |
+| `trees[].filesystem` | string or null | the filesystem type holding the tree, such as `apfs` or `ext4`; the warm runs' copy when the run had both |
+| `trees[].cold_filesystem` | string or null | the filesystem type holding the cold runs' copy, when `--cold-trees-dir` put it in a directory of its own; null otherwise |
 | `trees[].build_s` | number | how long the build took |
 | `tools` | array of object | every tool the run was asked for, measured or not |
 | `tools[].name` | string | the tool |

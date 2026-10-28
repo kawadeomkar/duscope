@@ -25,7 +25,7 @@ anything in this table is a new row in the [change log](#change-log).
 | Memory | 48 GiB, shared with the author's own work | 8 GiB, fixed (no ballooning) |
 | OS and kernel | macOS 26.7.2 (25G330), Darwin 25.6.0 | Ubuntu 24.04.5 LTS, Linux 6.8.0-147-generic |
 | Disk holding `BENCH_HOME` | the internal SSD | a 64 GB virtio-scsi disk (`ssd=1`, `discard=on`, no host cache) on LVM-thin storage on the host's Sabrent NVMe SSD |
-| Filesystem of `BENCH_HOME` | APFS, the Data volume; the trees on an APFS sparse-bundle disk image inside it ([below](#bench-macos-the-authors-macbook-pro)) | ext4, the root filesystem (`relatime,discard`) |
+| Filesystem of `BENCH_HOME` | APFS, the Data volume, holding the warm runs' trees; the cold runs' trees on an APFS sparse-bundle disk image inside it ([below](#bench-macos-the-authors-macbook-pro)) | ext4, the root filesystem (`relatime,discard`) |
 | Free space and inodes | 471 GiB; APFS allocates inodes as needed | 58 GB and 8.1 million inodes, with the tools installed and no trees yet |
 | Network | Wi-Fi on the home LAN; not filtered ([Network](#network)) | bridged to the home LAN, DHCP; outbound to the internet only ([Network](#network)) |
 | Power and location | on AC power at the author's home, woken at 03:10 every day | the Proxmox host, in the author's home |
@@ -45,15 +45,17 @@ harness exits. What keeps the runner apart from the author's work:
   GitHub's `svc.sh` installs a LaunchAgent instead, which runs only while
   `runner` is logged in.
 
-The trees live on an APFS disk image, `BENCH_HOME/trees.sparsebundle`, attached
-at `BENCH_HOME/trees-volume`, not on the Data volume itself. `purge` leaves
-APFS's metadata caches warm, so a cold run there measured little more than a
-warm one (`du` on T1: 2.94 s cold, 2.85 s warm); the cold command detaches the
-image, purges, and attaches it again (bench/README.md, "Cold runs"). The nightly
-job creates the image the first night it runs and attaches it after a reboot;
-`runner` owns it, and `hdiutil` needs no root for that. Trees built before the
-image, in `BENCH_HOME/trees`, are no longer read: `sudo rm -rf
-/Users/runner/duscope-bench/trees` frees their 3.6 GiB.
+The cold runs' trees live on an APFS disk image, `BENCH_HOME/trees.sparsebundle`,
+attached at `BENCH_HOME/trees-volume`, not on the Data volume itself. `purge`
+leaves APFS's metadata caches warm, so a cold run there measured little more
+than a warm one (`du` on T1: 2.94 s cold, 2.85 s warm); the cold command detaches
+the image, purges, and attaches it again (bench/README.md, "Cold runs"). The
+nightly job creates the image the first night it runs and attaches it after a
+reboot; `runner` owns it, and `hdiutil` needs no root for that. The warm runs'
+trees stay in `BENCH_HOME/trees` on the Data volume: the image is slow even warm
+(`du` on T1 took 13 s there), so warm runs on it would measure the image. Each
+copy takes 3.6 GiB. Cold runs pair the subject with dua and `du` only, since all
+eight tools cold on the image would not fit the job's 300 minutes.
 
 ### bench-linux: a VM on Proxmox
 
@@ -392,3 +394,4 @@ platform and architecture.
 | 2026-10-25 | `bench-macos` | Registered: the author's MacBook Pro (M5 Pro, 18 cores, 48 GiB, macOS 26.7.2), runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1; a launchd daemon in the system domain; a daily wake at 03:10 |
 | 2026-10-25 | `bench-linux` | 10 vCPUs, one per core of the host (was 4), for the thread sweep |
 | 2026-10-25 | `bench-macos` | the trees on an APFS disk image, which the cold command remounts around each purge |
+| 2026-10-28 | `bench-macos` | the warm runs' trees back on the Data volume, in `BENCH_HOME/trees`; the image holds the cold runs' trees, measured with dua and `du` only |

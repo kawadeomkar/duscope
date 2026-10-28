@@ -6,10 +6,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -269,6 +272,53 @@ class Harness(unittest.TestCase):
         self.assertIsInstance(facts["logical_cpus"], int)
         self.assertTrue(re.match(r"^(Darwin|Linux) ", str(facts["kernel"])))
         self.assertIn(harness.platform_name(), ("macos", "linux"))
+
+    def test_p0_bench_02_cold_runs_measure_their_own_trees_and_tools(self):
+        """--cold-trees-dir and --cold-competitors give the cold runs their own trees and tools."""
+        with tempfile.TemporaryDirectory() as scratch:
+            argv = ["run", "--trees", "T3", "--scale", "0.0005", "--jobs", "1", "--subject", "du"]
+            # Stand-ins for two pinned tools: each reports its pin and exits 0.
+            for name in ("diskus", "dua"):
+                fake = os.path.join(scratch, name)
+                with open(fake, "w", encoding="utf-8") as f:
+                    f.write(f"#!/bin/sh\necho '{name} {tools.PINS[name].pinned}'\n")
+                os.chmod(fake, 0o755)
+                argv += ["--tool-path", f"{name}={fake}"]
+            warm, cold, results = (os.path.join(scratch, d) for d in ("warm", "cold", "results"))
+            argv += [
+                "--competitors", "diskus,dua", "--cold-competitors", "dua",
+                "--trees-dir", warm, "--cold-trees-dir", cold,
+                "--mode", "both", "--cold-cmd", "true", "--runs", "1", "--warmup", "0",
+                "--hyperfine", f"{shlex.quote(sys.executable)} {shlex.quote(STUB)}",
+                "--tools-dir", os.path.join(scratch, "tools"), "--results-dir", results,
+            ]
+            smoked = []
+            smoke = measure.smoke
+
+            def record(tool, path):
+                smoked.append((tool.tool.name, os.path.dirname(path)))
+                smoke(tool, path)
+
+            with mock.patch.object(measure, "smoke", record), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(harness.main(argv), 0)
+            # Every tool runs on the trees its mode reads, and only there.
+            self.assertEqual(
+                sorted(smoked),
+                [("diskus", warm), ("du", cold), ("du", warm), ("dua", cold), ("dua", warm)],
+            )
+            for d in (warm, cold):
+                self.assertTrue(os.path.isfile(trees.stamp_path(trees.tree("T3", 0.0005), d)), d)
+            [name] = os.listdir(results)
+            with open(os.path.join(results, name), encoding="utf-8") as f:
+                result = json.load(f)
+            self.assertEqual(
+                sorted((r["mode"], r["tool"]) for r in result["results"]),
+                [("cold", "du"), ("cold", "dua"), ("warm", "diskus"), ("warm", "du"), ("warm", "dua")],
+            )
+            self.assertEqual(result["harness"]["cold_competitors"], ["dua"])
+            self.assertEqual(result["trees"][0]["filesystem"], result["trees"][0]["cold_filesystem"])
+            self.assertIsNotNone(result["trees"][0]["cold_filesystem"])
 
 
 
