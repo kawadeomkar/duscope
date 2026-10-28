@@ -24,16 +24,19 @@ impl DirId {
     pub const ROOT: DirId = DirId(0);
 
     /// The id with this number.
+    #[must_use]
     pub const fn new(id: u32) -> DirId {
         DirId(id)
     }
 
     /// The id as a number.
+    #[must_use]
     pub const fn get(self) -> u32 {
         self.0
     }
 
     /// The id as an index into a side table.
+    #[must_use]
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -47,16 +50,19 @@ pub struct NameRef(Box<[u8]>);
 
 impl NameRef {
     /// A name holding a copy of these bytes.
+    #[must_use]
     pub fn new(bytes: &[u8]) -> NameRef {
         NameRef(bytes.into())
     }
 
     /// The name's bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
     /// The name as an `OsStr`, for joining onto a path.
+    #[must_use]
     pub fn as_os_str(&self) -> &OsStr {
         OsStr::from_bytes(&self.0)
     }
@@ -202,7 +208,10 @@ pub struct Entry {
     pub ctime_ns: i64,
     /// Hard-link count.
     pub nlink: u32,
-    /// Device id.
+    /// Device id. On macOS it is the volume's own device
+    /// (`FSOPT_RETURN_REALDEV`), which inside a volume group differs from
+    /// the group's shared `st_dev`: a later `(dev, ino)` check against
+    /// `lstat` must read the device the same way.
     pub dev: u64,
     /// Inode number.
     pub ino: u64,
@@ -218,22 +227,109 @@ pub struct Entry {
     pub full: Option<FullAttrs>,
 }
 
-/// A volume the walk met. P1-WALK-06 adds the fields its mount decisions
-/// record.
+/// A volume the walk met: the root's, and one per mount it crossed or
+/// stopped at (a `scan_volumes` row).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeInfo {
     /// Device id, as in [`Entry::dev`].
     pub dev: u64,
-    /// Mount id, as in [`Entry::mnt_id`].
+    /// Mount id, as in [`Entry::mnt_id`]: the mount's unique id on Linux
+    /// 6.8 and later, its reusable id before, the device id on macOS.
     pub mnt_id: u64,
     /// Where the volume is mounted.
     pub mount_point: PathBuf,
-    /// The filesystem type (`apfs`, `ext4`, …).
+    /// The filesystem type as the kernel names it, lower-cased (`apfs`,
+    /// `ext4`, …).
     pub fs_type: String,
-    /// The volume's size in bytes.
+    /// The platform matrix's class of the filesystem type, which decides
+    /// whether the walk enters it.
+    pub class: VolumeClass,
+    /// Mounted read-only.
+    pub read_only: bool,
+    /// Whether names differ by case alone; `None` where it cannot be told.
+    /// For a volume the walk did not enter it comes only from the type and
+    /// the mount options (Linux), or is `None` (macOS asks the volume).
+    pub case_sensitive: Option<bool>,
+    /// Whether names compare normalisation-insensitively (APFS, HFS+).
+    pub normalization: Normalization,
+    /// The mount options (`noatime`, `relatime`, …), for the
+    /// `atime_unreliable` warning.
+    pub options: Vec<String>,
+    /// The volume's size in bytes. For a volume the walk did not enter,
+    /// what the platform has without asking a server or a kernel table:
+    /// the kernel's cached sizes on macOS, `statvfs` of a local mount on
+    /// Linux, and 0 for network and kernel mounts on both.
     pub total_bytes: u64,
-    /// Bytes free for an unprivileged user.
+    /// Bytes free for an unprivileged user, read as `total_bytes` is.
     pub free_bytes: u64,
+    /// Why the walk did not enter the volume; `None` when it did.
+    pub reason: Option<Skip>,
+}
+
+impl VolumeInfo {
+    /// Whether the walk entered the volume.
+    #[must_use]
+    pub fn entered(&self) -> bool {
+        self.reason.is_none()
+    }
+}
+
+/// The platform matrix's classes of filesystem types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VolumeClass {
+    /// ext4, XFS, btrfs, ZFS, F2FS, bcachefs, APFS: entered.
+    Local,
+    /// overlayfs: entered; inode numbers are not stable across layers, so
+    /// hard links are not deduplicated.
+    Overlay,
+    /// tmpfs, ramfs, devtmpfs: entered and tagged memory-backed.
+    Memory,
+    /// NFS, SMB, FUSE, 9p, AFP, autofs: listed, entered only under
+    /// `--include-network`.
+    Network,
+    /// proc, sysfs, cgroup and the other kernel pseudo-filesystems, and
+    /// macOS's devfs: never entered.
+    Kernel,
+    /// exFAT, FAT, NTFS, HFS+: entered, with their per-type limits.
+    Foreign,
+    /// squashfs, ISO 9660, EROFS: entered, read-only.
+    ReadOnlyImage,
+}
+
+impl VolumeClass {
+    /// The class as the index and the envelope spell it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VolumeClass::Local => "local",
+            VolumeClass::Overlay => "overlay",
+            VolumeClass::Memory => "memory",
+            VolumeClass::Network => "network",
+            VolumeClass::Kernel => "kernel",
+            VolumeClass::Foreign => "foreign",
+            VolumeClass::ReadOnlyImage => "read_only_image",
+        }
+    }
+}
+
+/// How a volume compares names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Normalization {
+    /// Bytes as given.
+    None,
+    /// NFC and NFD forms of a name are the same name (APFS, HFS+).
+    Insensitive,
+}
+
+impl Normalization {
+    /// The value as the index spells it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Normalization::None => "none",
+            Normalization::Insensitive => "insensitive",
+        }
+    }
 }
 
 /// What a walk delivers to its sink, on the calling thread.
@@ -279,13 +375,27 @@ pub enum Skip {
     /// macOS: the Data volume's mount point, in a scan that reaches the
     /// volume through its firmlinks.
     Firmlinked,
+    /// The mount of a kernel pseudo-filesystem.
+    Kernel,
+    /// The mount of a network filesystem, without `--include-network`.
+    Network,
+    /// A mount other than the root's, under `-x`.
+    OneFileSystem,
+    /// A mount of a directory already on the path (a bind mount of an
+    /// ancestor), which would loop.
+    BindCycle,
 }
 
 impl Skip {
     /// The reason as the index and the envelope spell it.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Skip::Firmlinked => "firmlinked",
+            Skip::Kernel => "kernel",
+            Skip::Network => "network",
+            Skip::OneFileSystem => "one_file_system",
+            Skip::BindCycle => "bind_cycle",
         }
     }
 }

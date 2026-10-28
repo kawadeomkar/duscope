@@ -24,20 +24,22 @@ mod scheduler;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
 use crossbeam_deque::Worker;
 
 pub use entry::{
-    Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, ScanEvent, Share, Skip, VolumeInfo,
+    Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, Normalization, ScanEvent, Share, Skip,
+    VolumeClass, VolumeInfo,
 };
 pub use errors::{ScanError, WalkError};
 pub use mem::MemProvider;
@@ -51,6 +53,8 @@ pub trait Provider: Send + Sync {
     /// Reads `dir`, appending an entry to `out` for each child and an error to
     /// `errs` for each child that was listed but could not be read. The walk
     /// sets each entry's `parent` and `dir` and each error's `dir`.
+    ///
+    /// # Errors
     ///
     /// An `Err` means the directory itself could not be read: the walk
     /// discards whatever was appended and closes the directory with the
@@ -68,6 +72,11 @@ pub trait Provider: Send + Sync {
     /// those with [`stat_names`](Provider::stat_names) in batches of 1,024
     /// that any worker can take, so one wide directory keeps every worker
     /// busy. The default leaves nothing for later.
+    ///
+    /// # Errors
+    ///
+    /// The error of reading the directory itself, as for
+    /// [`read_dir`](Provider::read_dir).
     fn read_dir_split(
         &self,
         dir: &DirHandle,
@@ -87,6 +96,11 @@ pub trait Provider: Send + Sync {
     ///
     /// A provider that leaves nothing for later need not implement it; the
     /// default fails with `ErrorKind::Unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// The error of opening `dir` again; a name that cannot be read is an
+    /// error in `errs`, not an `Err`.
     fn stat_names(
         &self,
         dir: &DirHandle,
@@ -115,11 +129,36 @@ pub trait Provider: Send + Sync {
     }
 
     /// The volume holding `path`.
+    ///
+    /// # Errors
+    ///
+    /// The error of reading the volume of `path`.
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
+
+    /// The volume mounted at `path`, whose entry reports the device `dev`,
+    /// read where the platform can without touching the mounted filesystem:
+    /// the walk classifies a mount with it before deciding whether to
+    /// enter, so a dead network mount it leaves alone is never asked for
+    /// its sizes. A provider may find the mount by `dev`, which holds
+    /// however the walk spelled the path. The default is
+    /// [`volume`](Provider::volume).
+    ///
+    /// # Errors
+    ///
+    /// The error of reading the mount table, or the mount point when the
+    /// table does not have it.
+    fn mount_info(&self, path: &Path, dev: u64) -> io::Result<VolumeInfo> {
+        let _ = dev;
+        self.volume(path)
+    }
 
     /// The entry of the walk root itself, not following a final symlink. Its
     /// name is the path's last component, or the whole path when it has none
     /// (`/`).
+    ///
+    /// # Errors
+    ///
+    /// The error of reading `path`, which ends the walk before it starts.
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry>;
 
     /// The workers a walk runs when [`WalkOptions::threads`] is 0: twice the
@@ -131,27 +170,92 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// A directory the walk asks a provider to read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A directory the walk asks a provider to read. It keeps its parent's
+/// handle, so the directories on its path can be walked back to the root.
+#[derive(Debug)]
 pub struct DirHandle {
     id: DirId,
     path: PathBuf,
     depth: u32,
+    dev: u64,
+    ino: u64,
+    mnt_id: u64,
+    parent: Option<Arc<DirHandle>>,
 }
 
 impl DirHandle {
+    /// The handle of `entry`, a directory numbered `id`, inside `parent`.
+    fn new(id: DirId, path: PathBuf, entry: &Entry, parent: Option<Arc<DirHandle>>) -> DirHandle {
+        DirHandle {
+            id,
+            path,
+            depth: parent.as_ref().map_or(0, |p| p.depth + 1),
+            dev: entry.dev,
+            ino: entry.ino,
+            mnt_id: entry.mnt_id,
+            parent,
+        }
+    }
+
+    /// A handle for tests: `path`, `depth` levels below a root it does not
+    /// link to.
+    #[cfg(test)]
+    pub(crate) fn detached(path: impl Into<PathBuf>, depth: u32) -> DirHandle {
+        DirHandle {
+            id: DirId::ROOT,
+            path: path.into(),
+            depth,
+            dev: 0,
+            ino: 0,
+            mnt_id: 0,
+            parent: None,
+        }
+    }
+
+    /// The directory's device, as its entry reported it.
+    #[must_use]
+    pub fn dev(&self) -> u64 {
+        self.dev
+    }
+
+    /// The directory's inode number, as its entry reported it.
+    #[must_use]
+    pub fn ino(&self) -> u64 {
+        self.ino
+    }
+
+    /// The directory's mount id, as its entry reported it.
+    #[must_use]
+    pub fn mnt_id(&self) -> u64 {
+        self.mnt_id
+    }
+
+    /// The parent directory's handle; `None` for the root.
+    #[must_use]
+    pub fn parent(&self) -> Option<&DirHandle> {
+        self.parent.as_deref()
+    }
+
+    /// This directory and every directory above it, up to the root.
+    pub fn ancestors(&self) -> impl Iterator<Item = &DirHandle> {
+        std::iter::successors(Some(self), |dir| dir.parent())
+    }
+
     /// The directory's id.
+    #[must_use]
     pub fn id(&self) -> DirId {
         self.id
     }
 
     /// The directory's path: the root as given, joined with the names below
     /// it.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// How far below the root the directory is; the root is 0.
+    #[must_use]
     pub fn depth(&self) -> u32 {
         self.depth
     }
@@ -170,6 +274,10 @@ pub struct WalkSummary {
     pub entry_errors: u64,
     /// Directories listed but not entered ([`ScanEvent::Skipped`]).
     pub skipped_dirs: u64,
+    /// Volumes met ([`ScanEvent::Volume`]), the root's included.
+    pub volumes: u64,
+    /// Volumes met but not entered, for the `mounts_excluded` warning.
+    pub mounts_excluded: u64,
     /// `--clones` met a filesystem without clone ids
     /// ([`Provider::clones_unavailable`]).
     pub clones_unavailable: bool,
@@ -181,8 +289,10 @@ pub struct WalkSummary {
 /// under [`WalkOptions::fallback`], delivering every entry to `sink`.
 /// [`walk_with`] walks with a given provider.
 ///
-/// Returns [`WalkError::NoProvider`] on a platform other than Linux and
-/// macOS.
+/// # Errors
+///
+/// As [`walk_with`], and [`WalkError::NoProvider`] on a platform other
+/// than Linux and macOS.
 pub fn walk(
     root: &Path,
     opts: &WalkOptions,
@@ -228,14 +338,14 @@ fn stat_batches(later: Vec<NameRef>) -> impl Iterator<Item = Vec<NameRef>> {
 /// A job for the pool.
 enum Job {
     /// Read one directory.
-    ReadDir(DirHandle),
+    ReadDir(Arc<DirHandle>),
     /// Read a batch of names a directory's read left for later.
     Stat(Arc<Split>, Vec<NameRef>),
 }
 
 /// A directory whose read left names for [`Job::Stat`]s.
 struct Split {
-    dir: DirHandle,
+    dir: Arc<DirHandle>,
     /// The directory's read plus its stat jobs not yet done; the part that
     /// takes it to 0 closes the directory.
     parts: AtomicUsize,
@@ -253,6 +363,8 @@ struct Batch {
     dir: DirId,
     entries: Vec<Entry>,
     errors: Vec<ScanError>,
+    /// Volumes first met among `entries`.
+    volumes: Vec<VolumeInfo>,
     /// Directories among `entries` the walk does not enter.
     skipped: Vec<(DirId, Skip)>,
     /// Whether this is the directory's last batch.
@@ -272,6 +384,20 @@ struct Walk<'a, P: ?Sized> {
     next_dir: AtomicU32,
     /// Set when the ids ran out.
     out_of_ids: AtomicBool,
+    /// The root's mount id, which `-x` confines the walk to.
+    root_mnt_id: u64,
+    /// Each mount id met so far: its class (`None` when it could not be
+    /// read), and whether its volume has been reported.
+    mounts: Mutex<HashMap<u64, Met>>,
+}
+
+/// A mount the walk has met.
+#[derive(Debug, Clone)]
+struct Met {
+    /// What [`Provider::mount_info`] said, read once per mount; `None`
+    /// when it could not be read.
+    info: Option<VolumeInfo>,
+    reported: bool,
 }
 
 /// Walks `root` with `provider`, delivering every entry to `sink` on this
@@ -280,6 +406,11 @@ struct Walk<'a, P: ?Sized> {
 /// Workers poll [`WalkOptions::cancel`] before each directory; once it is set
 /// the walk stops and returns [`WalkError::Cancelled`]. A panic in a worker
 /// is resumed on this thread.
+///
+/// # Errors
+///
+/// The root cannot be read, a worker thread cannot start, the walk was
+/// cancelled ([`WalkError::Cancelled`]), or directory ids ran out.
 pub fn walk_with<P: Provider + ?Sized>(
     provider: &P,
     root: &Path,
@@ -305,7 +436,19 @@ pub fn walk_with<P: Provider + ?Sized>(
         threads,
         ..WalkSummary::default()
     };
+    let root_dir = DirHandle::new(DirId::ROOT, root.to_owned(), &entry, None);
+    let (root_dev, root_mnt_id) = (entry.dev, entry.mnt_id);
     sink(ScanEvent::Entry(entry));
+    if let Ok(mut volume) = provider.volume(root) {
+        // The root's own identity, as every other volume row takes its
+        // entry's: on macOS a volume's statfs device can be its volume
+        // group's, shared by every volume in the group.
+        volume.dev = root_dev;
+        volume.mnt_id = root_mnt_id;
+        volume.reason = None;
+        summary.volumes += 1;
+        sink(ScanEvent::Volume(volume));
+    }
     if !is_dir {
         return Ok(summary);
     }
@@ -319,6 +462,14 @@ pub fn walk_with<P: Provider + ?Sized>(
         pending: AtomicUsize::new(1),
         next_dir: AtomicU32::new(1),
         out_of_ids: AtomicBool::new(false),
+        root_mnt_id,
+        mounts: Mutex::new(HashMap::from([(
+            root_mnt_id,
+            Met {
+                info: None,
+                reported: true,
+            },
+        )])),
     };
     let run = |job: Job, worker: &Worker<Job>, shared: &PoolShared<Job, Event>| {
         state.run(job, worker, shared);
@@ -326,11 +477,7 @@ pub fn walk_with<P: Provider + ?Sized>(
     thread::scope(|scope| {
         let pool = scheduler::start_pool(scope, threads, QUEUED_BATCHES_PER_WORKER, &run)
             .map_err(WalkError::Spawn)?;
-        pool.inject(Job::ReadDir(DirHandle {
-            id: DirId::ROOT,
-            path: root.to_owned(),
-            depth: 0,
-        }));
+        pool.inject(Job::ReadDir(Arc::new(root_dir)));
         let finished = loop {
             match pool.events.recv_timeout(POLL) {
                 Ok(Event::Batch(batch)) => deliver(batch, &mut summary, &mut sink),
@@ -369,6 +516,11 @@ fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEv
     for error in batch.errors {
         sink(ScanEvent::Error(error));
     }
+    for volume in batch.volumes {
+        summary.volumes += 1;
+        summary.mounts_excluded += u64::from(!volume.entered());
+        sink(ScanEvent::Volume(volume));
+    }
     summary.skipped_dirs += batch.skipped.len() as u64;
     for (dir, reason) in batch.skipped {
         sink(ScanEvent::Skipped { dir, reason });
@@ -402,7 +554,12 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     /// and any stat jobs stealable: parent first, as upstream's
     /// `Order::ParentFirst`, so the sink sees a directory's entry before
     /// anything inside it.
-    fn read_dir(&self, dir: &DirHandle, worker: &Worker<Job>, shared: &PoolShared<Job, Event>) {
+    fn read_dir(
+        &self,
+        dir: &Arc<DirHandle>,
+        worker: &Worker<Job>,
+        shared: &PoolShared<Job, Event>,
+    ) {
         let (mut entries, mut errors, mut later) = (Vec::new(), Vec::new(), Vec::new());
         let errno = match self.provider.read_dir_split(
             dir,
@@ -420,12 +577,14 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             }
         };
         let mut jobs = Vec::new();
-        let Some(skipped) = self.adopt(dir, &mut entries, &mut errors, &mut jobs, shared) else {
+        let Some((volumes, skipped)) =
+            self.adopt(dir, &mut entries, &mut errors, &mut jobs, shared)
+        else {
             return;
         };
         let split = (!later.is_empty()).then(|| {
             let split = Arc::new(Split {
-                dir: dir.clone(),
+                dir: Arc::clone(dir),
                 parts: AtomicUsize::new(later.len().div_ceil(STAT_BATCH) + 1),
             });
             for names in stat_batches(later) {
@@ -437,6 +596,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             dir: dir.id,
             entries,
             errors,
+            volumes,
             skipped,
             closes: split.is_none(),
             errno,
@@ -472,7 +632,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 .collect();
         }
         let mut jobs = Vec::new();
-        let Some(skipped) = self.adopt(&split.dir, &mut entries, &mut errors, &mut jobs, shared)
+        let Some((volumes, skipped)) =
+            self.adopt(&split.dir, &mut entries, &mut errors, &mut jobs, shared)
         else {
             return;
         };
@@ -480,6 +641,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             dir: split.dir.id,
             entries,
             errors,
+            volumes,
             skipped,
             closes: false,
             errno: None,
@@ -489,18 +651,19 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     }
 
     /// Sets the parent of `dir`'s new entries and errors, numbers its
-    /// subdirectories and queues a read of each the provider does not skip.
-    /// Returns the skipped ones, or `None` when the ids ran out, which stops
-    /// the walk.
+    /// subdirectories and queues a read of each the walk enters. Returns the
+    /// volumes first met and the directories not entered, or `None` when the
+    /// ids ran out, which stops the walk.
+    #[allow(clippy::type_complexity)]
     fn adopt(
         &self,
-        dir: &DirHandle,
+        dir: &Arc<DirHandle>,
         entries: &mut [Entry],
         errors: &mut [ScanError],
         jobs: &mut Vec<Job>,
         shared: &PoolShared<Job, Event>,
-    ) -> Option<Vec<(DirId, Skip)>> {
-        let mut skipped = Vec::new();
+    ) -> Option<(Vec<VolumeInfo>, Vec<(DirId, Skip)>)> {
+        let (mut volumes, mut skipped) = (Vec::new(), Vec::new());
         for entry in entries {
             entry.parent = dir.id;
             entry.dir = None;
@@ -511,21 +674,124 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     return None;
                 };
                 entry.dir = Some(id);
-                if let Some(reason) = self.provider.skip(dir, entry, self.opts) {
+                let path = dir.path.join(entry.name.as_os_str());
+                let skip = self.decide(dir, entry, &path, &mut volumes);
+                if let Some(reason) = skip {
                     skipped.push((id, reason));
                     continue;
                 }
-                jobs.push(Job::ReadDir(DirHandle {
+                jobs.push(Job::ReadDir(Arc::new(DirHandle::new(
                     id,
-                    path: dir.path.join(entry.name.as_os_str()),
-                    depth: dir.depth + 1,
-                }));
+                    path,
+                    entry,
+                    Some(Arc::clone(dir)),
+                ))));
             }
         }
         for error in errors {
             error.dir = dir.id;
         }
-        Some(skipped)
+        Some((volumes, skipped))
+    }
+
+    /// Decides whether the walk enters `entry`, a directory of `dir` at
+    /// `path`. Never a directory already on the path (a bind mount of an
+    /// ancestor, or one the kernel did not report as a mount); at a mount
+    /// crossing, never a kernel pseudo-filesystem, a network one only under
+    /// `--include-network`, and under `-x` no mount other than the root's (a
+    /// firmlink leads into the volume the root's own is paired with, so it
+    /// is no crossing for `-x`); then whatever the provider skips. A mount's
+    /// volume is added to `volumes` the first time it is met, read in full
+    /// only when the walk enters it. `None` enters.
+    ///
+    /// The bind-cycle test walks the directory's ancestors, one pointer per
+    /// level (bounded by `PATH_MAX`); a mount is classified once, and the
+    /// classification is kept for the volume row of a mount that is not
+    /// entered.
+    fn decide(
+        &self,
+        dir: &DirHandle,
+        entry: &Entry,
+        path: &Path,
+        volumes: &mut Vec<VolumeInfo>,
+    ) -> Option<Skip> {
+        let cycle = dir
+            .ancestors()
+            .any(|a| (a.dev, a.ino) == (entry.dev, entry.ino));
+        let crossing = entry.mnt_id != dir.mnt_id || entry.boundary == Boundary::Mount;
+        if !crossing {
+            return if cycle {
+                Some(Skip::BindCycle)
+            } else {
+                self.provider.skip(dir, entry, self.opts)
+            };
+        }
+        let met = self.met(entry, path);
+        let class = met.as_ref().map(|info| info.class);
+        let skip = match class {
+            _ if cycle => Some(Skip::BindCycle),
+            Some(VolumeClass::Kernel) => Some(Skip::Kernel),
+            Some(VolumeClass::Network) if !self.opts.include_network => Some(Skip::Network),
+            _ if self.opts.one_file_system
+                && entry.boundary != Boundary::Firmlink
+                && entry.mnt_id != self.root_mnt_id =>
+            {
+                Some(Skip::OneFileSystem)
+            }
+            _ => self.provider.skip(dir, entry, self.opts),
+        };
+        // A directory the provider skips is reached another way (the Data
+        // volume through its firmlinks), so it reports no volume of its own.
+        let provider_skip = skip.is_some_and(|s| s == Skip::Firmlinked);
+        if !provider_skip && self.claim(entry.mnt_id) {
+            let volume = match skip {
+                None => self.provider.volume(path).ok(),
+                Some(_) => met,
+            };
+            if let Some(mut volume) = volume {
+                volume.dev = entry.dev;
+                volume.mnt_id = entry.mnt_id;
+                volume.reason = skip;
+                volumes.push(volume);
+            }
+        }
+        skip
+    }
+
+    /// What [`Provider::mount_info`] says of the mount `entry` crossed into
+    /// at `path`, read the first time the mount is met; `None` when it
+    /// cannot be read.
+    fn met(&self, entry: &Entry, path: &Path) -> Option<VolumeInfo> {
+        if let Some(met) = self
+            .mounts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&entry.mnt_id)
+        {
+            return met.info.clone();
+        }
+        let info = self.provider.mount_info(path, entry.dev).ok();
+        self.mounts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(entry.mnt_id)
+            .or_insert(Met {
+                info,
+                reported: false,
+            })
+            .info
+            .clone()
+    }
+
+    /// Claims the report of the volume of `mnt_id`: true for the one caller
+    /// that is to report it.
+    fn claim(&self, mnt_id: u64) -> bool {
+        let mut mounts = self.mounts.lock().unwrap_or_else(PoisonError::into_inner);
+        let met = mounts.entry(mnt_id).or_insert(Met {
+            info: None,
+            reported: false,
+        });
+        !std::mem::replace(&mut met.reported, true)
     }
 
     /// Sends a batch, then makes the jobs it found stealable.
@@ -552,6 +818,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 dir: split.dir.id,
                 entries: Vec::new(),
                 errors: Vec::new(),
+                volumes: Vec::new(),
                 skipped: Vec::new(),
                 closes: true,
                 errno: None,

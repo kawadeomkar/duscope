@@ -10,7 +10,7 @@ mod tests;
 mod volume;
 
 pub(super) use stat::from_stat;
-pub(super) use volume::of as volume;
+pub(super) use volume::{mount_info, of as volume};
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use bulk::{Clock, Decoded, Outcome};
 use ffi::AttrBuf;
 
-use crate::platform::fallback;
+use crate::platform::fallback::FallbackProvider;
 use crate::platform::posix;
 use crate::{
     Boundary, DirHandle, Entry, NameRef, Provider, ScanError, Skip, VolumeInfo, WalkOptions,
@@ -126,13 +126,17 @@ fn firmlinks() -> &'static [PathBuf] {
 /// Where the Data volume is mounted in the boot volume group.
 const DATA_MOUNT: &str = "/System/Volumes/Data";
 
-/// The device of the Data volume: the one the firmlinks lead to.
+/// The device of the Data volume: the one the firmlinks lead to, read
+/// the way entries read theirs (`FSOPT_RETURN_REALDEV`), so the two compare
+/// on one definition of a device. `lstat` would give the volume group's
+/// shared `st_dev`, which matches the Data volume's only by coincidence.
 fn data_volume() -> Option<u64> {
     static DATA: OnceLock<Option<u64>> = OnceLock::new();
     *DATA.get_or_init(|| {
+        let opts = WalkOptions::default();
         firmlinks().iter().find_map(|source| {
-            let stat = posix::lstat(&posix::c_path(source).ok()?).ok()?;
-            Some(bulk::dev(stat.st_dev))
+            let name = NameRef::from(source.file_name()?);
+            Some(stat::entry_of_path(source, name, &opts).ok()?.dev)
         })
     })
 }
@@ -206,7 +210,7 @@ impl Provider for MacProvider {
                 if opts.clones {
                     self.clones_unavailable.store(true, Ordering::Relaxed);
                 }
-                fallback::read_open(fd.as_fd(), dir, opts, out, errs, later)?;
+                FallbackProvider::default().read_open(fd.as_fd(), dir, opts, out, errs, later)?;
             }
             // The probed refills' entries are kept; the rest of the
             // directory is listed by name and every worker reads it from
@@ -284,8 +288,9 @@ impl Provider for MacProvider {
     /// firmlinks and skips the mount point; a root that holds the mount
     /// point but not every firmlink (a scan of `/System`) enters the mount
     /// point and skips the firmlinks below the root. A scan rooted inside
-    /// the Data volume is ordinary.
-    fn skip(&self, dir: &DirHandle, entry: &Entry, _opts: &WalkOptions) -> Option<Skip> {
+    /// the Data volume is ordinary. Under `-x` the mount point stays out
+    /// (another volume), so the firmlinks are the way in and are kept.
+    fn skip(&self, dir: &DirHandle, entry: &Entry, opts: &WalkOptions) -> Option<Skip> {
         if Some(entry.dev) != data_volume() {
             return None;
         }
@@ -299,7 +304,7 @@ impl Provider for MacProvider {
         let sources: Vec<&PathBuf> = firmlinks().iter().filter(|s| s.exists()).collect();
         let every = !sources.is_empty() && sources.iter().all(|source| source.starts_with(&root));
         let skip = if firmlink {
-            !every && Path::new(DATA_MOUNT).starts_with(&root)
+            !every && !opts.one_file_system && Path::new(DATA_MOUNT).starts_with(&root)
         } else {
             every
         };
@@ -312,6 +317,10 @@ impl Provider for MacProvider {
 
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
         volume::of(path)
+    }
+
+    fn mount_info(&self, path: &Path, dev: u64) -> io::Result<VolumeInfo> {
+        volume::mount_info(path, dev)
     }
 
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {

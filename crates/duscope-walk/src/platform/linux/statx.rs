@@ -11,7 +11,8 @@ use crate::platform::posix;
 use crate::{Attrs, Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, Share, WalkOptions};
 
 /// The basic mask: type, size, blocks, inode, links, both times, the mount
-/// id (5.8) and the subvolume id (6.10). A kernel that does not know a bit
+/// id (the unique one where the kernel has it, 6.8; the reusable one before,
+/// 5.8) and the subvolume id (6.10). A kernel that does not know a bit
 /// leaves it out of `stx_mask`.
 pub(super) const BASIC: u32 = libc::STATX_TYPE
     | libc::STATX_SIZE
@@ -21,6 +22,7 @@ pub(super) const BASIC: u32 = libc::STATX_TYPE
     | libc::STATX_MTIME
     | libc::STATX_CTIME
     | libc::STATX_MNT_ID
+    | libc::STATX_MNT_ID_UNIQUE
     | libc::STATX_SUBVOL;
 
 /// What `--attrs full` adds: access and creation times, mode, owner and
@@ -28,22 +30,40 @@ pub(super) const BASIC: u32 = libc::STATX_TYPE
 pub(super) const FULL: u32 =
     libc::STATX_ATIME | libc::STATX_BTIME | libc::STATX_MODE | libc::STATX_UID | libc::STATX_GID;
 
-/// Never follow a final symlink; on NFS and SMB, take the client's cached
-/// attributes instead of revalidating each entry with the server.
-const FLAGS: c_int = libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_DONT_SYNC;
+/// Never follow a final symlink, never trigger an automount; on NFS and
+/// SMB, take the client's cached attributes instead of revalidating each
+/// entry with the server.
+const FLAGS: c_int = libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT | libc::AT_STATX_DONT_SYNC;
 
-/// `statx(2)` of `name` relative to `dir` (`None`: the working directory).
+/// `statx(2)` of `name` relative to `dir` (`None`: the working directory),
+/// leaving an automount untriggered.
 pub(super) fn statx(
     dir: Option<BorrowedFd<'_>>,
     name: &CStr,
     mask: u32,
+) -> io::Result<libc::statx> {
+    statx_with(dir, name, mask, FLAGS)
+}
+
+/// `statx(2)` of `path`, triggering an automount there: for the walk root
+/// and the volumes the walk enters, whose directories the walk opens, which
+/// triggers it anyway.
+pub(super) fn statx_through(path: &CStr, mask: u32) -> io::Result<libc::statx> {
+    statx_with(None, path, mask, FLAGS & !libc::AT_NO_AUTOMOUNT)
+}
+
+fn statx_with(
+    dir: Option<BorrowedFd<'_>>,
+    name: &CStr,
+    mask: u32,
+    flags: c_int,
 ) -> io::Result<libc::statx> {
     let at = dir.map_or(libc::AT_FDCWD, |fd| fd.as_raw_fd());
     let mut buf = MaybeUninit::<libc::statx>::uninit();
     loop {
         // SAFETY: `at` is AT_FDCWD or a descriptor open for the borrow,
         // `name` is NUL-terminated, and `buf` is writable for one statx.
-        let rc = unsafe { libc::statx(at, name.as_ptr(), FLAGS, mask, buf.as_mut_ptr()) };
+        let rc = unsafe { libc::statx(at, name.as_ptr(), flags, mask, buf.as_mut_ptr()) };
         if rc == 0 {
             // SAFETY: statx succeeded, so it filled the struct.
             return Ok(unsafe { buf.assume_init() });
@@ -141,7 +161,7 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
     // An automount point not yet triggered is a mount boundary too: what
     // lies beneath it is another filesystem.
     let automount = attribute(libc::STATX_ATTR_AUTOMOUNT);
-    let mnt_id = if stx.stx_mask & libc::STATX_MNT_ID != 0 {
+    let mnt_id = if stx.stx_mask & (libc::STATX_MNT_ID | libc::STATX_MNT_ID_UNIQUE) != 0 {
         stx.stx_mnt_id
     } else {
         0
