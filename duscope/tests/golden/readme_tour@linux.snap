@@ -1,0 +1,46 @@
+$ duscope top ~ --limit 6
+    Size      %   Files  Path
+95.6 MiB  37.9%  24,859  ~/Library
+62.5 MiB  24.8%   8,604  ~/dev
+30.0 MiB  11.9%       8  ~/Movies
+11.6 MiB   4.6%   2,001  ~/Documents
+10.7 MiB   4.2%     250  ~/Music
+10.2 MiB   4.1%   4,000  ~/.cache
+252.3 MiB allocated · 43,137 files · 8,129 dirs · <elapsed, threads>
+
+$ duscope tree ~/Projects --depth 1 --min-pct 10
+   Size       %  Path
+6.5 MiB  100.0%  ~/Projects
+3.5 MiB   54.7%    rust-cli/
+1.1 MiB   17.6%    npm-app/
+6.5 MiB allocated · 94 files · 137 dirs · <elapsed, threads>
+
+$ duscope by-type ~
+    Size      %   Files  Class
+54.7 MiB  21.7%  18,988  data
+50.9 MiB  20.2%   1,704  media
+44.0 MiB  17.5%   4,055  binaries
+24.5 MiB   9.7%   6,277  code
+15.1 MiB   6.0%   4,932  docs
+ 7.4 MiB   2.9%     197  archives
+23.9 MiB   9.5%   6,983  other
+252.3 MiB allocated · 43,137 files · 8,129 dirs · <elapsed, threads>
+
+$ duscope stale ~ --older-than 1y --min-size 1M
+   Size    Modified  Path
+7.0 MiB  2035-08-20  ~/Movies/holiday-2035.mov
+6.0 MiB  2034-01-02  ~/Movies/wedding.mp4
+4.0 MiB  2035-01-02  ~/Movies/lecture-01.mkv
+4.0 MiB  2035-01-02  ~/Movies/lecture-02.mkv
+3.0 MiB  2035-01-02  ~/Downloads/Xcode_16.1.xip
+1.5 MiB  2034-10-24  ~/Downloads/ubuntu-24.04.1-live-server-arm64.iso
+252.3 MiB allocated · 43,137 files · 8,129 dirs · <elapsed, threads>
+
+$ duscope top ~ --files --limit 3 --plain
+7340032	7340032	1	0	2035-08-20T00:00:00Z	file	~/Movies/holiday-2035.mov
+6291456	6291456	1	0	2034-01-02T00:00:00Z	file	~/Movies/wedding.mp4
+5242880	5242880	1	0	2036-12-12T00:00:00Z	file	~/Movies/screen-recording.mov
+
+$ duscope top ~ --files --limit 2 --json | jq -c '.entries[] | {path, kind, allocated_bytes}'
+{"path":"~/Movies/holiday-2035.mov","kind":"file","allocated_bytes":7340032}
+{"path":"~/Movies/wedding.mp4","kind":"file","allocated_bytes":6291456}
