@@ -1,0 +1,29 @@
+.SH FILES
+.TP
+.I theme.toml
+A theme for
+.B \-\-theme
+or
+.BR DUSCOPE_THEME :
+thirteen role colours, seven class colours, a ten\-colour cycle and a
+five\-step age ramp, each
+.BR #rrggbb .
+.TP
+.I classes.toml
+A classes table for
+.BR "by\-type \-\-classes" ,
+merged over the built\-in one:
+.B [ext]
+maps an extension to a class,
+.B [dir]
+a directory name or glob.
+.TP
+.I ignore files
+Gitignore\-syntax files for
+.BR \-\-ignore\-from ,
+negations included; and plain pattern files for
+.BR \-\-exclude\-from .
+.PP
+The formats are in
+.I docs/rules.md
+in the source distribution.

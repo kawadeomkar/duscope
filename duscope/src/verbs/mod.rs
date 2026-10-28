@@ -1,5 +1,7 @@
 //! The verbs, and the failures they report.
 
+mod completions;
+mod man;
 mod query;
 mod scan;
 mod treemap;
@@ -83,5 +85,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::Tree(args)) => query::tree(&args, output),
         Some(Verb::ByType(args)) => query::by_type(&args, output),
         Some(Verb::Stale(args)) => query::stale(&args, output),
+        Some(Verb::Man) => man::run(),
+        Some(Verb::Completions(args)) => completions::run(args.shell),
     }
 }

@@ -1,0 +1,66 @@
+.SH ENVIRONMENT
+.TP
+.B DUSCOPE_FORMAT
+The output format when no flag names one:
+.BR json ,
+.BR plain ,
+.BR table ,
+.B treemap
+or
+.BR ndjson .
+It wins over the agent and CI variables below.
+.TP
+.BR CLAUDECODE ", " CODEX_THREAD_ID ", " CODEX_VERSION ", " GEMINI_CLI
+Set by an agent's shell: the output is the JSON envelope, even on a
+terminal.
+.TP
+.B CI
+Set (and not
+.B 0
+or
+.BR false ):
+the output is
+.BR \-\-plain .
+.TP
+.B DUSCOPE_THREADS
+The scanner's worker threads, as
+.BR \-\-threads .
+.TP
+.B DUSCOPE_THEME
+The treemap's colours, as
+.BR \-\-theme :
+a pack's name or the path of a theme file.
+.TP
+.B NO_COLOR
+Set and not empty: no colour. The treemap is drawn in shades.
+.TP
+.BR CLICOLOR_FORCE ", " FORCE_COLOR
+Set (and not
+.BR 0 ):
+colour even when stdout is not a terminal.
+.TP
+.B TERM
+.B dumb
+turns colour off.
+.TP
+.B COLORTERM
+.B truecolor
+or
+.BR 24bit :
+the treemap is drawn in 24\-bit colour; otherwise in the 256\-colour cube.
+.TP
+.B COLORFGBG
+A light background (the last field 7 or 15) picks the light theme when
+none is named.
+.TP
+.B LS_COLORS
+The extension colours of
+.BR "\-\-color\-by lscolors" .
+.TP
+.BR LC_ALL ", " LC_CTYPE ", " LANG
+Without UTF\-8 the treemap is drawn in ASCII.
+.TP
+.B TZ
+The local zone that
+.BR \-\-since " and " \-\-until
+read a date in.

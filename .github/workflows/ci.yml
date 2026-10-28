@@ -127,16 +127,24 @@ jobs:
       - name: Generate the fr_FR.UTF-8 locale
         if: matrix.leg == 'locale' && runner.os == 'Linux'
         run: sudo locale-gen fr_FR.UTF-8
-      - name: Install bash 4 or later
+      - name: Install bash 4 or later and fish
         # macOS ships bash 3.2, and the test that runs the changelog job needs 4 or
-        # later; `just setup` installs it the same way.
+        # later; `just setup` installs it the same way. fish loads the completions
+        # in P1-CLI-04's test (macOS ships zsh and mandoc).
         if: runner.os == 'macOS'
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |
-          brew install bash
+          brew install bash fish
           "$(brew --prefix)/bin/bash" --version
+      - name: Install zsh, fish and mandoc
+        # P1-CLI-04's tests load the completions in zsh and fish and lint the man
+        # page with mandoc; in CI a missing one fails them.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zsh fish mandoc
       - name: just test
         if: matrix.leg == 'default'
         run: just test
@@ -198,6 +206,11 @@ jobs:
         with:
           key: ${{ matrix.toolchain }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install zsh, fish and mandoc
+        # As in the test job: P1-CLI-04's tests need them in CI.
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zsh fish mandoc
       - name: Build
         run: cargo build --workspace --all-targets --locked
       - run: just test
