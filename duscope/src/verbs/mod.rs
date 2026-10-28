@@ -2,6 +2,8 @@
 
 mod scan;
 
+pub use scan::report_interrupt;
+
 use std::fmt;
 
 use crate::cli::{Cli, Verb};

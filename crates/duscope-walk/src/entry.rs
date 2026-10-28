@@ -338,7 +338,10 @@ impl Normalization {
 /// arrive after the entry of the directory itself, and its `DirClosed`
 /// arrives after its entries, so the sink always knows an entry's parent.
 /// A directory the walk does not enter gets `Skipped`, then its `DirClosed`,
-/// after its entry.
+/// after its entry. One `Error` may come after its directory's `DirClosed`:
+/// a subdirectory that could not be read for `ELOOP`, `ENAMETOOLONG` or
+/// `EIO` is an error of its parent, known only once the subdirectory is
+/// read; it arrives before the subdirectory's own `DirClosed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanEvent {
     /// An entry.
@@ -351,10 +354,15 @@ pub enum ScanEvent {
         /// Why the directory could not be read.
         errno: Option<i32>,
     },
-    /// `dir` disappeared between being listed and being read.
+    /// Something disappeared between being listed and being read
+    /// (`ENOENT`, `ESTALE`): the entry `name` that `dir` listed, which is not
+    /// delivered; or, with no name, the directory `dir` itself, whose
+    /// `DirClosed` follows with no entries.
     Vanished {
         /// The directory.
         dir: DirId,
+        /// The entry of `dir` that vanished; `None` when `dir` itself did.
+        name: Option<NameRef>,
     },
     /// A volume the walk met.
     Volume(VolumeInfo),
@@ -384,6 +392,10 @@ pub enum Skip {
     /// A mount of a directory already on the path (a bind mount of an
     /// ancestor), which would loop.
     BindCycle,
+    /// It matches `--exclude`, `--exclude-from` or `--ignore-from`.
+    Excluded,
+    /// A cache directory, under `--exclude-caches`.
+    ExcludedCache,
 }
 
 impl Skip {
@@ -396,6 +408,8 @@ impl Skip {
             Skip::Network => "network",
             Skip::OneFileSystem => "one_file_system",
             Skip::BindCycle => "bind_cycle",
+            Skip::Excluded => "excluded",
+            Skip::ExcludedCache => "excluded_cache",
         }
     }
 }

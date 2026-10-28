@@ -1,6 +1,8 @@
 //! Calls both platforms make the same way: opening a directory to read and
 //! raising the descriptor limit.
 
+pub(crate) mod signal;
+
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::MaybeUninit;
@@ -57,6 +59,38 @@ pub(crate) fn raise_nofile_limit() {
 /// The path as a C string. A path from a directory listing holds no NUL.
 pub(crate) fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput.into())
+}
+
+/// The first 43 bytes of a valid `CACHEDIR.TAG`.
+const CACHEDIR_SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
+/// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`: a regular
+/// file, not a link, that starts with the signature. One `lstat` answers
+/// for a directory without a tag, the common case; a candidate is then
+/// opened without blocking, so a FIFO of that name cannot stall the walk,
+/// and checked again through the descriptor, so nothing swapped in after
+/// the first check is read.
+pub(crate) fn cachedir_tag(dir: &Path) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = dir.join("CACHEDIR.TAG");
+    let long_enough =
+        |m: &std::fs::Metadata| m.is_file() && m.len() >= CACHEDIR_SIGNATURE.len() as u64;
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| long_enough(&m)) {
+        return false;
+    }
+    let Ok(mut tag) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    else {
+        return false;
+    };
+    let mut head = [0u8; 43];
+    tag.metadata().is_ok_and(|m| long_enough(&m))
+        && tag.read_exact(&mut head).is_ok()
+        && &head == CACHEDIR_SIGNATURE
 }
 
 /// Room for a name of up to `NAME_MAX` (255) bytes and its terminating NUL.
