@@ -9,15 +9,17 @@
 
 use duscope_walk::{DirId, Kind};
 
+use crate::accounting::{Charges, charge};
 use crate::arena::{Arena, DirRec, EntryIdx};
 
-/// The pre-order numbering of an arena.
+/// The pre-order numbering of an arena, and what charging decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollUp {
     /// The entry at each pre-order id.
     order: Vec<u32>,
     /// The pre-order id of each entry, by its scan-order index.
     ids: Vec<u32>,
+    charges: Charges,
 }
 
 impl RollUp {
@@ -45,19 +47,33 @@ impl RollUp {
     pub fn preorder(&self) -> impl Iterator<Item = EntryIdx> + '_ {
         self.order.iter().map(|&raw| EntryIdx::from_raw(raw))
     }
+
+    /// How hard links and clones were charged.
+    pub fn charges(&self) -> &Charges {
+        &self.charges
+    }
 }
 
-/// Numbers the arena's entries in pre-order and fills every directory's
-/// cumulative fields: totals of apparent and allocated bytes (the directory
-/// itself included), file and directory counts, the recursive `max_mtime`,
-/// `last_id`, `files_end`. Every entry's bytes count here; hard links and
-/// clones are charged once by the accounting that follows (P1-CORE-03).
+/// Numbers the arena's entries in pre-order, fills every directory's
+/// cumulative fields — totals of apparent and allocated bytes (the
+/// directory itself included), file and directory counts, the recursive
+/// `max_mtime`, `last_id`, `files_end` — and charges hard links and clones
+/// once ([`charge`]): a later link's bytes leave `cum_apparent` and
+/// `cum_allocated`, a later clone's leave `cum_allocated`.
 pub fn roll_up(arena: &mut Arena) -> RollUp {
+    let mut rollup = number_and_total(arena);
+    rollup.charges = charge(arena, &rollup);
+    rollup
+}
+
+/// The roll-up with every entry's bytes counted.
+fn number_and_total(arena: &mut Arena) -> RollUp {
     let n = arena.len();
     if n == 0 {
         return RollUp {
             order: Vec::new(),
             ids: Vec::new(),
+            charges: Charges::default(),
         };
     }
     let children = Children::of(arena);
@@ -149,7 +165,11 @@ pub fn roll_up(arena: &mut Arena) -> RollUp {
         rec.n_dirs = rec.n_dirs.saturating_add(dirs);
         rec.last_id = rec.last_id.max(last);
     }
-    RollUp { order, ids }
+    RollUp {
+        order,
+        ids,
+        charges: Charges::default(),
+    }
 }
 
 /// Gives `raw` the next pre-order id.
