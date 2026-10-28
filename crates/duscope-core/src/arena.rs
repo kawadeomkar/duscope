@@ -37,6 +37,11 @@ impl EntryIdx {
     pub const fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// The index with this number.
+    pub(crate) const fn from_raw(raw: u32) -> EntryIdx {
+        EntryIdx(raw)
+    }
 }
 
 /// One entry: 48 bytes.
@@ -589,6 +594,11 @@ impl Arena {
             .get(dir.index())
             .filter(|rec| rec.entry != DirRec::NO_ENTRY)
             .unwrap_or_else(|| panic!("no directory {dir:?}"))
+    }
+
+    /// The directory record of `dir`, for the roll-up.
+    pub(crate) fn dir_mut(&mut self, dir: DirId) -> &mut DirRec {
+        self.dirs.slot(dir.index())
     }
 
     /// Every entry, in scan order.

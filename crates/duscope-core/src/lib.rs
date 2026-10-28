@@ -10,6 +10,7 @@
 pub mod arena;
 pub mod envelope;
 mod errors;
+pub mod rollup;
 pub mod rules;
 
 #[cfg(test)]
