@@ -1,0 +1,100 @@
+# The proposal's example tree: `duscope scan ~ --save` from its CLI session,
+# as the depth-1 treemap mockup draws it (Treemap output, "mockup · the
+# example scan from the CLI session above at --depth 1, 11 tiles on an 80×36
+# half-cell grid"). The layout, painter and TUI tests share it.
+#
+# Each tile is a top-level or second-level entry of ~; `gib` is its
+# allocated size as the mockup prints it and `bytes` the same in bytes
+# (tenths of a GiB times 107374182, so the layout sees the mockup's
+# proportions exactly); `class` the file class of most of its bytes, one of
+# the taxonomy's seven (the mockup's own labels, app data and build output,
+# are purpose classes, which `caches` reports and the map does not colour);
+# and `rect` where the squarified layout puts it on the canvas, in
+# half-cell units: [x, y, width, height].
+
+root = "/Users/alex"
+total_gib = 412.3
+files = 1284310
+dirs = 143882
+
+[canvas]
+columns = 80
+rows = 18
+units_high = 36
+
+[[tile]]
+name = "Library/Containers"
+gib = 98.2
+bytes = 105441446724
+class = "data"
+rect = [0, 0, 19, 36]
+
+[[tile]]
+name = "dev/target"
+gib = 61.0
+bytes = 65498251020
+class = "binaries"
+rect = [19, 0, 21, 20]
+
+[[tile]]
+name = "Library (other)"
+gib = 48.5
+bytes = 52076478270
+class = "data"
+rect = [19, 20, 21, 16]
+
+[[tile]]
+name = "Movies"
+gib = 44.7
+bytes = 47996259354
+class = "media"
+rect = [40, 0, 15, 21]
+
+[[tile]]
+name = "Pictures"
+gib = 31.3
+bytes = 33608118966
+class = "media"
+rect = [40, 21, 15, 15]
+
+[[tile]]
+name = "dev/node_modules"
+gib = 31.1
+bytes = 33393370602
+class = "code"
+rect = [55, 0, 14, 15]
+
+[[tile]]
+name = "dev (other)"
+gib = 22.6
+bytes = 24266565132
+class = "code"
+rect = [69, 0, 11, 15]
+
+[[tile]]
+name = "DerivedData"
+gib = 22.4
+bytes = 24051816768
+class = "binaries"
+rect = [55, 15, 14, 11]
+
+[[tile]]
+name = "other"
+gib = 19.6
+bytes = 21045339672
+class = "other"
+rect = [55, 26, 14, 10]
+
+[[tile]]
+name = "Music"
+gib = 18.7
+bytes = 20078972034
+class = "media"
+rect = [69, 15, 11, 12]
+
+[[tile]]
+name = "Documents"
+gib = 14.2
+bytes = 15247133844
+class = "docs"
+rect = [69, 27, 11, 9]

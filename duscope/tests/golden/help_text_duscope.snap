@@ -96,21 +96,33 @@ Output:
 
       --color-by <BY>
           What colours the treemap's tiles
+          
+          lscolors takes LS_COLORS' *suffix= and ex= (with --attrs full) entries
 
           Possible values:
           - type:     File class
           - folder:   Top-level folder
           - level:    Depth
           - age:      Age
-          - lscolors: LS_COLORS
+          - lscolors: LS_COLORS, else file class
 
       --theme <THEME>
-          The colours: a theme name (mocha, dracula, …) or a theme file
+          The colours: a theme name or the path of a theme file
+          
+          mocha|tokyo-night|dracula|gruvbox|light|terminal-native|no-color
           
           [env: DUSCOPE_THEME=]
 
       --pool-files
           Pool files into their directory's tile
+
+      --min-tile <UNITS>
+          The smallest tile the treemap draws, in half-cell units
+
+          Possible values:
+          - 1: One unit: every tile that rounds to a unit (the default)
+          - 2: Two units
+          - 4: Four units: a calmer picture
 
       --json
           Print the JSON envelope (--format json)

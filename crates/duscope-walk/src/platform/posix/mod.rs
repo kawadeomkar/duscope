@@ -2,6 +2,7 @@
 //! raising the descriptor limit.
 
 pub(crate) mod signal;
+pub(crate) mod winsize;
 
 use std::ffi::{CStr, CString};
 use std::io;

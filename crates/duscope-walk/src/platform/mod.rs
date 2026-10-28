@@ -101,6 +101,18 @@ pub(crate) fn wait_for_interrupt() -> bool {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn stand_down_interrupt() {}
 
+/// The size of the terminal on stdout.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn terminal_size() -> Option<(u16, u16)> {
+    posix::winsize::terminal_size()
+}
+
+/// The size of the terminal on stdout: unknown on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn terminal_size() -> Option<(u16, u16)> {
+    None
+}
+
 /// Makes SIGINT set `flag`: not on this platform.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn cancel_on_interrupt(

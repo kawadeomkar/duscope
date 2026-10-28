@@ -18,7 +18,7 @@ use std::path::Path;
 use crate::envelope::{ByTypeEntry, Example, name_fields};
 use crate::rules::{Class, Classes, ext};
 
-use super::{Filters, Page, SizeKind, TreeView, abs_path, pct};
+use super::{Filters, Node, Page, SizeKind, TreeView, abs_path, pct};
 
 /// What `by-type` was asked.
 #[derive(Debug, Clone)]
@@ -120,13 +120,25 @@ pub fn root_dirs<'p>(classes: &Classes, root: &'p Path) -> (Vec<&'p [u8]>, Optio
     (components, class)
 }
 
-/// Each class's files under the root, by [`index`].
-fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
-    let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
+/// Calls `each` with every entry under the root of `view`, in pre-order,
+/// and its class: a directory's is that of the outermost directory rule
+/// above or at it, the directories above the root included (`other` when
+/// none matches); a file's is that rule's, else its extension's in the
+/// table, else `binaries` for a file without an extension whose mode has
+/// an execute bit, else `other`. `by-type` tallies these classes and the
+/// treemap colours its tiles with them, so the legend and the tiles agree.
+pub fn classify(
+    view: &(impl TreeView + ?Sized),
+    classes: &Classes,
+    mut each: impl FnMut(&Node<'_>, Class),
+) {
+    if view.is_empty() {
+        return;
+    }
     let root = view.node(0);
     // The directory rules match a directory's last path components, the
     // root's own included.
-    let (mut components, above) = root_dirs(q.classes, view.root_path());
+    let (mut components, above) = root_dirs(classes, view.root_path());
     // The directories open above the current id: (last id, its class).
     let mut open: Vec<(u32, Option<Class>)> = vec![(u32::MAX, above)];
     for id in 0..=root.last_id {
@@ -138,11 +150,9 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
         let inherited = open.last().and_then(|&(_, class)| class);
         if node.is_dir() {
             components.push(node.name);
-            let class = inherited.or_else(|| q.classes.of_dir(&components));
+            let class = inherited.or_else(|| classes.of_dir(&components));
             open.push((node.last_id, class));
-            continue;
-        }
-        if node.linked_away || !q.filters.keeps(view, &node, q.size) {
+            each(&node, class.unwrap_or(Class::Other));
             continue;
         }
         let class = inherited.unwrap_or_else(|| {
@@ -155,9 +165,21 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
                     Class::Other
                 }
             } else {
-                q.classes.of_ext(&suffix).unwrap_or(Class::Other)
+                classes.of_ext(&suffix).unwrap_or(Class::Other)
             }
         });
+        each(&node, class);
+    }
+}
+
+/// Each class's files under the root, by [`index`].
+fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
+    let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
+    classify(view, q.classes, |node, class| {
+        if node.is_dir() || node.linked_away || !q.filters.keeps(view, node, q.size) {
+            return;
+        }
+        let id = node.id;
         let tally = &mut tallies[index(class)];
         tally.allocated += node.counted(SizeKind::Allocated);
         tally.apparent += node.counted(SizeKind::Apparent);
@@ -172,7 +194,7 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
                 tally.largest.truncate(q.examples);
             }
         }
-    }
+    });
     tallies
 }
 

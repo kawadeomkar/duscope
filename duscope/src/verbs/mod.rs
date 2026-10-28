@@ -2,6 +2,7 @@
 
 mod query;
 mod scan;
+mod treemap;
 
 pub use scan::report_interrupt;
 

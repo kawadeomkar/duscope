@@ -389,6 +389,12 @@ pub fn stand_down_interrupt() {
     platform::stand_down_interrupt();
 }
 
+/// The columns and rows of the terminal on stdout (`TIOCGWINSZ`); `None`
+/// when stdout is not a terminal. The static treemap sizes itself by it.
+pub fn terminal_size() -> Option<(u16, u16)> {
+    platform::terminal_size()
+}
+
 /// The result queue holds this many directory batches per worker, as in
 /// dua-core; a worker blocks on a full queue until the sink catches up.
 const QUEUED_BATCHES_PER_WORKER: usize = 2;

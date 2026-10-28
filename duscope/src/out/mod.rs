@@ -20,6 +20,12 @@ use duscope_core::envelope::{
 use serde::Serialize;
 
 pub use args::{ColorWhen, FormatArg, OutputArgs};
+
+/// Writes `bytes` to stdout as they are (the treemap's escapes and
+/// cells); a closed pipe ends the output quietly.
+pub fn emit_bytes(bytes: &[u8]) -> Result<(), Failure> {
+    emit(|out| out.write_all(bytes))
+}
 pub use units::{Units, iso8601, thousands};
 
 use crate::cli::TreemapWhen;
@@ -384,17 +390,6 @@ impl Output {
             warn(&envelope.warnings);
         }
         written
-    }
-
-    /// Writes one line for people: on stdout in the human formats, on
-    /// stderr in the machine formats.
-    pub fn line(&self, line: &str) -> Result<(), Failure> {
-        if self.is_machine() {
-            stderr_line(line);
-            Ok(())
-        } else {
-            emit(|out| writeln!(out, "{line}"))
-        }
     }
 
     /// Reports a failure: the error envelope on stdout under JSON, two
