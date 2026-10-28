@@ -5,6 +5,7 @@ mod scan;
 use std::fmt;
 
 use crate::cli::{Cli, Verb};
+use crate::out::Output;
 
 /// The exit codes of the conventions appendix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,14 +70,27 @@ impl fmt::Display for Failure {
     }
 }
 
-/// Runs the verb `cli` names.
-pub fn run(cli: Cli) -> Result<(), Failure> {
+/// Runs the verb `cli` names, writing as `output` says.
+pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
     match cli.verb {
-        None => scan::run(&cli.scan),
-        Some(Verb::Scan(args)) => scan::run(&args),
-        Some(Verb::Top(args)) => scan::summarize(&args.walk, &[]),
-        Some(Verb::Tree(args)) => scan::summarize(&args.walk, &[]),
-        Some(Verb::ByType(args)) => scan::summarize(&args.walk, &[]),
-        Some(Verb::Stale(args)) => scan::summarize(&args.walk, &[]),
+        None => scan::run(&cli.scan, output),
+        Some(Verb::Scan(args)) => scan::run(&args, output),
+        Some(Verb::Top(args)) => scan::list(
+            &args.walk,
+            &[],
+            "top",
+            Some(&args.query),
+            args.files,
+            output,
+        ),
+        Some(Verb::Tree(args)) => {
+            scan::list(&args.walk, &[], "tree", Some(&args.query), false, output)
+        }
+        Some(Verb::ByType(args)) => {
+            scan::list(&args.walk, &[], "by-type", Some(&args.query), false, output)
+        }
+        Some(Verb::Stale(args)) => {
+            scan::list(&args.walk, &[], "stale", Some(&args.query), true, output)
+        }
     }
 }

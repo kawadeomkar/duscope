@@ -1,19 +1,27 @@
 //! `scan`, and the scan every verb of phase 1 runs: the walk into the
-//! arena, then the roll-up.
+//! arena, then the roll-up. Until P1-CLI-03 brings the queries, every verb
+//! lists the root's largest children.
 
-use std::io::{self, Write};
-use std::path::Path;
+use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use duscope_core::arena::{Arena, EntryIdx};
+use duscope_core::arena::{Arena, DirRec, EntryIdx};
+use duscope_core::envelope::{
+    Envelope, QueryBlock, SCHEMA_VERSION, ScanBlock, Tool, TopEntry, VolumeEntry, Warning,
+    name_fields,
+};
+use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::roll_up;
-use duscope_walk::{Attrs, DirId, WalkError, WalkOptions, WalkSummary, walk};
+use duscope_walk::{Attrs, DirId, Flags, Kind, WalkError, WalkOptions, WalkSummary, walk};
 use globset::{Glob, GlobSetBuilder};
 
 use super::{Exit, Failure};
-use crate::cli::{AttrsArg, ProviderArg, ScanArgs, WalkArgs};
+use crate::cli::{AttrsArg, ProviderArg, QueryArgs, ScanArgs, SizeKind, WalkArgs};
+use crate::out::{Format, Output, iso8601, thousands};
 
 /// A finished scan.
 #[derive(Debug)]
@@ -24,58 +32,375 @@ pub struct Scanned {
     pub summary: WalkSummary,
     /// How long the walk and the roll-up took.
     pub elapsed: Duration,
+    /// The root, absolute, symbolic links resolved: the path the walk read.
+    pub root: PathBuf,
+    /// The root as given.
+    pub root_as_given: PathBuf,
+    /// When the scan started and finished, Unix nanoseconds.
+    pub started_ns: i64,
+    /// When it finished.
+    pub finished_ns: i64,
 }
 
 /// `scan`.
-pub fn run(args: &ScanArgs) -> Result<(), Failure> {
+pub fn run(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
     if args.save {
         return Err(not_yet("--save", "the index"));
     }
     if args.interactive {
         return Err(not_yet("--interactive", "the interactive viewer"));
     }
-    summarize(&args.walk, &args.exclude)
+    list(&args.walk, &args.exclude, "scan", None, false, output)
 }
 
-/// Scans and prints the one-line summary.
-pub fn summarize(walk_args: &WalkArgs, excludes: &[String]) -> Result<(), Failure> {
+/// Scans, then prints the root's largest children (its files with
+/// `files`) for `verb`. On a terminal, `scan` prints its footer alone
+/// until the treemap arrives (P1-MAP-02).
+pub fn list(
+    walk_args: &WalkArgs,
+    excludes: &[String],
+    verb: &'static str,
+    query: Option<&QueryArgs>,
+    files: bool,
+    output: &Output,
+) -> Result<(), Failure> {
     let scanned = scan(walk_args, excludes)?;
-    let (allocated, files, dirs) = root_totals(&scanned.arena);
-    let line = format!(
-        "{} allocated · {} files · {} dirs · {:.1} s, {} threads",
-        iec(allocated),
-        thousands(files),
-        thousands(dirs),
-        scanned.elapsed.as_secs_f64(),
-        scanned.summary.threads,
-    );
-    write_stdout(&line)
+    // --strict: a directory that could not be read fails the command.
+    if query.is_some_and(|q| q.strict) && scanned.summary.unreadable_dirs > 0 {
+        return Err(Failure::new(
+            Exit::Permission,
+            "permission_denied",
+            format!(
+                "{} directories could not be read, and --strict asks for all of them",
+                scanned.summary.unreadable_dirs
+            ),
+        )
+        .hint("Run without --strict to accept totals that leave them out"));
+    }
+    let size_kind = size_kind(walk_args);
+    let envelope = envelope(&scanned, walk_args, verb, query, files, size_kind, output);
+    let footer = footer(&envelope.scan, &scanned, output);
+    if output.format == Format::Treemap {
+        output.line(&footer)
+    } else {
+        output.list(&envelope, &footer)
+    }
 }
 
-/// The root's allocated bytes, files and directories below it. A root
-/// that is not a directory (a file, or a symbolic link the walk does not
-/// follow) is one file of its own size.
-fn root_totals(arena: &Arena) -> (u64, u64, u64) {
-    if arena.is_empty() {
-        return (0, 0, 0);
+/// The size the rows are ranked and shown by.
+fn size_kind(args: &WalkArgs) -> &'static str {
+    if args.apparent_size || args.size == Some(SizeKind::Apparent) {
+        "apparent"
+    } else {
+        "allocated"
     }
-    let root = arena.entry(EntryIdx::ROOT);
-    match root.dir {
-        Some(dir) => {
-            let rec = arena.dir(dir);
-            (
-                rec.cum_allocated,
-                u64::from(rec.n_files),
-                u64::from(rec.n_dirs),
-            )
+}
+
+/// The envelope of a listing: the scan block, then the root's children,
+/// largest first, path bytewise among equals.
+fn envelope(
+    scanned: &Scanned,
+    walk_args: &WalkArgs,
+    verb: &'static str,
+    query: Option<&QueryArgs>,
+    files: bool,
+    size_kind: &'static str,
+    output: &Output,
+) -> Envelope<TopEntry> {
+    let arena = &scanned.arena;
+    let root = &scanned.root;
+    let totals = Totals::of(arena, EntryIdx::ROOT);
+    let apparent = size_kind == "apparent";
+    let root_total = if apparent {
+        totals.apparent
+    } else {
+        totals.allocated
+    };
+    let mut rows: Vec<TopEntry> = arena
+        .entries()
+        .skip(1)
+        .filter(|view| view.parent == DirId::ROOT && (view.kind == Kind::Dir) != files)
+        .map(|view| {
+            let path = root.join(std::ffi::OsStr::from_bytes(view.name));
+            let path_bytes = path.as_os_str().as_bytes().to_vec();
+            let (name, name_raw) = name_fields(view.name);
+            let t = Totals::of(arena, view.idx);
+            let size = if apparent { t.apparent } else { t.allocated };
+            TopEntry {
+                path: String::from_utf8_lossy(&path_bytes).into_owned(),
+                path_bytes,
+                name,
+                name_raw,
+                kind: kind_name(view.kind),
+                allocated_bytes: t.allocated,
+                apparent_bytes: t.apparent,
+                pct_of_root: pct(size, root_total),
+                file_count: t.files,
+                dir_count: t.dirs,
+                max_mtime: iso8601(t.max_mtime_ns),
+                flags: t.flags,
+            }
+        })
+        .collect();
+    let key = |row: &TopEntry| {
+        if apparent {
+            row.apparent_bytes
+        } else {
+            row.allocated_bytes
         }
-        None => (root.allocated, 1, 0),
+    };
+    rows.sort_by(|a, b| {
+        key(b)
+            .cmp(&key(a))
+            .then_with(|| a.path_bytes.cmp(&b.path_bytes))
+    });
+    let total_count = rows.len() as u64;
+    // ndjson streams every row; the others return at most 100.
+    let limit = (output.format != Format::Ndjson)
+        .then(|| query.and_then(|q| q.limit).unwrap_or(25).min(100));
+    if let Some(limit) = limit {
+        rows.truncate(limit);
     }
+    let returned_count = rows.len() as u64;
+    Envelope {
+        ok: true,
+        schema_version: SCHEMA_VERSION,
+        tool: Tool::CURRENT,
+        scan: scan_block(scanned, walk_args, root, &totals, size_kind),
+        query: QueryBlock {
+            command: verb,
+            path: root.to_string_lossy().into_owned(),
+            depth: query.and_then(|q| q.depth),
+            limit: limit.map(|l| l as u64),
+            sort: format!("{size_kind}_desc"),
+            filters: Vec::new(),
+        },
+        entries: rows,
+        returned_count,
+        total_count,
+        truncated: returned_count < total_count,
+        next_cursor: None,
+        warnings: warnings(scanned, totals.upper_bound),
+        next: Vec::new(),
+    }
+}
+
+/// The scan block: the root, the scan's options, times and totals, and
+/// the volumes it met.
+fn scan_block(
+    scanned: &Scanned,
+    walk_args: &WalkArgs,
+    root: &Path,
+    totals: &Totals,
+    size_kind: &'static str,
+) -> ScanBlock {
+    let arena = &scanned.arena;
+    let summary = &scanned.summary;
+    ScanBlock {
+        id: None,
+        root: root.to_string_lossy().into_owned(),
+        root_as_given: scanned.root_as_given.to_string_lossy().into_owned(),
+        started_at: iso8601(scanned.started_ns),
+        finished_at: iso8601(scanned.finished_ns),
+        size_kind,
+        attrs: match walk_args.attrs {
+            AttrsArg::Basic => "basic",
+            AttrsArg::Full => "full",
+        },
+        thread_count: summary.threads as u64,
+        fs_type: arena.volumes().first().map(|v| v.fs_type.clone()),
+        device_confined: walk_args.one_file_system,
+        total_allocated_bytes: totals.allocated,
+        total_apparent_bytes: totals.apparent,
+        file_count: totals.files,
+        dir_count: totals.dirs,
+        error_count: summary.unreadable_dirs + summary.entry_errors,
+        vanished_count: arena.vanished(),
+        incremental: false,
+        volumes: arena
+            .volumes()
+            .iter()
+            .map(|v| VolumeEntry {
+                mount_point: v.mount_point.to_string_lossy().into_owned(),
+                fs_type: v.fs_type.clone(),
+                entered: v.entered(),
+                reason: v.reason.map(duscope_walk::Skip::as_str),
+                read_only: v.read_only,
+                total_bytes: v.total_bytes,
+                free_bytes: v.free_bytes,
+            })
+            .collect(),
+    }
+}
+
+/// An entry's totals: a directory's subtree, or a file's own.
+struct Totals {
+    allocated: u64,
+    apparent: u64,
+    files: u64,
+    dirs: u64,
+    max_mtime_ns: i64,
+    upper_bound: bool,
+    flags: Vec<&'static str>,
+}
+
+impl Totals {
+    fn of(arena: &Arena, idx: EntryIdx) -> Totals {
+        let view = arena.entry(idx);
+        let mut flags: Vec<&'static str> = FLAG_NAMES
+            .iter()
+            .filter(|(flag, _)| view.flags.contains(*flag))
+            .map(|&(_, name)| name)
+            .collect();
+        match view.dir {
+            Some(dir) => {
+                let rec = arena.dir(dir);
+                let upper_bound = rec.flags & DirRec::UPPER_BOUND != 0;
+                if upper_bound {
+                    flags.push("upper_bound");
+                }
+                if rec.flags & DirRec::UNREADABLE != 0 {
+                    flags.push("unreadable");
+                }
+                Totals {
+                    allocated: rec.cum_allocated,
+                    apparent: rec.cum_apparent,
+                    files: u64::from(rec.n_files),
+                    dirs: u64::from(rec.n_dirs) + 1,
+                    max_mtime_ns: rec.max_mtime_ns,
+                    upper_bound,
+                    flags,
+                }
+            }
+            None => Totals {
+                allocated: view.allocated,
+                apparent: view.apparent,
+                files: 1,
+                dirs: 0,
+                max_mtime_ns: view.mtime_ns,
+                upper_bound: false,
+                flags,
+            },
+        }
+    }
+}
+
+/// The storage flags rows name.
+const FLAG_NAMES: [(Flags, &str); 8] = [
+    (Flags::SPARSE, "sparse"),
+    (Flags::COMPRESSED, "compressed"),
+    (Flags::DATALESS, "dataless"),
+    (Flags::PURGEABLE, "purgeable"),
+    (Flags::MAY_SHARE, "may_share"),
+    (Flags::SHARES_ALL, "shares_all"),
+    (Flags::MOUNT_ROOT, "mount_root"),
+    (Flags::SUBVOLUME, "subvolume"),
+];
+
+/// A kind as rows name it.
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Dir => "dir",
+        Kind::File => "file",
+        Kind::Symlink => "symlink",
+        _ => "other",
+    }
+}
+
+/// `part` as a percentage of `whole`, with one decimal.
+fn pct(part: u64, whole: u64) -> f64 {
+    if whole == 0 {
+        return 0.0;
+    }
+    let tenths = (u128::from(part) * 1000 + u128::from(whole) / 2) / u128::from(whole);
+    f64::from(u32::try_from(tenths).unwrap_or(u32::MAX)) / 10.0
+}
+
+/// The scan's warnings.
+fn warnings(scanned: &Scanned, upper_bound: bool) -> Vec<Warning> {
+    let summary = &scanned.summary;
+    let mut warnings = Vec::new();
+    if summary.unreadable_dirs > 0 {
+        warnings.push(Warning {
+            code: "partial_read",
+            message: format!(
+                "{} directories could not be read; the totals are a lower bound",
+                thousands(summary.unreadable_dirs)
+            ),
+            count: Some(summary.unreadable_dirs),
+            hint: Some(
+                "Rerun duscope as a user who can read them, or with --strict to fail instead"
+                    .to_owned(),
+            ),
+        });
+    }
+    if summary.mounts_excluded > 0 {
+        warnings.push(Warning {
+            code: "mounts_excluded",
+            message: format!(
+                "{} mounted filesystems were not entered (scan.volumes says why)",
+                thousands(summary.mounts_excluded)
+            ),
+            count: Some(summary.mounts_excluded),
+            hint: Some(
+                "Rerun duscope scan with --include-network, or without -x, to enter them"
+                    .to_owned(),
+            ),
+        });
+    }
+    if scanned.arena.vanished() > 0 {
+        warnings.push(Warning {
+            code: "vanished",
+            message: format!(
+                "{} entries disappeared while the scan read them",
+                thousands(scanned.arena.vanished())
+            ),
+            count: Some(scanned.arena.vanished()),
+            hint: Some("Rerun duscope scan once the tree is quiet".to_owned()),
+        });
+    }
+    if upper_bound {
+        warnings.push(Warning {
+            code: "upper_bound",
+            message: "some files may share blocks with others; the totals are an upper bound"
+                .to_owned(),
+            count: None,
+            hint: None,
+        });
+    }
+    warnings
+}
+
+/// The one line for people: the root's total, counts, and time.
+fn footer(scan: &ScanBlock, scanned: &Scanned, output: &Output) -> String {
+    let total = if scan.size_kind == "apparent" {
+        scan.total_apparent_bytes
+    } else {
+        scan.total_allocated_bytes
+    };
+    format!(
+        "{} {} · {} files · {} dirs · {:.1} s, {} threads",
+        output.units.size(total),
+        scan.size_kind,
+        thousands(scan.file_count),
+        thousands(scan.dir_count),
+        scanned.elapsed.as_secs_f64(),
+        scan.thread_count,
+    )
+}
+
+/// Now, as Unix nanoseconds.
+fn now_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
 }
 
 /// Scans the tree `walk_args` names.
 pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failure> {
-    let root = match &walk_args.path {
+    let given = match &walk_args.path {
         Some(path) => path.clone(),
         None => std::env::current_dir().map_err(|e| {
             Failure::new(
@@ -85,8 +410,13 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             )
         })?,
     };
+    // A root given as a symbolic link, or through one, is read as the path
+    // it leads to; the envelope keeps the path as given beside it.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let ResolvedPath { real: root, .. } = resolve_path(&cwd, &given);
     let opts = options(walk_args, excludes)?;
     let started = Instant::now();
+    let started_ns = now_ns();
     let mut arena = Arena::new(opts.attrs);
     let mut push_error = None;
     let summary = walk(&root, &opts, |event| {
@@ -96,7 +426,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             push_error = Some(e);
         }
     })
-    .map_err(|e| walk_failure(&root, e))?;
+    .map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
         return Err(Failure::new(Exit::Runtime, "io_error", e.to_string()));
     }
@@ -106,7 +436,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         return Err(Failure::new(
             Exit::Permission,
             "permission_denied",
-            format!("permission denied reading {}", root.display()),
+            format!("permission denied reading {}", given.display()),
         )
         .hint("Run duscope scan on a directory you can read"));
     }
@@ -115,6 +445,10 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         arena,
         summary,
         elapsed: started.elapsed(),
+        root,
+        root_as_given: given,
+        started_ns,
+        finished_ns: now_ns(),
     })
 }
 
@@ -191,92 +525,55 @@ fn not_yet(flag: &str, what: &str) -> Failure {
     )
 }
 
-/// Writes one line to stdout. A closed pipe (`duscope … | head`) ends the
-/// command quietly with success.
-pub fn write_stdout(line: &str) -> Result<(), Failure> {
-    let mut stdout = io::stdout().lock();
-    let written = writeln!(stdout, "{line}").and_then(|()| stdout.flush());
-    quiet_on_broken_pipe(written)
-}
-
-/// A write's result: success, also when the reader went away.
-pub fn quiet_on_broken_pipe(result: io::Result<()>) -> Result<(), Failure> {
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(Failure::new(
-            Exit::Runtime,
-            "io_error",
-            format!("cannot write the output: {e}"),
-        )),
-    }
-}
-
-/// Bytes in IEC units with one decimal, as tables and footers show them.
-pub fn iec(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-    let mut unit = 0;
-    let mut whole = bytes;
-    while whole >= 1024 && unit + 1 < UNITS.len() {
-        whole /= 1024;
-        unit += 1;
-    }
-    if unit == 0 {
-        return format!("{bytes} B");
-    }
-    // One decimal from integer arithmetic: tenths of the unit, rounded; a
-    // value that rounds up to the next unit is shown in it (1.0 MiB, not
-    // 1024.0 KiB).
-    let tenths = |unit: usize| {
-        let divisor = 1u128 << (10 * unit);
-        (u128::from(bytes) * 10 + divisor / 2) / divisor
-    };
-    let mut rounded = tenths(unit);
-    if rounded >= 10_240 && unit + 1 < UNITS.len() {
-        unit += 1;
-        rounded = tenths(unit);
-    }
-    format!("{}.{} {}", rounded / 10, rounded % 10, UNITS[unit])
-}
-
-/// A count with thousands separators.
-pub fn thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::Path;
+    use std::time::Duration;
 
-    #[test]
-    fn p1_cli_01_a_closed_pipe_is_success() {
-        let broken = Err(io::Error::from(io::ErrorKind::BrokenPipe));
-        assert_eq!(quiet_on_broken_pipe(broken), Ok(()));
-        let other = Err(io::Error::from(io::ErrorKind::PermissionDenied));
-        assert_eq!(quiet_on_broken_pipe(other).unwrap_err().exit, Exit::Runtime);
+    use clap::Parser;
+    use duscope_core::arena::{Arena, EntryIdx};
+    use duscope_core::rollup::roll_up;
+    use duscope_walk::{Attrs, MemProvider, ScanEvent, WalkOptions, walk_with};
+
+    use super::{Scanned, Totals, scan_block};
+    use crate::cli::{Cli, Verb};
+
+    /// A scan of a small in-memory tree; without its volume when `volume`
+    /// is false.
+    fn scanned(volume: bool) -> Scanned {
+        let mut tree = MemProvider::new("/t");
+        tree.file("a", 10);
+        let mut arena = Arena::new(Attrs::Basic);
+        let summary = walk_with(&tree, Path::new("/t"), &WalkOptions::default(), |event| {
+            if volume || !matches!(event, ScanEvent::Volume(_)) {
+                arena.push(event).unwrap();
+            }
+        })
+        .unwrap();
+        roll_up(&mut arena);
+        Scanned {
+            arena,
+            summary,
+            elapsed: Duration::ZERO,
+            root: "/t".into(),
+            root_as_given: "/t".into(),
+            started_ns: 0,
+            finished_ns: 0,
+        }
     }
 
     #[test]
-    fn p1_cli_01_sizes_and_counts_read_as_humans_expect() {
-        assert_eq!(iec(0), "0 B");
-        assert_eq!(iec(1023), "1023 B");
-        assert_eq!(iec(1024), "1.0 KiB");
-        assert_eq!(iec(1536), "1.5 KiB");
-        assert_eq!(iec(412 * (1 << 30) + 300 * (1 << 20)), "412.3 GiB");
-        // A value that rounds up to the next unit is shown in it.
-        assert_eq!(iec(1_048_575), "1.0 MiB");
-        assert_eq!(iec(1_048_524), "1023.9 KiB");
-        assert_eq!(iec(u64::MAX), "16384.0 PiB");
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(1_284_310), "1,284,310");
-        assert_eq!(thousands(999), "999");
+    fn p1_cli_02_fs_type_is_null_without_a_volume() {
+        let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
+        else {
+            panic!("not scan");
+        };
+        let block = |scanned: &Scanned| {
+            let totals = Totals::of(&scanned.arena, EntryIdx::ROOT);
+            let block = scan_block(scanned, &args.walk, Path::new("/t"), &totals, "allocated");
+            serde_json::to_value(block).unwrap()
+        };
+        assert_eq!(block(&scanned(true))["fs_type"], "mem");
+        assert_eq!(block(&scanned(false))["fs_type"], serde_json::Value::Null);
     }
 }

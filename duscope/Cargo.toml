@@ -20,14 +20,16 @@ duscope-core.workspace = true
 duscope-treemap.workspace = true
 duscope-tui.workspace = true
 duscope-mcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
 cargo_metadata.workspace = true
 duscope-testkit.workspace = true
 jsonschema.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
+termlens.workspace = true
 
 [lints]
 workspace = true

@@ -16,6 +16,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::out::OutputArgs;
+
 /// Fast, queryable disk-usage analyzer.
 #[derive(Debug, Parser)]
 #[command(
@@ -25,7 +27,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     long_about = "Fast, queryable disk-usage analyzer: a parallel scanner, queries over\n\
                   its result, and a treemap in the terminal.\n\n\
                   Without a verb, duscope scans the given path, or the current directory.",
-    args_conflicts_with_subcommands = true,
+    // The flags before a verb are scan's, and main refuses them with a
+    // verb; clap's own setting for that would refuse the output flags too,
+    // which are global.
+    override_usage = "duscope [OPTIONS] [PATH]\n       duscope <VERB>",
     subcommand_value_name = "VERB",
     subcommand_help_heading = "Verbs"
 )]
@@ -36,6 +41,9 @@ pub struct Cli {
     /// `scan`'s arguments, for `duscope [PATH]` without a verb.
     #[command(flatten)]
     pub scan: ScanArgs,
+    /// How the result is written, before or after the verb.
+    #[command(flatten)]
+    pub output: OutputArgs,
 }
 
 /// The verbs of phase 1.

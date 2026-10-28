@@ -7,24 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use assert_cmd::Command;
-use duscope_testkit::TestEnv;
-
-/// The golden file `name` under `duscope/tests/golden/`, compared with
-/// `actual`; with `DUSCOPE_TEST_UPDATE_GOLDEN=1` it is rewritten instead.
-fn golden(name: &str, actual: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name);
-    if std::env::var_os("DUSCOPE_TEST_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
-        fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(
-        actual, expected,
-        "golden {name} differs; rerun with DUSCOPE_TEST_UPDATE_GOLDEN=1 to regenerate"
-    );
-}
+use duscope_testkit::{TestEnv, golden};
 
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
@@ -226,13 +209,14 @@ fn p1_cli_01_exit_codes() {
 
 #[test]
 fn p1_cli_01_sigpipe_exits_zero() {
-    // The read end closes before the verb writes its line: the write meets
+    // The read end closes before the verb writes its rows: the write meets
     // EPIPE, which the binary ends quietly with success. (`--help` would
-    // not do: clap prints it, and it fits in the pipe's buffer.)
+    // not do: clap prints it, and it fits in the pipe's buffer.) The
+    // footer still reaches stderr, and nothing else does.
     let env = TestEnv::new();
     let mut child = env
         .cmd()
-        .arg("scan")
+        .args(["top", "--format", "ndjson"])
         .arg(env.fixtures().path("home"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -240,12 +224,10 @@ fn p1_cli_01_sigpipe_exits_zero() {
         .unwrap();
     drop(child.stdout.take());
     let out = child.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(0));
-    assert!(
-        out.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.lines().count() <= 1, "{stderr}");
+    assert!(!stderr.contains("duscope:"), "{stderr}");
 }
 
 #[test]
@@ -258,15 +240,11 @@ fn p1_cli_01_a_root_that_is_not_a_directory() {
         .arg(links.join("target.txt"))
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(stdout.contains(" · 1 files · 0 dirs · "), "{stdout}");
-    assert!(out.stderr.is_empty());
+    // The footer, the scan verb's one line, is human output on stderr.
+    let footer = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{footer}");
+    assert!(footer.contains(" · 1 files · 0 dirs · "), "{footer}");
+    assert!(out.stdout.is_empty());
     // A symbolic link to a directory, and one that leads nowhere, are
     // scanned without a crash.
     for link in ["to-dir", "dangling"] {
@@ -275,14 +253,10 @@ fn p1_cli_01_a_root_that_is_not_a_directory() {
             .arg(links.join(link))
             .output()
             .unwrap();
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "{link}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(out.stderr.is_empty(), "{link}");
-        assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 1);
+        let footer = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{link}: {footer}");
+        assert_eq!(footer.lines().count(), 1, "{link}: {footer}");
+        assert!(footer.contains(" allocated · "), "{link}: {footer}");
     }
 }
 
@@ -303,8 +277,8 @@ fn p1_cli_01_thread_counts() {
         .arg(&tree)
         .assert()
         .code(0);
-    let stdout = String::from_utf8_lossy(&given.get_output().stdout).into_owned();
-    assert!(stdout.ends_with(", 3 threads\n"), "{stdout}");
+    let footer = String::from_utf8_lossy(&given.get_output().stderr).into_owned();
+    assert!(footer.ends_with(", 3 threads\n"), "{footer}");
     // A value that is not a count names where it came from.
     let bad = duscope(&env)
         .env("DUSCOPE_THREADS", "many")
