@@ -134,7 +134,6 @@ pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat, attrs: At
             mode: u32::from(stat.st_mode),
             uid: stat.st_uid,
             gid: stat.st_gid,
-            private_size: None,
         }),
     })
 }

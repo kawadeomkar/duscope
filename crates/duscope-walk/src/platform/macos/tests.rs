@@ -776,32 +776,6 @@ fn p1_walk_07_storage_flags_follow_the_filesystem() {
 }
 
 #[test]
-fn p1_walk_07_private_size_under_the_hidden_option() {
-    let env = TestEnv::new();
-    let root = env.fixtures().case_root("clones");
-    let opts = WalkOptions {
-        attrs: crate::Attrs::Full,
-        private_size: true,
-        ..WalkOptions::default()
-    };
-    let (entries, _) = walk_paths(&MacProvider::new(), &root, &opts);
-    let file = &entries[&root.join("original.img")];
-    assert!(file.full.unwrap().private_size.is_some());
-    let opts = WalkOptions {
-        attrs: crate::Attrs::Full,
-        ..WalkOptions::default()
-    };
-    let (entries, _) = walk_paths(&MacProvider::new(), &root, &opts);
-    assert_eq!(
-        entries[&root.join("original.img")]
-            .full
-            .unwrap()
-            .private_size,
-        None
-    );
-}
-
-#[test]
 fn p1_walk_07_apfs_has_clone_ids() {
     let env = TestEnv::new();
     let root = env.fixtures().root();
@@ -1071,4 +1045,30 @@ fn p1_walk_04_the_fallback_provider_turns_dataless_downloads_off() {
         ffi::dataless_policy().unwrap(),
         ffi::IOPOL_MATERIALIZE_DATALESS_FILES_OFF
     );
+}
+
+#[test]
+fn p1_bench_02_the_default_follows_the_result_file() {
+    // bench/results/clone-attributes-macos.json decides the --clones
+    // default and drops PRIVATESIZE; the scanner must agree with it.
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bench/results/clone-attributes-macos.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let decided_on = text.contains("\"clones_default\": \"on\"");
+    assert!(decided_on || text.contains("\"clones_default\": \"off\""));
+    assert_eq!(WalkOptions::default().clones, decided_on);
+    for attrs in [crate::Attrs::Basic, crate::Attrs::Full] {
+        let opts = WalkOptions {
+            attrs,
+            clones: true,
+            ..WalkOptions::default()
+        };
+        let request = Request::bulk(&opts);
+        assert_eq!(
+            request.attrs.forkattr & libc::ATTR_CMNEXT_PRIVATESIZE,
+            0,
+            "PRIVATESIZE is not asked for"
+        );
+        assert_ne!(request.attrs.forkattr & libc::ATTR_CMNEXT_CLONEID, 0);
+    }
 }

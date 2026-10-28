@@ -104,13 +104,10 @@ impl Request {
             options: libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_NOFOLLOW,
             bulk: false,
         };
+        // ATTR_CMNEXT_PRIVATESIZE is not asked for: it added 36% to a warm
+        // T1 scan (P1-BENCH-02, bench/results/clone-attributes-macos.json).
         if opts.clones {
-            request.attrs.forkattr |= CLONES;
-        }
-        if opts.private_size && opts.attrs == Attrs::Full {
-            request.attrs.forkattr |= libc::ATTR_CMNEXT_PRIVATESIZE;
-        }
-        if request.attrs.forkattr != 0 {
+            request.attrs.forkattr = CLONES;
             request.options |= libc::FSOPT_ATTR_CMN_EXTENDED;
         }
         if opts.attrs == Attrs::Full {
@@ -176,7 +173,6 @@ pub(super) struct Record<'a> {
     pub(super) alloc: u64,
     pub(super) len: u64,
     pub(super) data_alloc: u64,
-    pub(super) private_size: u64,
     pub(super) clone_id: u64,
     pub(super) ext_flags: u64,
 }
@@ -280,9 +276,6 @@ impl Record<'_> {
                 mode: mode(kind, self.access),
                 uid: self.uid,
                 gid: self.gid,
-                private_size: self
-                    .has(FORK_GROUP, libc::ATTR_CMNEXT_PRIVATESIZE)
-                    .then_some(self.private_size),
             }),
         }))
     }
@@ -554,9 +547,6 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
         }
     }
     let fork = attrs.forkattr;
-    if fork & libc::ATTR_CMNEXT_PRIVATESIZE != 0 {
-        r.private_size = c.u64()?;
-    }
     if fork & libc::ATTR_CMNEXT_CLONEID != 0 {
         r.clone_id = c.u64()?;
     }
