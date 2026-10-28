@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 use libc::attrgroup_t;
 
 use super::ffi::{self, AttrBuf};
-use crate::{Boundary, Entry, Flags, Kind, NameRef, Share, WalkOptions};
+use crate::{Attrs, Boundary, Entry, Flags, FullAttrs, Kind, NameRef, Share, WalkOptions};
+
+/// The filesystem whose entries carry clone ids.
+pub(super) const CLONE_FS: &str = "apfs";
 
 /// The bulk buffer: Apple's `fts` uses 32 KiB, dumac 128 KB.
 pub(super) const BUFFER_BYTES: usize = 64 * 1024;
@@ -41,6 +44,16 @@ const FILE: attrgroup_t = libc::ATTR_FILE_LINKCOUNT
     | libc::ATTR_FILE_ALLOCSIZE
     | libc::ATTR_FILE_DATALENGTH
     | libc::ATTR_FILE_DATAALLOCSIZE;
+/// The common attributes `--attrs full` adds: creation and access times,
+/// owner, group and permissions. They come in the same records.
+const FULL: attrgroup_t = libc::ATTR_CMN_CRTIME
+    | libc::ATTR_CMN_ACCTIME
+    | libc::ATTR_CMN_OWNERID
+    | libc::ATTR_CMN_GRPID
+    | libc::ATTR_CMN_ACCESSMASK;
+/// Of those, what an entry cannot be built without; a filesystem without
+/// creation times leaves `btime` empty instead.
+const REQUIRED_FULL: attrgroup_t = FULL & !libc::ATTR_CMN_CRTIME;
 /// The extended common attributes `--clones` adds, under
 /// `FSOPT_ATTR_CMN_EXTENDED`.
 const CLONES: attrgroup_t = libc::ATTR_CMNEXT_CLONEID | libc::ATTR_CMNEXT_EXT_FLAGS;
@@ -88,14 +101,30 @@ impl Request {
                 fileattr: FILE,
                 forkattr: 0,
             },
-            options: libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_NOFOLLOW,
+            // FSOPT_RETURN_REALDEV: the device of the volume itself. The
+            // System and Data volumes of macOS's boot volume group share
+            // one st_dev; their real devices differ, so the device can stand
+            // for the volume (the mount id) and keep inodes of the two apart.
+            options: libc::FSOPT_PACK_INVAL_ATTRS
+                | libc::FSOPT_NOFOLLOW
+                | libc::FSOPT_RETURN_REALDEV,
             bulk: false,
         };
+        // ATTR_CMNEXT_PRIVATESIZE is not asked for: it added 36% to a warm
+        // T1 scan (P1-BENCH-02, bench/results/clone-attributes-macos.json).
         if opts.clones {
             request.attrs.forkattr = CLONES;
             request.options |= libc::FSOPT_ATTR_CMN_EXTENDED;
         }
+        if opts.attrs == Attrs::Full {
+            request.attrs.commonattr |= FULL;
+        }
         request
+    }
+
+    /// Whether the request asks for the `--attrs full` set.
+    pub(super) fn full(&self) -> bool {
+        self.attrs.commonattr & FULL == FULL
     }
 
     /// Whether the request asks for extended common attributes, which some
@@ -136,8 +165,13 @@ pub(super) struct Record<'a> {
     pub(super) name: Option<&'a [u8]>,
     pub(super) dev: i32,
     pub(super) objtype: u32,
+    pub(super) crtime: Timespec,
     pub(super) mtime: Timespec,
     pub(super) ctime: Timespec,
+    pub(super) atime: Timespec,
+    pub(super) uid: u32,
+    pub(super) gid: u32,
+    pub(super) access: u32,
     pub(super) flags: u32,
     pub(super) ino: u64,
     pub(super) links: u32,
@@ -166,6 +200,7 @@ pub(super) enum Decoded {
 const COMMON_GROUP: usize = 0;
 const DIR_GROUP: usize = 2;
 const FILE_GROUP: usize = 3;
+const FORK_GROUP: usize = 4;
 
 impl Record<'_> {
     fn has(&self, group: usize, attrs: attrgroup_t) -> bool {
@@ -200,24 +235,30 @@ impl Record<'_> {
             return Err((name, None));
         }
         let kind = kind(self.objtype);
+        let mount_point = kind == Kind::Dir
+            && self.has(DIR_GROUP, libc::ATTR_DIR_MOUNTSTATUS)
+            && self.mount_status & DIR_MNTSTATUS_MNTPOINT != 0;
+        // A firmlink's record describes the link on the System volume; read
+        // by name, it resolves to the directory it shows on the Data volume.
+        // A bulk read does not cross mounts: a mount point's record describes
+        // the directory beneath it, not the mounted root. Both are read
+        // again by name, whatever else the record holds.
+        if request.bulk && self.flags & ffi::SF_FIRMLINK != 0 {
+            return Err((name, Some(Boundary::Firmlink)));
+        }
+        if request.bulk && mount_point {
+            return Err((name, Some(Boundary::Mount)));
+        }
         let complete = if kind == Kind::Dir {
             self.has(DIR_GROUP, REQUIRED_DIR)
         } else {
             self.has(FILE_GROUP, REQUIRED_FILE)
-        };
+        } && (!request.full() || self.has(COMMON_GROUP, REQUIRED_FULL));
         if !complete {
             return Err((name, None));
         }
-        // A bulk read does not cross mounts: a mount point's record describes
-        // the directory beneath it, not the mounted root.
-        if request.bulk
-            && kind == Kind::Dir
-            && self.has(DIR_GROUP, libc::ATTR_DIR_MOUNTSTATUS)
-            && self.mount_status & DIR_MNTSTATUS_MNTPOINT != 0
-        {
-            return Err((name, Some(Boundary::Mount)));
-        }
-        Ok(build(Fields {
+        let dev = dev(self.dev);
+        let mut entry = build(Fields {
             name,
             kind,
             apparent: self.len,
@@ -225,11 +266,48 @@ impl Record<'_> {
             mtime_ns: self.mtime.ns(),
             ctime_ns: self.ctime.ns(),
             nlink: self.links,
-            dev: dev(self.dev),
+            dev,
+            mnt_id: dev,
             ino: self.ino,
             bsd_flags: self.flags,
-        }))
+            ext_flags: self
+                .has(FORK_GROUP, libc::ATTR_CMNEXT_EXT_FLAGS)
+                .then_some(self.ext_flags),
+            clone_id: self
+                .has(FORK_GROUP, libc::ATTR_CMNEXT_CLONEID)
+                .then_some(self.clone_id),
+            full: request.full().then(|| FullAttrs {
+                atime_ns: self.atime.ns(),
+                btime_ns: self
+                    .has(COMMON_GROUP, libc::ATTR_CMN_CRTIME)
+                    .then(|| self.crtime.ns()),
+                mode: mode(kind, self.access),
+                uid: self.uid,
+                gid: self.gid,
+            }),
+        });
+        // Read by name, a mount point is the mounted volume's root.
+        if mount_point {
+            entry.boundary = Boundary::Mount;
+        }
+        Ok(entry)
     }
+}
+
+/// An `st_mode`: the type bits of `kind` and the permission bits of
+/// `ATTR_CMN_ACCESSMASK`, which holds only the latter.
+pub(super) fn mode(kind: Kind, access: u32) -> u32 {
+    let format = match kind {
+        Kind::Dir => libc::S_IFDIR,
+        Kind::File => libc::S_IFREG,
+        Kind::Symlink => libc::S_IFLNK,
+        Kind::Socket => libc::S_IFSOCK,
+        Kind::Fifo => libc::S_IFIFO,
+        Kind::Char => libc::S_IFCHR,
+        Kind::Block => libc::S_IFBLK,
+        Kind::Unknown => 0,
+    };
+    u32::from(format) | (access & 0o7777)
 }
 
 /// The kind of a vnode type.
@@ -262,9 +340,17 @@ pub(super) struct Fields {
     pub(super) ctime_ns: i64,
     pub(super) nlink: u32,
     pub(super) dev: u64,
+    /// The volume's id: `ATTR_CMN_FSID`, or the device where it is unknown.
+    pub(super) mnt_id: u64,
     pub(super) ino: u64,
     /// `st_flags` / `ATTR_CMN_FLAGS`.
     pub(super) bsd_flags: u32,
+    /// `ATTR_CMNEXT_EXT_FLAGS` and `ATTR_CMNEXT_CLONEID`, when they were
+    /// asked for (`--clones`) and returned.
+    pub(super) ext_flags: Option<u64>,
+    pub(super) clone_id: Option<u64>,
+    /// The `--attrs full` attributes, when they were asked for.
+    pub(super) full: Option<FullAttrs>,
 }
 
 /// The entry both readers build from what they read, so the two agree
@@ -279,21 +365,41 @@ pub(super) fn build(fields: Fields) -> Entry {
         ctime_ns,
         nlink,
         dev,
+        mnt_id,
         ino,
         bsd_flags,
+        ext_flags,
+        clone_id,
+        full,
     } = fields;
     // Devices, sockets and pipes hold no blocks of their own.
     let allocated = match kind {
         Kind::Socket | Kind::Fifo | Kind::Char | Kind::Block => 0,
         _ => allocated,
     };
-    let share = if kind != Kind::Dir && nlink > 1 {
+    let ext = ext_flags.unwrap_or(0);
+    let mut flags = Flags::empty();
+    flags.set(Flags::DATALESS, bsd_flags & ffi::SF_DATALESS != 0);
+    flags.set(Flags::COMPRESSED, bsd_flags & libc::UF_COMPRESSED != 0);
+    flags.set(Flags::SPARSE, ext & ffi::EF_IS_SPARSE != 0);
+    flags.set(Flags::PURGEABLE, ext & ffi::EF_IS_PURGEABLE != 0);
+    flags.set(Flags::MAY_SHARE, ext & ffi::EF_MAY_SHARE_BLOCKS != 0);
+    flags.set(Flags::SHARES_ALL, ext & ffi::EF_SHARES_ALL_BLOCKS != 0);
+    // Every APFS file has a clone id, cloned or not, and a clone that has
+    // been modified gets a new one while still sharing some blocks. So the
+    // id names a group only for a file that shares all its blocks; one that
+    // only may share some is sized as an upper bound.
+    let share = if kind == Kind::Dir {
+        Share::None
+    } else if let Some(id) = clone_id.filter(|&id| id != 0 && flags.contains(Flags::SHARES_ALL)) {
+        Share::Clone(id)
+    } else if flags.contains(Flags::MAY_SHARE) {
+        Share::MayShare
+    } else if nlink > 1 {
         Share::Hardlink
     } else {
         Share::None
     };
-    let mut flags = Flags::empty();
-    flags.set(Flags::DATALESS, bsd_flags & ffi::SF_DATALESS != 0);
     Entry {
         name,
         parent: crate::DirId::ROOT,
@@ -306,12 +412,11 @@ pub(super) fn build(fields: Fields) -> Entry {
         nlink,
         dev,
         ino,
-        // A macOS volume is identified by its device id.
-        mnt_id: dev,
+        mnt_id,
         share,
         boundary: Boundary::None,
         flags,
-        full: None,
+        full,
     }
 }
 
@@ -397,14 +502,30 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
     if common & libc::ATTR_CMN_DEVID != 0 {
         r.dev = c.i32()?;
     }
+
     if common & libc::ATTR_CMN_OBJTYPE != 0 {
         r.objtype = c.u32()?;
+    }
+    if common & libc::ATTR_CMN_CRTIME != 0 {
+        r.crtime = c.timespec()?;
     }
     if common & libc::ATTR_CMN_MODTIME != 0 {
         r.mtime = c.timespec()?;
     }
     if common & libc::ATTR_CMN_CHGTIME != 0 {
         r.ctime = c.timespec()?;
+    }
+    if common & libc::ATTR_CMN_ACCTIME != 0 {
+        r.atime = c.timespec()?;
+    }
+    if common & libc::ATTR_CMN_OWNERID != 0 {
+        r.uid = c.u32()?;
+    }
+    if common & libc::ATTR_CMN_GRPID != 0 {
+        r.gid = c.u32()?;
+    }
+    if common & libc::ATTR_CMN_ACCESSMASK != 0 {
+        r.access = c.u32()?;
     }
     if common & libc::ATTR_CMN_FLAGS != 0 {
         r.flags = c.u32()?;
@@ -528,13 +649,15 @@ pub(super) enum Outcome {
 /// Reads the records of the directory open on `dir`, handing each one to
 /// `each` as soon as its refill is decoded, so no listing of the whole
 /// directory is ever held. With `probe`, the first two refills are timed on
-/// its clocks.
+/// its clocks. `each` is also told whether the probe has settled: once it
+/// has, no switch to the stat queue can follow, so what was handed over may
+/// be passed on.
 pub(super) fn read(
     dir: BorrowedFd<'_>,
     opts: &WalkOptions,
     buf: &mut AttrBuf,
     probe: Option<&dyn Clock>,
-    each: &mut dyn FnMut(Decoded),
+    each: &mut dyn FnMut(Decoded, bool),
 ) -> io::Result<Outcome> {
     let mut request = Request::bulk(opts);
     let mut timer = Probe::default();
@@ -565,6 +688,9 @@ pub(super) fn read(
             let cpu = cpu_start.and_then(|s| clock.cpu()?.checked_sub(s));
             timer.sample(cpu, clock.now().saturating_duration_since(start))
         });
+        // No switch can follow a refill the probe did not take, or the last
+        // one it took if that one did not switch.
+        let settled = !switch && (probe.is_none() || !timer.active());
         let mut bytes = buf.bytes();
         for _ in 0..count {
             let Some(len) = record_len(bytes) else {
@@ -573,7 +699,9 @@ pub(super) fn read(
                     "getattrlistbulk returned a record longer than its buffer",
                 ));
             };
-            each(parse(&bytes[..len], &request).map_or(Decoded::Nameless, |r| r.decode(&request)));
+            let decoded =
+                parse(&bytes[..len], &request).map_or(Decoded::Nameless, |r| r.decode(&request));
+            each(decoded, settled);
             bytes = &bytes[len..];
         }
         if switch {

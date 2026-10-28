@@ -30,6 +30,7 @@ if sys.version_info < (3, 9):  # pragma: no cover - the message is the point
     sys.exit("bench: Python 3.9 or later is needed")
 
 import measure
+import sweep
 import tools
 import trees
 
@@ -124,6 +125,20 @@ def parser() -> argparse.ArgumentParser:
 
     show = sub.add_parser("show", help="print a result file as a table")
     show.add_argument("file")
+
+    swept = sub.add_parser("sweep", help="measure duscope at each thread count (P1-BENCH-01)")
+    _tree_options(swept)
+    _jobs_option(swept)
+    swept.add_argument("--duscope", required=True, metavar="PATH", help="the duscope executable to measure")
+    swept.add_argument("--threads", default=",".join(map(str, sweep.THREADS)), help="the thread counts, comma-separated (default 1 to 8, then the steps up to 64)")
+    swept.add_argument("--mode", choices=("warm", "cold", "both"), default="both", help="warm caches, cold caches, or both (default both)")
+    swept.add_argument("--cold-cmd", default=shlex.quote(os.path.join(BENCH, "drop-caches.sh")), help="the command that drops the caches before each cold run (default bench/drop-caches.sh)")
+    swept.add_argument("--runs", type=int, default=5, help="measured runs at each thread count (default 5)")
+    swept.add_argument("--warmup", type=int, default=1, help="warm-up runs before each warm count (default 1)")
+    swept.add_argument("--tools-dir", default=os.path.join(BENCH, ".tools"), help=argparse.SUPPRESS)
+    swept.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
+    swept.add_argument("--out", help="the result file (default <results-dir>/thread-sweep-<platform>-<arch>.json)")
+    swept.add_argument("--hyperfine", default="hyperfine", help="the hyperfine command (default hyperfine on PATH)")
     return top
 
 
@@ -458,12 +473,7 @@ def cmd_run(args) -> int:
         "results": results,
     }
     out = args.out or os.path.join(args.results_dir, f"{date}-{plat}.json")
-    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    with open(out + ".tmp", "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
-        f.write("\n")
-    os.replace(out + ".tmp", out)
-    log(f"wrote {out}")
+    write_result(result, out)
     if sys.stderr.isatty():
         cmd_show(argparse.Namespace(file=out), out=sys.stderr)
     print(out)
@@ -474,7 +484,18 @@ def cmd_run(args) -> int:
     return 0
 
 
+def write_result(result: Dict[str, object], out: str) -> None:
+    """Writes a result file whole, or not at all."""
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    with open(out + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+        f.write("\n")
+    os.replace(out + ".tmp", out)
+    log(f"wrote {out}")
+
+
 COMMANDS = {
+    "sweep": lambda args: sweep.cmd_sweep(args, sys.modules[__name__]),
     "run": cmd_run,
     "build": cmd_build,
     "install": cmd_install,

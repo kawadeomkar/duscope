@@ -91,6 +91,109 @@ pub fn duscope_bin() -> PathBuf {
     dir.join(format!("duscope{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// The variable that makes [`golden`] rewrite golden files instead of
+/// comparing with them, when set to `1` in the test process's environment.
+pub const UPDATE_GOLDEN: &str = "DUSCOPE_TEST_UPDATE_GOLDEN";
+
+/// The directory of the golden files, `duscope/tests/golden/`.
+pub fn golden_dir() -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap_or(Path::new("."));
+    workspace.join("duscope/tests/golden")
+}
+
+/// Compares `actual` with the golden file `name` in [`golden_dir`]. With
+/// [`UPDATE_GOLDEN`]`=1` the file is written instead; review the diff
+/// before committing it.
+///
+/// # Panics
+///
+/// When `actual` differs from the file, or the file cannot be read or
+/// written: it is a test assertion.
+pub fn golden(name: &str, actual: &str) {
+    let path = golden_dir().join(name);
+    if std::env::var_os(UPDATE_GOLDEN).is_some_and(|v| v == "1") {
+        fs::write(&path, actual)
+            .unwrap_or_else(|e| panic!("duscope-testkit: {}: {e}", path.display()));
+        return;
+    }
+    let expected = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("duscope-testkit: {}: {e}", path.display()));
+    assert_eq!(
+        actual, expected,
+        "golden {name} differs; rerun with {UPDATE_GOLDEN}=1 to regenerate"
+    );
+}
+
+/// `text`, a command's output, without what differs between runs, machines
+/// and releases, for a golden file: the root's path as `<root>`, the scan's
+/// times, the version, every `volumes` array (sizes and free space), and
+/// the scan's duration in a table's footer.
+///
+/// # Panics
+///
+/// When `root` is not valid UTF-8.
+pub fn normalize(text: &str, root: &Path) -> String {
+    let root = root
+        .to_str()
+        .unwrap_or_else(|| panic!("duscope-testkit: {} is not UTF-8", root.display()));
+    let mut text = text.replace(root, "<root>");
+    for (key, placeholder) in [
+        ("\"started_at\":\"", "<time>"),
+        ("\"finished_at\":\"", "<time>"),
+        ("\"name\":\"duscope\",\"version\":\"", "<version>"),
+    ] {
+        replace_values(&mut text, key, '"', placeholder);
+    }
+    let key = "\"volumes\":[";
+    let mut from = 0;
+    while let Some(at) = text[from..].find(key) {
+        let start = from + at + key.len() - 1;
+        let mut depth = 0;
+        let mut end = text.len();
+        for (i, c) in text[start..].char_indices() {
+            match c {
+                '[' | '{' => depth += 1,
+                ']' | '}' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                end = start + i + 1;
+                break;
+            }
+        }
+        text.replace_range(start..end, "[\"<volumes>\"]");
+        from = start;
+    }
+    // A table's footer: `220.6 MiB allocated · … · 0.21 s, 4 threads`.
+    if let Some(at) = text.find(" s, ")
+        && let Some(dot) = text[..at].rfind(" · ")
+    {
+        text.replace_range(dot + " · ".len()..at, "<secs>");
+    }
+    text
+}
+
+/// Replaces with `placeholder` the value after each `key` in `text`, up to
+/// the next `end`.
+///
+/// # Panics
+///
+/// When a value has no `end`.
+pub fn replace_values(text: &mut String, key: &str, end: char, placeholder: &str) {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(key) {
+        let start = from + at + key.len();
+        let len = text[start..]
+            .find(end)
+            .unwrap_or_else(|| panic!("duscope-testkit: no {end:?} after {key}"));
+        text.replace_range(start..start + len, placeholder);
+        from = start + placeholder.len();
+    }
+}
+
 /// A test's private environment. Dropping it removes its temporary
 /// directory (restoring permissions first) and releases the fixture tree.
 #[derive(Debug)]

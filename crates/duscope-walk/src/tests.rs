@@ -254,6 +254,9 @@ fn replay(root: &Path, events: &[ScanEvent]) -> (Vec<PathBuf>, HashMap<DirId, Pa
                 assert!(dirs.contains_key(dir), "{dir:?} closed before it was seen");
                 assert!(closed.insert(*dir), "{dir:?} closed twice");
             }
+            ScanEvent::Skipped { dir, .. } => {
+                assert!(dirs.contains_key(dir), "{dir:?} skipped before it was seen");
+            }
             ScanEvent::Error(_) | ScanEvent::Vanished { .. } | ScanEvent::Volume(_) => {}
         }
     }
@@ -318,6 +321,12 @@ proptest! {
                 dirs: u64::from(DIRS),
                 unreadable_dirs: 0,
                 entry_errors: 0,
+                vanished: 0,
+                excluded: 0,
+                skipped_dirs: 0,
+                volumes: 1,
+                mounts_excluded: 0,
+                clones_unavailable: false,
                 threads,
             });
         }
@@ -385,14 +394,14 @@ fn p1_walk_01_entries_that_cannot_be_read_become_scan_errors() {
     let mut tree = MemProvider::new("/mem");
     tree.file("d/ok", 1)
         .file("d/gone", 2)
-        .unstatable("d/gone", 2);
+        .unstatable("d/gone", libc::EIO);
     let (result, events) = walk_events(&tree, tree.root_path(), &WalkOptions::default());
     let (paths, dirs) = replay(tree.root_path(), &events);
     assert!(!paths.contains(&PathBuf::from("/mem/d/gone")));
     assert!(events.contains(&ScanEvent::Error(ScanError {
         dir: id_of(&dirs, "/mem/d"),
         name: NameRef::from("gone"),
-        errno: 2,
+        errno: libc::EIO,
     })));
     assert_eq!(result.unwrap().entry_errors, 1);
 }
@@ -428,7 +437,8 @@ fn p1_walk_01_a_file_root_is_the_whole_walk() {
     let (result, events) = walk_events(&tree, root, &WalkOptions::default());
     let summary = result.unwrap();
     assert_eq!((summary.entries, summary.dirs), (1, 0));
-    let [ScanEvent::Entry(entry)] = events.as_slice() else {
+    // The root's volume follows its entry (P1-WALK-06).
+    let [ScanEvent::Entry(entry), ScanEvent::Volume(_)] = events.as_slice() else {
         panic!("one entry expected: {events:?}");
     };
     assert_eq!(entry.name, NameRef::from("only"));
@@ -561,18 +571,22 @@ fn p1_walk_03_a_failed_stat_batch_records_every_name() {
     let (result, events) = walk_events(&provider, tree.root_path(), &opts);
     let summary = result.unwrap();
     replay(tree.root_path(), &events);
-    // Two batches, of 1,024 and 476 names, both failed: only the root was
-    // read, and every name of both batches is an error.
+    // Two batches, of 1,024 and 476 names, both failed as if the directory
+    // had vanished: only the root was read, and every name of both batches
+    // is recorded as vanished.
     let batches = provider.batches.lock().unwrap();
     let mut sizes: Vec<usize> = batches.iter().map(|&(len, _)| len).collect();
     sizes.sort_unstable();
     assert_eq!(sizes, [476, 1_024]);
     assert_eq!(summary.entries, 1);
-    assert_eq!(summary.entry_errors, 1_500);
+    assert_eq!(summary.vanished, 1_500);
+    assert_eq!(summary.entry_errors, 0);
     let named: HashSet<Vec<u8>> = events
         .iter()
         .filter_map(|e| match e {
-            ScanEvent::Error(ScanError { errno: 2, name, .. }) => Some(name.as_bytes().to_vec()),
+            ScanEvent::Vanished {
+                name: Some(name), ..
+            } => Some(name.as_bytes().to_vec()),
             _ => None,
         })
         .collect();
@@ -598,4 +612,717 @@ fn p1_walk_03_stat_batches_hold_only_their_own_names() {
     // tail of the listing each time: under 64 bytes per name.
     let held: usize = batches.iter().map(Vec::capacity).sum::<usize>() * size_of::<NameRef>();
     assert!(held <= 64 * count, "{held} bytes held for {count} names");
+}
+
+/// Skips every directory named `skipped`.
+struct Skipping<'a> {
+    inner: &'a MemProvider,
+}
+
+impl Provider for Skipping<'_> {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        assert!(
+            !dir.path().ends_with("skipped"),
+            "a skipped directory was read"
+        );
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn skip(&self, _dir: &DirHandle, entry: &Entry, _opts: &WalkOptions) -> Option<Skip> {
+        (entry.name.as_bytes() == b"skipped").then_some(Skip::Firmlinked)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+}
+
+#[test]
+fn p1_walk_07_a_skipped_directory_is_listed_not_entered() {
+    let mut tree = MemProvider::new("/mem");
+    tree.file("a/skipped/inside", 10).file("a/kept/inside", 10);
+    let provider = Skipping { inner: &tree };
+    let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+    let summary = result.unwrap();
+    let (paths, dirs) = replay(tree.root_path(), &events);
+    assert!(paths.contains(&PathBuf::from("/mem/a/skipped")));
+    assert!(!paths.contains(&PathBuf::from("/mem/a/skipped/inside")));
+    assert!(paths.contains(&PathBuf::from("/mem/a/kept/inside")));
+    assert_eq!(summary.skipped_dirs, 1);
+    // Skipped, then closed with no error, right after its parent's entries.
+    let skipped = id_of(&dirs, "/mem/a/skipped");
+    let at = events
+        .iter()
+        .position(|e| {
+            *e == ScanEvent::Skipped {
+                dir: skipped,
+                reason: Skip::Firmlinked,
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        events[at + 1],
+        ScanEvent::DirClosed {
+            dir: skipped,
+            errno: None
+        }
+    );
+    assert_eq!(Skip::Firmlinked.as_str(), "firmlinked");
+}
+
+/// A mount in [`Mounted`]'s table: its path, mount id and class.
+struct MountRow {
+    path: &'static str,
+    mnt_id: u64,
+    class: VolumeClass,
+}
+
+/// A [`MemProvider`] with mounts: each entry takes the mount id of the
+/// longest mount path above it, a mount point carries `Boundary::Mount`, and
+/// `bind_of` gives a mount point the identity of another directory, as a
+/// bind mount does.
+/// A mount table row.
+fn row(path: &'static str, mnt_id: u64, class: VolumeClass) -> MountRow {
+    MountRow {
+        path,
+        mnt_id,
+        class,
+    }
+}
+
+struct Mounted<'a> {
+    inner: &'a MemProvider,
+    mounts: Vec<MountRow>,
+    bind_of: Option<(&'static str, &'static str)>,
+    /// Paths that are firmlinks, and the one mount point the provider skips
+    /// as reached through them.
+    firmlinks: Vec<&'static str>,
+    firmlinked: Option<&'static str>,
+    /// Paths `volume` and `mount_info` were asked about.
+    volume_calls: Mutex<Vec<PathBuf>>,
+    mount_info_calls: Mutex<Vec<PathBuf>>,
+}
+
+impl<'a> Mounted<'a> {
+    fn new(inner: &'a MemProvider, mounts: Vec<MountRow>) -> Mounted<'a> {
+        Mounted {
+            inner,
+            mounts,
+            bind_of: None,
+            firmlinks: Vec::new(),
+            firmlinked: None,
+            volume_calls: Mutex::new(Vec::new()),
+            mount_info_calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Mounted<'_> {
+    fn mount_of(&self, path: &Path) -> Option<&MountRow> {
+        self.mounts
+            .iter()
+            .filter(|m| path.starts_with(m.path))
+            .max_by_key(|m| m.path.len())
+    }
+
+    fn fix(&self, path: &Path, entry: &mut Entry) {
+        if let Some(mount) = self.mount_of(path) {
+            entry.mnt_id = mount.mnt_id;
+            if path == Path::new(mount.path) {
+                entry.boundary = Boundary::Mount;
+            }
+        }
+        if self.firmlinks.iter().any(|f| path == Path::new(f)) {
+            entry.boundary = Boundary::Firmlink;
+        }
+        if let Some((point, target)) = self.bind_of
+            && path == Path::new(point)
+        {
+            let target = self
+                .inner
+                .root(Path::new(target), &WalkOptions::default())
+                .unwrap();
+            (entry.dev, entry.ino) = (target.dev, target.ino);
+        }
+    }
+}
+
+impl Provider for Mounted<'_> {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        let start = out.len();
+        self.inner.read_dir(dir, opts, out, errs)?;
+        for entry in &mut out[start..] {
+            self.fix(&dir.path().join(entry.name.as_os_str()), entry);
+        }
+        Ok(())
+    }
+
+    fn skip(&self, _dir: &DirHandle, entry: &Entry, _opts: &WalkOptions) -> Option<Skip> {
+        let firmlinked = self.firmlinked?;
+        (entry.boundary == Boundary::Mount
+            && self
+                .mount_of(Path::new(firmlinked))
+                .is_some_and(|m| m.mnt_id == entry.mnt_id))
+        .then_some(Skip::Firmlinked)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.volume_calls.lock().unwrap().push(path.to_owned());
+        let mut volume = self.inner.volume(path)?;
+        if let Some(mount) = self.mount_of(path) {
+            volume.mount_point = PathBuf::from(mount.path);
+            volume.mnt_id = mount.mnt_id;
+            volume.class = mount.class;
+        }
+        Ok(volume)
+    }
+
+    fn mount_info(&self, path: &Path, _dev: u64) -> io::Result<VolumeInfo> {
+        self.mount_info_calls.lock().unwrap().push(path.to_owned());
+        let mut volume = self.inner.volume(path)?;
+        if let Some(mount) = self.mount_of(path) {
+            volume.mount_point = PathBuf::from(mount.path);
+            volume.class = mount.class;
+            (volume.total_bytes, volume.free_bytes) = (0, 0);
+        }
+        Ok(volume)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        let mut entry = self.inner.root(path, opts)?;
+        self.fix(path, &mut entry);
+        Ok(entry)
+    }
+}
+
+/// What a walk of the mount tree read and reported.
+struct MountWalk {
+    paths: Vec<PathBuf>,
+    volumes: Vec<VolumeInfo>,
+    skips: Vec<(PathBuf, Skip)>,
+    summary: WalkSummary,
+}
+
+/// A tree with a mount of each kind under /mem, walked with `opts`.
+fn walk_mounts(opts: &WalkOptions) -> MountWalk {
+    let mut tree = MemProvider::new("/mem");
+    tree.file("disk/a", 1)
+        .file("tmp/b", 1)
+        .file("proc/c", 1)
+        .file("nfs/d", 1)
+        .file("plain/e", 1)
+        .dir("disk/loop");
+    let mut provider = Mounted::new(
+        &tree,
+        vec![
+            row("/mem", 1, VolumeClass::Local),
+            row("/mem/disk", 2, VolumeClass::Local),
+            row("/mem/tmp", 3, VolumeClass::Memory),
+            row("/mem/proc", 4, VolumeClass::Kernel),
+            row("/mem/nfs", 5, VolumeClass::Network),
+            row("/mem/disk/loop", 6, VolumeClass::Local),
+        ],
+    );
+    // /mem bind-mounted on /mem/disk/loop: entering it would loop.
+    provider.bind_of = Some(("/mem/disk/loop", "/mem"));
+    let (result, events) = walk_events(&provider, tree.root_path(), opts);
+    let summary = result.unwrap();
+    let (paths, dirs) = replay(tree.root_path(), &events);
+    let mut volumes = Vec::new();
+    let mut skips = Vec::new();
+    for event in events {
+        match event {
+            ScanEvent::Volume(volume) => volumes.push(volume),
+            ScanEvent::Skipped { dir, reason } => skips.push((dirs[&dir].clone(), reason)),
+            _ => {}
+        }
+    }
+    skips.sort_by(|a, b| a.0.cmp(&b.0));
+    MountWalk {
+        paths,
+        volumes,
+        skips,
+        summary,
+    }
+}
+
+#[test]
+fn p1_walk_06_mounts_are_crossed_by_default() {
+    let MountWalk {
+        paths,
+        volumes,
+        skips,
+        summary,
+    } = walk_mounts(&WalkOptions::default());
+    assert!(paths.contains(&PathBuf::from("/mem/disk/a")));
+    assert!(paths.contains(&PathBuf::from("/mem/tmp/b")));
+    assert!(
+        !paths.contains(&PathBuf::from("/mem/proc/c")),
+        "kernel mounts are never entered"
+    );
+    assert!(
+        !paths.contains(&PathBuf::from("/mem/nfs/d")),
+        "nor network mounts by default"
+    );
+    assert_eq!(
+        skips,
+        [
+            (PathBuf::from("/mem/disk/loop"), Skip::BindCycle),
+            (PathBuf::from("/mem/nfs"), Skip::Network),
+            (PathBuf::from("/mem/proc"), Skip::Kernel),
+        ]
+    );
+    // The root's volume, then one per mount met.
+    let ids: Vec<(u64, bool, Option<Skip>)> = volumes
+        .iter()
+        .map(|v| (v.mnt_id, v.entered(), v.reason))
+        .collect();
+    assert_eq!(ids[0], (1, true, None));
+    let mut rest = ids[1..].to_vec();
+    rest.sort_by_key(|v| v.0);
+    assert_eq!(
+        rest,
+        [
+            (2, true, None),
+            (3, true, None),
+            (4, false, Some(Skip::Kernel)),
+            (5, false, Some(Skip::Network)),
+            (6, false, Some(Skip::BindCycle)),
+        ]
+    );
+    assert_eq!((summary.volumes, summary.mounts_excluded), (6, 3));
+    assert_eq!(
+        volumes.iter().find(|v| v.mnt_id == 3).unwrap().class,
+        VolumeClass::Memory
+    );
+}
+
+#[test]
+fn p1_walk_06_include_network_enters_network_mounts() {
+    let opts = WalkOptions {
+        include_network: true,
+        ..WalkOptions::default()
+    };
+    let MountWalk {
+        paths,
+        skips,
+        summary,
+        ..
+    } = walk_mounts(&opts);
+    assert!(paths.contains(&PathBuf::from("/mem/nfs/d")));
+    assert!(!skips.iter().any(|(_, reason)| *reason == Skip::Network));
+    assert!(
+        skips.contains(&(PathBuf::from("/mem/proc"), Skip::Kernel)),
+        "kernel mounts still not"
+    );
+    assert_eq!(
+        summary.mounts_excluded, 2,
+        "the kernel mount and the bind cycle"
+    );
+}
+
+#[test]
+fn p1_walk_06_one_file_system_stays_on_the_root_mount() {
+    let opts = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    let MountWalk {
+        paths,
+        skips,
+        summary,
+        ..
+    } = walk_mounts(&opts);
+    assert!(paths.contains(&PathBuf::from("/mem/plain/e")));
+    for other in ["/mem/disk/a", "/mem/tmp/b"] {
+        assert!(!paths.contains(&PathBuf::from(other)), "{other}");
+    }
+    assert!(skips.contains(&(PathBuf::from("/mem/disk"), Skip::OneFileSystem)));
+    assert!(skips.contains(&(PathBuf::from("/mem/tmp"), Skip::OneFileSystem)));
+    assert_eq!(summary.mounts_excluded, 4);
+}
+
+#[test]
+fn p1_walk_06_skipped_mounts_are_never_asked_for_sizes() {
+    let mut tree = MemProvider::new("/mem");
+    tree.file("nfs/d", 1).file("proc/c", 1).file("disk/a", 1);
+    let provider = Mounted::new(
+        &tree,
+        vec![
+            row("/mem", 1, VolumeClass::Local),
+            row("/mem/nfs", 5, VolumeClass::Network),
+            row("/mem/proc", 4, VolumeClass::Kernel),
+            row("/mem/disk", 2, VolumeClass::Local),
+        ],
+    );
+    let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+    result.unwrap();
+    // The root's and the entered disk's volumes are read in full; the
+    // network and kernel mounts only from the mount table.
+    let mut sized = provider.volume_calls.lock().unwrap().clone();
+    sized.sort();
+    assert_eq!(sized, [PathBuf::from("/mem"), PathBuf::from("/mem/disk")]);
+    let info = provider.mount_info_calls.lock().unwrap().len();
+    assert_eq!(
+        info, 3,
+        "each crossing classified once; a skipped volume's row reuses it"
+    );
+    let excluded: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            ScanEvent::Volume(v) if !v.entered() => Some(v.total_bytes),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(excluded, [0, 0], "skipped volumes carry no sizes");
+}
+
+#[test]
+fn p1_walk_06_a_same_device_bind_mount_is_still_a_cycle() {
+    // A kernel before 5.8, or the fallback provider, reports a bind mount on
+    // the same device with its parent's mount id and no mount boundary.
+    let mut tree = MemProvider::new("/mem");
+    tree.file("data/f", 1).dir("data/sub/loop");
+    let mut provider = Mounted::new(&tree, vec![row("/mem", 1, VolumeClass::Local)]);
+    provider.bind_of = Some(("/mem/data/sub/loop", "/mem/data"));
+    let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+    let summary = result.unwrap();
+    let (paths, dirs) = replay(tree.root_path(), &events);
+    assert!(paths.contains(&PathBuf::from("/mem/data/sub/loop")));
+    let skipped = id_of(&dirs, "/mem/data/sub/loop");
+    assert!(events.contains(&ScanEvent::Skipped {
+        dir: skipped,
+        reason: Skip::BindCycle
+    }));
+    assert_eq!(
+        summary.mounts_excluded, 0,
+        "no mount was detected, so no volume row"
+    );
+}
+
+#[test]
+fn p1_walk_06_firmlinks_are_no_crossing_for_one_file_system() {
+    // macOS: / on the System volume (1); /users a firmlink onto the Data
+    // volume (2), also mounted at /sys/data, which the provider skips as
+    // reached through the firmlinks.
+    let mut tree = MemProvider::new("/mem");
+    tree.file("users/me/notes", 1)
+        .file("sys/data/users/me/notes", 1)
+        .file("bin/ls", 1);
+    let mut provider = Mounted::new(
+        &tree,
+        vec![
+            row("/mem", 1, VolumeClass::Local),
+            row("/mem/users", 2, VolumeClass::Local),
+            row("/mem/sys/data", 2, VolumeClass::Local),
+        ],
+    );
+    provider.firmlinks = vec!["/mem/users"];
+    provider.firmlinked = Some("/mem/sys/data");
+    for one_file_system in [false, true] {
+        let opts = WalkOptions {
+            one_file_system,
+            ..WalkOptions::default()
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+        let summary = result.unwrap();
+        let (paths, _) = replay(tree.root_path(), &events);
+        assert!(
+            paths.contains(&PathBuf::from("/mem/users/me/notes")),
+            "-x {one_file_system}"
+        );
+        assert!(!paths.contains(&PathBuf::from("/mem/sys/data/users/me/notes")));
+        // The Data volume is reported once, entered, whichever of its two
+        // paths the workers reached first.
+        let data: Vec<bool> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::Volume(v) if v.mnt_id == 2 => Some(v.entered()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(data, [true], "-x {one_file_system}");
+        assert_eq!(summary.mounts_excluded, 0);
+    }
+}
+
+#[test]
+fn p1_walk_06_a_handle_walks_back_to_the_root() {
+    let root = Arc::new(DirHandle::detached("/r", 0));
+    let entry = MemProvider::new("/r")
+        .root(Path::new("/r"), &WalkOptions::default())
+        .unwrap();
+    let child = DirHandle::new(
+        DirId::new(1),
+        PathBuf::from("/r/a"),
+        b"a".to_vec(),
+        &entry,
+        Some(Arc::clone(&root)),
+    );
+    let paths: Vec<&Path> = child.ancestors().map(DirHandle::path).collect();
+    assert_eq!(paths, [Path::new("/r/a"), Path::new("/r")]);
+    assert_eq!(
+        (child.depth(), child.parent().map(DirHandle::depth)),
+        (1, Some(0))
+    );
+}
+
+/// Reads like a provider of a wide directory that streams: the first `keep`
+/// children as entries, flushed every 7, the rest as names left for later,
+/// flushed every 1,500 (not a multiple of a stat batch). With `fail`, the
+/// read of `wide` ends with that error after flushing; with `cancel`, the
+/// flag is set once its first flush has returned.
+struct Streaming<'a> {
+    inner: &'a MemProvider,
+    keep: usize,
+    fail: Option<i32>,
+    cancel: Option<&'a AtomicBool>,
+}
+
+impl Provider for Streaming<'_> {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn read_dir_streaming(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+        later: &mut Vec<NameRef>,
+        flush: &mut Flush<'_>,
+    ) -> io::Result<()> {
+        let mut all = Vec::new();
+        self.inner.read_dir(dir, opts, &mut all, errs)?;
+        let mut flush =
+            |out: &mut Vec<Entry>, errs: &mut Vec<ScanError>, later: &mut Vec<NameRef>| {
+                flush(out, errs, later);
+                if let Some(cancel) = self.cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            };
+        for (i, entry) in all.into_iter().enumerate() {
+            if i < self.keep {
+                out.push(entry);
+                if out.len() == 7 {
+                    flush(out, errs, later);
+                }
+            } else {
+                later.push(entry.name);
+                if later.len() == 1_500 {
+                    flush(out, errs, later);
+                }
+            }
+        }
+        match self.fail {
+            Some(errno) if dir.path().ends_with("wide") => Err(io::Error::from_raw_os_error(errno)),
+            _ => Ok(()),
+        }
+    }
+
+    fn stat_names(
+        &self,
+        dir: &DirHandle,
+        names: &[NameRef],
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        let wanted: HashSet<&NameRef> = names.iter().collect();
+        let mut all = Vec::new();
+        self.inner.read_dir(dir, opts, &mut all, errs)?;
+        out.extend(all.into_iter().filter(|entry| wanted.contains(&entry.name)));
+        Ok(())
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+}
+
+#[test]
+fn p1_test_01_a_streamed_directory_arrives_whole_and_closes_last() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..20_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    for i in 0..3 {
+        tree.file(format!("wide/sub{i}/inside"), 1);
+    }
+    for keep in [0, 100, 30_000] {
+        let provider = Streaming {
+            inner: &tree,
+            keep,
+            fail: None,
+            cancel: None,
+        };
+        let opts = WalkOptions {
+            threads: 4,
+            ..WalkOptions::default()
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+        let summary = result.unwrap();
+        // replay checks that every entry follows its parent and precedes
+        // the parent's close, and that each directory closes once.
+        let (paths, _) = replay(tree.root_path(), &events);
+        assert_eq!(
+            sorted(paths.iter().map(PathBuf::as_path)),
+            sorted(tree.paths()),
+            "keep {keep}"
+        );
+        assert_eq!(summary.entries, tree.entry_count() as u64, "keep {keep}");
+    }
+}
+
+#[test]
+fn p1_test_01_a_read_failing_after_a_flush_closes_with_its_errno() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..5_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    // With names left for later, the last stat job closes the directory;
+    // without, the read's own last batch does.
+    for keep in [20, 3_000, 30_000] {
+        let provider = Streaming {
+            inner: &tree,
+            keep,
+            fail: Some(libc::EACCES),
+            cancel: None,
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+        result.unwrap();
+        let (_, dirs) = replay(tree.root_path(), &events);
+        let wide = id_of(&dirs, "/mem/wide");
+        let closed = events.iter().find_map(|e| match e {
+            ScanEvent::DirClosed { dir, errno } if *dir == wide => Some(*errno),
+            _ => None,
+        });
+        assert_eq!(closed, Some(Some(libc::EACCES)), "keep {keep}");
+    }
+}
+
+#[test]
+fn p1_test_01_names_up_to_22_bytes_are_held_in_place() {
+    assert_eq!(std::mem::size_of::<NameRef>(), 24);
+    let short = NameRef::from("f0131638");
+    let edge = NameRef::from("exactly-twenty-two-byt");
+    let long = NameRef::from("a-name-longer-than-twenty-two-bytes");
+    assert_eq!(edge.as_bytes().len(), 22);
+    for name in [&short, &edge, &long] {
+        assert_eq!(NameRef::new(name.as_bytes()), *name);
+    }
+    // Order, equality and hashing are by bytes, whichever way a name is
+    // held.
+    let mut names = vec![long.clone(), short.clone(), edge.clone()];
+    names.sort();
+    assert_eq!(names, [long.clone(), edge.clone(), short.clone()]);
+    let set: HashSet<NameRef> = [short.clone(), NameRef::new(b"f0131638")].into();
+    assert_eq!(set.len(), 1);
+    assert_eq!(
+        format!("{long:?}"),
+        "\"a-name-longer-than-twenty-two-bytes\""
+    );
+}
+
+#[test]
+fn p1_test_01_a_directory_vanishing_after_a_flush_is_reported() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..5_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    // With names left for later (keep 20) the last stat job closes the
+    // directory; without (keep 30,000) the read's own last batch does.
+    for keep in [20, 30_000] {
+        let provider = Streaming {
+            inner: &tree,
+            keep,
+            fail: Some(libc::ENOENT),
+            cancel: None,
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &WalkOptions::default());
+        let summary = result.unwrap();
+        let (_, dirs) = replay(tree.root_path(), &events);
+        let wide = id_of(&dirs, "/mem/wide");
+        let vanished = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Vanished { dir, name: None } if *dir == wide))
+            .count();
+        assert_eq!((vanished, summary.vanished), (1, 1), "keep {keep}");
+    }
+}
+
+#[test]
+fn p1_test_01_a_cancel_during_a_streamed_read_ends_the_walk() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..5_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    // The first flush sends stat jobs (keep 0: one batch of the 1,500 names
+    // it carries, which a worker may still read) or 7 entries (keep 100).
+    for (keep, most) in [(0, STAT_BATCH), (100, 7)] {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let provider = Streaming {
+            inner: &tree,
+            keep,
+            fail: None,
+            cancel: Some(&cancel),
+        };
+        let opts = WalkOptions {
+            threads: 4,
+            cancel: Arc::clone(&cancel),
+            ..WalkOptions::default()
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+        assert!(
+            matches!(result, Err(WalkError::Cancelled)),
+            "keep {keep}: {result:?}"
+        );
+        // Nothing after the first flush is sent, and the directory never
+        // closes: the walk is ending.
+        let wide = events
+            .iter()
+            .find_map(|e| match e {
+                ScanEvent::Entry(entry) if entry.name.as_bytes() == b"wide" => entry.dir,
+                _ => None,
+            })
+            .expect("wide is listed with the root");
+        let inside = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Entry(entry) if entry.parent == wide))
+            .count();
+        assert!(inside <= most, "keep {keep}: {inside} entries of wide");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ScanEvent::DirClosed { dir, .. } if *dir == wide)),
+            "keep {keep}: wide closed after the cancel"
+        );
+    }
 }

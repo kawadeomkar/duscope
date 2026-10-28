@@ -1,0 +1,14 @@
+# The musl builds (the Linux archives and .deb packages) allocate with
+# mimalloc, built to commit its arenas as they fill rather than all at once,
+# and without transparent huge pages, which back its pages with 2 MiB pages
+# where the kernel's setting is "always": on the benchmark trees that keeps a
+# scan's peak memory within the RSS budget (T1 123.5, T2 119.5, T3 134.5 bytes
+# per entry; T3 was 170.5 with huge pages and 244 with mimalloc's defaults) at
+# no cost in time. cc reads these when it compiles mimalloc for each musl
+# target (P1-BENCH-03, bench/results/allocator.json); the same variable set in
+# the environment replaces them, a plain CFLAGS does not. This file applies to
+# builds in this repository (the releases, `just deb`, CI): `cargo install
+# duscope` from crates.io builds mimalloc with its own defaults.
+[env]
+CFLAGS_aarch64_unknown_linux_musl = "-DMI_DEFAULT_ARENA_EAGER_COMMIT=0 -DMI_DEFAULT_ALLOW_THP=0"
+CFLAGS_x86_64_unknown_linux_musl = "-DMI_DEFAULT_ARENA_EAGER_COMMIT=0 -DMI_DEFAULT_ALLOW_THP=0"

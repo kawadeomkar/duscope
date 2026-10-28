@@ -54,7 +54,71 @@ pub(crate) fn native() -> Option<Box<dyn Provider>> {
 #[allow(clippy::unnecessary_wraps)] // `None` where no provider is built
 pub(crate) fn fallback() -> Option<Box<dyn Provider>> {
     setup();
-    Some(Box::new(fallback::FallbackProvider))
+    Some(Box::new(fallback::FallbackProvider::default()))
+}
+
+/// Makes SIGINT set `flag`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn cancel_on_interrupt(
+    flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<bool> {
+    posix::signal::cancel_on_interrupt(flag)
+}
+
+/// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn cachedir_tag(dir: &std::path::Path) -> bool {
+    posix::cachedir_tag(dir)
+}
+
+/// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`: not read on
+/// this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn cachedir_tag(_dir: &std::path::Path) -> bool {
+    false
+}
+
+/// Blocks until SIGINT arrives (`true`) or [`stand_down_interrupt`] is
+/// called (`false`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn wait_for_interrupt() -> bool {
+    posix::signal::wait_for_interrupt()
+}
+
+/// Wakes the thread waiting for SIGINT; the handler stays.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn stand_down_interrupt() {
+    posix::signal::stand_down();
+}
+
+/// Blocks until SIGINT arrives: never here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn wait_for_interrupt() -> bool {
+    false
+}
+
+/// Wakes the thread waiting for SIGINT: none here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn stand_down_interrupt() {}
+
+/// The size of the terminal on stdout.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn terminal_size() -> Option<(u16, u16)> {
+    posix::winsize::terminal_size()
+}
+
+/// The size of the terminal on stdout: unknown on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn terminal_size() -> Option<(u16, u16)> {
+    None
+}
+
+/// Makes SIGINT set `flag`: not on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn cancel_on_interrupt(
+    _flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<bool> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// The fallback provider: none is built here.

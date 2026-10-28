@@ -3,6 +3,10 @@
 //! platform providers, less what only their calls report: the mount id and
 //! the attribute flags on Linux, the clone ids on macOS. macOS reads a
 //! filesystem that refuses bulk reads through it.
+//!
+//! On macOS it reads no clone ids or extended flags, which only
+//! `getattrlist` returns: the filesystems that refuse bulk reads (SMB,
+//! FUSE) have none.
 
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
@@ -12,13 +16,17 @@ use crate::platform::posix;
 use crate::{DirHandle, Entry, NameRef, Provider, STAT_BATCH, ScanError, VolumeInfo, WalkOptions};
 
 #[cfg(target_os = "linux")]
-use super::linux::{from_stat, volume};
+use super::linux::{Mounts, from_stat};
 #[cfg(target_os = "macos")]
-use super::macos::{from_stat, volume};
+use super::macos::{from_stat, mount_info, volume};
 
 /// The fallback provider.
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct FallbackProvider;
+#[derive(Debug, Default)]
+pub(crate) struct FallbackProvider {
+    /// The mount table, read for this walk: `stat` reports no mount id.
+    #[cfg(target_os = "linux")]
+    mounts: Mounts,
+}
 
 impl Provider for FallbackProvider {
     fn read_dir(
@@ -42,35 +50,63 @@ impl Provider for FallbackProvider {
     fn read_dir_split(
         &self,
         dir: &DirHandle,
-        _opts: &WalkOptions,
+        opts: &WalkOptions,
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        read_open(fd.as_fd(), dir, out, errs, later)
+        self.read_open(fd.as_fd(), dir, opts, out, errs, later)
     }
 
     fn stat_names(
         &self,
         dir: &DirHandle,
         names: &[NameRef],
-        _opts: &WalkOptions,
+        opts: &WalkOptions,
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
-        read_names(fd.as_fd(), dir, names.iter().cloned(), out, errs);
+        self.read_names(fd.as_fd(), dir, names.iter().cloned(), opts, out, errs);
         Ok(())
     }
 
+    /// Clone ids are read only on APFS; on Linux, `explain --clones` finds
+    /// shared extents on demand.
+    fn clones_unavailable(&self, _opts: &WalkOptions) -> bool {
+        true
+    }
+
+    #[cfg(target_os = "linux")]
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.mounts.volume(path)
+    }
+
+    #[cfg(target_os = "macos")]
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
         volume(path)
     }
 
-    fn root(&self, path: &Path, _opts: &WalkOptions) -> io::Result<Entry> {
+    #[cfg(target_os = "linux")]
+    fn mount_info(&self, path: &Path, _dev: u64) -> io::Result<VolumeInfo> {
+        self.mounts.mount_info(path)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mount_info(&self, path: &Path, dev: u64) -> io::Result<VolumeInfo> {
+        mount_info(path, dev)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
         let name = NameRef::from(path.file_name().unwrap_or(path.as_os_str()));
-        Ok(from_stat(name, &posix::lstat(&posix::c_path(path)?)?))
+        #[allow(unused_mut)] // only Linux fills in the mount id
+        let mut entry = from_stat(name, &posix::lstat(&posix::c_path(path)?)?, opts.attrs);
+        #[cfg(target_os = "linux")]
+        {
+            entry.mnt_id = self.mounts.mnt_id_of(path);
+        }
+        Ok(entry)
     }
 
     /// The platform provider's default, so the two compare like for like,
@@ -80,42 +116,56 @@ impl Provider for FallbackProvider {
     }
 }
 
-/// Lists the directory open on `fd` through that descriptor, reads the
-/// first 1,024 entries and leaves the rest in `later`. The macOS provider
-/// calls it with the descriptor its refused bulk read was made on, so the
-/// directory is never opened by path a second time.
-pub(crate) fn read_open(
-    fd: BorrowedFd<'_>,
-    dir: &DirHandle,
-    out: &mut Vec<Entry>,
-    errs: &mut Vec<ScanError>,
-    later: &mut Vec<NameRef>,
-) -> io::Result<()> {
-    let mut names = posix::list_names(fd)?;
-    if names.len() > STAT_BATCH {
-        later.extend(names.drain(STAT_BATCH..));
+impl FallbackProvider {
+    /// Lists the directory open on `fd` through that descriptor, reads the
+    /// first 1,024 entries and leaves the rest in `later`. The macOS
+    /// provider calls it with the descriptor its refused bulk read was made
+    /// on, so the directory is never opened by path a second time.
+    pub(crate) fn read_open(
+        &self,
+        fd: BorrowedFd<'_>,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+        later: &mut Vec<NameRef>,
+    ) -> io::Result<()> {
+        let mut names = posix::list_names(fd)?;
+        if names.len() > STAT_BATCH {
+            later.extend(names.drain(STAT_BATCH..));
+        }
+        self.read_names(fd, dir, names, opts, out, errs);
+        Ok(())
     }
-    read_names(fd, dir, names, out, errs);
-    Ok(())
-}
 
-/// Reads `names` in the directory open on `fd`: an entry or an error each,
-/// each name moving into its entry or error.
-fn read_names(
-    fd: BorrowedFd<'_>,
-    dir: &DirHandle,
-    names: impl IntoIterator<Item = NameRef>,
-    out: &mut Vec<Entry>,
-    errs: &mut Vec<ScanError>,
-) {
-    for name in names {
-        match posix::with_c_name(name.as_bytes(), |c_name| posix::lstat_at(fd, c_name)) {
-            Ok(stat) => out.push(from_stat(name, &stat)),
-            Err(e) => errs.push(ScanError {
-                dir: dir.id(),
-                name,
-                errno: e.raw_os_error().unwrap_or(crate::EIO),
-            }),
+    /// Reads `names` in the directory open on `fd`: an entry or an error
+    /// each, each name moving into its entry or error.
+    // Only Linux reads the mount table.
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_self))]
+    fn read_names(
+        &self,
+        fd: BorrowedFd<'_>,
+        dir: &DirHandle,
+        names: impl IntoIterator<Item = NameRef>,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) {
+        for name in names {
+            match posix::with_c_name(name.as_bytes(), |c_name| posix::lstat_at(fd, c_name)) {
+                Ok(stat) => {
+                    #[allow(unused_mut)] // only Linux fills in the mount id
+                    let mut entry = from_stat(name, &stat, opts.attrs);
+                    #[cfg(target_os = "linux")]
+                    self.mounts.fill_mnt_id(&mut entry, dir);
+                    out.push(entry);
+                }
+                Err(e) => errs.push(ScanError {
+                    dir: dir.id(),
+                    name,
+                    errno: e.raw_os_error().unwrap_or(crate::EIO),
+                }),
+            }
         }
     }
 }
@@ -135,7 +185,8 @@ mod tests {
     use super::FallbackProvider;
     use crate::platform::posix;
     use crate::{
-        Boundary, DirId, Entry, Flags, Kind, Provider, ScanEvent, WalkOptions, walk, walk_with,
+        Boundary, DirId, Entry, Flags, Kind, Provider, ScanEvent, Share, WalkOptions, walk,
+        walk_with,
     };
 
     /// What a walk saw: entries by path, scan errors by path, and the
@@ -200,10 +251,27 @@ mod tests {
                 entry.boundary = Boundary::None;
             }
         }
-        if cfg!(target_os = "macos") && entry.kind == Kind::Dir {
-            // ATTR_DIR_LINKCOUNT counts the directory's hard links (1 on
+        if cfg!(target_os = "macos") {
+            // stat names no volume, so the fallback's mount id is the
+            // volume group's shared device; the bulk read's is the
+            // volume's own device (FSOPT_RETURN_REALDEV).
+            entry.mnt_id = 0;
+            // ATTR_DIR_LINKCOUNT counts a directory's hard links (1 on
             // APFS); st_nlink also counts its subdirectories.
-            entry.nlink = 0;
+            if entry.kind == Kind::Dir {
+                entry.nlink = 0;
+            }
+            // stat carries neither clone ids nor the extended flags.
+            entry
+                .flags
+                .remove(Flags::SPARSE | Flags::PURGEABLE | Flags::MAY_SHARE | Flags::SHARES_ALL);
+            if matches!(entry.share, Share::Clone(_) | Share::MayShare) {
+                entry.share = if entry.nlink > 1 {
+                    Share::Hardlink
+                } else {
+                    Share::None
+                };
+            }
         }
         entry
     }
@@ -218,7 +286,7 @@ mod tests {
         };
         let native = crate::platform::native().unwrap();
         let native = seen(&*native, &root, &opts);
-        let fallback = seen(&FallbackProvider, &root, &opts);
+        let fallback = seen(&FallbackProvider::default(), &root, &opts);
         assert!(native.entries.len() > 100_000);
         assert_eq!(native.entries.len(), fallback.entries.len());
         for (path, entry) in &native.entries {
@@ -237,17 +305,20 @@ mod tests {
             ..WalkOptions::default()
         };
         let mut entries = Vec::new();
+        let (_, stats_before, _) = crate::platform::posix::calls::now();
         walk(&root, &opts, |event| {
             if let ScanEvent::Entry(entry) = event {
                 entries.push(entry);
             }
         })
         .unwrap();
+        let (_, stats_after, _) = crate::platform::posix::calls::now();
         assert!(entries.len() > 200);
-        // What only the fallback reports: no mount id on Linux, st_nlink
-        // for a directory with a subdirectory on macOS.
+        // What only the fallback does: read the root with lstat on this
+        // thread (Linux reads it with statx otherwise), and report st_nlink
+        // for a directory with a subdirectory (macOS).
         if cfg!(target_os = "linux") {
-            assert!(entries.iter().all(|e| e.mnt_id == 0));
+            assert_eq!(stats_after - stats_before, 1);
         } else {
             assert!(entries.iter().any(|e| e.kind == Kind::Dir && e.nlink >= 3));
         }
@@ -256,7 +327,10 @@ mod tests {
     #[test]
     fn p1_walk_04_the_fallback_threads_follow_the_platform_provider() {
         let native = crate::platform::native().unwrap();
-        assert_eq!(FallbackProvider.default_threads(), native.default_threads());
+        assert_eq!(
+            FallbackProvider::default().default_threads(),
+            native.default_threads()
+        );
     }
 
     #[test]
@@ -273,13 +347,12 @@ mod tests {
         std::fs::rename(&dir, env.tmp_dir().join("moved")).unwrap();
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("c"), "c").unwrap();
-        let handle = crate::DirHandle {
-            id: DirId::ROOT,
-            path: dir,
-            depth: 0,
-        };
+        let handle = crate::DirHandle::detached(dir, 0);
         let (mut out, mut errs, mut later) = (Vec::new(), Vec::new(), Vec::new());
-        super::read_open(fd.as_fd(), &handle, &mut out, &mut errs, &mut later).unwrap();
+        let opts = WalkOptions::default();
+        FallbackProvider::default()
+            .read_open(fd.as_fd(), &handle, &opts, &mut out, &mut errs, &mut later)
+            .unwrap();
         let mut names: Vec<&[u8]> = out.iter().map(|e| e.name.as_bytes()).collect();
         names.sort_unstable();
         assert_eq!(names, [b"a", b"b"]);

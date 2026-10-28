@@ -13,17 +13,62 @@ keywords = ["disk-usage", "du", "treemap", "cli", "mcp"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
+clap.workspace = true
+clap_complete.workspace = true
+clap_mangen.workspace = true
+globset.workspace = true
 duscope-walk.workspace = true
 duscope-core.workspace = true
 duscope-treemap.workspace = true
 duscope-tui.workspace = true
 duscope-mcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# musl's allocator serialises under many workers; P1-BENCH-03 measured the gain
+# (bench/results/allocator.json).
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc.workspace = true
 
 [dev-dependencies]
+assert_cmd.workspace = true
 cargo_metadata.workspace = true
+duscope-testkit.workspace = true
 jsonschema.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
+termlens.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
+
+# The .deb packages of the two musl targets (P1-PKG-01), built by `just deb`
+# and release.yml with cargo-deb from a musl build of this package. The man
+# page and completions are what `duscope man` and `duscope completions` print,
+# written once by a host build into target/deb-assets/; debian/changelog is
+# written from CHANGELOG.md by debian/changelog.sh.
+[package.metadata.deb]
+maintainer = "Omkar Kawade <kawadeomkar@users.noreply.github.com>"
+extended-description = """\
+duscope measures where a disk's space goes. A parallel scanner reads a tree \
+as fast as du, counting hard links and clones once; top, tree, by-type and \
+stale answer from the scan with one JSON envelope for scripts and agents; \
+and scan draws a treemap in the terminal."""
+section = "utils"
+priority = "optional"
+# Statically linked, so cargo-deb's $auto finds no dependency and the
+# package has no Depends field. tzdata gives --since and local times their
+# zone.
+recommends = "tzdata"
+changelog = "../debian/changelog"
+assets = [
+    ["target/release/duscope", "usr/bin/", "755"],
+    ["../target/deb-assets/duscope.1", "usr/share/man/man1/duscope.1", "644"],
+    ["../target/deb-assets/duscope.bash", "usr/share/bash-completion/completions/duscope", "644"],
+    ["../target/deb-assets/_duscope", "usr/share/zsh/vendor-completions/_duscope", "644"],
+    ["../target/deb-assets/duscope.fish", "usr/share/fish/vendor_completions.d/duscope.fish", "644"],
+    ["../README.md", "usr/share/doc/duscope/README.md", "644"],
+    # Machine-readable (DEP-5), in place of the one cargo-deb would write.
+    ["../debian/copyright", "usr/share/doc/duscope/copyright", "644"],
+    ["../debian/duscope.lintian-overrides", "usr/share/lintian/overrides/duscope", "644"],
+]

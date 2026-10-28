@@ -12,7 +12,8 @@ use std::thread::{self, ThreadId};
 
 use duscope_testkit::TestEnv;
 
-use super::{LinuxProvider, Mount, dents, parse_mountinfo};
+use super::mounts::{Mount, parse_mountinfo};
+use super::{LinuxProvider, dents};
 use crate::tests::Gate;
 use crate::{
     DirHandle, DirId, Entry, Kind, NameRef, Provider, STAT_BATCH, ScanError, ScanEvent, VolumeInfo,
@@ -253,11 +254,13 @@ fn p1_walk_02_mountinfo_lines_parse() {
                 id: 22,
                 path: PathBuf::from("/proc"),
                 fs_type: "proc".to_owned(),
+                options: vec!["rw".to_owned(), "nosuid".to_owned(), "rw".to_owned()],
             },
             Mount {
                 id: 36,
                 path: PathBuf::from("/mnt/with space"),
                 fs_type: "ext4".to_owned(),
+                options: vec!["rw".to_owned(), "noatime".to_owned(), "rw".to_owned()],
             },
         ]
     );
@@ -280,6 +283,114 @@ fn p1_walk_02_the_volume_comes_from_mountinfo_and_statvfs() {
 }
 
 #[test]
+fn p1_walk_05_full_attrs_match_lstat() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    let entries = walk_paths(&LinuxProvider::new(), &root, &opts);
+    let ns = |s: i64, n: i64| s * 1_000_000_000 + n;
+    for (path, entry) in &entries {
+        let meta = fs::symlink_metadata(path).unwrap();
+        let full = entry
+            .full
+            .unwrap_or_else(|| panic!("no full attributes: {path:?}"));
+        assert_eq!(full.mode, meta.mode(), "mode {path:?}");
+        assert_eq!(
+            (full.uid, full.gid),
+            (meta.uid(), meta.gid()),
+            "owner {path:?}"
+        );
+        assert_eq!(
+            full.atime_ns,
+            ns(meta.atime(), meta.atime_nsec()),
+            "atime {path:?}"
+        );
+        // std reads the creation time with statx too; None where the
+        // filesystem keeps none.
+        let created = meta.created().ok().map(|time| {
+            let since = time.duration_since(std::time::UNIX_EPOCH).unwrap();
+            i64::try_from(since.as_nanos()).unwrap()
+        });
+        assert_eq!(full.btime_ns, created, "btime {path:?}");
+    }
+    let basic = walk_paths(&LinuxProvider::new(), &root, &WalkOptions::default());
+    assert!(basic.values().all(|entry| entry.full.is_none()));
+}
+
+#[test]
+fn p1_walk_05_full_attrs_add_no_calls() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let count = |attrs| {
+        let provider = LinuxProvider::new();
+        let opts = WalkOptions {
+            attrs,
+            ..WalkOptions::default()
+        };
+        walk_with(&provider, &root, &opts, |_| {}).unwrap();
+        provider.statx_calls.load(Ordering::Relaxed)
+    };
+    // The five attributes are mask bits of the same statx.
+    assert_eq!(count(crate::Attrs::Full), count(crate::Attrs::Basic));
+}
+
+#[test]
+fn p1_walk_06_mount_classes() {
+    use super::mounts::{case_sensitive, class};
+    use crate::VolumeClass;
+    assert_eq!(class("ext4"), VolumeClass::Local);
+    assert_eq!(class("proc"), VolumeClass::Kernel);
+    assert_eq!(class("nfs4"), VolumeClass::Network);
+    assert_eq!(class("fuse.sshfs"), VolumeClass::Network);
+    assert_eq!(class("ceph"), VolumeClass::Network);
+    assert_eq!(class("autofs"), VolumeClass::Network);
+    assert_eq!(
+        class("fuseblk"),
+        VolumeClass::Foreign,
+        "ntfs-3g on a local disk"
+    );
+    assert_eq!(class("tmpfs"), VolumeClass::Memory);
+    assert_eq!(class("overlay"), VolumeClass::Overlay);
+    assert_eq!(class("squashfs"), VolumeClass::ReadOnlyImage);
+    assert_eq!(case_sensitive("exfat", &[]), Some(false));
+    assert_eq!(case_sensitive("ntfs3", &["nocase".to_owned()]), Some(false));
+    assert_eq!(case_sensitive("hfsplus", &[]), None);
+    assert_eq!(case_sensitive("ext4", &[]), Some(true));
+}
+
+#[test]
+fn p1_walk_06_the_fallback_root_has_a_mount_id() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let entry = crate::platform::fallback::FallbackProvider::default()
+        .root(&root, &WalkOptions::default())
+        .unwrap();
+    assert_ne!(entry.mnt_id, 0);
+}
+
+#[test]
+fn p1_walk_06_mount_info_reads_the_mount_table() {
+    let info = super::mounts::Mounts::default()
+        .mount_info(Path::new("/proc"))
+        .unwrap();
+    assert_eq!(info.class, crate::VolumeClass::Kernel);
+    assert_eq!((info.total_bytes, info.free_bytes), (0, 0));
+    // A local mount's sizes are read, as macOS's mount table gives them.
+    let root = super::mounts::Mounts::default()
+        .mount_info(Path::new("/"))
+        .unwrap();
+    if !matches!(
+        root.class,
+        crate::VolumeClass::Network | crate::VolumeClass::Kernel
+    ) {
+        assert!(root.total_bytes > 0, "{root:?}");
+    }
+}
+
+#[test]
 fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
     // SAFETY: statx is plain data; all zeros is a valid value.
     let mut stx: libc::statx = unsafe { std::mem::zeroed() };
@@ -289,9 +400,9 @@ fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
         let bit = u64::from(bit.cast_unsigned());
         stx.stx_attributes_mask |= bit;
         stx.stx_attributes |= bit;
-        super::statx::entry(NameRef::from("d"), &stx)
+        super::statx::entry(NameRef::from("d"), &stx, crate::Attrs::Basic)
     };
-    let plain = super::statx::entry(NameRef::from("d"), &stx);
+    let plain = super::statx::entry(NameRef::from("d"), &stx, crate::Attrs::Basic);
     assert_eq!(plain.boundary, crate::Boundary::None);
     assert!(plain.flags.is_empty());
     let root = with(&stx, libc::STATX_ATTR_MOUNT_ROOT);
@@ -307,7 +418,7 @@ fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
     let mut unvouched = stx;
     unvouched.stx_attributes |= u64::from(libc::STATX_ATTR_AUTOMOUNT.cast_unsigned());
     assert_eq!(
-        super::statx::entry(NameRef::from("d"), &unvouched).boundary,
+        super::statx::entry(NameRef::from("d"), &unvouched, crate::Attrs::Basic).boundary,
         crate::Boundary::None
     );
 }

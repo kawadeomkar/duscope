@@ -1,8 +1,8 @@
 # Contributing to duscope
 
-duscope is pre-release. This guide is a skeleton: it covers setup, the tools, the `just`
-recipes and the package workflow, and is filled in before the 0.1 release. Agents working in
-this repository read [CLAUDE.md](CLAUDE.md) first; it states the same rules for a session.
+This guide covers setup, the tools, the `just` recipes, the package workflow, tests,
+benchmarks, packaging and releases. Agents working in this repository read
+[CLAUDE.md](CLAUDE.md) first; it states the same rules for a session.
 
 ## Prerequisites
 
@@ -54,10 +54,10 @@ disagree, so a pin changes in both places in the same pull request.
 | `just` | any 1.x release | you | the recipes below |
 | `gh` | any 2.x release | you | pull requests |
 | `cargo-deny` | 0.20.2 | `just setup` | licences, bans, sources and advisories |
-| `cargo-insta` | 1.49.0 | `just setup` | reviewing golden snapshots |
 | `cargo-fuzz` | 0.13.2 | `just setup` | fuzz targets, on nightly |
 | `cargo-llvm-cov` | 0.9.1 | `just setup` | coverage |
 | `cargo-deb` | 3.8.0 | `just setup` | the `.deb` packages |
+| `cargo-auditable` | 0.7.7 | `just setup` | the dependency list embedded in the binary `just deb` packages, as in the release archives |
 | `cargo-dist` | 0.33.1 | `just setup`, from the GitHub tag (later releases are not on crates.io) | release builds (the `dist` command) |
 | `hyperfine` | 2.0.0 | `just setup` | the benchmark harness |
 | `mandoc` | system package | `just setup` (apt) on Linux; ships with macOS | linting the man page |
@@ -76,14 +76,15 @@ disagree, so a pin changes in both places in the same pull request.
 | `just setup` | install the pinned toolchains and tools for this platform |
 | `just check` | `just fmt`, `just clippy`, `just test`, `just docs` and `just deny`: the pull-request gate |
 | `just check-full` | `just check` plus the advisory database and the ignored platform tests; what CI runs (needs the network) |
+| `just platform-tests` | the ignored platform tests, by name, in a release build; they need root and skip without it (CI runs them under `sudo`) |
 | `just test-pkg P2-QRY-06` | the tests of one package (names starting `p2_qry_06_`) |
 | `just test-crate duscope-core` | the tests of one crate |
-| `just size` | release build and the stripped binary size against the 8 MB budget |
+| `just size [TARGET]` | release build and the stripped binary size against the budget (`size_budget`, 5.2 MB) |
 | `just repro` | the reproducible release build, printing the binary's SHA-256 |
 | `just fixtures` | build the reference fixture tree under `target/fixtures.noindex` |
 | `just golden` | regenerate the golden files after an intended output change |
 | `just bench` | the hyperfine harness on the seeded trees |
-| `just deb` | build the `.deb` packages |
+| `just deb [TARGET]` | build the `.deb` package of a musl target (Linux) |
 
 ## Package workflow
 
@@ -105,6 +106,33 @@ brief and acceptance checks, and one package is one pull request.
 
 A change that is not yet a package, such as a bug report or a feature idea, starts as an issue
 from one of the templates.
+
+## Tests
+
+- `just test-pkg <ID>` runs a package's tests while you work; `just check` is the gate.
+- Golden files live in `duscope/tests/golden/`, one copy per OS where the output differs.
+  After an intended output change, `just golden` regenerates this platform's copies and lists
+  them; [duscope/tests/golden/README.md](duscope/tests/golden/README.md) says how to get the
+  other platform's.
+- `just check-full` adds the advisory database and the ignored platform tests, which mount
+  filesystems and need root on Linux; CI's `platform` job runs them under `sudo`.
+- Tests never touch the network, your home directory or your index directory: the
+  `duscope-testkit` crate gives every test its own environment.
+
+## Benchmarks
+
+`just bench` runs the hyperfine harness on the seeded trees: [bench/README.md](bench/README.md)
+has the trees, the pinned competitors, the result file and the thread sweep. CI's
+`bench-regression` job measures duscope on T1 in every pull request; the nightly job on the
+bench runners measures the full matrix.
+
+## Packages and releases
+
+`just deb` builds a `.deb` on Linux with `musl-tools`, the musl target and `cargo-auditable`
+installed (`just setup` installs them); it writes the man page and completions afresh each time.
+Releases are cut by the maintainer from a signed tag, following
+[docs/RELEASING.md](docs/RELEASING.md) step by step; `release.yml` builds, attests and publishes
+everything, and nothing is published by hand.
 
 ## Pull requests
 

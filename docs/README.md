@@ -8,6 +8,10 @@ ones at the top of the repository.
 - [github-settings.md](github-settings.md): the repository settings duscope
   depends on (branch protection and the required checks, merge methods,
   Actions, security, labels), as a checklist with the command that applies each.
+- [RELEASING.md](RELEASING.md): the checklist every release tag follows, the
+  patch-release subset, the secrets table and how to pull a release.
+- [rules.md](rules.md): the schemas of `classes.toml`, `caches.toml` and user
+  theme files, with an example of each.
 - [runners.md](runners.md): the two self-hosted machines the nightly benchmarks
   run on, how each is set up and registered, its network and security limits,
   and what to do when one is offline.
@@ -18,7 +22,7 @@ More documents arrive with the features they describe.
 
 - [README.md](../README.md): what duscope is, and how to install it.
 - [CONTRIBUTING.md](../CONTRIBUTING.md): setup, the pinned tools, the `just`
-  recipes and the package workflow.
+  recipes, the package workflow, tests, benchmarks, packaging and releases.
 - [CLAUDE.md](../CLAUDE.md): the rules for agents working in this repository.
 - [SECURITY.md](../SECURITY.md): how to report a vulnerability.
 - [CHANGELOG.md](../CHANGELOG.md): what changed in each release.

@@ -1,0 +1,18 @@
+allocated_bytes	apparent_bytes	pct_of_parent	depth	kind	path
+231301120	146481871	100.0	0	dir	<root>
+83185664	38161450	36.0	1	dir	<root>/Library
+45936640	16043822	55.2	2	dir	<root>/Library/Containers
+14704640	13146680	17.7	2	dir	<root>/Library/Developer
+7254016	1916392	8.7	2	dir	<root>/Library/Group Containers
+6070272	2769188	7.3	2	dir	<root>/Library/Caches
+5402624	2421270	6.5	2	dir	<root>/Library/Application Support
+56913920	34665732	24.6	1	dir	<root>/dev
+38494208	29766409	67.6	2	dir	<root>/dev/target
+18247680	4733727	32.1	2	dir	<root>/dev/node_modules
+31465472	31463840	13.6	1	dir	<root>/Movies
+7340032	7340032	23.3	2	file	<root>/Movies/holiday-2035.mov
+6291456	6291456	20.0	2	file	<root>/Movies/wedding.mp4
+5242880	5242880	16.7	2	file	<root>/Movies/screen-recording.mov
+4194304	4194432	13.3	2	dir	<root>/Movies/clips
+4194304	4194304	13.3	2	file	<root>/Movies/lecture-01.mkv
+4194304	4194304	13.3	2	file	<root>/Movies/lecture-02.mkv

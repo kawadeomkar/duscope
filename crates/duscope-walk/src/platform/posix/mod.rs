@@ -1,6 +1,9 @@
 //! Calls both platforms make the same way: opening a directory to read and
 //! raising the descriptor limit.
 
+pub(crate) mod signal;
+pub(crate) mod winsize;
+
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::MaybeUninit;
@@ -59,6 +62,38 @@ pub(crate) fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput.into())
 }
 
+/// The first 43 bytes of a valid `CACHEDIR.TAG`.
+const CACHEDIR_SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
+/// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`: a regular
+/// file, not a link, that starts with the signature. One `lstat` answers
+/// for a directory without a tag, the common case; a candidate is then
+/// opened without blocking, so a FIFO of that name cannot stall the walk,
+/// and checked again through the descriptor, so nothing swapped in after
+/// the first check is read.
+pub(crate) fn cachedir_tag(dir: &Path) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = dir.join("CACHEDIR.TAG");
+    let long_enough =
+        |m: &std::fs::Metadata| m.is_file() && m.len() >= CACHEDIR_SIGNATURE.len() as u64;
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| long_enough(&m)) {
+        return false;
+    }
+    let Ok(mut tag) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    else {
+        return false;
+    };
+    let mut head = [0u8; 43];
+    tag.metadata().is_ok_and(|m| long_enough(&m))
+        && tag.read_exact(&mut head).is_ok()
+        && &head == CACHEDIR_SIGNATURE
+}
+
 /// Room for a name of up to `NAME_MAX` (255) bytes and its terminating NUL.
 const NAME_BUF: usize = 256;
 
@@ -98,6 +133,8 @@ fn parked(mut open: impl FnMut() -> libc::c_int) -> io::Result<OwnedFd> {
     let mut parked = Duration::ZERO;
     let mut pause = Duration::from_millis(1);
     loop {
+        #[cfg(test)]
+        calls::other();
         let fd = open();
         if fd >= 0 {
             // SAFETY: `fd` was just returned by `open` and is owned by
@@ -143,9 +180,18 @@ fn retry(mut call: impl FnMut() -> libc::c_int) -> io::Result<()> {
     }
 }
 
+/// `fstatat(2)`'s flags: never follow a final symlink, and on Linux never
+/// trigger an automount.
+#[cfg(target_os = "linux")]
+const STAT_FLAGS: libc::c_int = libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT;
+#[cfg(not(target_os = "linux"))]
+const STAT_FLAGS: libc::c_int = libc::AT_SYMLINK_NOFOLLOW;
+
 /// `fstatat(2)` of `name` in the directory open on `dir`, not following a
 /// final symlink.
 pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
+    #[cfg(test)]
+    calls::entry();
     let mut stat = MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `dir` is open for the borrow, `name` is NUL-terminated, and
     // `stat` is writable for one `struct stat`.
@@ -154,7 +200,7 @@ pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::sta
             dir.as_raw_fd(),
             name.as_ptr(),
             stat.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
+            STAT_FLAGS,
         )
     })?;
     // SAFETY: fstatat succeeded, so it filled the struct.
@@ -163,6 +209,8 @@ pub(crate) fn lstat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::sta
 
 /// `lstat(2)` of `path`.
 pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
+    #[cfg(test)]
+    calls::entry();
     let mut stat = MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `path` is NUL-terminated and `stat` is writable for one
     // `struct stat`.
@@ -171,12 +219,23 @@ pub(crate) fn lstat(path: &CStr) -> io::Result<libc::stat> {
     Ok(unsafe { stat.assume_init() })
 }
 
-/// The names in the directory open on `dir`, without `.` and `..`, read
-/// with `readdir` through a duplicate of the descriptor, so the listing is
-/// of the directory the descriptor holds, not of whatever its path names
-/// by now. The listing starts from the beginning, wherever an earlier read
-/// of the descriptor left off.
+/// The names in the directory open on `dir`, without `.` and `..`; see
+/// [`each_name`].
 pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>> {
+    let mut names = Vec::new();
+    each_name(dir, &mut |name| names.push(name))?;
+    Ok(names)
+}
+
+/// Calls `each` with the name of every entry in the directory open on
+/// `dir`, without `.` and `..`, read with `readdir` through a duplicate of
+/// the descriptor, so the listing is of the directory the descriptor holds,
+/// not of whatever its path names by now. The listing starts from the
+/// beginning, wherever an earlier read of the descriptor left off.
+pub(crate) fn each_name(
+    dir: BorrowedFd<'_>,
+    each: &mut dyn FnMut(crate::NameRef),
+) -> io::Result<()> {
     // SAFETY: `dir` is open for the borrow; F_DUPFD_CLOEXEC returns a new
     // descriptor or -1. The duplicate waits for a free descriptor as an
     // open does.
@@ -194,7 +253,6 @@ pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>>
     // SAFETY: `stream` is live; the duplicate shares the descriptor's
     // offset, which a bulk read may have moved.
     unsafe { libc::rewinddir(stream) };
-    let mut names = Vec::new();
     let result = loop {
         set_errno(0);
         // SAFETY: `stream` is a live directory stream until closedir below.
@@ -211,12 +269,12 @@ pub(crate) fn list_names(dir: BorrowedFd<'_>) -> io::Result<Vec<crate::NameRef>>
         // NUL-terminated and lives until the next readdir call.
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if name != b"." && name != b".." {
-            names.push(crate::NameRef::new(name));
+            each(crate::NameRef::new(name));
         }
     };
     // SAFETY: `stream` came from fdopendir and is closed once.
     unsafe { libc::closedir(stream) };
-    result.map(|()| names)
+    result
 }
 
 /// Sets the calling thread's `errno`.
@@ -231,6 +289,43 @@ fn set_errno(value: libc::c_int) {
         {
             *libc::__error() = value;
         }
+    }
+}
+
+/// Per-thread counts of the system calls the providers make, for the tests
+/// that count them: bulk reads, reads of one entry, and every other call
+/// a walk makes per directory (opening it, duplicating its descriptor).
+#[cfg(test)]
+// Only the macOS tests count bulk reads.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod calls {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(crate) static BULK: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static ENTRY: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static OTHER: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn bulk() {
+        BULK.with(|n| n.set(n.get() + 1));
+    }
+
+    pub(crate) fn entry() {
+        ENTRY.with(|n| n.set(n.get() + 1));
+    }
+
+    pub(crate) fn other() {
+        OTHER.with(|n| n.set(n.get() + 1));
+    }
+
+    /// This thread's counts so far: (bulk, entry, other).
+    pub(crate) fn now() -> (usize, usize, usize) {
+        (
+            BULK.with(Cell::get),
+            ENTRY.with(Cell::get),
+            OTHER.with(Cell::get),
+        )
     }
 }
 

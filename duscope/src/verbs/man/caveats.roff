@@ -1,0 +1,44 @@
+.SH CAVEATS
+On macOS,
+.B \-x
+tells volumes apart by each volume's own device, not by the device number
+the volumes of a boot volume group share, so
+.I /System/Volumes/Data
+counts as a volume of its own:
+.B duscope \-x /System/Volumes
+leaves it out, where BSD
+.B du \-x
+enters it.
+The firmlinks of the system volume are entered, so
+.B duscope \-x /
+measures what
+.B du \-x /
+does.
+.PP
+.B \-\-exclude\-caches
+looks for a cache rule's marker files only beside the directory, in its
+parent:
+.I node_modules
+is left out next to a
+.IR package.json ,
+not when the
+.I package.json
+is further up the tree.
+The
+.B caches
+verb, which comes with saved scans, looks for markers in every ancestor,
+so it can report a cache the scan entered.
+.PP
+Patterns given to
+.B \-\-exclude
+and
+.BR \-\-exclude\-from ,
+and the list verbs'
+.B \-\-glob
+and
+.BR \-\-exclude ,
+match names case\-sensitively, also on a case\-insensitive volume (APFS
+and HFS+ by default):
+.B \-\-exclude \(aq*.MOV\(aq
+does not leave out
+.IR a.mov .

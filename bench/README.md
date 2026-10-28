@@ -3,14 +3,19 @@
 The harness times disk-usage tools with [hyperfine](https://github.com/sharkdp/hyperfine) on
 three seeded trees and writes one JSON result file per run. `just bench` runs it on developer
 machines; the nightly job (`nightly-bench.yml`, on the `bench-macos` and `bench-linux`
-self-hosted runners) runs the full matrix, and from phase 1 the `bench-regression` CI job runs it
-on T1. Until duscope can scan, the subject every competitor is measured against is `du`.
+self-hosted runners) runs the full matrix, and the `bench-regression` CI job runs it on T1. Both
+measure duscope, built from the checkout, as the subject every competitor is paired with; `du`
+is one of the competitors. Without `--subject`, the subject is `du`.
 
 ## Running it
 
 ```sh
 just bench                      # T1, du against diskus, warm caches, 10 runs each
-just bench --trees all --competitors all --mode both    # the nightly matrix
+cargo build --release -p duscope
+just bench --subject duscope --tool-path duscope=target/release/duscope   # duscope against diskus
+just bench --subject duscope --tool-path duscope=target/release/duscope --trees all --competitors all --mode both
+                                # the nightly matrix
+bench/run.sh sweep --duscope target/release/duscope    # the thread sweep
 bench/run.sh show bench/results/2026-10-23-macos.json   # a result file as a table
 ```
 
@@ -32,6 +37,7 @@ for release binaries, and rustup with the stable toolchain for the competitors b
 | `verify` | walk built trees and compare them with their stamps |
 | `tools` | list the pinned tools and how each installs on each platform |
 | `show FILE` | print a result file as a table |
+| `sweep` | measure duscope at each thread count and apply the defaults rule ([The thread sweep](#the-thread-sweep)) |
 
 Options of `run` (most also apply to `build`, `install` and `verify`):
 
@@ -107,6 +113,7 @@ than on macOS; deleting T2 and T3 there takes minutes too (`rm -rf bench/.trees/
 | Tool | Pinned | Command | Installed from |
 | --- | --- | --- | --- |
 | `du` | system | `du -sk {tree}` | `/usr/bin/du`: BSD du on macOS, GNU coreutils on Linux |
+| `duscope` | this checkout | `duscope scan --json --treemap never {tree}` | never installed: built from the checkout and passed with `--tool-path duscope=target/release/duscope` |
 | `diskus` | `0.9.0` | `diskus {tree}` | release binary, all four platforms |
 | `dua` | `2.46.0` | `dua {tree}` | release binary, all four platforms |
 | `pdu` | `0.24.0` | `pdu {tree}` | release binary on x86_64; crates.io build on arm64 |
@@ -253,6 +260,73 @@ Within a file, `subject_ratio_p50` is the fairer comparison than the ratio of tw
 each of its ratios comes from runs a moment apart. The phase gates are judged on the nightly
 runners' cold and warm p50s, never on shared CI runners.
 
+## Attribute costs on macOS
+
+`gab_bench.c` measures what each `getattrlistbulk` attribute set costs per entry, apart from
+the rest of a scan (P1-BENCH-02). It walks the trees it is given single-threaded, warm, once
+per mode, in a rotated order each round, and reports the median nanoseconds per entry:
+
+| Mode | Attributes |
+| --- | --- |
+| `lean` | name, type and allocated size |
+| `basic` | duscope's basic list (P1-WALK-03) |
+| `clones` | `basic` plus `ATTR_CMNEXT_CLONEID` and `ATTR_CMNEXT_EXT_FLAGS` |
+| `privatesize` | `clones` plus `ATTR_CMNEXT_PRIVATESIZE` |
+| `fstatat` | `readdir` and `fstatat`, the reference |
+
+```sh
+clang -O2 -Wall -Wextra -o gab_bench bench/gab_bench.c
+./gab_bench --reps 7 --json out.json bench/.trees/T1 /Applications
+./gab_bench --make /tmp/gab_tree 60000 10    # 60,000 cp -c clones of one 64 KiB file
+```
+
+The decision (D23) is taken on duscope's own warm T1 scan, timed in alternating pairs, because
+single-threaded medians on a busy machine swing by several percent between runs. The pairs come
+from `crates/duscope-walk/examples/clone_pairs.rs`, which prints the `walker.clones` object:
+
+```sh
+cargo run --release -p duscope-walk --example clone_pairs -- bench/.trees/T1 40
+```
+
+`results/clone-attributes-macos.json` holds both measurements, a re-run of the clone pairs with
+the committed driver (`walker_rerun`, +0.1%), and the decision:
+- **Clone attributes.** They add 0.7% to the warm T1 scan, so `--clones` stays on by default.
+- **`PRIVATESIZE`.** It adds 36%, so it is not read: it leaves `FullAttrs`.
+
+## The thread sweep
+
+`bench/run.sh sweep --duscope target/release/duscope` measures duscope alone at each thread count
+(1 to 8, then 10, 12, 16, 20, 24, 32, 48 and 64; `--threads` takes another list) on each tree,
+warm and cold by default, five runs each, and writes
+`bench/results/thread-sweep-<platform>-<arch>.json`: the usual header, one row per tree, mode and
+thread count (the result file's row fields plus `threads`), and `default`. On scaled trees
+(`--scale` below 1) it is a smoke run: the file is `thread-sweep-<platform>-<arch>-x<scale>.json`
+and `default` is null.
+
+The default is set by a fixed rule (P1-BENCH-01): among the warm T1 rows, the smallest thread
+count whose p50 is within 5% of the best p50, rounded to the nearest of 4, 8, 16 and 32, ties to
+the smaller. The bench runners run the sweep on a dispatch of `nightly-bench.yml` with `sweep`
+ticked, in place of the harness (so the day's nightly result stays as it was), which leaves each
+runner's file as a `thread-sweep-<platform>` artifact. A full dispatch (three trees, warm and
+cold, a cache drop before every cold run) may not fit the job's 300 minutes on bench-linux:
+dispatch one tree at a time with `trees`, T1 first, since the rule reads only its warm rows.
+Above 8 the sweep samples counts rather than taking every one; the rule rounds to 4, 8, 16 or 32,
+so the gaps would not change its answer. The author
+commits the files, each platform provider's `default_threads` takes the rule's count and cites
+the file, and `duscope/tests/thread_sweep.rs` fails when a committed file and the default
+disagree. `--threads` and `DUSCOPE_THREADS` still override.
+
+## The allocator
+
+P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
+alternating runs each, and kept mimalloc where it gains at least 2% (musl) or 10% (macOS);
+`results/allocator.json` holds the runs. On the musl build (aarch64, a Debian 12 container on
+an Apple M5 Pro) mimalloc took the p50 from 3.04 s to 0.41 s, 86.6% faster, so the Linux
+archives and `.deb`s allocate with it, built with arena eager commit and transparent huge pages
+off (`.cargo/config.toml`), which keeps a scan's peak with `--attrs full` at 120–135 bytes per
+entry on T1–T3, within the RSS budget, where mimalloc's defaults reached 168–244. On macOS
+(arm64, APFS) it gained 1.7% (4.16 s to 4.09 s), so macOS keeps the system allocator.
+
 ## Files
 
 | File | Purpose |
@@ -267,3 +341,7 @@ runners' cold and warm p50s, never on shared CI runners.
 | `compare.py` | the regression check: a result file against the results before it on the same machine kind and tree |
 | `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |
 | `testdata/` | a real hyperfine 2.0.0 export and the hyperfine stand-in the tests use |
+| `gab_bench.c` | the per-entry cost of `getattrlistbulk` attribute sets on macOS |
+| `sweep.py` | the thread sweep and the rule that sets a platform's default thread count |
+| `results/clone-attributes-macos.json` | P1-BENCH-02's measurement and the `--clones` and `PRIVATESIZE` decisions |
+| `results/allocator.json` | P1-BENCH-03's measurement: mimalloc on the musl builds, the system allocator on macOS |

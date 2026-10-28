@@ -1,0 +1,77 @@
+{
+  "package": "P1-BENCH-03",
+  "date": "2026-10-26",
+  "rule": "The musl builds ship mimalloc unless its gain on a warm T2 scan is under 2%; macOS keeps the system allocator unless the gain is at least 10%. Gain: (system p50 - mimalloc p50) / system p50, three runs each, alternating.",
+  "measurements": [
+    {
+      "platform": "macos",
+      "arch": "arm64",
+      "allocator_baseline": "system (libmalloc)",
+      "machine": "Apple M5 Pro, APFS, macOS 26",
+      "tree": "T2",
+      "mode": "warm",
+      "runs": 3,
+      "system_p50_s": 4.163,
+      "mimalloc_p50_s": 4.093,
+      "gain_pct": 1.7,
+      "decision": "system"
+    },
+    {
+      "platform": "linux",
+      "arch": "aarch64",
+      "allocator_baseline": "musl 1.2 (the Rust musl target's)",
+      "machine": "Debian 12 container, 12 CPUs, on the same Mac",
+      "tree": "T2",
+      "mode": "warm",
+      "runs": 3,
+      "system_p50_s": 3.042,
+      "mimalloc_p50_s": 0.407,
+      "gain_pct": 86.6,
+      "decision": "mimalloc"
+    }
+  ],
+  "musl_peak_rss_bytes_per_entry": {
+    "note": "duscope scan --attrs full at the default 24 threads, in a 12-CPU aarch64 container whose transparent_hugepage setting is 'always'; mimalloc 0.1.52 (v3). The 2026-10-26 rows are the first measurement, on that day's scanner; the 2026-10-27 rows are medians of five runs on the current one. .cargo/config.toml builds the last row's settings",
+    "rows": [
+      {
+        "date": "2026-10-26",
+        "settings": "mimalloc defaults",
+        "T1": 227.9,
+        "T2": 167.8,
+        "T3": 244.0
+      },
+      {
+        "date": "2026-10-26",
+        "settings": "arena eager commit off",
+        "T1": 140.0,
+        "T2": 127.4,
+        "T3": 172.1
+      },
+      {
+        "date": "2026-10-27",
+        "settings": "arena eager commit off",
+        "T1": 125.0,
+        "T2": 121.7,
+        "T3": 170.5
+      },
+      {
+        "date": "2026-10-27",
+        "settings": "arena eager commit and transparent huge pages off",
+        "T1": 123.5,
+        "T2": 119.5,
+        "T3": 134.5
+      }
+    ],
+    "warm_scan_p50_s": {
+      "note": "a basic scan, seven alternating runs each, 2026-10-27: transparent huge pages cost nothing measurable to turn off",
+      "T2": {
+        "huge_pages_allowed": 0.421,
+        "huge_pages_off": 0.425
+      },
+      "T3": {
+        "huge_pages_allowed": 0.488,
+        "huge_pages_off": 0.49
+      }
+    }
+  }
+}

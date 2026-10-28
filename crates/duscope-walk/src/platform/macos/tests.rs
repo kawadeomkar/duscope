@@ -15,7 +15,7 @@ use duscope_testkit::TestEnv;
 use super::bulk::{self, Decoded, Outcome, Probe, Request};
 use super::{MacProvider, ffi, stat};
 use crate::platform::posix;
-use crate::{Boundary, DirHandle, DirId, Entry, Flags, Kind, ScanEvent, WalkOptions, walk_with};
+use crate::{Boundary, DirHandle, Entry, Flags, Kind, ScanEvent, Share, WalkOptions, walk_with};
 
 /// A clock on which every bulk refill waits on I/O: each reading moves the
 /// wall clock 10 ms and the CPU clock 1 µs.
@@ -84,7 +84,7 @@ fn p1_walk_03_every_entry_matches_lstat() {
     );
     for (path, entry) in &entries {
         let st = lstat(path);
-        let kind = super::stat::from_stat(entry.name.clone(), &st).kind;
+        let kind = super::stat::from_stat(entry.name.clone(), &st, crate::Attrs::Basic).kind;
         assert_eq!(entry.kind, kind, "{path:?}");
         let allocated = match kind {
             Kind::Socket | Kind::Fifo | Kind::Char | Kind::Block => 0,
@@ -108,7 +108,10 @@ fn p1_walk_03_every_entry_matches_lstat() {
             "ctime {path:?}"
         );
         assert_eq!(entry.dev, bulk::dev(st.st_dev), "dev {path:?}");
-        assert_eq!(entry.mnt_id, entry.dev, "mnt_id {path:?}");
+        assert_eq!(
+            entry.mnt_id, entry.dev,
+            "a volume is named by its device: {path:?}"
+        );
         assert_eq!(entry.ino, st.st_ino, "ino {path:?}");
         if kind != Kind::Dir {
             assert_eq!(entry.nlink, u32::from(st.st_nlink), "nlink {path:?}");
@@ -145,15 +148,29 @@ fn same_as_bulk_reads(queued: &MacProvider) {
     // Directory ids follow the order the workers found directories in. The
     // fallback provider reports a directory's st_nlink, which counts its
     // subdirectories; ATTR_DIR_LINKCOUNT does not.
-    let unnumbered = |entry: &Entry| Entry {
-        parent: crate::DirId::ROOT,
-        dir: entry.dir.map(|_| crate::DirId::ROOT),
-        nlink: if queued.pretend == Some(Outcome::Unsupported) && entry.kind == Kind::Dir {
-            0
-        } else {
-            entry.nlink
-        },
-        ..entry.clone()
+    let unnumbered = |entry: &Entry| {
+        let mut entry = Entry {
+            parent: crate::DirId::ROOT,
+            dir: entry.dir.map(|_| crate::DirId::ROOT),
+            ..entry.clone()
+        };
+        if queued.pretend == Some(Outcome::Unsupported) {
+            if entry.kind == Kind::Dir {
+                entry.nlink = 0;
+            }
+            // The fallback reads no clone ids or extended flags.
+            entry
+                .flags
+                .remove(Flags::SPARSE | Flags::PURGEABLE | Flags::MAY_SHARE | Flags::SHARES_ALL);
+            if matches!(entry.share, Share::Clone(_) | Share::MayShare) {
+                entry.share = if entry.nlink > 1 {
+                    Share::Hardlink
+                } else {
+                    Share::None
+                };
+            }
+        }
+        entry
     };
     for (path, entry) in &bulk {
         assert_eq!(
@@ -206,11 +223,7 @@ fn p1_walk_03_a_record_without_a_name_is_an_error() {
     let env = TestEnv::new();
     let root = env.fixtures().root();
     let fd = posix::open_dir(&root).unwrap();
-    let dir = DirHandle {
-        id: DirId::ROOT,
-        path: root.clone(),
-        depth: 0,
-    };
+    let dir = DirHandle::detached(&root, 0);
     let (mut out, mut errs) = (Vec::new(), Vec::new());
     let mut single = ffi::AttrBuf::new(stat::BUFFER_BYTES);
     super::take(
@@ -567,6 +580,563 @@ fn p1_walk_03_an_unsearchable_directory_lists_its_children_as_errors() {
     assert_eq!(closed_with, [libc::EACCES]);
 }
 
+/// Counts the calls the wrapped provider makes on the walk's threads:
+/// (bulk reads, reads of one entry, other calls).
+struct Counting<'a> {
+    inner: &'a MacProvider,
+    calls: std::sync::Mutex<(usize, usize, usize)>,
+}
+
+impl Counting<'_> {
+    fn count<T>(&self, call: impl FnOnce() -> T) -> T {
+        let before = posix::calls::now();
+        let result = call();
+        let after = posix::calls::now();
+        let mut calls = self.calls.lock().unwrap();
+        calls.0 += after.0 - before.0;
+        calls.1 += after.1 - before.1;
+        calls.2 += after.2 - before.2;
+        result
+    }
+}
+
+impl crate::Provider for Counting<'_> {
+    fn read_dir(
+        &self,
+        dir: &crate::DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<crate::ScanError>,
+    ) -> std::io::Result<()> {
+        self.count(|| self.inner.read_dir(dir, opts, out, errs))
+    }
+
+    fn read_dir_split(
+        &self,
+        dir: &crate::DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<crate::ScanError>,
+        later: &mut Vec<crate::NameRef>,
+    ) -> std::io::Result<()> {
+        self.count(|| self.inner.read_dir_split(dir, opts, out, errs, later))
+    }
+
+    fn stat_names(
+        &self,
+        dir: &crate::DirHandle,
+        names: &[crate::NameRef],
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<crate::ScanError>,
+    ) -> std::io::Result<()> {
+        self.count(|| self.inner.stat_names(dir, names, opts, out, errs))
+    }
+
+    fn volume(&self, path: &Path) -> std::io::Result<crate::VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> std::io::Result<Entry> {
+        self.count(|| self.inner.root(path, opts))
+    }
+}
+
+#[test]
+fn p1_walk_05_full_attrs_match_lstat() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    let (entries, _) = walk_paths(&MacProvider::new(), &root, &opts);
+    let ns = |s: i64, n: i64| s * 1_000_000_000 + n;
+    for (path, entry) in &entries {
+        let st = lstat(path);
+        let full = entry
+            .full
+            .unwrap_or_else(|| panic!("no full attributes: {path:?}"));
+        assert_eq!(full.mode, u32::from(st.st_mode), "mode {path:?}");
+        assert_eq!(
+            (full.uid, full.gid),
+            (st.st_uid, st.st_gid),
+            "owner {path:?}"
+        );
+        assert_eq!(
+            full.atime_ns,
+            ns(st.st_atime, st.st_atime_nsec),
+            "atime {path:?}"
+        );
+        assert_eq!(
+            full.btime_ns,
+            Some(ns(st.st_birthtime, st.st_birthtime_nsec)),
+            "btime {path:?}"
+        );
+    }
+    let (basic, _) = walk_paths(&MacProvider::new(), &root, &WalkOptions::default());
+    assert!(basic.values().all(|entry| entry.full.is_none()));
+}
+
+#[test]
+fn p1_walk_05_full_attrs_add_no_calls_per_entry() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let count = |attrs| {
+        let provider = Counting {
+            inner: &MacProvider::new(),
+            calls: std::sync::Mutex::new((0, 0, 0)),
+        };
+        // One worker: the probe, which can send a directory to the stat
+        // queue depending on how busy the machine is, runs only with more.
+        let opts = WalkOptions {
+            attrs,
+            threads: 1,
+            ..WalkOptions::default()
+        };
+        walk_with(&provider, &root, &opts, |_| {}).unwrap();
+        provider.calls.into_inner().unwrap()
+    };
+    let (basic_bulk, basic_entry, basic_other) = count(crate::Attrs::Basic);
+    let (full_bulk, full_entry, full_other) = count(crate::Attrs::Full);
+    // The same reads of single entries (the root, mount points, records
+    // that lack an attribute) and the same opens. Records grow by 44 bytes
+    // under --attrs full, so a big directory takes a few more refills of
+    // the same 64 KiB buffer: 0.4% more on the fixture tree, bounded here
+    // at 5%, which no call per entry could stay under.
+    assert_eq!(full_entry, basic_entry);
+    assert_eq!(full_other, basic_other);
+    assert!(
+        basic_bulk <= full_bulk && full_bulk * 100 <= basic_bulk * 105,
+        "bulk reads: {basic_bulk} basic, {full_bulk} full"
+    );
+}
+
+#[test]
+fn p1_walk_07_clones_carry_equal_clone_ids() {
+    let env = TestEnv::new();
+    if !env.fixtures().built("clones") {
+        return;
+    }
+    let root = env.fixtures().case_root("clones");
+    let (entries, _) = walk_paths(&MacProvider::new(), &root, &WalkOptions::default());
+    let share = |rel: &str| entries[&root.join(rel)].share;
+    let Share::Clone(id) = share("original.img") else {
+        panic!("not a clone: {:?}", share("original.img"));
+    };
+    assert_eq!(share("clone-1.img"), Share::Clone(id));
+    assert_eq!(share("nested/clone-2.img"), Share::Clone(id));
+    for rel in ["original.img", "clone-1.img", "nested/clone-2.img"] {
+        assert!(
+            entries[&root.join(rel)].flags.contains(Flags::MAY_SHARE),
+            "{rel}"
+        );
+    }
+
+    // Without --clones the attributes are not asked for.
+    let opts = WalkOptions {
+        clones: false,
+        ..WalkOptions::default()
+    };
+    let (plain, _) = walk_paths(&MacProvider::new(), &root, &opts);
+    let original = &plain[&root.join("original.img")];
+    assert_eq!(original.share, Share::None);
+    assert!(!original.flags.contains(Flags::MAY_SHARE));
+}
+
+#[test]
+fn p1_walk_07_storage_flags_follow_the_filesystem() {
+    let env = TestEnv::new();
+    let fixtures = env.fixtures();
+    let (entries, _) = walk_paths(
+        &MacProvider::new(),
+        &fixtures.root(),
+        &WalkOptions::default(),
+    );
+    if fixtures.built("compressed") {
+        let file = &entries[&fixtures.case_root("compressed").join("text-1m.txt")];
+        assert!(file.flags.contains(Flags::COMPRESSED), "{:?}", file.flags);
+    }
+    if fixtures.built("sparse") {
+        let file = &entries[&fixtures.case_root("sparse").join("hole-only.bin")];
+        assert!(file.flags.contains(Flags::SPARSE), "{:?}", file.flags);
+    }
+    // Each flag agrees with st_flags, where stat reports it.
+    for (path, entry) in &entries {
+        let st = lstat(path);
+        assert_eq!(
+            entry.flags.contains(Flags::COMPRESSED),
+            st.st_flags & libc::UF_COMPRESSED != 0,
+            "{path:?}"
+        );
+    }
+}
+
+#[test]
+fn p1_walk_07_apfs_has_clone_ids() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let summary = walk_with(&MacProvider::new(), &root, &WalkOptions::default(), |_| {}).unwrap();
+    let apfs = volume_of(&root).fs_type == "apfs";
+    assert_eq!(summary.clones_unavailable, !apfs);
+    let opts = WalkOptions {
+        clones: false,
+        ..WalkOptions::default()
+    };
+    let summary = walk_with(&MacProvider::new(), &root, &opts, |_| {}).unwrap();
+    assert!(!summary.clones_unavailable, "only asked of --clones");
+}
+
+fn volume_of(path: &Path) -> crate::VolumeInfo {
+    crate::Provider::volume(&MacProvider::new(), path).unwrap()
+}
+
+/// The entries of one directory, read by the provider.
+fn read_one(path: &str, depth: u32) -> Vec<Entry> {
+    let dir = crate::DirHandle::detached(path, depth);
+    let (mut out, mut errs) = (Vec::new(), Vec::new());
+    crate::Provider::read_dir(
+        &MacProvider::new(),
+        &dir,
+        &WalkOptions::default(),
+        &mut out,
+        &mut errs,
+    )
+    .unwrap();
+    out
+}
+
+#[test]
+fn p1_walk_07_firmlinks_carry_the_firmlink_boundary() {
+    let firmlinks = super::firmlinks();
+    if firmlinks.is_empty() {
+        return;
+    }
+    let slash = read_one("/", 0);
+    let users = slash
+        .iter()
+        .find(|e| e.name.as_bytes() == b"Users")
+        .unwrap();
+    assert_eq!(users.boundary, Boundary::Firmlink);
+    assert_eq!(users.kind, Kind::Dir);
+    // Read by name, the firmlink is the directory it shows: on the Data
+    // volume, not the System volume holding /.
+    assert_eq!(users.dev, bulk::dev(lstat(Path::new("/Users")).st_dev));
+    assert_eq!(Some(users.dev), super::data_volume());
+    let system = slash
+        .iter()
+        .find(|e| e.name.as_bytes() == b"System")
+        .unwrap();
+    assert_eq!(system.boundary, Boundary::None);
+}
+
+#[test]
+fn p1_walk_07_a_scan_of_slash_skips_the_data_volume_mount() {
+    if super::data_volume().is_none() || !Path::new("/System/Volumes/Data").exists() {
+        return;
+    }
+    let provider = MacProvider::new();
+    let opts = WalkOptions::default();
+    let skip_in = |path: &str, root_depth: u32| {
+        // /System/Volumes, read as `path` in a scan rooted `root_depth`
+        // levels up.
+        let dir = crate::DirHandle::detached(path, root_depth);
+        let data = read_one("/System/Volumes", root_depth)
+            .into_iter()
+            .find(|e| e.name.as_bytes() == b"Data")
+            .unwrap();
+        assert_eq!(data.boundary, Boundary::Mount);
+        crate::Provider::skip(&provider, &dir, &data, &opts)
+    };
+    let skip = |root_depth| skip_in("/System/Volumes", root_depth);
+    // Rooted at /: every firmlink lies under the root.
+    assert_eq!(skip(2), Some(crate::Skip::Firmlinked));
+    // Rooted at /System/Volumes or /System: the volume is the only way in.
+    assert_eq!(skip(0), None);
+    assert_eq!(skip(1), None);
+    // A root spelled /System/.. is /: the decision is made on its real path.
+    assert_eq!(
+        skip_in("/System/../System/Volumes", 2),
+        Some(crate::Skip::Firmlinked)
+    );
+}
+
+#[test]
+fn p1_walk_07_a_scan_of_system_skips_the_firmlinks_below_it() {
+    // A scan rooted at /System enters the Data volume through its mount
+    // point, so the firmlinks under /System/Library, which lead into the
+    // same volume, are listed but not entered; a scan of / keeps them.
+    let Some(caches) = read_one("/System/Library", 1)
+        .into_iter()
+        .find(|e| e.name.as_bytes() == b"Caches" && e.boundary == Boundary::Firmlink)
+    else {
+        return; // no /System/Library/Caches firmlink on this system
+    };
+    let provider = MacProvider::new();
+    let skip = |root_depth| {
+        let dir = crate::DirHandle::detached("/System/Library", root_depth);
+        crate::Provider::skip(&provider, &dir, &caches, &WalkOptions::default())
+    };
+    assert_eq!(skip(1), Some(crate::Skip::Firmlinked), "rooted at /System");
+    assert_eq!(skip(2), None, "rooted at /");
+    assert_eq!(
+        skip(0),
+        None,
+        "rooted at /System/Library: no mount point below"
+    );
+    // Under -x the mount point is another volume and stays out, so the
+    // firmlinks are the way in.
+    let dir = crate::DirHandle::detached("/System/Library", 1);
+    let opts = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    assert_eq!(crate::Provider::skip(&provider, &dir, &caches, &opts), None);
+}
+
+/// A scan of `/` on the machine running the test: `/Users` is counted once,
+/// through its firmlink, and `/System/Volumes/Data` is listed but not
+/// entered. It reads the whole disk, so it runs only with
+/// `DUSCOPE_TEST_PLATFORM=1` (`just check-full`).
+#[test]
+#[ignore = "reads the whole disk; DUSCOPE_TEST_PLATFORM=1"]
+fn p1_walk_07_a_scan_of_slash_counts_users_once() {
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none() {
+        return;
+    }
+    let env = TestEnv::new();
+    let mut dirs: BTreeMap<crate::DirId, PathBuf> = BTreeMap::new();
+    let (mut users, mut under_data, mut skipped) = (0u64, 0u64, Vec::new());
+    let mut seen = std::collections::HashSet::new();
+    walk_with(
+        &MacProvider::new(),
+        Path::new("/"),
+        // -x, as `du -skx` reads /Users below: no other volume mounted
+        // under it is counted on either side.
+        &WalkOptions {
+            one_file_system: true,
+            ..WalkOptions::default()
+        },
+        |event| match event {
+            ScanEvent::Entry(entry) => {
+                let path = if entry.dir == Some(crate::DirId::ROOT) {
+                    PathBuf::from("/")
+                } else {
+                    dirs[&entry.parent].join(entry.name.as_os_str())
+                };
+                if let Some(id) = entry.dir {
+                    dirs.insert(id, path.clone());
+                }
+                let first = entry.kind == Kind::Dir
+                    || entry.nlink < 2
+                    || seen.insert((entry.dev, entry.ino));
+                if path.starts_with("/Users") && first {
+                    users += entry.allocated;
+                }
+                // Path::starts_with compares components: count what lies
+                // below the mount point, not the mount point itself.
+                if path.starts_with("/System/Volumes/Data")
+                    && path != Path::new("/System/Volumes/Data")
+                {
+                    under_data += 1;
+                }
+            }
+            ScanEvent::Skipped { dir, reason } => skipped.push((dirs[&dir].clone(), reason)),
+            _ => {}
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        under_data, 0,
+        "nothing under the Data volume's mount point is read"
+    );
+    // Listed, not entered: under -x as another volume.
+    assert!(
+        skipped
+            .iter()
+            .any(|(path, _)| path == Path::new("/System/Volumes/Data"))
+    );
+    let out = env.command("du").args(["-skx", "/Users"]).output().unwrap();
+    let du: u64 = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let ours = users.div_ceil(1024);
+    // /Users changes while it is read; the two agree to within 2%.
+    assert!(
+        ours.abs_diff(du) * 50 <= du,
+        "/Users: {ours} KiB read, du -skx says {du} KiB"
+    );
+}
+
+#[test]
+fn p1_walk_06_mount_classes() {
+    use super::volume::class;
+    use crate::VolumeClass;
+    assert_eq!(class("apfs"), VolumeClass::Local);
+    assert_eq!(class("devfs"), VolumeClass::Kernel);
+    assert_eq!(class("smbfs"), VolumeClass::Network);
+    assert_eq!(class("autofs"), VolumeClass::Network);
+    assert_eq!(class("macfuse"), VolumeClass::Network);
+    assert_eq!(class("exfat"), VolumeClass::Foreign);
+    assert_eq!(class("cd9660"), VolumeClass::ReadOnlyImage);
+}
+
+#[test]
+fn p1_walk_06_mount_info_reads_the_mount_table() {
+    // The boot volume is mounted at /; its record comes from getfsstat.
+    let dev = |path: &str| {
+        crate::Provider::root(
+            &MacProvider::new(),
+            Path::new(path),
+            &WalkOptions::default(),
+        )
+        .unwrap()
+        .dev
+    };
+    let info = super::volume::mount_info(Path::new("/"), dev("/")).unwrap();
+    assert_eq!(info.mount_point, Path::new("/"));
+    assert_eq!(info.class, crate::VolumeClass::Local);
+    assert!(
+        info.total_bytes > 0,
+        "MNT_NOWAIT still gives the cached sizes"
+    );
+}
+
+#[test]
+fn p1_walk_06_a_mount_reached_by_another_path_is_found_by_its_device() {
+    // The Data volume's mount point spelled through `..`: no getfsstat row
+    // has that path, so the row is found by the device the entry reports,
+    // with its cached sizes, and nothing is asked of the mount itself.
+    let data = Path::new("/System/Volumes/Data");
+    if !data.exists() {
+        return;
+    }
+    let dev = crate::Provider::root(&MacProvider::new(), data, &WalkOptions::default())
+        .unwrap()
+        .dev;
+    let spelled = Path::new("/System/../System/Volumes/Data");
+    let info = super::volume::mount_info(spelled, dev).unwrap();
+    assert_eq!(info.mount_point, data);
+    assert!(info.total_bytes > 0, "the getfsstat row's cached sizes");
+}
+
+#[test]
+fn p1_walk_05_no_creation_time_is_none_through_lstat_too() {
+    // devfs keeps no creation time: the bulk read leaves ATTR_CMN_CRTIME
+    // out, and lstat reports 0.
+    let opts = WalkOptions {
+        attrs: crate::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    let null = Path::new("/dev/null");
+    let st = lstat(null);
+    if st.st_birthtime != 0 {
+        return;
+    }
+    let entry = super::stat::from_stat(crate::NameRef::from("null"), &st, opts.attrs);
+    assert_eq!(entry.full.unwrap().btime_ns, None);
+    let root = crate::Provider::root(&MacProvider::new(), null, &opts).unwrap();
+    assert_eq!(root.full.unwrap().btime_ns, None, "the native read agrees");
+}
+
+#[test]
+fn p1_walk_07_a_modified_clone_may_share_but_names_no_group() {
+    // Built in a private directory, not the shared fixture tree: the case
+    // needs a clone written to in place, and a case added to the fixture
+    // manifest would change the totals of every golden file.
+    let env = TestEnv::new();
+    let dir = env.tmp_dir().join("clones");
+    std::fs::create_dir_all(&dir).unwrap();
+    let original = dir.join("original.bin");
+    std::fs::write(&original, vec![7u8; 1 << 20]).unwrap();
+    let cp = |name: &str| {
+        let out = env
+            .command("cp")
+            .arg("-c")
+            .arg(&original)
+            .arg(dir.join(name))
+            .output()
+            .unwrap();
+        out.status.success()
+    };
+    if !cp("pure.bin") || !cp("partial.bin") {
+        return; // not APFS
+    }
+    // Overwrite the first 64 KiB of one clone in place.
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("partial.bin"))
+            .unwrap();
+        file.write_all(&vec![9u8; 64 * 1024]).unwrap();
+        file.sync_all().unwrap();
+    }
+    let (entries, _) = walk_paths(&MacProvider::new(), &dir, &WalkOptions::default());
+    let share = |name: &str| entries[&dir.join(name)].share;
+    let Share::Clone(id) = share("original.bin") else {
+        panic!("{:?}", share("original.bin"));
+    };
+    assert_eq!(share("pure.bin"), Share::Clone(id));
+    assert_eq!(share("partial.bin"), Share::MayShare);
+    assert!(
+        entries[&dir.join("partial.bin")]
+            .flags
+            .contains(Flags::MAY_SHARE)
+    );
+}
+
+#[test]
+fn p1_walk_06_the_system_and_data_volumes_have_their_own_mount_ids() {
+    // macOS 26 gives the two volumes of the boot volume group one st_dev;
+    // their real devices differ.
+    let slash = read_one("/", 0);
+    let (Some(users), Some(system)) = (
+        slash.iter().find(|e| e.name.as_bytes() == b"Users"),
+        slash.iter().find(|e| e.name.as_bytes() == b"System"),
+    ) else {
+        return;
+    };
+    if users.boundary != Boundary::Firmlink {
+        return;
+    }
+    assert_ne!(
+        users.mnt_id, system.mnt_id,
+        "the Data volume is another mount"
+    );
+    let root = crate::Provider::root(&MacProvider::new(), Path::new("/"), &WalkOptions::default())
+        .unwrap();
+    assert_eq!(root.mnt_id, system.mnt_id);
+    // The root's volume row carries the root entry's own device, as every
+    // other row carries its entry's, so no two rows share a device: a
+    // System-volume root is not reported with the Data volume's.
+    let opts = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    let (mut root_dev, mut volumes) = (None, Vec::new());
+    walk_with(
+        &MacProvider::new(),
+        Path::new("/System/Volumes"),
+        &opts,
+        |event| match event {
+            ScanEvent::Entry(entry) if entry.dir == Some(crate::DirId::ROOT) => {
+                root_dev = Some(entry.dev);
+            }
+            ScanEvent::Volume(volume) => volumes.push(volume),
+            _ => {}
+        },
+    )
+    .unwrap();
+    assert_eq!(Some(volumes[0].dev), root_dev, "the root's volume row");
+    let devs: std::collections::HashSet<u64> = volumes.iter().map(|v| v.dev).collect();
+    assert_eq!(devs.len(), volumes.len(), "{volumes:?}");
+}
+
 #[test]
 fn p1_walk_04_the_fallback_provider_turns_dataless_downloads_off() {
     assert!(crate::platform::fallback().is_some());
@@ -574,4 +1144,30 @@ fn p1_walk_04_the_fallback_provider_turns_dataless_downloads_off() {
         ffi::dataless_policy().unwrap(),
         ffi::IOPOL_MATERIALIZE_DATALESS_FILES_OFF
     );
+}
+
+#[test]
+fn p1_bench_02_the_default_follows_the_result_file() {
+    // bench/results/clone-attributes-macos.json decides the --clones
+    // default and drops PRIVATESIZE; the scanner must agree with it.
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bench/results/clone-attributes-macos.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let decided_on = text.contains("\"clones_default\": \"on\"");
+    assert!(decided_on || text.contains("\"clones_default\": \"off\""));
+    assert_eq!(WalkOptions::default().clones, decided_on);
+    for attrs in [crate::Attrs::Basic, crate::Attrs::Full] {
+        let opts = WalkOptions {
+            attrs,
+            clones: true,
+            ..WalkOptions::default()
+        };
+        let request = Request::bulk(&opts);
+        assert_eq!(
+            request.attrs.forkattr & libc::ATTR_CMNEXT_PRIVATESIZE,
+            0,
+            "PRIVATESIZE is not asked for"
+        );
+        assert_ne!(request.attrs.forkattr & libc::ATTR_CMNEXT_CLONEID, 0);
+    }
 }
