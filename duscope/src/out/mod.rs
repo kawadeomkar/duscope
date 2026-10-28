@@ -14,7 +14,9 @@ mod units;
 use std::borrow::Cow;
 use std::io::{IsTerminal, Write as _};
 
-use duscope_core::envelope::{Envelope, ErrorEnvelope, TopEntry, Warning};
+use duscope_core::envelope::{
+    ByTypeEntry, Envelope, ErrorEnvelope, StaleEntry, TopEntry, TreeEntry, Warning,
+};
 use serde::Serialize;
 
 pub use args::{ColorWhen, FormatArg, OutputArgs};
@@ -233,6 +235,125 @@ impl Row for TopEntry {
             units.size(size),
             format!("{:.1}%", self.pct_of_root),
             thousands(self.file_count),
+            printable(&self.path).into_owned(),
+        ]
+    }
+}
+
+impl Row for TreeEntry {
+    const FIELDS: &'static [&'static str] = &[
+        "allocated_bytes",
+        "apparent_bytes",
+        "pct_of_parent",
+        "depth",
+        "kind",
+        "path",
+    ];
+    const COLUMNS: &'static [&'static str] = &["Size", "%", "Path"];
+
+    fn plain(&self) -> Vec<Cow<'_, [u8]>> {
+        let text = |s: String| Cow::Owned(s.into_bytes());
+        vec![
+            text(self.allocated_bytes.to_string()),
+            text(self.apparent_bytes.to_string()),
+            text(format!("{:.1}", self.pct_of_parent)),
+            text(self.depth.to_string()),
+            Cow::Borrowed(self.kind.as_bytes()),
+            Cow::Borrowed(&self.path_bytes),
+        ]
+    }
+
+    fn cells(&self, units: Units, size_kind: &str) -> Vec<String> {
+        let size = if size_kind == "apparent" {
+            self.apparent_bytes
+        } else {
+            self.allocated_bytes
+        };
+        // The root by its path, everything under it by name, indented.
+        let label = if self.depth == 0 {
+            self.path.clone()
+        } else {
+            let slash = if self.kind == "dir" { "/" } else { "" };
+            format!("{}{}{slash}", "  ".repeat(self.depth as usize), self.name)
+        };
+        vec![
+            units.size(size),
+            format!("{:.1}%", self.pct_of_parent),
+            printable(&label).into_owned(),
+        ]
+    }
+}
+
+impl Row for ByTypeEntry {
+    const FIELDS: &'static [&'static str] = &[
+        "allocated_bytes",
+        "apparent_bytes",
+        "pct_of_root",
+        "file_count",
+        "class",
+    ];
+    const COLUMNS: &'static [&'static str] = &["Size", "%", "Files", "Class"];
+
+    fn plain(&self) -> Vec<Cow<'_, [u8]>> {
+        let number = |n: u64| Cow::Owned(n.to_string().into_bytes());
+        vec![
+            number(self.allocated_bytes),
+            number(self.apparent_bytes),
+            Cow::Owned(format!("{:.1}", self.pct_of_root).into_bytes()),
+            number(self.file_count),
+            Cow::Borrowed(self.class.as_bytes()),
+        ]
+    }
+
+    fn cells(&self, units: Units, size_kind: &str) -> Vec<String> {
+        let size = if size_kind == "apparent" {
+            self.apparent_bytes
+        } else {
+            self.allocated_bytes
+        };
+        vec![
+            units.size(size),
+            format!("{:.1}%", self.pct_of_root),
+            thousands(self.file_count),
+            self.class.to_owned(),
+        ]
+    }
+}
+
+impl Row for StaleEntry {
+    const FIELDS: &'static [&'static str] = &[
+        "allocated_bytes",
+        "apparent_bytes",
+        "mtime",
+        "ctime",
+        "atime",
+        "kind",
+        "path",
+    ];
+    const COLUMNS: &'static [&'static str] = &["Size", "Modified", "Path"];
+
+    fn plain(&self) -> Vec<Cow<'_, [u8]>> {
+        let number = |n: u64| Cow::Owned(n.to_string().into_bytes());
+        vec![
+            number(self.allocated_bytes),
+            number(self.apparent_bytes),
+            Cow::Borrowed(self.mtime.as_bytes()),
+            Cow::Borrowed(self.ctime.as_bytes()),
+            Cow::Borrowed(self.atime.as_deref().unwrap_or("").as_bytes()),
+            Cow::Borrowed(self.kind.as_bytes()),
+            Cow::Borrowed(&self.path_bytes),
+        ]
+    }
+
+    fn cells(&self, units: Units, size_kind: &str) -> Vec<String> {
+        let size = if size_kind == "apparent" {
+            self.apparent_bytes
+        } else {
+            self.allocated_bytes
+        };
+        vec![
+            units.size(size),
+            self.mtime.get(..10).unwrap_or(&self.mtime).to_owned(),
             printable(&self.path).into_owned(),
         ]
     }

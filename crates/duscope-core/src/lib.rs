@@ -11,6 +11,7 @@ pub mod accounting;
 pub mod arena;
 pub mod envelope;
 mod errors;
+pub mod query;
 pub mod resolve;
 pub mod rollup;
 pub mod rules;
