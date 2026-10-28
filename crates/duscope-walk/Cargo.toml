@@ -15,9 +15,12 @@ bitflags.workspace = true
 crossbeam-deque.workspace = true
 crossbeam-utils.workspace = true
 globset.workspace = true
+libc.workspace = true
+log.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+duscope-testkit.workspace = true
 proptest.workspace = true
 
 [lints]

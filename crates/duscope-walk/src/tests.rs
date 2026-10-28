@@ -1,10 +1,13 @@
-//! P1-WALK-01: the walk over in-memory trees.
+//! P1-WALK-01: the walk over in-memory trees; P1-WALK-03: directories split
+//! into stat batches.
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, ThreadId};
+use std::time::Duration;
 
 use proptest::prelude::*;
 
@@ -84,6 +87,110 @@ impl Provider for CancelAfter<'_> {
             self.cancel.store(true, Ordering::Relaxed);
         }
         self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+}
+
+/// Holds each thread's first pass until `threads` threads have passed, or
+/// ten seconds have gone by. A test proves that work reached that many
+/// workers without relying on timing, and a worker that never comes fails
+/// the test's assertion instead of hanging it.
+pub(crate) struct Gate {
+    threads: usize,
+    seen: Mutex<HashSet<ThreadId>>,
+    all: Condvar,
+}
+
+impl Gate {
+    pub(crate) fn new(threads: usize) -> Gate {
+        Gate {
+            threads,
+            seen: Mutex::new(HashSet::new()),
+            all: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn pass(&self) {
+        let mut seen = self.seen.lock().unwrap();
+        if seen.insert(thread::current().id()) {
+            self.all.notify_all();
+            let wait = self
+                .all
+                .wait_timeout_while(seen, Duration::from_secs(10), |seen| {
+                    seen.len() < self.threads
+                });
+            drop(wait.unwrap());
+        }
+    }
+}
+
+/// Lists the first `keep` children of every directory and leaves the rest
+/// for stat batches, recording which threads read the batches. Each
+/// worker's first batch waits at `gate`. With `fail_stats`, every batch
+/// fails as if its directory had vanished.
+struct Splitting<'a> {
+    inner: &'a MemProvider,
+    keep: usize,
+    fail_stats: bool,
+    batches: Mutex<Vec<(usize, ThreadId)>>,
+    gate: Gate,
+}
+
+impl Provider for Splitting<'_> {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn read_dir_split(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+        later: &mut Vec<NameRef>,
+    ) -> io::Result<()> {
+        let mut all = Vec::new();
+        self.inner.read_dir(dir, opts, &mut all, errs)?;
+        let rest = all.split_off(all.len().min(self.keep));
+        out.extend(all);
+        later.extend(rest.into_iter().map(|entry| entry.name));
+        Ok(())
+    }
+
+    fn stat_names(
+        &self,
+        dir: &DirHandle,
+        names: &[NameRef],
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        self.batches
+            .lock()
+            .unwrap()
+            .push((names.len(), thread::current().id()));
+        self.gate.pass();
+        if self.fail_stats {
+            return Err(io::Error::from_raw_os_error(2));
+        }
+        let wanted: HashSet<&NameRef> = names.iter().collect();
+        let mut all = Vec::new();
+        self.inner.read_dir(dir, opts, &mut all, errs)?;
+        out.extend(all.into_iter().filter(|entry| wanted.contains(&entry.name)));
+        Ok(())
     }
 
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
@@ -389,4 +496,106 @@ fn p1_walk_01_flags_keep_their_bit_values() {
         assert_eq!(flag.bits(), bit, "{flag:?}");
     }
     assert_eq!(Flags::all().bits(), 0xff);
+}
+
+#[test]
+fn p1_walk_03_a_wide_directory_is_read_in_batches_by_several_workers() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..20_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    // Subdirectories that only the stat batches find are still entered.
+    for i in 0..3 {
+        tree.file(format!("wide/sub{i}/inside"), 1);
+    }
+    let provider = Splitting {
+        inner: &tree,
+        keep: 100,
+        fail_stats: false,
+        batches: Mutex::new(Vec::new()),
+        gate: Gate::new(4),
+    };
+    let opts = WalkOptions {
+        threads: 4,
+        ..WalkOptions::default()
+    };
+    let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+    let summary = result.unwrap();
+    let (paths, _) = replay(tree.root_path(), &events);
+    assert_eq!(
+        sorted(paths.iter().map(PathBuf::as_path)),
+        sorted(tree.paths())
+    );
+    assert_eq!(summary.entries, tree.entry_count() as u64);
+
+    let batches = provider.batches.lock().unwrap();
+    // wide/ leaves 19,903 names: 19 full batches of 1,024 and one of 447.
+    assert_eq!(
+        batches.len(),
+        20,
+        "{:?}",
+        batches.iter().map(|b| b.0).collect::<Vec<_>>()
+    );
+    assert!(batches.iter().all(|&(len, _)| len <= STAT_BATCH));
+    let threads: HashSet<ThreadId> = batches.iter().map(|&(_, thread)| thread).collect();
+    assert_eq!(threads.len(), 4, "every worker read some of the batches");
+}
+
+#[test]
+fn p1_walk_03_a_failed_stat_batch_records_every_name() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..1_500 {
+        tree.file(format!("f{i}"), 10);
+    }
+    let provider = Splitting {
+        inner: &tree,
+        keep: 0,
+        fail_stats: true,
+        batches: Mutex::new(Vec::new()),
+        gate: Gate::new(1),
+    };
+    let opts = WalkOptions {
+        threads: 2,
+        ..WalkOptions::default()
+    };
+    let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+    let summary = result.unwrap();
+    replay(tree.root_path(), &events);
+    // Two batches, of 1,024 and 476 names, both failed: only the root was
+    // read, and every name of both batches is an error.
+    let batches = provider.batches.lock().unwrap();
+    let mut sizes: Vec<usize> = batches.iter().map(|&(len, _)| len).collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [476, 1_024]);
+    assert_eq!(summary.entries, 1);
+    assert_eq!(summary.entry_errors, 1_500);
+    let named: HashSet<Vec<u8>> = events
+        .iter()
+        .filter_map(|e| match e {
+            ScanEvent::Error(ScanError { errno: 2, name, .. }) => Some(name.as_bytes().to_vec()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(named.len(), 1_500);
+    assert!((0..1_500).all(|i| named.contains(format!("f{i}").as_bytes())));
+}
+
+#[test]
+fn p1_walk_03_stat_batches_hold_only_their_own_names() {
+    let count: usize = 200_000;
+    let later: Vec<NameRef> = (0..count)
+        .map(|i| NameRef::from(format!("f{i}").as_str()))
+        .collect();
+    let batches: Vec<Vec<NameRef>> = stat_batches(later).collect();
+    assert_eq!(batches.len(), count.div_ceil(STAT_BATCH));
+    assert!(
+        batches
+            .iter()
+            .all(|b| !b.is_empty() && b.capacity() <= STAT_BATCH)
+    );
+    assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), count);
+    // The job Vecs together hold room for the names they carry, not the
+    // tail of the listing each time: under 64 bytes per name.
+    let held: usize = batches.iter().map(Vec::capacity).sum::<usize>() * size_of::<NameRef>();
+    assert!(held <= 64 * count, "{held} bytes held for {count} names");
 }
