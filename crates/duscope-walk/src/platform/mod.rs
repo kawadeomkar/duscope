@@ -57,6 +57,45 @@ pub(crate) fn fallback() -> Option<Box<dyn Provider>> {
     Some(Box::new(fallback::FallbackProvider::default()))
 }
 
+/// Makes SIGINT set `flag`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn cancel_on_interrupt(
+    flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<bool> {
+    posix::signal::cancel_on_interrupt(flag)
+}
+
+/// Blocks until SIGINT arrives (`true`) or [`stand_down_interrupt`] is
+/// called (`false`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn wait_for_interrupt() -> bool {
+    posix::signal::wait_for_interrupt()
+}
+
+/// Wakes the thread waiting for SIGINT; the handler stays.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn stand_down_interrupt() {
+    posix::signal::stand_down();
+}
+
+/// Blocks until SIGINT arrives: never here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn wait_for_interrupt() -> bool {
+    false
+}
+
+/// Wakes the thread waiting for SIGINT: none here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn stand_down_interrupt() {}
+
+/// Makes SIGINT set `flag`: not on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn cancel_on_interrupt(
+    _flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<bool> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
 /// The fallback provider: none is built here.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn fallback() -> Option<Box<dyn Provider>> {

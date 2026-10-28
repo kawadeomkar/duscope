@@ -321,6 +321,7 @@ proptest! {
                 dirs: u64::from(DIRS),
                 unreadable_dirs: 0,
                 entry_errors: 0,
+                vanished: 0,
                 skipped_dirs: 0,
                 volumes: 1,
                 mounts_excluded: 0,
@@ -392,14 +393,14 @@ fn p1_walk_01_entries_that_cannot_be_read_become_scan_errors() {
     let mut tree = MemProvider::new("/mem");
     tree.file("d/ok", 1)
         .file("d/gone", 2)
-        .unstatable("d/gone", 2);
+        .unstatable("d/gone", libc::EIO);
     let (result, events) = walk_events(&tree, tree.root_path(), &WalkOptions::default());
     let (paths, dirs) = replay(tree.root_path(), &events);
     assert!(!paths.contains(&PathBuf::from("/mem/d/gone")));
     assert!(events.contains(&ScanEvent::Error(ScanError {
         dir: id_of(&dirs, "/mem/d"),
         name: NameRef::from("gone"),
-        errno: 2,
+        errno: libc::EIO,
     })));
     assert_eq!(result.unwrap().entry_errors, 1);
 }
@@ -569,18 +570,22 @@ fn p1_walk_03_a_failed_stat_batch_records_every_name() {
     let (result, events) = walk_events(&provider, tree.root_path(), &opts);
     let summary = result.unwrap();
     replay(tree.root_path(), &events);
-    // Two batches, of 1,024 and 476 names, both failed: only the root was
-    // read, and every name of both batches is an error.
+    // Two batches, of 1,024 and 476 names, both failed as if the directory
+    // had vanished: only the root was read, and every name of both batches
+    // is recorded as vanished.
     let batches = provider.batches.lock().unwrap();
     let mut sizes: Vec<usize> = batches.iter().map(|&(len, _)| len).collect();
     sizes.sort_unstable();
     assert_eq!(sizes, [476, 1_024]);
     assert_eq!(summary.entries, 1);
-    assert_eq!(summary.entry_errors, 1_500);
+    assert_eq!(summary.vanished, 1_500);
+    assert_eq!(summary.entry_errors, 0);
     let named: HashSet<Vec<u8>> = events
         .iter()
         .filter_map(|e| match e {
-            ScanEvent::Error(ScanError { errno: 2, name, .. }) => Some(name.as_bytes().to_vec()),
+            ScanEvent::Vanished {
+                name: Some(name), ..
+            } => Some(name.as_bytes().to_vec()),
             _ => None,
         })
         .collect();

@@ -299,8 +299,9 @@ impl Provider for MacProvider {
             Boundary::Firmlink => true,
             _ => return None,
         };
-        let depth = usize::try_from(dir.depth()).ok()?;
-        let root = self.real_root(dir.path().ancestors().nth(depth)?)?;
+        // The walk root's own path, resolved: below a followed link the
+        // directory's path is the link's target, not under the root.
+        let root = self.real_root(dir.ancestors().last()?.path())?;
         let sources: Vec<&PathBuf> = firmlinks().iter().filter(|s| s.exists()).collect();
         let every = !sources.is_empty() && sources.iter().all(|source| source.starts_with(&root));
         let skip = if firmlink {

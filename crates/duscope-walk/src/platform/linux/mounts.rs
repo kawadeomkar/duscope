@@ -161,9 +161,13 @@ impl Mounts {
     }
 
     /// The real path of `name` in `dir`: the walk root's real path, read
-    /// once, joined with the names below it.
+    /// once, joined with the names below it. A directory reached through a
+    /// link followed under `--follow-symlinks` has its resolved path already.
     fn real(&self, dir: &DirHandle, name: &[u8]) -> io::Result<PathBuf> {
         let given = dir.ancestors().last().map_or(dir.path(), DirHandle::path);
+        let Ok(below) = dir.path().strip_prefix(given) else {
+            return Ok(dir.path().join(OsStr::from_bytes(name)));
+        };
         let mut root = self.root.lock().unwrap_or_else(PoisonError::into_inner);
         let real_root = match &*root {
             Some((cached, real)) if cached == given => real.clone(),
@@ -173,7 +177,6 @@ impl Mounts {
                 real
             }
         };
-        let below = dir.path().strip_prefix(given).unwrap_or(Path::new(""));
         Ok(real_root.join(below).join(OsStr::from_bytes(name)))
     }
 

@@ -1,6 +1,8 @@
 //! Calls both platforms make the same way: opening a directory to read and
 //! raising the descriptor limit.
 
+pub(crate) mod signal;
+
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::MaybeUninit;

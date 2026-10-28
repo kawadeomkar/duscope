@@ -6,7 +6,8 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use duscope_core::arena::{Arena, DirRec, EntryIdx};
@@ -414,31 +415,48 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     // it leads to; the envelope keeps the path as given beside it.
     let cwd = std::env::current_dir().unwrap_or_default();
     let ResolvedPath { real: root, .. } = resolve_path(&cwd, &given);
-    let opts = options(walk_args, excludes)?;
+    unresolved_link(&root, &given)?;
+    let mut opts = options(walk_args, excludes)?;
+    // Ctrl-C stops the walk; if it has not stopped soon after, the process
+    // ends anyway. Nothing is written before a scan completes, and once the
+    // walk is over the result is written whole.
+    let interrupts = Interrupts::arm();
+    opts.cancel = Arc::clone(&interrupts.flag);
     let started = Instant::now();
     let started_ns = now_ns();
     let mut arena = Arena::new(opts.attrs);
     let mut push_error = None;
-    let summary = walk(&root, &opts, |event| {
+    let walked = walk(&root, &opts, |event| {
         if push_error.is_none()
             && let Err(e) = arena.push(event)
         {
             push_error = Some(e);
         }
-    })
-    .map_err(|e| walk_failure(&given, e))?;
+    });
+    drop(interrupts);
+    let summary = walked.map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
         return Err(Failure::new(Exit::Runtime, "io_error", e.to_string()));
     }
     // A root that is a directory nobody may list is a permission failure
-    // (exit 4); a directory below it that cannot be read is a partial read.
-    if arena.unreadable().contains_key(&DirId::ROOT) {
-        return Err(Failure::new(
-            Exit::Permission,
-            "permission_denied",
-            format!("permission denied reading {}", given.display()),
-        )
-        .hint("Run duscope scan on a directory you can read"));
+    // (exit 4), one that fails otherwise (EIO, ELOOP) a runtime error; a
+    // directory below it that cannot be read is a partial read.
+    if let Some(&errno) = arena.unreadable().get(&DirId::ROOT) {
+        let error = io::Error::from_raw_os_error(errno);
+        return Err(if error.kind() == io::ErrorKind::PermissionDenied {
+            Failure::new(
+                Exit::Permission,
+                "permission_denied",
+                format!("permission denied reading {}", given.display()),
+            )
+            .hint("Run duscope scan on a directory you can read")
+        } else {
+            Failure::new(
+                Exit::Runtime,
+                "io_error",
+                format!("cannot read {}: {error}", given.display()),
+            )
+        });
     }
     roll_up(&mut arena);
     Ok(Scanned {
@@ -516,6 +534,96 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
     }
 }
 
+/// How long a walk has to stop after Ctrl-C before the process ends
+/// regardless: half the 200 ms the conventions allow, which leaves room for
+/// a slow machine to notice the flag and end the process.
+const INTERRUPT_GRACE: Duration = Duration::from_millis(100);
+
+/// Ctrl-C during a walk. While armed, SIGINT sets `flag`, the walk's
+/// cancellation flag, and a watcher thread ends the process with exit 130
+/// if the walk has not stopped [`INTERRUPT_GRACE`] later; the watcher
+/// blocks until SIGINT or the stand-down, without polling. Dropping it once
+/// the walk is over ends the watcher, so a Ctrl-C while the result is
+/// written lets it finish rather than cut it off from another thread.
+/// Where SIGINT was inherited ignored (a background job), or the watcher
+/// cannot be started, Ctrl-C keeps its usual effect and the flag is never
+/// set.
+struct Interrupts {
+    flag: Arc<AtomicBool>,
+    /// Set once the walk is over, for a watcher woken by a late SIGINT.
+    over: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl Interrupts {
+    fn arm() -> Interrupts {
+        let flag = Arc::new(AtomicBool::new(false));
+        let over = Arc::new(AtomicBool::new(false));
+        let armed = matches!(duscope_walk::cancel_on_interrupt(&flag), Ok(true));
+        if armed {
+            let walk_over = Arc::clone(&over);
+            let watcher = thread::Builder::new()
+                .name("interrupt".to_owned())
+                .spawn(move || {
+                    if duscope_walk::wait_for_interrupt() {
+                        thread::sleep(INTERRUPT_GRACE);
+                        if !walk_over.load(Ordering::SeqCst) {
+                            report_interrupt();
+                            std::process::exit(i32::from(Exit::Interrupted.code()));
+                        }
+                    }
+                });
+            if watcher.is_err() {
+                duscope_walk::stand_down_interrupt();
+                return Interrupts {
+                    flag,
+                    over,
+                    armed: false,
+                };
+            }
+        }
+        Interrupts { flag, over, armed }
+    }
+}
+
+impl Drop for Interrupts {
+    fn drop(&mut self) {
+        if self.armed {
+            self.over.store(true, Ordering::SeqCst);
+            duscope_walk::stand_down_interrupt();
+        }
+    }
+}
+
+/// Reports Ctrl-C: one line on stderr, once, whatever the format.
+pub fn report_interrupt() {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if !REPORTED.swap(true, Ordering::SeqCst) {
+        crate::out::stderr_line("duscope: interrupted");
+    }
+}
+
+/// The failure of a root that is still a symbolic link once resolved: one
+/// that leads nowhere (exit 3) or into a loop (a runtime error), where
+/// scanning the link itself would report a few bytes as a success.
+fn unresolved_link(root: &Path, given: &Path) -> Result<(), Failure> {
+    let is_link = std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink());
+    match std::fs::metadata(root) {
+        Err(e) if is_link && e.kind() == io::ErrorKind::NotFound => Err(Failure::new(
+            Exit::NotFound,
+            "scan_not_found",
+            format!("{} is a symbolic link to nothing", given.display()),
+        )
+        .hint("Check where the link points, or scan the directory it should lead to")),
+        Err(e) if is_link => Err(Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!("cannot follow {}: {e}", given.display()),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// A flag of a later phase.
 fn not_yet(flag: &str, what: &str) -> Failure {
     Failure::new(
@@ -535,8 +643,9 @@ mod tests {
     use duscope_core::rollup::roll_up;
     use duscope_walk::{Attrs, MemProvider, ScanEvent, WalkOptions, walk_with};
 
-    use super::{Scanned, Totals, scan_block};
+    use super::{Scanned, Totals, envelope, scan_block};
     use crate::cli::{Cli, Verb};
+    use crate::out::{Format, Output, Units};
 
     /// A scan of a small in-memory tree; without its volume when `volume`
     /// is false.
@@ -575,5 +684,60 @@ mod tests {
         };
         assert_eq!(block(&scanned(true))["fs_type"], "mem");
         assert_eq!(block(&scanned(false))["fs_type"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn p1_walk_08_a_vanished_file_increments_vanished_count() {
+        /// `ENOENT`, 2 on Linux and macOS alike.
+        const ENOENT: i32 = 2;
+        let mut tree = MemProvider::new("/t");
+        tree.file("kept", 10)
+            .file("gone", 10)
+            .unstatable("gone", ENOENT);
+        let mut arena = Arena::new(Attrs::Basic);
+        let summary = walk_with(&tree, Path::new("/t"), &WalkOptions::default(), |event| {
+            arena.push(event).unwrap();
+        })
+        .unwrap();
+        roll_up(&mut arena);
+        let scanned = Scanned {
+            arena,
+            summary,
+            elapsed: Duration::ZERO,
+            root: "/t".into(),
+            root_as_given: "/t".into(),
+            started_ns: 0,
+            finished_ns: 0,
+        };
+        let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
+        else {
+            panic!("not scan");
+        };
+        let output = Output {
+            format: Format::Json,
+            color: false,
+            units: Units::default(),
+            null: false,
+            header: false,
+        };
+        let envelope = envelope(
+            &scanned,
+            &args.walk,
+            "scan",
+            None,
+            true,
+            "allocated",
+            &output,
+        );
+        assert_eq!(envelope.scan.vanished_count, 1);
+        assert_eq!(envelope.scan.error_count, 0);
+        let warning = envelope
+            .warnings
+            .iter()
+            .find(|w| w.code == "vanished")
+            .unwrap();
+        assert_eq!(warning.count, Some(1));
+        // The file that vanished is not a row.
+        assert_eq!(envelope.entries.len(), 1);
     }
 }

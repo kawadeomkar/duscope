@@ -396,13 +396,8 @@ fn p1_cli_02_a_root_given_as_a_link_is_read_where_it_leads() {
     assert_eq!(file["scan"]["file_count"], 1);
     assert_eq!(file["scan"]["dir_count"], 0);
     assert_eq!(file["entries"].as_array().unwrap().len(), 0);
-    // A link that leads nowhere is read as the link itself.
-    let dangling = json(Path::new("dangling"));
-    assert_eq!(
-        dangling["scan"]["root"],
-        links.join("dangling").to_str().unwrap()
-    );
-    assert_eq!(dangling["scan"]["file_count"], 1);
+    // A link that leads nowhere is refused, not read as the link itself:
+    // p1_walk_08_a_root_link_that_leads_nowhere_fails.
 }
 
 #[test]

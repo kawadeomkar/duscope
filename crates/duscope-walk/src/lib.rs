@@ -161,6 +161,19 @@ pub trait Provider: Send + Sync {
     /// The error of reading `path`, which ends the walk before it starts.
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry>;
 
+    /// Where the symbolic link at `path` leads, every link on the way
+    /// followed, and the entry there, for `--follow-symlinks`; a directory
+    /// reached this way is read through that path, since directories are
+    /// opened without following links. The default resolves the path
+    /// (`realpath`) and reads the result as [`root`](Provider::root) does: an
+    /// `ELOOP` from a link that leads to itself, an `ENOENT` from one that
+    /// leads nowhere.
+    fn follow(&self, path: &Path, opts: &WalkOptions) -> io::Result<(PathBuf, Entry)> {
+        let real = std::fs::canonicalize(path)?;
+        let entry = self.root(&real, opts)?;
+        Ok((real, entry))
+    }
+
     /// The workers a walk runs when [`WalkOptions::threads`] is 0: twice the
     /// logical CPUs, clamped to 4..=32, until the phase-1 thread sweep sets
     /// each platform's default.
@@ -197,18 +210,22 @@ impl DirHandle {
         }
     }
 
-    /// A handle for tests: `path`, `depth` levels below a root it does not
-    /// link to.
+    /// A handle for tests: `path`, `depth` levels below a root, with a
+    /// handle for each directory between them.
     #[cfg(test)]
     pub(crate) fn detached(path: impl Into<PathBuf>, depth: u32) -> DirHandle {
+        let path = path.into();
+        let parent = depth
+            .checked_sub(1)
+            .map(|up| Arc::new(DirHandle::detached(path.parent().unwrap_or(&path), up)));
         DirHandle {
             id: DirId::ROOT,
-            path: path.into(),
+            path,
             depth,
             dev: 0,
             ino: 0,
             mnt_id: 0,
-            parent: None,
+            parent,
         }
     }
 
@@ -247,8 +264,9 @@ impl DirHandle {
         self.id
     }
 
-    /// The directory's path: the root as given, joined with the names below
-    /// it.
+    /// The directory's path, to open: the root as given joined with the
+    /// names below it; below a link followed under `--follow-symlinks`, the
+    /// link's resolved target joined with the names below that.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -272,6 +290,9 @@ pub struct WalkSummary {
     pub unreadable_dirs: u64,
     /// Entries listed but not read ([`ScanEvent::Error`]).
     pub entry_errors: u64,
+    /// Entries and directories that disappeared between being listed and
+    /// being read ([`ScanEvent::Vanished`]).
+    pub vanished: u64,
     /// Directories listed but not entered ([`ScanEvent::Skipped`]).
     pub skipped_dirs: u64,
     /// Volumes met ([`ScanEvent::Volume`]), the root's included.
@@ -307,6 +328,31 @@ pub fn walk(
     walk_with(&*provider, root, opts, sink)
 }
 
+/// Makes SIGINT set `flag`, the [`WalkOptions::cancel`] of the walks it is
+/// given to: a running walk then stops within a directory per worker and
+/// returns [`WalkError::Cancelled`]. A later call replaces the flag.
+/// Returns `false`, installing nothing, when the process inherited SIGINT
+/// ignored (a background job): Ctrl-C was not meant for it.
+pub fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<bool> {
+    platform::cancel_on_interrupt(flag)
+}
+
+/// Blocks the calling thread until SIGINT arrives (`true`), or until
+/// [`stand_down_interrupt`] is called or no handler was installed
+/// (`false`). A thread that ends the process when a walk does not stop in
+/// time waits here instead of polling the flag.
+#[must_use]
+pub fn wait_for_interrupt() -> bool {
+    platform::wait_for_interrupt()
+}
+
+/// Wakes a thread waiting in [`wait_for_interrupt`], which returns
+/// `false`, once the walk it watched is over. The handler stays installed:
+/// a later SIGINT sets the flag, which no walk reads any more.
+pub fn stand_down_interrupt() {
+    platform::stand_down_interrupt();
+}
+
 /// The result queue holds this many directory batches per worker, as in
 /// dua-core; a worker blocks on a full queue until the sink catches up.
 const QUEUED_BATCHES_PER_WORKER: usize = 2;
@@ -318,6 +364,33 @@ const POLL: Duration = Duration::from_millis(50);
 /// Reported for a directory whose read failed without an OS error number.
 /// `EIO` is 5 on Linux and macOS alike.
 pub(crate) const EIO: i32 = 5;
+
+/// What a failed read means, by its error number: the error matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failed {
+    /// `EACCES`, `EPERM` and the rest: the directory is listed empty, with
+    /// the error number.
+    Unreadable,
+    /// `ENOENT`, `ESTALE`, and `ENOTDIR` for a directory replaced by a file:
+    /// it disappeared, as listed, after it was listed.
+    Vanished,
+    /// `ELOOP`, `ENAMETOOLONG`, `EIO`: an error of the entry, recorded on
+    /// the directory that listed it with the entry dropped, for a link
+    /// followed under `--follow-symlinks`. A directory that fails this way
+    /// when it is read has had its entry delivered already, so it is listed
+    /// empty with the error number, as an unreadable one.
+    OnParent,
+}
+
+impl Failed {
+    fn of(errno: i32) -> Failed {
+        match errno {
+            libc::ENOENT | libc::ESTALE | libc::ENOTDIR => Failed::Vanished,
+            libc::ELOOP | libc::ENAMETOOLONG | libc::EIO => Failed::OnParent,
+            _ => Failed::Unreadable,
+        }
+    }
+}
 
 /// The names one [`Job::Stat`] reads: the Linux floor's batch size, which
 /// spreads a wide directory's per-entry calls over every worker.
@@ -363,6 +436,11 @@ struct Batch {
     dir: DirId,
     entries: Vec<Entry>,
     errors: Vec<ScanError>,
+    /// Entries of `dir` that disappeared after they were listed.
+    vanished: Vec<NameRef>,
+    /// Whether `dir` itself disappeared after it was listed; only on a
+    /// closing batch.
+    dir_vanished: bool,
     /// Volumes first met among `entries`.
     volumes: Vec<VolumeInfo>,
     /// Directories among `entries` the walk does not enter.
@@ -493,6 +571,9 @@ pub fn walk_with<P: Provider + ?Sized>(
         if let Err(worker_panic) = pool.finish() {
             panic::resume_unwind(worker_panic);
         }
+        // A walk cancelled as it finished is cancelled: Ctrl-C during the
+        // last directory still stops the command.
+        let finished = finished && !opts.cancel.load(Ordering::Relaxed);
         if finished {
             summary.clones_unavailable = opts.clones && provider.clones_unavailable(opts);
             Ok(summary)
@@ -516,6 +597,13 @@ fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEv
     for error in batch.errors {
         sink(ScanEvent::Error(error));
     }
+    summary.vanished += batch.vanished.len() as u64;
+    for name in batch.vanished {
+        sink(ScanEvent::Vanished {
+            dir: batch.dir,
+            name: Some(name),
+        });
+    }
     for volume in batch.volumes {
         summary.volumes += 1;
         summary.mounts_excluded += u64::from(!volume.entered());
@@ -528,6 +616,13 @@ fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEv
     }
     if batch.closes {
         summary.unreadable_dirs += u64::from(batch.errno.is_some());
+        if batch.dir_vanished {
+            summary.vanished += 1;
+            sink(ScanEvent::Vanished {
+                dir: batch.dir,
+                name: None,
+            });
+        }
         sink(ScanEvent::DirClosed {
             dir: batch.dir,
             errno: batch.errno,
@@ -561,7 +656,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         shared: &PoolShared<Job, Event>,
     ) {
         let (mut entries, mut errors, mut later) = (Vec::new(), Vec::new(), Vec::new());
-        let errno = match self.provider.read_dir_split(
+        let failed = match self.provider.read_dir_split(
             dir,
             self.opts,
             &mut entries,
@@ -577,11 +672,22 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             }
         };
         let mut jobs = Vec::new();
-        let Some((volumes, skipped)) =
+        let Some((volumes, skipped, vanished)) =
             self.adopt(dir, &mut entries, &mut errors, &mut jobs, shared)
         else {
             return;
         };
+        // A directory that could not be read, by the error matrix: one that
+        // disappeared is vanished, and any other failure, ELOOP,
+        // ENAMETOOLONG and EIO included, lists it empty with the error
+        // number (its entry was delivered with its parent, so it cannot be
+        // dropped, and the unreadable flag and the partial read cover it).
+        let (mut errno, mut dir_vanished) = (None, false);
+        match failed.map(|e| (e, Failed::of(e))) {
+            None => {}
+            Some((_, Failed::Vanished)) => dir_vanished = true,
+            Some((e, _)) => errno = Some(e),
+        }
         let split = (!later.is_empty()).then(|| {
             let split = Arc::new(Split {
                 dir: Arc::clone(dir),
@@ -596,6 +702,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             dir: dir.id,
             entries,
             errors,
+            vanished,
+            dir_vanished,
             volumes,
             skipped,
             closes: split.is_none(),
@@ -632,7 +740,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 .collect();
         }
         let mut jobs = Vec::new();
-        let Some((volumes, skipped)) =
+        let Some((volumes, skipped, vanished)) =
             self.adopt(&split.dir, &mut entries, &mut errors, &mut jobs, shared)
         else {
             return;
@@ -641,6 +749,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             dir: split.dir.id,
             entries,
             errors,
+            vanished,
+            dir_vanished: false,
             volumes,
             skipped,
             closes: false,
@@ -650,21 +760,36 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         Self::finish_part(split, shared);
     }
 
-    /// Sets the parent of `dir`'s new entries and errors, numbers its
-    /// subdirectories and queues a read of each the walk enters. Returns the
-    /// volumes first met and the directories not entered, or `None` when the
-    /// ids ran out, which stops the walk.
+    /// Sets the parent of `dir`'s new entries and errors, follows its
+    /// symbolic links under `--follow-symlinks`, numbers its subdirectories
+    /// and queues a read of each the walk enters. Entries that vanished
+    /// after they were listed leave `errors`. Returns the volumes first
+    /// met, the directories not entered and the names that vanished, or
+    /// `None` when the ids ran out, which stops the walk.
     #[allow(clippy::type_complexity)]
     fn adopt(
         &self,
         dir: &Arc<DirHandle>,
-        entries: &mut [Entry],
-        errors: &mut [ScanError],
+        entries: &mut Vec<Entry>,
+        errors: &mut Vec<ScanError>,
         jobs: &mut Vec<Job>,
         shared: &PoolShared<Job, Event>,
-    ) -> Option<(Vec<VolumeInfo>, Vec<(DirId, Skip)>)> {
-        let (mut volumes, mut skipped) = (Vec::new(), Vec::new());
-        for entry in entries {
+    ) -> Option<(Vec<VolumeInfo>, Vec<(DirId, Skip)>, Vec<NameRef>)> {
+        let (mut volumes, mut skipped, mut vanished) = (Vec::new(), Vec::new(), Vec::new());
+        errors.retain(|error| {
+            let gone = Failed::of(error.errno) == Failed::Vanished;
+            if gone {
+                vanished.push(error.name.clone());
+            }
+            !gone
+        });
+        // Where each directory reached through a link is read from.
+        let resolved = if self.opts.follow_symlinks {
+            self.follow_links(dir, entries, errors)
+        } else {
+            Vec::new()
+        };
+        for (i, entry) in entries.iter_mut().enumerate() {
             entry.parent = dir.id;
             entry.dir = None;
             if entry.kind == Kind::Dir {
@@ -674,7 +799,10 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     return None;
                 };
                 entry.dir = Some(id);
-                let path = dir.path.join(entry.name.as_os_str());
+                let path = match resolved.get(i) {
+                    Some(Some(real)) => real.clone(),
+                    _ => dir.path.join(entry.name.as_os_str()),
+                };
                 let skip = self.decide(dir, entry, &path, &mut volumes);
                 if let Some(reason) = skip {
                     skipped.push((id, reason));
@@ -691,7 +819,64 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         for error in errors {
             error.dir = dir.id;
         }
-        Some((volumes, skipped))
+        Some((volumes, skipped, vanished))
+    }
+
+    /// Replaces each symbolic link among `entries` with the entry it leads
+    /// to, under its own name, and returns, for each entry left, the path a
+    /// directory reached through a link is read from. A link that loops, one
+    /// to a directory on its own path, and one whose target cannot be named
+    /// (`ENAMETOOLONG`) or read (`EIO`) become errors of `dir`; one that
+    /// leads nowhere stays a link.
+    fn follow_links(
+        &self,
+        dir: &DirHandle,
+        entries: &mut Vec<Entry>,
+        errors: &mut Vec<ScanError>,
+    ) -> Vec<Option<PathBuf>> {
+        let mut resolved = Vec::with_capacity(entries.len());
+        let mut kept = Vec::with_capacity(entries.len());
+        for entry in entries.drain(..) {
+            if entry.kind != Kind::Symlink {
+                kept.push(entry);
+                resolved.push(None);
+                continue;
+            }
+            let path = dir.path.join(entry.name.as_os_str());
+            let errno = match self.provider.follow(&path, self.opts) {
+                Ok((real, target)) => {
+                    let is_dir = target.kind == Kind::Dir;
+                    let on_path = is_dir
+                        && dir
+                            .ancestors()
+                            .any(|a| (a.dev, a.ino) == (target.dev, target.ino));
+                    if !on_path {
+                        resolved.push(is_dir.then_some(real));
+                        kept.push(Entry {
+                            name: entry.name,
+                            ..target
+                        });
+                        continue;
+                    }
+                    libc::ELOOP
+                }
+                Err(e) => match e.raw_os_error() {
+                    Some(errno) if Failed::of(errno) == Failed::OnParent => errno,
+                    _ => {
+                        kept.push(entry);
+                        resolved.push(None);
+                        continue;
+                    }
+                },
+            };
+            errors.push(ScanError {
+                dir: dir.id,
+                name: entry.name,
+                errno,
+            });
+        }
+        *entries = kept;
+        resolved
     }
 
     /// Decides whether the walk enters `entry`, a directory of `dir` at
@@ -818,6 +1003,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 dir: split.dir.id,
                 entries: Vec::new(),
                 errors: Vec::new(),
+                vanished: Vec::new(),
+                dir_vanished: false,
                 volumes: Vec::new(),
                 skipped: Vec::new(),
                 closes: true,
