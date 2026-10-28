@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use duscope_testkit::{TestEnv, golden};
+use duscope_testkit::{TestEnv, golden, normalize};
 
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
@@ -19,51 +19,6 @@ fn duscope(env: &TestEnv) -> Command {
 /// reports it.
 fn home(env: &TestEnv) -> PathBuf {
     fs::canonicalize(env.fixtures().path("home")).unwrap()
-}
-
-/// `text` without what differs between runs, machines and releases: the
-/// root's path, the scan's times, the volumes (sizes and free space), the
-/// version, and the scan's duration in a footer.
-fn normalize(text: &str, root: &Path) -> String {
-    let mut text = text.replace(root.to_str().unwrap(), "<root>");
-    for (key, placeholder) in [
-        ("\"started_at\":\"", "<time>"),
-        ("\"finished_at\":\"", "<time>"),
-        ("\"name\":\"duscope\",\"version\":\"", "<version>"),
-    ] {
-        let mut from = 0;
-        while let Some(at) = text[from..].find(key) {
-            let start = from + at + key.len();
-            let end = start + text[start..].find('"').unwrap();
-            text.replace_range(start..end, placeholder);
-            from = start;
-        }
-    }
-    let key = "\"volumes\":[";
-    let mut from = 0;
-    while let Some(at) = text[from..].find(key) {
-        let start = from + at + key.len() - 1;
-        let mut depth = 0;
-        let mut end = start;
-        for (i, c) in text[start..].char_indices() {
-            match c {
-                '[' | '{' => depth += 1,
-                ']' | '}' => depth -= 1,
-                _ => {}
-            }
-            if depth == 0 {
-                end = start + i + 1;
-                break;
-            }
-        }
-        text.replace_range(start..end, "[\"<volumes>\"]");
-        from = start;
-    }
-    if let Some(at) = text.find(" s, ") {
-        let start = text[..at].rfind(" · ").unwrap() + " · ".len();
-        text.replace_range(start..at, "<secs>");
-    }
-    text
 }
 
 #[test]

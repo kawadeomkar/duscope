@@ -3,9 +3,11 @@
 # bench/run.sh, the full matrix (the three trees, the pinned competitors, warm
 # and cold caches), on two self-hosted runners: an Apple-silicon Mac with the
 # label `bench-macos` and a Linux x86_64 box with `bench-linux`, described in
-# docs/runners.md. Until duscope can scan, `du` is the subject. The result files
-# go to the `bench-results` branch as <date>-<platform>.json, never to main, and
-# bench/compare.py reads baselines from there. Each bench job then holds the
+# docs/runners.md. The subject is duscope, built from the checkout; `du` is one
+# of the competitors. The result files go to the `bench-results` branch as
+# <date>-<platform>.json, never to main, and bench/compare.py reads baselines from
+# there. Each bench job then checks the binary's du parity on a system tree
+# (/Applications, /usr) and its peak RSS on the trees (P1-TEST-01), and holds the
 # fixture tree to P0-TEST-01's 30-second build budget, which these quiet machines
 # can assert and shared CI runners cannot.
 #
@@ -175,6 +177,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Build duscope
+        run: |
+          # In the runner's own target directory, outside the checkout.
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          rustup toolchain install --profile minimal
+          CARGO_TARGET_DIR="$home/target" cargo build --release --locked -p duscope
+          echo "DUSCOPE_BIN=$home/target/release/duscope" >> "$GITHUB_ENV"
       - name: Run the harness
         id: harness
         run: |
@@ -200,7 +209,8 @@ jobs:
           cold="$PWD/bench/drop-caches.sh --remount $(printf %q "$image") $(printf %q "$volume")"
           # bench-macos is a laptop that sleeps when idle: caffeinate keeps it awake
           # until the harness exits.
-          file=$(caffeinate -is bench/run.sh run --subject du --trees "$TREES" --competitors "$COMPETITORS" \
+          file=$(caffeinate -is bench/run.sh run --subject duscope --tool-path "duscope=$DUSCOPE_BIN" \
+            --trees "$TREES" --competitors "$COMPETITORS" \
             --mode "$MODE" --scale "$SCALE" --trees-dir "$volume/trees" --tools-dir "$home/tools" \
             --cold-cmd "$cold" --results-dir "$results") || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
@@ -221,6 +231,23 @@ jobs:
           exit 1
         env:
           STATUS: ${{ steps.harness.outputs.status }}
+      # P1-TEST-01: the binary the harness measured (DUSCOPE_BIN) totals what
+      # du does on a system tree, and its peak RSS per entry with --attrs full
+      # stays within budget on the trees the harness just measured.
+      - name: du parity on /Applications
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_PARITY_ROOT=/Applications DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" CARGO_TARGET_DIR="$home/target" \
+            caffeinate -is cargo test --release --locked -p duscope --test suite \
+            -- --ignored --exact p1_test_01_scan_totals_equal_du_on_a_system_tree
+      - name: Peak RSS within budget
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees-volume/trees" CARGO_TARGET_DIR="$home/target" \
+            caffeinate -is cargo test --release --locked -p duscope --test suite \
+            -- --ignored --exact --nocapture p1_test_01_peak_rss_per_entry_on_the_bench_trees
       # P0-TEST-01's acceptance check, here because a quiet machine can hold the
       # fixture tree to its budget and shared CI runners cannot (they report the
       # time only): the debug build `just fixtures` runs, in under 30 s.
@@ -253,6 +280,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Build duscope
+        run: |
+          # In the runner's own target directory, outside the checkout. The musl build:
+          # what the Linux archives and .debs ship (docs/runners.md installs musl-tools).
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          target="$(uname -m)-unknown-linux-musl"
+          rustup toolchain install --profile minimal
+          rustup target add "$target"
+          CARGO_TARGET_DIR="$home/target" cargo build --release --locked -p duscope --target "$target"
+          echo "DUSCOPE_BIN=$home/target/$target/release/duscope" >> "$GITHUB_ENV"
       - name: Run the harness
         id: harness
         run: |
@@ -262,7 +299,8 @@ jobs:
           results="$RUNNER_TEMP/bench-results"
           rm -rf "$results"
           status=0
-          file=$(bench/run.sh run --subject du --trees "$TREES" --competitors "$COMPETITORS" \
+          file=$(bench/run.sh run --subject duscope --tool-path "duscope=$DUSCOPE_BIN" \
+            --trees "$TREES" --competitors "$COMPETITORS" \
             --mode "$MODE" --scale "$SCALE" --trees-dir "$home/trees" --tools-dir "$home/tools" \
             --results-dir "$results") || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
@@ -283,6 +321,23 @@ jobs:
           exit 1
         env:
           STATUS: ${{ steps.harness.outputs.status }}
+      # P1-TEST-01: the binary the harness measured (DUSCOPE_BIN) totals what
+      # du does on a system tree, and its peak RSS per entry with --attrs full
+      # stays within budget on the trees the harness just measured.
+      - name: du parity on /usr
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_PARITY_ROOT=/usr DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" CARGO_TARGET_DIR="$home/target" \
+            cargo test --release --locked -p duscope --test suite \
+            -- --ignored --exact p1_test_01_scan_totals_equal_du_on_a_system_tree
+      - name: Peak RSS within budget
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
+            cargo test --release --locked -p duscope --test suite \
+            -- --ignored --exact --nocapture p1_test_01_peak_rss_per_entry_on_the_bench_trees
       # P0-TEST-01's acceptance check, here because a quiet machine can hold the
       # fixture tree to its budget and shared CI runners cannot (they report the
       # time only): the debug build `just fixtures` runs, in under 30 s.

@@ -16,12 +16,13 @@ under [Auditing](#auditing) read it again.
 - [x] Administrators are included (`enforce_admins`), so nobody bypasses the rules.
 - [x] Linear history is required.
 - [x] Force pushes and deletion of `main` are blocked.
-- [x] Required status checks, with "Require branches to be up to date before
+- [ ] Required status checks, with "Require branches to be up to date before
   merging" (`strict`). The checks are the jobs of
   [ci.yml](../.github/workflows/ci.yml) that the spec marks required:
   - `fmt`
   - `clippy` on the three runners
   - `test` on the three runners, plus its locale leg on each
+  - `platform` and `bench-regression` on the three runners (from phase 1)
   - `msrv (pinned)` and `msrv (stable)`
   - `deny`
   - `docs`
@@ -36,7 +37,9 @@ under [Auditing](#auditing) read it again.
   settings above unchanged. `app_id` 15368 is GitHub Actions, so only a workflow
   run can report these checks.
 
-  Applied with all 20 checks, `schemas` included, on 2026-10-25.
+  Applied with 20 checks, `schemas` included, on 2026-10-25. P1-TEST-01 adds
+  `platform` and `bench-regression` on the three runners: the author runs the
+  26-check PUT below once it merges, then ticks this item.
 
   ```sh
   gh api -X PUT repos/kawadeomkar/duscope/branches/main/protection --input - <<'EOF'
@@ -54,6 +57,12 @@ under [Auditing](#auditing) read it again.
         { "context": "test (macos-26, locale)", "app_id": 15368 },
         { "context": "test (ubuntu-24.04, locale)", "app_id": 15368 },
         { "context": "test (ubuntu-24.04-arm, locale)", "app_id": 15368 },
+        { "context": "platform (macos-26)", "app_id": 15368 },
+        { "context": "platform (ubuntu-24.04)", "app_id": 15368 },
+        { "context": "platform (ubuntu-24.04-arm)", "app_id": 15368 },
+        { "context": "bench-regression (macos-26)", "app_id": 15368 },
+        { "context": "bench-regression (ubuntu-24.04)", "app_id": 15368 },
+        { "context": "bench-regression (ubuntu-24.04-arm)", "app_id": 15368 },
         { "context": "msrv (pinned)", "app_id": 15368 },
         { "context": "msrv (stable)", "app_id": 15368 },
         { "context": "deny", "app_id": 15368 },

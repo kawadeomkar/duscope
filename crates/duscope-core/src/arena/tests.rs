@@ -9,7 +9,7 @@ use duscope_walk::{
     walk,
 };
 
-use super::{Arena, CHUNK, Chunked, DirRec, EntryIdx, EntryRec, SharedRec};
+use super::{Arena, CHUNK, Chunked, DirRec, EntryIdx, EntryRec, FullRec, SharedRec};
 
 #[test]
 fn p1_core_01_records_are_48_bytes() {
@@ -18,6 +18,8 @@ fn p1_core_01_records_are_48_bytes() {
     assert_eq!(size_of::<EntryIdx>(), 4);
     // A hard-linked or cloned file's identity beside its record.
     assert_eq!(size_of::<SharedRec>(), 16);
+    // `--attrs full`'s side record, without padding.
+    assert_eq!(size_of::<FullRec>(), 28);
 }
 
 fn walk_into(root: &std::path::Path, attrs: Attrs) -> (Arena, Vec<Entry>) {

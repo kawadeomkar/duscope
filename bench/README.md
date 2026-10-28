@@ -3,8 +3,9 @@
 The harness times disk-usage tools with [hyperfine](https://github.com/sharkdp/hyperfine) on
 three seeded trees and writes one JSON result file per run. `just bench` runs it on developer
 machines; the nightly job (`nightly-bench.yml`, on the `bench-macos` and `bench-linux`
-self-hosted runners) runs the full matrix, and from phase 1 the `bench-regression` CI job runs it
-on T1. Until duscope can scan, the subject every competitor is measured against is `du`.
+self-hosted runners) runs the full matrix, and the `bench-regression` CI job runs it on T1. Both
+measure duscope, built from the checkout, as the subject every competitor is paired with; `du`
+is one of the competitors. Without `--subject`, the subject is `du`.
 
 ## Running it
 
@@ -107,6 +108,7 @@ than on macOS; deleting T2 and T3 there takes minutes too (`rm -rf bench/.trees/
 | Tool | Pinned | Command | Installed from |
 | --- | --- | --- | --- |
 | `du` | system | `du -sk {tree}` | `/usr/bin/du`: BSD du on macOS, GNU coreutils on Linux |
+| `duscope` | this checkout | `duscope scan --json --treemap never {tree}` | never installed: built from the checkout and passed with `--tool-path duscope=target/release/duscope` |
 | `diskus` | `0.9.0` | `diskus {tree}` | release binary, all four platforms |
 | `dua` | `2.46.0` | `dua {tree}` | release binary, all four platforms |
 | `pdu` | `0.24.0` | `pdu {tree}` | release binary on x86_64; crates.io build on arm64 |

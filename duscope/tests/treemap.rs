@@ -12,7 +12,7 @@ use duscope_core::arena::Arena;
 use duscope_core::query::{ArenaView, ByTypeQuery, Filters, Node, SizeKind, TreeView, by_type};
 use duscope_core::rollup::roll_up;
 use duscope_core::rules::{Class, Classes};
-use duscope_testkit::TestEnv;
+use duscope_testkit::{TestEnv, golden};
 use duscope_treemap::cells::Color;
 use duscope_treemap::packs::Pack;
 use duscope_treemap::paint::{ColorBy, Footer, Glyphs, LsColors, PaintOpts, frame};
@@ -150,23 +150,6 @@ fn p1_map_02_refused_map_flags_are_refused_before_the_scan() {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--theme solarized"), "{stderr}");
-}
-
-/// The golden file `name` under `duscope/tests/golden/`, compared with
-/// `actual`; with `DUSCOPE_TEST_UPDATE_GOLDEN=1` it is rewritten instead.
-fn golden(name: &str, actual: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name);
-    if std::env::var_os("DUSCOPE_TEST_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
-        fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(
-        actual, expected,
-        "golden {name} differs; rerun with DUSCOPE_TEST_UPDATE_GOLDEN=1 to regenerate"
-    );
 }
 
 #[test]

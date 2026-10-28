@@ -20,8 +20,8 @@ use dents::DentBuf;
 
 use crate::platform::posix;
 use crate::{
-    DirHandle, Entry, Flags, Kind, NameRef, Provider, STAT_BATCH, ScanError, VolumeInfo,
-    WalkOptions,
+    DirHandle, Entry, Flags, Flush, Kind, NameRef, Provider, STAT_BATCH, STREAM_CHUNK, ScanError,
+    VolumeInfo, WalkOptions,
 };
 
 thread_local! {
@@ -115,8 +115,6 @@ impl Provider for LinuxProvider {
         }
     }
 
-    /// Lists the directory, reads the first 1,024 entries here and leaves
-    /// the rest for stat batches on any worker.
     fn read_dir_split(
         &self,
         dir: &DirHandle,
@@ -125,12 +123,33 @@ impl Provider for LinuxProvider {
         errs: &mut Vec<ScanError>,
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
+        self.read_dir_streaming(dir, opts, out, errs, later, &mut |_, _, _| {})
+    }
+
+    /// Lists the directory, reads the first 1,024 entries here and leaves
+    /// the rest for stat batches on any worker, flushing them to the walk
+    /// every [`STREAM_CHUNK`] as they are listed.
+    fn read_dir_streaming(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+        later: &mut Vec<NameRef>,
+        flush: &mut Flush<'_>,
+    ) -> io::Result<()> {
         let fd = posix::open_dir(dir.path())?;
         let mut names = Vec::new();
-        DENTS.with_borrow_mut(|buf| dents::list(fd.as_fd(), buf, &mut names))?;
-        if names.len() > STAT_BATCH {
-            later.extend(names.drain(STAT_BATCH..));
-        }
+        DENTS.with_borrow_mut(|buf| {
+            dents::list(fd.as_fd(), buf, &mut names, &mut |names| {
+                if names.len() > STAT_BATCH {
+                    later.extend(names.drain(STAT_BATCH..));
+                    if later.len() >= STREAM_CHUNK {
+                        flush(out, errs, later);
+                    }
+                }
+            })
+        })?;
         self.read_names(fd.as_fd(), dir, names, opts, out, errs);
         Ok(())
     }

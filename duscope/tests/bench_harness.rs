@@ -712,7 +712,7 @@ fn p0_bench_01_readme_lists_the_pinned_tools() {
     let competitors: BTreeSet<&str> = listed
         .keys()
         .map(String::as_str)
-        .filter(|n| *n != "du")
+        .filter(|n| !["du", "duscope"].contains(n))
         .collect();
     assert_eq!(
         competitors,

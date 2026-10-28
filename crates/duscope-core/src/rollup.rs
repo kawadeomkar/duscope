@@ -78,7 +78,6 @@ fn number_and_total(arena: &mut Arena) -> RollUp {
     }
     let children = Children::of(arena);
     let mut order = Vec::with_capacity(n);
-    let mut ids = vec![u32::MAX; n];
 
     // Pre-order: a directory, its files in name order, then each
     // subdirectory's subtree in name order. The stack holds subdirectories
@@ -90,7 +89,7 @@ fn number_and_total(arena: &mut Arena) -> RollUp {
     let mut dirs: Vec<(DirId, u32)> = Vec::with_capacity(arena.dir_count());
     while let Some(raw) = stack.pop() {
         let view = arena.entry(EntryIdx::from_raw(raw));
-        let id = number(&mut order, &mut ids, raw);
+        let id = number(&mut order, raw);
         let Some(dir) = view.dir else {
             continue;
         };
@@ -109,12 +108,19 @@ fn number_and_total(arena: &mut Arena) -> RollUp {
         files.sort_unstable_by(|a, b| name(a).cmp(name(b)));
         subdirs.sort_unstable_by(|a, b| name(a).cmp(name(b)));
         for &file in &files {
-            number(&mut order, &mut ids, file);
+            number(&mut order, file);
         }
         stack.extend(subdirs.iter().rev());
         let files_end = id + u32::try_from(files.len()).unwrap_or(u32::MAX);
         arena.dir_mut(dir).files_end = files_end;
         dirs.push((dir, id));
+    }
+    // Each entry's id, made once the children index is gone, so the two
+    // never take memory at the same time: a scan's peak is here.
+    drop((children, files, subdirs, stack));
+    let mut ids = vec![u32::MAX; n];
+    for (id, &raw) in order.iter().enumerate() {
+        ids[raw as usize] = u32::try_from(id).unwrap_or(u32::MAX);
     }
 
     // Each directory starts from its own entry: its sizes, its mtime, its
@@ -173,10 +179,9 @@ fn number_and_total(arena: &mut Arena) -> RollUp {
 }
 
 /// Gives `raw` the next pre-order id.
-fn number(order: &mut Vec<u32>, ids: &mut [u32], raw: u32) -> u32 {
+fn number(order: &mut Vec<u32>, raw: u32) -> u32 {
     let id = u32::try_from(order.len()).unwrap_or(u32::MAX);
     order.push(raw);
-    ids[raw as usize] = id;
     id
 }
 

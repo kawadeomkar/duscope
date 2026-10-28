@@ -44,33 +44,80 @@ impl DirId {
 
 /// An entry's name: the bytes the directory listing returned. Names are bytes
 /// on both platforms and are never decoded here; the envelope decides how to
-/// show a name that is not valid UTF-8.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NameRef(Box<[u8]>);
+/// show a name that is not valid UTF-8. A name of up to 22 bytes, which is
+/// most names, is held in place, so listing a directory allocates nothing
+/// per name; a longer one is boxed. Either way it takes 24 bytes.
+#[derive(Clone)]
+pub struct NameRef(Repr);
+
+/// The longest name held in place.
+const INLINE: usize = 22;
+
+#[derive(Clone)]
+enum Repr {
+    Inline { len: u8, bytes: [u8; INLINE] },
+    Boxed(Box<[u8]>),
+}
 
 impl NameRef {
     /// A name holding a copy of these bytes.
     #[must_use]
     pub fn new(bytes: &[u8]) -> NameRef {
-        NameRef(bytes.into())
+        match u8::try_from(bytes.len()) {
+            Ok(len) if bytes.len() <= INLINE => {
+                let mut inline = [0u8; INLINE];
+                inline[..bytes.len()].copy_from_slice(bytes);
+                NameRef(Repr::Inline { len, bytes: inline })
+            }
+            _ => NameRef(Repr::Boxed(bytes.into())),
+        }
     }
 
     /// The name's bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        match &self.0 {
+            Repr::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Repr::Boxed(bytes) => bytes,
+        }
     }
 
     /// The name as an `OsStr`, for joining onto a path.
     #[must_use]
     pub fn as_os_str(&self) -> &OsStr {
-        OsStr::from_bytes(&self.0)
+        OsStr::from_bytes(self.as_bytes())
+    }
+}
+
+impl PartialEq for NameRef {
+    fn eq(&self, other: &NameRef) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl Eq for NameRef {}
+
+impl PartialOrd for NameRef {
+    fn partial_cmp(&self, other: &NameRef) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NameRef {
+    fn cmp(&self, other: &NameRef) -> std::cmp::Ordering {
+        self.as_bytes().cmp(other.as_bytes())
+    }
+}
+
+impl std::hash::Hash for NameRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_bytes().hash(state);
     }
 }
 
 impl fmt::Debug for NameRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "\"{}\"", self.0.escape_ascii())
+        write!(f, "\"{}\"", self.as_bytes().escape_ascii())
     }
 }
 
@@ -347,7 +394,8 @@ pub enum ScanEvent {
     /// An entry.
     Entry(Entry),
     /// Every entry of `dir` has been delivered. `errno` is set when the
-    /// directory could not be read; it then has no entries.
+    /// directory could not be read; it then has no entries, or only those a
+    /// streaming read delivered before it failed.
     DirClosed {
         /// The directory.
         dir: DirId,
@@ -357,7 +405,8 @@ pub enum ScanEvent {
     /// Something disappeared between being listed and being read
     /// (`ENOENT`, `ESTALE`): the entry `name` that `dir` listed, which is not
     /// delivered; or, with no name, the directory `dir` itself, whose
-    /// `DirClosed` follows with no entries.
+    /// `DirClosed` follows, after no entries or only those a streaming read
+    /// delivered before it vanished.
     Vanished {
         /// The directory.
         dir: DirId,

@@ -649,13 +649,15 @@ pub(super) enum Outcome {
 /// Reads the records of the directory open on `dir`, handing each one to
 /// `each` as soon as its refill is decoded, so no listing of the whole
 /// directory is ever held. With `probe`, the first two refills are timed on
-/// its clocks.
+/// its clocks. `each` is also told whether the probe has settled: once it
+/// has, no switch to the stat queue can follow, so what was handed over may
+/// be passed on.
 pub(super) fn read(
     dir: BorrowedFd<'_>,
     opts: &WalkOptions,
     buf: &mut AttrBuf,
     probe: Option<&dyn Clock>,
-    each: &mut dyn FnMut(Decoded),
+    each: &mut dyn FnMut(Decoded, bool),
 ) -> io::Result<Outcome> {
     let mut request = Request::bulk(opts);
     let mut timer = Probe::default();
@@ -686,6 +688,9 @@ pub(super) fn read(
             let cpu = cpu_start.and_then(|s| clock.cpu()?.checked_sub(s));
             timer.sample(cpu, clock.now().saturating_duration_since(start))
         });
+        // No switch can follow a refill the probe did not take, or the last
+        // one it took if that one did not switch.
+        let settled = !switch && (probe.is_none() || !timer.active());
         let mut bytes = buf.bytes();
         for _ in 0..count {
             let Some(len) = record_len(bytes) else {
@@ -694,7 +699,9 @@ pub(super) fn read(
                     "getattrlistbulk returned a record longer than its buffer",
                 ));
             };
-            each(parse(&bytes[..len], &request).map_or(Decoded::Nameless, |r| r.decode(&request)));
+            let decoded =
+                parse(&bytes[..len], &request).map_or(Decoded::Nameless, |r| r.decode(&request));
+            each(decoded, settled);
             bytes = &bytes[len..];
         }
         if switch {

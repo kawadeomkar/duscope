@@ -13,49 +13,13 @@ use std::process::Stdio;
 
 use assert_cmd::Command;
 use duscope_core::query::timegrammar;
-use duscope_testkit::TestEnv;
+use duscope_testkit::{TestEnv, golden, replace_values};
 
-/// The golden file `name` under `duscope/tests/golden/`, compared with
-/// `actual`; with `DUSCOPE_TEST_UPDATE_GOLDEN=1` it is rewritten instead.
-fn golden(name: &str, actual: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name);
-    if std::env::var_os("DUSCOPE_TEST_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
-        fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(
-        actual, expected,
-        "golden {name} differs; rerun with DUSCOPE_TEST_UPDATE_GOLDEN=1 to regenerate"
-    );
-}
-
-/// `text` without what differs between runs, machines and releases: the
-/// root's path, the scan's times, the volumes, the version, and the inode
-/// change times, which are when the fixture tree was built.
+/// The shared normalisation, and the files' ctimes: a fixture's ctime is
+/// when the tree was built.
 fn normalize(text: &str, root: &Path) -> String {
-    let mut text = text.replace(root.to_str().unwrap(), "<root>");
-    for (key, placeholder) in [
-        ("\"started_at\":\"", "<time>"),
-        ("\"finished_at\":\"", "<time>"),
-        ("\"ctime\":\"", "<built>"),
-        ("\"name\":\"duscope\",\"version\":\"", "<version>"),
-    ] {
-        let mut from = 0;
-        while let Some(at) = text[from..].find(key) {
-            let start = from + at + key.len();
-            let end = start + text[start..].find('"').unwrap();
-            text.replace_range(start..end, placeholder);
-            from = start;
-        }
-    }
-    if let Some(at) = text.find("\"volumes\":[") {
-        let start = at + "\"volumes\":".len();
-        let end = start + text[start..].find("}]").unwrap() + 2;
-        text.replace_range(start..end, "[\"<volumes>\"]");
-    }
+    let mut text = duscope_testkit::normalize(text, root);
+    replace_values(&mut text, "\"ctime\":\"", '"', "<built>");
     text
 }
 

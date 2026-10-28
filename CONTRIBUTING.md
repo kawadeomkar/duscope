@@ -54,7 +54,6 @@ disagree, so a pin changes in both places in the same pull request.
 | `just` | any 1.x release | you | the recipes below |
 | `gh` | any 2.x release | you | pull requests |
 | `cargo-deny` | 0.20.2 | `just setup` | licences, bans, sources and advisories |
-| `cargo-insta` | 1.49.0 | `just setup` | reviewing golden snapshots |
 | `cargo-fuzz` | 0.13.2 | `just setup` | fuzz targets, on nightly |
 | `cargo-llvm-cov` | 0.9.1 | `just setup` | coverage |
 | `cargo-deb` | 3.8.0 | `just setup` | the `.deb` packages |
@@ -76,6 +75,7 @@ disagree, so a pin changes in both places in the same pull request.
 | `just setup` | install the pinned toolchains and tools for this platform |
 | `just check` | `just fmt`, `just clippy`, `just test`, `just docs` and `just deny`: the pull-request gate |
 | `just check-full` | `just check` plus the advisory database and the ignored platform tests; what CI runs (needs the network) |
+| `just platform-tests` | the ignored platform tests, by name, in a release build; they need root and skip without it (CI runs them under `sudo`) |
 | `just test-pkg P2-QRY-06` | the tests of one package (names starting `p2_qry_06_`) |
 | `just test-crate duscope-core` | the tests of one crate |
 | `just size` | release build and the stripped binary size against the 8 MB budget |

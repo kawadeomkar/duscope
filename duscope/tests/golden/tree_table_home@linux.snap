@@ -1,0 +1,20 @@
+     Size       %  Path
+252.3 MiB  100.0%  <root>
+ 95.6 MiB   37.9%    Library/
+ 53.2 MiB   55.6%      Containers/
+ 14.5 MiB   15.1%      Developer/
+ 10.0 MiB   10.5%      Group Containers/
+  7.0 MiB    7.3%      Caches/
+  6.2 MiB    6.4%      Application Support/
+  4.8 MiB    5.0%      Mail/
+ 62.5 MiB   24.8%    dev/
+ 37.9 MiB   60.6%      target/
+ 24.4 MiB   39.1%      node_modules/
+ 30.0 MiB   11.9%    Movies/
+  7.0 MiB   23.3%      holiday-2035.mov
+  6.0 MiB   20.0%      wedding.mp4
+  5.0 MiB   16.7%      screen-recording.mov
+  4.0 MiB   13.3%      clips/
+  4.0 MiB   13.3%      lecture-01.mkv
+  4.0 MiB   13.3%      lecture-02.mkv
+252.3 MiB allocated · 43,137 files · 8,129 dirs · <secs> s, 4 threads

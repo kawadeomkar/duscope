@@ -7,49 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
-use duscope_testkit::TestEnv;
-
-/// The golden file `name` under `duscope/tests/golden/`, compared with
-/// `actual`; with `DUSCOPE_TEST_UPDATE_GOLDEN=1` it is rewritten instead.
-fn golden(name: &str, actual: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name);
-    if std::env::var_os("DUSCOPE_TEST_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
-        fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(
-        actual, expected,
-        "golden {name} differs; rerun with DUSCOPE_TEST_UPDATE_GOLDEN=1 to regenerate"
-    );
-}
-
-/// `text` without what differs between runs, machines and releases: the
-/// root's path, the scan's times, the volumes and the version.
-fn normalize(text: &str, root: &Path) -> String {
-    let mut text = text.replace(root.to_str().unwrap(), "<root>");
-    for (key, placeholder) in [
-        ("\"started_at\":\"", "<time>"),
-        ("\"finished_at\":\"", "<time>"),
-        ("\"name\":\"duscope\",\"version\":\"", "<version>"),
-    ] {
-        let mut from = 0;
-        while let Some(at) = text[from..].find(key) {
-            let start = from + at + key.len();
-            let end = start + text[start..].find('"').unwrap();
-            text.replace_range(start..end, placeholder);
-            from = start;
-        }
-    }
-    if let Some(at) = text.find("\"volumes\":[") {
-        let start = at + "\"volumes\":".len();
-        let end = start + text[start..].find("}]").unwrap() + 2;
-        text.replace_range(start..end, "[\"<volumes>\"]");
-    }
-    text
-}
+use duscope_testkit::{TestEnv, golden, normalize};
 
 fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())

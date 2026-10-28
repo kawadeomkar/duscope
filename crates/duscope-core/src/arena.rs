@@ -126,8 +126,11 @@ impl Default for DirRec {
     }
 }
 
-/// The `--attrs full` side record of one entry.
+/// The `--attrs full` side record of one entry: 28 bytes, packed to a
+/// 4-byte alignment so the times' 8-byte alignment adds no padding. Its
+/// fields are only ever read by value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C, packed(4))]
 struct FullRec {
     atime_ns: i64,
     /// `i64::MIN` where the filesystem keeps no creation time.
