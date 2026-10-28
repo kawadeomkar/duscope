@@ -17,4 +17,7 @@ pub enum CoreError {
     /// The scan does not fit the arena's record fields.
     #[error("the scan is too large for the arena: {0}")]
     ArenaFull(&'static str),
+    /// A query needs attributes the scan did not collect.
+    #[error("{0} needs --attrs full, which this scan did not collect")]
+    AttrsNotCollected(&'static str),
 }

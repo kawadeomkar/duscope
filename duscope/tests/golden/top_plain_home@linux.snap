@@ -5,5 +5,5 @@ allocated_bytes	apparent_bytes	file_count	dir_count	max_mtime	kind	path
 12144640	8280762	2001	401	2036-12-31T16:15:13Z	dir	<root>/Documents
 11202560	10693314	250	41	2036-12-02T00:00:00Z	dir	<root>/Music
 10719232	4490204	4000	601	2036-12-31T22:56:14Z	dir	<root>/.cache
-8900608	3676400	2500	502	2036-12-30T22:51:44Z	dir	<root>/.local
+8896512	3672304	2500	501	2036-12-30T22:51:44Z	dir	<root>/.local/share
 6971392	6969344	7	1	2036-12-31T22:00:00Z	dir	<root>/Downloads

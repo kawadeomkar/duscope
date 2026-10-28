@@ -391,11 +391,13 @@ fn p1_cli_02_a_root_given_as_a_link_is_read_where_it_leads() {
         assert_eq!(link["entries"], real["entries"]);
         assert_eq!(link["entries"].as_array().unwrap().len(), 1);
     }
-    // A regular file is one file, with no rows below it.
+    // A regular file is one file: the largest file of its scan, itself.
     let file = json(&links.join("target.txt"));
     assert_eq!(file["scan"]["file_count"], 1);
     assert_eq!(file["scan"]["dir_count"], 0);
-    assert_eq!(file["entries"].as_array().unwrap().len(), 0);
+    let rows = file["entries"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["path"], links.join("target.txt").to_str().unwrap());
     // A link that leads nowhere is refused, not read as the link itself:
     // p1_walk_08_a_root_link_that_leads_nowhere_fails.
 }

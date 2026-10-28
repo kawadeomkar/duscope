@@ -1,6 +1,6 @@
 //! `scan`, and the scan every verb of phase 1 runs: the walk into the
-//! arena, then the roll-up. Until P1-CLI-03 brings the queries, every verb
-//! lists the root's largest children.
+//! arena, then the roll-up; and the parts of the envelope that describe
+//! the scan (the scan block, its warnings, the footer for people).
 
 use std::collections::HashMap;
 use std::io;
@@ -9,30 +9,28 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use duscope_core::arena::{Arena, DirRec, EntryIdx};
-use duscope_core::envelope::{
-    Envelope, ExcludedEntry, QueryBlock, SCHEMA_VERSION, ScanBlock, Tool, TopEntry, VolumeEntry,
-    Warning, name_fields,
-};
+use duscope_core::arena::Arena;
+use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
+use duscope_core::query::{ArenaView, SizeKind, TreeView, clock, timegrammar};
 use duscope_core::resolve::{ResolvedPath, resolve_path};
-use duscope_core::rollup::roll_up;
+use duscope_core::rollup::{RollUp, roll_up};
 use duscope_core::rules::Caches;
-use duscope_walk::{
-    Attrs, DirId, Flags, IgnoreRules, Kind, Skip, WalkError, WalkOptions, WalkSummary, walk,
-};
+use duscope_walk::{Attrs, DirId, IgnoreRules, Skip, WalkError, WalkOptions, WalkSummary, walk};
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
 
 use super::{Exit, Failure};
-use crate::cli::{AttrsArg, ProviderArg, QueryArgs, ScanArgs, SizeKind, WalkArgs};
-use crate::out::{Format, Output, iso8601, thousands};
+use crate::cli::{AttrsArg, ProviderArg, ScanArgs, WalkArgs};
+use crate::out::{Output, iso8601, thousands};
 
 /// A finished scan.
 #[derive(Debug)]
 pub struct Scanned {
     /// The tree, rolled up.
     pub arena: Arena,
+    /// Its pre-order numbering and what charging decided.
+    pub rollup: RollUp,
     /// What the walk counted.
     pub summary: WalkSummary,
     /// How long the walk and the roll-up took.
@@ -47,7 +45,9 @@ pub struct Scanned {
     pub finished_ns: i64,
 }
 
-/// `scan`.
+/// `scan`: the root's largest entries, as `top` lists them, under the
+/// scan block; on a terminal the footer alone until the treemap arrives
+/// (P1-MAP-02).
 pub fn run(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
     if args.save {
         return Err(not_yet("--save", "the index"));
@@ -55,159 +55,40 @@ pub fn run(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
     if args.interactive {
         return Err(not_yet("--interactive", "the interactive viewer"));
     }
-    list(&args.walk, &args.exclude, "scan", None, false, output)
+    super::query::scan(args, output)
 }
 
-/// Scans, then prints the root's largest children (its files with
-/// `files`) for `verb`. On a terminal, `scan` prints its footer alone
-/// until the treemap arrives (P1-MAP-02).
-pub fn list(
-    walk_args: &WalkArgs,
-    excludes: &[String],
-    verb: &'static str,
-    query: Option<&QueryArgs>,
-    files: bool,
-    output: &Output,
-) -> Result<(), Failure> {
-    let scanned = scan(walk_args, excludes)?;
-    // --strict: a directory that could not be read fails the command.
-    if query.is_some_and(|q| q.strict) && scanned.summary.unreadable_dirs > 0 {
-        return Err(Failure::new(
-            Exit::Permission,
-            "permission_denied",
-            format!(
-                "{} directories could not be read, and --strict asks for all of them",
-                scanned.summary.unreadable_dirs
-            ),
-        )
-        .hint("Run without --strict to accept totals that leave them out"));
-    }
-    let size_kind = size_kind(walk_args);
-    let envelope = envelope(&scanned, walk_args, verb, query, files, size_kind, output);
-    let footer = footer(&envelope.scan, &scanned, output);
-    if output.format == Format::Treemap {
-        output.line(&footer)
-    } else {
-        output.list(&envelope, &footer)
+impl Scanned {
+    /// The scan as the queries read it.
+    pub fn view(&self) -> ArenaView<'_> {
+        let root = std::path::absolute(&self.root).unwrap_or_else(|_| self.root.clone());
+        ArenaView::new(&self.arena, &self.rollup, root)
     }
 }
 
 /// The size the rows are ranked and shown by.
-fn size_kind(args: &WalkArgs) -> &'static str {
-    if args.apparent_size || args.size == Some(SizeKind::Apparent) {
-        "apparent"
+pub fn size_kind(args: &WalkArgs) -> SizeKind {
+    if args.apparent_size || args.size == Some(crate::cli::SizeKind::Apparent) {
+        SizeKind::Apparent
     } else {
-        "allocated"
-    }
-}
-
-/// The envelope of a listing: the scan block, then the root's children,
-/// largest first, path bytewise among equals.
-fn envelope(
-    scanned: &Scanned,
-    walk_args: &WalkArgs,
-    verb: &'static str,
-    query: Option<&QueryArgs>,
-    files: bool,
-    size_kind: &'static str,
-    output: &Output,
-) -> Envelope<TopEntry> {
-    let arena = &scanned.arena;
-    let root = &scanned.root;
-    let totals = Totals::of(arena, EntryIdx::ROOT);
-    let apparent = size_kind == "apparent";
-    let root_total = if apparent {
-        totals.apparent
-    } else {
-        totals.allocated
-    };
-    let mut rows: Vec<TopEntry> = arena
-        .entries()
-        .skip(1)
-        .filter(|view| view.parent == DirId::ROOT && (view.kind == Kind::Dir) != files)
-        .map(|view| {
-            let path = root.join(std::ffi::OsStr::from_bytes(view.name));
-            let path_bytes = path.as_os_str().as_bytes().to_vec();
-            let (name, name_raw) = name_fields(view.name);
-            let t = Totals::of(arena, view.idx);
-            let size = if apparent { t.apparent } else { t.allocated };
-            TopEntry {
-                path: String::from_utf8_lossy(&path_bytes).into_owned(),
-                path_bytes,
-                name,
-                name_raw,
-                kind: kind_name(view.kind),
-                allocated_bytes: t.allocated,
-                apparent_bytes: t.apparent,
-                pct_of_root: pct(size, root_total),
-                file_count: t.files,
-                dir_count: t.dirs,
-                max_mtime: iso8601(t.max_mtime_ns),
-                flags: t.flags,
-            }
-        })
-        .collect();
-    let key = |row: &TopEntry| {
-        if apparent {
-            row.apparent_bytes
-        } else {
-            row.allocated_bytes
-        }
-    };
-    rows.sort_by(|a, b| {
-        key(b)
-            .cmp(&key(a))
-            .then_with(|| a.path_bytes.cmp(&b.path_bytes))
-    });
-    let total_count = rows.len() as u64;
-    // ndjson streams every row; the others return at most 100.
-    let limit = (output.format != Format::Ndjson)
-        .then(|| query.and_then(|q| q.limit).unwrap_or(25).min(100));
-    if let Some(limit) = limit {
-        rows.truncate(limit);
-    }
-    let returned_count = rows.len() as u64;
-    Envelope {
-        ok: true,
-        schema_version: SCHEMA_VERSION,
-        tool: Tool::CURRENT,
-        scan: scan_block(scanned, walk_args, root, &totals, size_kind),
-        query: QueryBlock {
-            command: verb,
-            path: root.to_string_lossy().into_owned(),
-            depth: query.and_then(|q| q.depth),
-            limit: limit.map(|l| l as u64),
-            sort: format!("{size_kind}_desc"),
-            filters: Vec::new(),
-        },
-        entries: rows,
-        returned_count,
-        total_count,
-        truncated: returned_count < total_count,
-        next_cursor: None,
-        warnings: warnings(scanned, totals.upper_bound),
-        next: Vec::new(),
+        SizeKind::Allocated
     }
 }
 
 /// The scan block: the root, the scan's options, times and totals, and
 /// the volumes it met.
-fn scan_block(
-    scanned: &Scanned,
-    walk_args: &WalkArgs,
-    root: &Path,
-    totals: &Totals,
-    size_kind: &'static str,
-) -> ScanBlock {
+pub fn scan_block(scanned: &Scanned, walk_args: &WalkArgs, size: SizeKind) -> ScanBlock {
     let arena = &scanned.arena;
     let summary = &scanned.summary;
+    let view = scanned.view();
+    let root = view.node(0);
     ScanBlock {
         id: None,
-        root: root.to_string_lossy().into_owned(),
+        root: view.root_path().to_string_lossy().into_owned(),
         root_as_given: scanned.root_as_given.to_string_lossy().into_owned(),
         started_at: iso8601(scanned.started_ns),
         finished_at: iso8601(scanned.finished_ns),
-        size_kind,
+        size_kind: size.as_str(),
         attrs: match walk_args.attrs {
             AttrsArg::Basic => "basic",
             AttrsArg::Full => "full",
@@ -215,10 +96,10 @@ fn scan_block(
         thread_count: summary.threads as u64,
         fs_type: arena.volumes().first().map(|v| v.fs_type.clone()),
         device_confined: walk_args.one_file_system,
-        total_allocated_bytes: totals.allocated,
-        total_apparent_bytes: totals.apparent,
-        file_count: totals.files,
-        dir_count: totals.dirs,
+        total_allocated_bytes: root.allocated,
+        total_apparent_bytes: root.apparent,
+        file_count: root.file_count,
+        dir_count: root.dir_count,
         error_count: summary.unreadable_dirs + summary.entry_errors,
         vanished_count: arena.vanished(),
         incremental: false,
@@ -229,14 +110,14 @@ fn scan_block(
                 mount_point: v.mount_point.to_string_lossy().into_owned(),
                 fs_type: v.fs_type.clone(),
                 entered: v.entered(),
-                reason: v.reason.map(duscope_walk::Skip::as_str),
+                reason: v.reason.map(Skip::as_str),
                 read_only: v.read_only,
                 total_bytes: v.total_bytes,
                 free_bytes: v.free_bytes,
             })
             .collect(),
         excluded_count: summary.excluded,
-        excluded: excluded(arena, root),
+        excluded: excluded(arena, view.root_path()),
     }
 }
 
@@ -284,92 +165,10 @@ fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
         .collect()
 }
 
-/// An entry's totals: a directory's subtree, or a file's own.
-struct Totals {
-    allocated: u64,
-    apparent: u64,
-    files: u64,
-    dirs: u64,
-    max_mtime_ns: i64,
-    upper_bound: bool,
-    flags: Vec<&'static str>,
-}
-
-impl Totals {
-    fn of(arena: &Arena, idx: EntryIdx) -> Totals {
-        let view = arena.entry(idx);
-        let mut flags: Vec<&'static str> = FLAG_NAMES
-            .iter()
-            .filter(|(flag, _)| view.flags.contains(*flag))
-            .map(|&(_, name)| name)
-            .collect();
-        match view.dir {
-            Some(dir) => {
-                let rec = arena.dir(dir);
-                let upper_bound = rec.flags & DirRec::UPPER_BOUND != 0;
-                if upper_bound {
-                    flags.push("upper_bound");
-                }
-                if rec.flags & DirRec::UNREADABLE != 0 {
-                    flags.push("unreadable");
-                }
-                Totals {
-                    allocated: rec.cum_allocated,
-                    apparent: rec.cum_apparent,
-                    files: u64::from(rec.n_files),
-                    dirs: u64::from(rec.n_dirs) + 1,
-                    max_mtime_ns: rec.max_mtime_ns,
-                    upper_bound,
-                    flags,
-                }
-            }
-            None => Totals {
-                allocated: view.allocated,
-                apparent: view.apparent,
-                files: 1,
-                dirs: 0,
-                max_mtime_ns: view.mtime_ns,
-                upper_bound: false,
-                flags,
-            },
-        }
-    }
-}
-
-/// The storage flags rows name.
-const FLAG_NAMES: [(Flags, &str); 8] = [
-    (Flags::SPARSE, "sparse"),
-    (Flags::COMPRESSED, "compressed"),
-    (Flags::DATALESS, "dataless"),
-    (Flags::PURGEABLE, "purgeable"),
-    (Flags::MAY_SHARE, "may_share"),
-    (Flags::SHARES_ALL, "shares_all"),
-    (Flags::MOUNT_ROOT, "mount_root"),
-    (Flags::SUBVOLUME, "subvolume"),
-];
-
-/// A kind as rows name it.
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Dir => "dir",
-        Kind::File => "file",
-        Kind::Symlink => "symlink",
-        _ => "other",
-    }
-}
-
-/// `part` as a percentage of `whole`, with one decimal.
-fn pct(part: u64, whole: u64) -> f64 {
-    if whole == 0 {
-        return 0.0;
-    }
-    let tenths = (u128::from(part) * 1000 + u128::from(whole) / 2) / u128::from(whole);
-    f64::from(u32::try_from(tenths).unwrap_or(u32::MAX)) / 10.0
-}
-
 /// The scan's warnings.
-fn warnings(scanned: &Scanned, upper_bound: bool) -> Vec<Warning> {
+pub fn warnings(scanned: &Scanned) -> Vec<Warning> {
     let summary = &scanned.summary;
+    let upper_bound = scanned.view().node(0).upper_bound;
     let mut warnings = Vec::new();
     if summary.unreadable_dirs > 0 {
         warnings.push(Warning {
@@ -423,7 +222,7 @@ fn warnings(scanned: &Scanned, upper_bound: bool) -> Vec<Warning> {
 }
 
 /// The one line for people: the root's total, counts, and time.
-fn footer(scan: &ScanBlock, scanned: &Scanned, output: &Output) -> String {
+pub fn footer(scan: &ScanBlock, scanned: &Scanned, output: &Output) -> String {
     let total = if scan.size_kind == "apparent" {
         scan.total_apparent_bytes
     } else {
@@ -440,13 +239,17 @@ fn footer(scan: &ScanBlock, scanned: &Scanned, output: &Output) -> String {
     )
 }
 
-/// Now, as Unix nanoseconds.
-fn now_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_nanos()).ok())
-        .unwrap_or(0)
+/// Now, Unix nanoseconds: `--test-now` when given, else [`clock::now`]
+/// (which honours `DUSCOPE_TEST_NOW` in a debug build). The scan is timed
+/// on it and the queries measure ages and the scan's own age on it, so both
+/// read one clock.
+pub fn now(walk_args: &WalkArgs) -> Result<i64, Failure> {
+    match &walk_args.test_now {
+        Some(text) => timegrammar::parse_date(text)
+            .map(|date| date.ns)
+            .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--test-now {e}"))),
+        None => Ok(clock::now()),
+    }
 }
 
 /// Scans the tree `walk_args` names.
@@ -473,7 +276,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     let interrupts = Interrupts::arm();
     opts.cancel = Arc::clone(&interrupts.flag);
     let started = Instant::now();
-    let started_ns = now_ns();
+    let started_ns = now(walk_args)?;
     let mut arena = Arena::new(opts.attrs);
     let mut push_error = None;
     let walked = walk(&root, &opts, |event| {
@@ -508,15 +311,16 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             )
         });
     }
-    roll_up(&mut arena);
+    let rollup = roll_up(&mut arena);
     Ok(Scanned {
         arena,
+        rollup,
         summary,
         elapsed: started.elapsed(),
         root,
         root_as_given: given,
         started_ns,
-        finished_ns: now_ns(),
+        finished_ns: now(walk_args)?,
     })
 }
 
@@ -796,13 +600,15 @@ mod tests {
     use std::time::Duration;
 
     use clap::Parser;
-    use duscope_core::arena::{Arena, EntryIdx};
+    use duscope_core::arena::Arena;
+    use duscope_core::query::SizeKind;
     use duscope_core::rollup::roll_up;
     use duscope_walk::{Attrs, MemProvider, ScanEvent, WalkOptions, walk_with};
 
-    use super::{Scanned, Totals, envelope, scan_block};
+    use super::{Scanned, scan_block};
     use crate::cli::{Cli, Verb};
     use crate::out::{Format, Output, Units};
+    use crate::verbs::query::top_envelope;
 
     /// A scan of a small in-memory tree; without its volume when `volume`
     /// is false.
@@ -816,9 +622,10 @@ mod tests {
             }
         })
         .unwrap();
-        roll_up(&mut arena);
+        let rollup = roll_up(&mut arena);
         Scanned {
             arena,
+            rollup,
             summary,
             elapsed: Duration::ZERO,
             root: "/t".into(),
@@ -835,9 +642,7 @@ mod tests {
             panic!("not scan");
         };
         let block = |scanned: &Scanned| {
-            let totals = Totals::of(&scanned.arena, EntryIdx::ROOT);
-            let block = scan_block(scanned, &args.walk, Path::new("/t"), &totals, "allocated");
-            serde_json::to_value(block).unwrap()
+            serde_json::to_value(scan_block(scanned, &args.walk, SizeKind::Allocated)).unwrap()
         };
         assert_eq!(block(&scanned(true))["fs_type"], "mem");
         assert_eq!(block(&scanned(false))["fs_type"], serde_json::Value::Null);
@@ -856,9 +661,10 @@ mod tests {
             arena.push(event).unwrap();
         })
         .unwrap();
-        roll_up(&mut arena);
+        let rollup = roll_up(&mut arena);
         let scanned = Scanned {
             arena,
+            rollup,
             summary,
             elapsed: Duration::ZERO,
             root: "/t".into(),
@@ -877,15 +683,8 @@ mod tests {
             null: false,
             header: false,
         };
-        let envelope = envelope(
-            &scanned,
-            &args.walk,
-            "scan",
-            None,
-            true,
-            "allocated",
-            &output,
-        );
+        let (envelope, _) =
+            top_envelope(scanned, &args.walk, None, "scan", true, true, &output).unwrap();
         assert_eq!(envelope.scan.vanished_count, 1);
         assert_eq!(envelope.scan.error_count, 0);
         let warning = envelope
