@@ -31,6 +31,8 @@ mktree = { path = "tests/fixtures/mktree" }
 bitflags = "2.13.2"
 # No `color` (duscope styles its own help) and no `wrap_help`, which pulls in the
 # banned `terminal_size`: the help text is written to fit 80 columns.
+clap_complete = { version = "4.6.11", default-features = false }
+clap_mangen = { version = "=0.3.3", default-features = false }
 clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions"] }
 crossbeam-deque = "=0.8.8"
 crossbeam-utils = "=0.8.23"

@@ -59,6 +59,18 @@ pub enum Verb {
     ByType(ByTypeArgs),
     /// Large files not modified (or accessed) since a date
     Stale(StaleArgs),
+    /// Print the manual page, in roff, to stdout
+    Man,
+    /// Print the completion script for a shell to stdout
+    Completions(CompletionsArgs),
+}
+
+/// `completions`' arguments.
+#[derive(Debug, Clone, Args)]
+pub struct CompletionsArgs {
+    /// The shell
+    #[arg(value_enum, value_name = "SHELL")]
+    pub shell: clap_complete::Shell,
 }
 
 /// How a scan reads the tree: the flags every verb takes for the scan it
@@ -251,6 +263,8 @@ pub struct ScanArgs {
         long,
         env = "DUSCOPE_THEME",
         value_name = "THEME",
+        value_parser = ThemeName,
+        hide_possible_values = true,
         help_heading = "Output"
     )]
     pub theme: Option<OsString>,
@@ -521,6 +535,34 @@ pub fn parse_size(text: &str) -> Result<u64, String> {
                 .and_then(|w| w.checked_add(u64::try_from(part).ok()?))
                 .ok_or_else(bad)
         }
+    }
+}
+
+/// `--theme`: a pack's name or a theme file's path, taken as given; the
+/// pack names are offered to the shell completions.
+#[derive(Debug, Clone, Copy)]
+struct ThemeName;
+
+impl clap::builder::TypedValueParser for ThemeName {
+    type Value = OsString;
+
+    fn parse_ref(
+        &self,
+        _command: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<OsString, clap::Error> {
+        Ok(value.to_owned())
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            duscope_treemap::packs::NAMES
+                .iter()
+                .map(clap::builder::PossibleValue::new),
+        ))
     }
 }
 

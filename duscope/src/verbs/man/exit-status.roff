@@ -1,0 +1,27 @@
+.SH "EXIT STATUS"
+.TP
+.B 0
+Success, partial reads included; also when the reader of stdout goes away
+early.
+.TP
+.B 1
+A runtime error, such as a filter needing
+.B \-\-attrs full
+on a scan without it.
+.TP
+.B 2
+A usage error: an unknown flag, a bad value, a flag of a later release.
+.TP
+.B 3
+The path, or a saved scan asked for, does not exist.
+.TP
+.B 4
+Permission denied on the root, or unreadable directories under
+.BR \-\-strict .
+.TP
+.B 5
+A saved index is corrupt, or was written by a version of duscope that
+cannot read it.
+.TP
+.B 130
+Interrupted (Ctrl\-C).

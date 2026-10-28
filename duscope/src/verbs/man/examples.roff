@@ -1,0 +1,19 @@
+.SH EXAMPLES
+.TP
+.B duscope
+Scan the current directory and draw its treemap.
+.TP
+.B duscope top ~ \-\-depth 2 \-\-limit 10
+The ten largest directories two levels under the home folder.
+.TP
+.B duscope stale ~/Downloads \-\-older\-than 180d \-\-min\-size 100M
+Large downloads nobody has changed for half a year.
+.TP
+.B duscope by\-type . \-\-examples 3
+Bytes by file class, with the three largest files of each.
+.TP
+.B duscope scan ~ \-\-exclude\-caches \-\-json
+The JSON envelope of a scan that leaves out regenerable caches.
+.TP
+.B duscope completions zsh > _duscope
+Write the zsh completion script.
