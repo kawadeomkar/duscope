@@ -322,6 +322,7 @@ proptest! {
                 unreadable_dirs: 0,
                 entry_errors: 0,
                 vanished: 0,
+                excluded: 0,
                 skipped_dirs: 0,
                 volumes: 1,
                 mounts_excluded: 0,
@@ -1070,6 +1071,7 @@ fn p1_walk_06_a_handle_walks_back_to_the_root() {
     let child = DirHandle::new(
         DirId::new(1),
         PathBuf::from("/r/a"),
+        b"a".to_vec(),
         &entry,
         Some(Arc::clone(&root)),
     );

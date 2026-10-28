@@ -43,6 +43,10 @@ struct Node {
     read_errno: Option<i32>,
     /// Reading this entry from its parent fails with this error number.
     stat_errno: Option<i32>,
+    /// A directory holding a valid `CACHEDIR.TAG`.
+    tagged: bool,
+    /// A symbolic link's target, when the tree says where it leads.
+    target: Option<PathBuf>,
 }
 
 impl MemProvider {
@@ -76,6 +80,28 @@ impl MemProvider {
     /// Adds a symbolic link at `path` with a target of `target_len` bytes.
     pub fn symlink(&mut self, path: impl AsRef<Path>, target_len: u64) -> &mut MemProvider {
         self.add(path.as_ref(), Kind::Symlink, target_len)
+    }
+
+    /// Adds a symbolic link at `path` that leads to `target`, absolute or
+    /// relative to the link's directory, which
+    /// [`follow`](Provider::follow) resolves through the tree.
+    pub fn link(&mut self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> &mut MemProvider {
+        let target = target.as_ref();
+        let len = target.as_os_str().len() as u64;
+        self.add(path.as_ref(), Kind::Symlink, len);
+        self.node_mut(path.as_ref()).target = Some(target.to_owned());
+        self
+    }
+
+    /// Gives the directory at `path` a valid `CACHEDIR.TAG`, which
+    /// [`cachedir_tag`](Provider::cachedir_tag) reports.
+    ///
+    /// # Panics
+    ///
+    /// If nothing was added at `path`.
+    pub fn cachedir_tag(&mut self, path: impl AsRef<Path>) -> &mut MemProvider {
+        self.node_mut(path.as_ref()).tagged = true;
+        self
     }
 
     /// Makes reading the directory at `path` fail with `errno`.
@@ -154,6 +180,8 @@ impl MemProvider {
                 children: Vec::new(),
                 read_errno: None,
                 stat_errno: None,
+                tagged: false,
+                target: None,
             },
         );
     }
@@ -169,6 +197,22 @@ impl MemProvider {
 /// `path` with its separators normalised, so equal paths have equal bytes.
 fn normal(path: &Path) -> PathBuf {
     path.components().collect()
+}
+
+/// `path` with `.` and `..` resolved by name, as a link target is in a tree
+/// that holds no links on the way.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn key(path: &Path) -> &[u8] {
@@ -264,5 +308,34 @@ impl Provider for MemProvider {
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
         let name = path.file_name().unwrap_or(path.as_os_str());
         Ok(node.entry(NameRef::from(name), opts))
+    }
+
+    fn cachedir_tag(&self, dir: &Path) -> bool {
+        self.nodes
+            .get(key(&normal(dir)))
+            .is_some_and(|node| node.tagged)
+    }
+
+    /// Follows the links the tree says where they lead, as the kernel
+    /// would: `ELOOP` after 40 hops, `ENOENT` for a target not in the tree.
+    /// A link added without a target leads nowhere.
+    fn follow(&self, path: &Path, opts: &WalkOptions) -> io::Result<(PathBuf, Entry)> {
+        let mut at = normal(path);
+        for _ in 0..40 {
+            let node = self
+                .nodes
+                .get(key(&at))
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            if node.kind != Kind::Symlink {
+                let entry = self.root(&at, opts)?;
+                return Ok((at, entry));
+            }
+            let target = node
+                .target
+                .as_ref()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            at = lexical(&at.parent().unwrap_or(&at).join(target));
+        }
+        Err(io::Error::from_raw_os_error(libc::ELOOP))
     }
 }

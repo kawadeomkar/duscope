@@ -35,6 +35,7 @@ clap = { version = "4.6.7", default-features = false, features = ["std", "derive
 crossbeam-deque = "=0.8.8"
 crossbeam-utils = "=0.8.23"
 # Default features off: the `log` feature only logs how patterns compile.
+gix-ignore = { version = "=0.24.1", default-features = false }
 globset = { version = "=0.4.20", default-features = false }
 libc = "=0.2.191"
 log = "=0.4.34"

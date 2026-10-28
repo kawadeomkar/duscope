@@ -17,6 +17,7 @@
 
 mod entry;
 mod errors;
+mod excludes;
 mod mem;
 mod options;
 mod platform;
@@ -24,7 +25,7 @@ mod scheduler;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic;
@@ -42,9 +43,11 @@ pub use entry::{
     VolumeClass, VolumeInfo,
 };
 pub use errors::{ScanError, WalkError};
+pub use excludes::IgnoreRules;
 pub use mem::MemProvider;
 pub use options::{Attrs, CacheRule, WalkOptions};
 
+use excludes::Excludes;
 use scheduler::PoolShared;
 
 /// Reads directories for a walk: one implementation per platform, plus the
@@ -174,6 +177,14 @@ pub trait Provider: Send + Sync {
         Ok((real, entry))
     }
 
+    /// Whether the directory at `dir` holds a valid `CACHEDIR.TAG` (the
+    /// 43-byte signature, in a regular file that is not a link), for
+    /// `--exclude-caches`. The default reads the file system, the one read of
+    /// a file's contents the scanner makes.
+    fn cachedir_tag(&self, dir: &Path) -> bool {
+        platform::cachedir_tag(dir)
+    }
+
     /// The workers a walk runs when [`WalkOptions::threads`] is 0: twice the
     /// logical CPUs, clamped to 4..=32, until the phase-1 thread sweep sets
     /// each platform's default.
@@ -189,6 +200,9 @@ pub trait Provider: Send + Sync {
 pub struct DirHandle {
     id: DirId,
     path: PathBuf,
+    /// The path relative to the root, `/`-separated, as the directory was
+    /// reached; empty for the root.
+    rel: Vec<u8>,
     depth: u32,
     dev: u64,
     ino: u64,
@@ -197,11 +211,19 @@ pub struct DirHandle {
 }
 
 impl DirHandle {
-    /// The handle of `entry`, a directory numbered `id`, inside `parent`.
-    fn new(id: DirId, path: PathBuf, entry: &Entry, parent: Option<Arc<DirHandle>>) -> DirHandle {
+    /// The handle of `entry`, a directory numbered `id` at `rel` below the
+    /// root (empty when no exclude needs it), inside `parent`.
+    fn new(
+        id: DirId,
+        path: PathBuf,
+        rel: Vec<u8>,
+        entry: &Entry,
+        parent: Option<Arc<DirHandle>>,
+    ) -> DirHandle {
         DirHandle {
             id,
             path,
+            rel,
             depth: parent.as_ref().map_or(0, |p| p.depth + 1),
             dev: entry.dev,
             ino: entry.ino,
@@ -221,12 +243,24 @@ impl DirHandle {
         DirHandle {
             id: DirId::ROOT,
             path,
+            rel: Vec::new(),
             depth,
             dev: 0,
             ino: 0,
             mnt_id: 0,
             parent,
         }
+    }
+
+    /// The path relative to the root of this directory's child `name`.
+    fn rel_of(&self, name: &[u8]) -> Vec<u8> {
+        let mut rel = Vec::with_capacity(self.rel.len() + 1 + name.len());
+        rel.extend_from_slice(&self.rel);
+        if !rel.is_empty() {
+            rel.push(b'/');
+        }
+        rel.extend_from_slice(name);
+        rel
     }
 
     /// The directory's device, as its entry reported it.
@@ -293,6 +327,8 @@ pub struct WalkSummary {
     /// Entries and directories that disappeared between being listed and
     /// being read ([`ScanEvent::Vanished`]).
     pub vanished: u64,
+    /// Files left out and directories not entered by the excludes.
+    pub excluded: u64,
     /// Directories listed but not entered ([`ScanEvent::Skipped`]).
     pub skipped_dirs: u64,
     /// Volumes met ([`ScanEvent::Volume`]), the root's included.
@@ -419,6 +455,8 @@ enum Job {
 /// A directory whose read left names for [`Job::Stat`]s.
 struct Split {
     dir: Arc<DirHandle>,
+    /// Every name the directory listed, for the cache rules' markers.
+    listing: Option<Arc<HashSet<NameRef>>>,
     /// The directory's read plus its stat jobs not yet done; the part that
     /// takes it to 0 closes the directory.
     parts: AtomicUsize,
@@ -441,6 +479,8 @@ struct Batch {
     /// Whether `dir` itself disappeared after it was listed; only on a
     /// closing batch.
     dir_vanished: bool,
+    /// Entries left out or not entered by the excludes.
+    excluded: u64,
     /// Volumes first met among `entries`.
     volumes: Vec<VolumeInfo>,
     /// Directories among `entries` the walk does not enter.
@@ -467,6 +507,21 @@ struct Walk<'a, P: ?Sized> {
     /// Each mount id met so far: its class (`None` when it could not be
     /// read), and whether its volume has been reported.
     mounts: Mutex<HashMap<u64, Met>>,
+    /// What the walk leaves out, when it leaves anything out.
+    excludes: Option<Excludes<'a>>,
+}
+
+/// What adopting a directory's entries found beside them.
+#[derive(Default)]
+struct Adopted {
+    /// Volumes first met.
+    volumes: Vec<VolumeInfo>,
+    /// Directories listed but not entered, and why.
+    skipped: Vec<(DirId, Skip)>,
+    /// Names that vanished after they were listed.
+    vanished: Vec<NameRef>,
+    /// Entries left out or not entered by the excludes.
+    excluded: u64,
 }
 
 /// A mount the walk has met.
@@ -514,7 +569,7 @@ pub fn walk_with<P: Provider + ?Sized>(
         threads,
         ..WalkSummary::default()
     };
-    let root_dir = DirHandle::new(DirId::ROOT, root.to_owned(), &entry, None);
+    let root_dir = DirHandle::new(DirId::ROOT, root.to_owned(), Vec::new(), &entry, None);
     let (root_dev, root_mnt_id) = (entry.dev, entry.mnt_id);
     sink(ScanEvent::Entry(entry));
     if let Ok(mut volume) = provider.volume(root) {
@@ -548,6 +603,7 @@ pub fn walk_with<P: Provider + ?Sized>(
                 reported: true,
             },
         )])),
+        excludes: Excludes::new(opts),
     };
     let run = |job: Job, worker: &Worker<Job>, shared: &PoolShared<Job, Event>| {
         state.run(job, worker, shared);
@@ -598,6 +654,7 @@ fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEv
         sink(ScanEvent::Error(error));
     }
     summary.vanished += batch.vanished.len() as u64;
+    summary.excluded += batch.excluded;
     for name in batch.vanished {
         sink(ScanEvent::Vanished {
             dir: batch.dir,
@@ -671,10 +728,35 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 Some(e.raw_os_error().unwrap_or(EIO))
             }
         };
+        // Every name the directory listed, when the cache rules need it.
+        let listing = self
+            .excludes
+            .as_ref()
+            .filter(|e| {
+                // Only when a child directory could be a cache by its name.
+                e.wants_listing()
+                    && e.may_mark(
+                        entries
+                            .iter()
+                            .filter(|entry| entry.kind == Kind::Dir)
+                            .map(|entry| &entry.name)
+                            .chain(later.iter()),
+                    )
+            })
+            .map(|_| {
+                let names = entries.iter().map(|e| e.name.clone());
+                let names = names.chain(errors.iter().map(|e| e.name.clone()));
+                Arc::new(names.chain(later.iter().cloned()).collect::<HashSet<_>>())
+            });
         let mut jobs = Vec::new();
-        let Some((volumes, skipped, vanished)) =
-            self.adopt(dir, &mut entries, &mut errors, &mut jobs, shared)
-        else {
+        let Some(adopted) = self.adopt(
+            dir,
+            listing.as_deref(),
+            &mut entries,
+            &mut errors,
+            &mut jobs,
+            shared,
+        ) else {
             return;
         };
         // A directory that could not be read, by the error matrix: one that
@@ -691,6 +773,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         let split = (!later.is_empty()).then(|| {
             let split = Arc::new(Split {
                 dir: Arc::clone(dir),
+                listing,
                 parts: AtomicUsize::new(later.len().div_ceil(STAT_BATCH) + 1),
             });
             for names in stat_batches(later) {
@@ -702,10 +785,11 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             dir: dir.id,
             entries,
             errors,
-            vanished,
+            vanished: adopted.vanished,
             dir_vanished,
-            volumes,
-            skipped,
+            excluded: adopted.excluded,
+            volumes: adopted.volumes,
+            skipped: adopted.skipped,
             closes: split.is_none(),
             errno,
         };
@@ -740,19 +824,25 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 .collect();
         }
         let mut jobs = Vec::new();
-        let Some((volumes, skipped, vanished)) =
-            self.adopt(&split.dir, &mut entries, &mut errors, &mut jobs, shared)
-        else {
+        let Some(adopted) = self.adopt(
+            &split.dir,
+            split.listing.as_deref(),
+            &mut entries,
+            &mut errors,
+            &mut jobs,
+            shared,
+        ) else {
             return;
         };
         let batch = Batch {
             dir: split.dir.id,
             entries,
             errors,
-            vanished,
+            vanished: adopted.vanished,
             dir_vanished: false,
-            volumes,
-            skipped,
+            excluded: adopted.excluded,
+            volumes: adopted.volumes,
+            skipped: adopted.skipped,
             closes: false,
             errno: None,
         };
@@ -761,25 +851,34 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     }
 
     /// Sets the parent of `dir`'s new entries and errors, follows its
-    /// symbolic links under `--follow-symlinks`, numbers its subdirectories
-    /// and queues a read of each the walk enters. Entries that vanished
-    /// after they were listed leave `errors`. Returns the volumes first
-    /// met, the directories not entered and the names that vanished, or
-    /// `None` when the ids ran out, which stops the walk.
-    #[allow(clippy::type_complexity)]
+    /// symbolic links under `--follow-symlinks`, leaves out what the
+    /// excludes match, numbers its subdirectories and queues a read of each
+    /// the walk enters. Entries that vanished after they were listed leave
+    /// `errors`. `listing` is every name `dir` listed, for the cache rules.
+    /// Returns `None` when the ids ran out, which stops the walk.
     fn adopt(
         &self,
         dir: &Arc<DirHandle>,
+        listing: Option<&HashSet<NameRef>>,
         entries: &mut Vec<Entry>,
         errors: &mut Vec<ScanError>,
         jobs: &mut Vec<Job>,
         shared: &PoolShared<Job, Event>,
-    ) -> Option<(Vec<VolumeInfo>, Vec<(DirId, Skip)>, Vec<NameRef>)> {
-        let (mut volumes, mut skipped, mut vanished) = (Vec::new(), Vec::new(), Vec::new());
+    ) -> Option<Adopted> {
+        let mut adopted = Adopted::default();
+        // Paths relative to the root, built only for globs and ignore rules.
+        let by_path = self.excludes.as_ref().filter(|ex| ex.wants_rel());
+        let rel_of =
+            |name: &NameRef| by_path.map_or_else(Vec::new, |_| dir.rel_of(name.as_bytes()));
+        // An entry the excludes leave out reports nothing, not even that it
+        // could not be read or vanished.
         errors.retain(|error| {
+            if by_path.is_some_and(|ex| ex.matches(&rel_of(&error.name), None)) {
+                return false;
+            }
             let gone = Failed::of(error.errno) == Failed::Vanished;
             if gone {
-                vanished.push(error.name.clone());
+                adopted.vanished.push(error.name.clone());
             }
             !gone
         });
@@ -789,37 +888,77 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         } else {
             Vec::new()
         };
+        let mut left_out = Vec::new();
         for (i, entry) in entries.iter_mut().enumerate() {
             entry.parent = dir.id;
             entry.dir = None;
-            if entry.kind == Kind::Dir {
+            let is_dir = entry.kind == Kind::Dir;
+            let rel = rel_of(&entry.name);
+            let excluded = self
+                .excludes
+                .as_ref()
+                .and_then(|ex| ex.excluded(&rel, entry, listing));
+            if excluded.is_some() {
+                adopted.excluded += 1;
+                if !is_dir {
+                    left_out.push(i);
+                    continue;
+                }
+            }
+            if is_dir {
                 let Some(id) = self.allocate_dir() else {
                     self.out_of_ids.store(true, Ordering::Relaxed);
                     shared.stop();
                     return None;
                 };
                 entry.dir = Some(id);
+                // The path only a directory needs: a file costs no copy.
                 let path = match resolved.get(i) {
-                    Some(Some(real)) => real.clone(),
+                    Some(Some(target)) => target.clone(),
                     _ => dir.path.join(entry.name.as_os_str()),
                 };
-                let skip = self.decide(dir, entry, &path, &mut volumes);
+                let mut skip = excluded;
+                if skip.is_none() {
+                    let met = adopted.volumes.len();
+                    skip = self.decide(dir, entry, &path, &mut adopted.volumes);
+                    // The tag is read only in a directory the walk would
+                    // enter, so a skipped mount is never touched.
+                    if skip.is_none()
+                        && self.excludes.as_ref().is_some_and(Excludes::wants_tags)
+                        && self.provider.cachedir_tag(&path)
+                    {
+                        adopted.excluded += 1;
+                        for volume in &mut adopted.volumes[met..] {
+                            volume.reason = Some(Skip::ExcludedCache);
+                        }
+                        skip = Some(Skip::ExcludedCache);
+                    }
+                }
                 if let Some(reason) = skip {
-                    skipped.push((id, reason));
+                    adopted.skipped.push((id, reason));
                     continue;
                 }
                 jobs.push(Job::ReadDir(Arc::new(DirHandle::new(
                     id,
                     path,
+                    rel,
                     entry,
                     Some(Arc::clone(dir)),
                 ))));
             }
         }
+        if !left_out.is_empty() {
+            let mut i = 0;
+            entries.retain(|_| {
+                let keep = left_out.binary_search(&i).is_err();
+                i += 1;
+                keep
+            });
+        }
         for error in errors {
             error.dir = dir.id;
         }
-        Some((volumes, skipped, vanished))
+        Some(adopted)
     }
 
     /// Replaces each symbolic link among `entries` with the entry it leads
@@ -827,7 +966,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     /// directory reached through a link is read from. A link that loops, one
     /// to a directory on its own path, and one whose target cannot be named
     /// (`ENAMETOOLONG`) or read (`EIO`) become errors of `dir`; one that
-    /// leads nowhere stays a link.
+    /// leads nowhere stays a link, and so does one the globs or ignore rules
+    /// leave out, which is left out unread.
     fn follow_links(
         &self,
         dir: &DirHandle,
@@ -837,7 +977,12 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         let mut resolved = Vec::with_capacity(entries.len());
         let mut kept = Vec::with_capacity(entries.len());
         for entry in entries.drain(..) {
-            if entry.kind != Kind::Symlink {
+            let excluded = || {
+                self.excludes.as_ref().is_some_and(|ex| {
+                    ex.wants_rel() && ex.matches(&dir.rel_of(entry.name.as_bytes()), Some(false))
+                })
+            };
+            if entry.kind != Kind::Symlink || excluded() {
                 kept.push(entry);
                 resolved.push(None);
                 continue;
@@ -1005,6 +1150,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 errors: Vec::new(),
                 vanished: Vec::new(),
                 dir_vanished: false,
+                excluded: 0,
                 volumes: Vec::new(),
                 skipped: Vec::new(),
                 closes: true,
