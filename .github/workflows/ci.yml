@@ -469,11 +469,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The two binaries the budget holds (the spec's arm64 macOS and x86_64
+        # musl); the musl build also keeps the release targets linking.
         include:
           - os: macos-26
             key: macos
+            target: ""
           - os: ubuntu-24.04
             key: ubuntu
+            target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     outputs:
@@ -491,17 +495,25 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install the musl target and musl-tools
+        if: matrix.target != ''
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup target add "$TARGET"
+          sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q musl-tools
       - name: just size
         id: size
         env:
           KEY: ${{ matrix.key }}
           OS: ${{ matrix.os }}
+          TARGET: ${{ matrix.target }}
         run: |
           set +e
-          just size 2>&1 | tee "$RUNNER_TEMP/size.log"
+          just size "$TARGET" 2>&1 | tee "$RUNNER_TEMP/size.log"
           status=${PIPESTATUS[0]}
           set -e
-          host=$(rustc -vV | sed -n 's/^host: //p')
+          host=${TARGET:-$(rustc -vV | sed -n 's/^host: //p')}
           line=$(grep -m1 '^duscope: ' "$RUNNER_TEMP/size.log" || echo "no size reported")
           (( status == 0 )) || line="$line; FAILED (just size exited $status)"
           echo "$KEY=$line ($host)" >> "$GITHUB_OUTPUT"

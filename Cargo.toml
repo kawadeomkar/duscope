@@ -42,6 +42,8 @@ jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-s
 globset = { version = "=0.4.20", default-features = false }
 libc = "=0.2.191"
 log = "=0.4.34"
+# The allocator of the musl builds only (P1-BENCH-03); no default features.
+mimalloc = { version = "=0.1.52", default-features = false }
 thiserror = "2.0.21"
 # Default features off: no `cjk`, whose ambiguous-width variant the map does not use.
 unicode-width = { version = "=0.2.2", default-features = false }

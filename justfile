@@ -121,12 +121,19 @@ test-crate crate:
 docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
-# Release build and the stripped binary size against the budget
-size:
+# Release build and the stripped binary size against the budget; a target (x86_64-unknown-linux-musl) builds that one
+size target="":
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --release --locked -p duscope
-    bytes=$(wc -c < target/release/duscope | tr -d ' ')
+    target={{quote(target)}}
+    if [[ -n $target ]]; then
+      cargo build --release --locked -p duscope --target "$target"
+      binary=target/$target/release/duscope
+    else
+      cargo build --release --locked -p duscope
+      binary=target/release/duscope
+    fi
+    bytes=$(wc -c < "$binary" | tr -d ' ')
     awk -v b="$bytes" -v l={{size_budget}} 'BEGIN { printf "duscope: %d bytes stripped, %.2f MB of the %.2f MB budget\n", b, b / 1e6, l / 1e6 }'
     (( bytes <= {{size_budget}} )) || { echo "size: over budget" >&2; exit 1; }
 

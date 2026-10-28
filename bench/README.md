@@ -329,3 +329,4 @@ disagree. `--threads` and `DUSCOPE_THREADS` still override.
 | `gab_bench.c` | the per-entry cost of `getattrlistbulk` attribute sets on macOS |
 | `sweep.py` | the thread sweep and the rule that sets a platform's default thread count |
 | `results/clone-attributes-macos.json` | P1-BENCH-02's measurement and the `--clones` and `PRIVATESIZE` decisions |
+| `results/allocator.json` | P1-BENCH-03's measurement: mimalloc on the musl builds, the system allocator on macOS |
