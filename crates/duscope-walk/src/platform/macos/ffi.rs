@@ -231,6 +231,49 @@ pub(super) fn statfs(path: &CStr) -> io::Result<libc::statfs> {
     Ok(unsafe { stat.assume_init() })
 }
 
+/// `pathconf(2)` of `path`; `None` when the value is unknown or the call
+/// fails.
+pub(super) fn pathconf(path: &CStr, name: c_int) -> Option<libc::c_long> {
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    let value = unsafe { libc::pathconf(path.as_ptr(), name) };
+    (value >= 0).then_some(value)
+}
+
+/// The device a `statfs` record's `f_fsid` names: its first word, which
+/// macOS fills with the volume's own device (the device bulk reads report
+/// under `FSOPT_RETURN_REALDEV`).
+pub(super) fn fsid_dev(fs: &libc::statfs) -> u64 {
+    // SAFETY: fsid_t is `#[repr(C)] struct { [i32; 2] }` in <sys/mount.h>
+    // and in libc, so it has the layout of two i32s; libc keeps the field
+    // private, hence the copy.
+    let words: [i32; 2] = unsafe { std::mem::transmute(fs.f_fsid) };
+    super::bulk::dev(words[0])
+}
+
+/// Every mounted volume as the kernel last recorded it (`getfsstat(2)`
+/// with `MNT_NOWAIT`): no volume is asked for fresh statistics, so a dead
+/// network mount cannot block the call.
+pub(super) fn mounted_volumes() -> io::Result<Vec<libc::statfs>> {
+    loop {
+        // SAFETY: a null buffer asks only for the count.
+        let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+        let count = usize::try_from(count).map_err(|_| io::Error::last_os_error())?;
+        // Room for a few mounts appearing between the two calls.
+        let capacity = count + 4;
+        let mut buf: Vec<libc::statfs> = Vec::with_capacity(capacity);
+        let bytes = libc::c_int::try_from(capacity * std::mem::size_of::<libc::statfs>())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: `buf` has room for `capacity` structs, `bytes` long.
+        let filled = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+        let filled = usize::try_from(filled).map_err(|_| io::Error::last_os_error())?;
+        if filled < capacity {
+            // SAFETY: getfsstat initialised the first `filled` structs.
+            unsafe { buf.set_len(filled) };
+            return Ok(buf);
+        }
+    }
+}
+
 /// `fstatfs(2)` of the volume holding the file open on `fd`.
 pub(super) fn fstatfs(fd: BorrowedFd<'_>) -> io::Result<libc::statfs> {
     let mut stat = MaybeUninit::<libc::statfs>::uninit();

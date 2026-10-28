@@ -54,7 +54,7 @@ pub(crate) fn native() -> Option<Box<dyn Provider>> {
 #[allow(clippy::unnecessary_wraps)] // `None` where no provider is built
 pub(crate) fn fallback() -> Option<Box<dyn Provider>> {
     setup();
-    Some(Box::new(fallback::FallbackProvider))
+    Some(Box::new(fallback::FallbackProvider::default()))
 }
 
 /// The fallback provider: none is built here.

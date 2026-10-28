@@ -8,8 +8,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use crate::{
-    Attrs, Boundary, DirHandle, DirId, Entry, Flags, FullAttrs, Kind, NameRef, Provider, ScanError,
-    Share, VolumeInfo, WalkOptions,
+    Attrs, Boundary, DirHandle, DirId, Entry, Flags, FullAttrs, Kind, NameRef, Normalization,
+    Provider, ScanError, Share, VolumeClass, VolumeInfo, WalkOptions,
 };
 
 /// Every entry's mtime and ctime: 2026-10-22T00:00:00Z.
@@ -58,6 +58,7 @@ impl MemProvider {
     }
 
     /// The root path.
+    #[must_use]
     pub fn root_path(&self) -> &Path {
         &self.root
     }
@@ -114,6 +115,7 @@ impl MemProvider {
     }
 
     /// The number of entries, the root included.
+    #[must_use]
     pub fn entry_count(&self) -> usize {
         self.nodes.len()
     }
@@ -244,8 +246,14 @@ impl Provider for MemProvider {
             mnt_id: DEV,
             mount_point: self.root.clone(),
             fs_type: "mem".to_owned(),
+            class: VolumeClass::Local,
+            read_only: false,
+            case_sensitive: Some(true),
+            normalization: Normalization::None,
+            options: Vec::new(),
             total_bytes: 1 << 40,
             free_bytes: 1 << 39,
+            reason: None,
         })
     }
 

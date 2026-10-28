@@ -15,9 +15,7 @@ use duscope_testkit::TestEnv;
 use super::bulk::{self, Decoded, Outcome, Probe, Request};
 use super::{MacProvider, ffi, stat};
 use crate::platform::posix;
-use crate::{
-    Boundary, DirHandle, DirId, Entry, Flags, Kind, ScanEvent, Share, WalkOptions, walk_with,
-};
+use crate::{Boundary, DirHandle, Entry, Flags, Kind, ScanEvent, Share, WalkOptions, walk_with};
 
 /// A clock on which every bulk refill waits on I/O: each reading moves the
 /// wall clock 10 ms and the CPU clock 1 µs.
@@ -110,7 +108,10 @@ fn p1_walk_03_every_entry_matches_lstat() {
             "ctime {path:?}"
         );
         assert_eq!(entry.dev, bulk::dev(st.st_dev), "dev {path:?}");
-        assert_eq!(entry.mnt_id, entry.dev, "mnt_id {path:?}");
+        assert_eq!(
+            entry.mnt_id, entry.dev,
+            "a volume is named by its device: {path:?}"
+        );
         assert_eq!(entry.ino, st.st_ino, "ino {path:?}");
         if kind != Kind::Dir {
             assert_eq!(entry.nlink, u32::from(st.st_nlink), "nlink {path:?}");
@@ -222,11 +223,7 @@ fn p1_walk_03_a_record_without_a_name_is_an_error() {
     let env = TestEnv::new();
     let root = env.fixtures().root();
     let fd = posix::open_dir(&root).unwrap();
-    let dir = DirHandle {
-        id: DirId::ROOT,
-        path: root.clone(),
-        depth: 0,
-    };
+    let dir = DirHandle::detached(&root, 0);
     let (mut out, mut errs) = (Vec::new(), Vec::new());
     let mut single = ffi::AttrBuf::new(stat::BUFFER_BYTES);
     super::take(
@@ -796,11 +793,7 @@ fn volume_of(path: &Path) -> crate::VolumeInfo {
 
 /// The entries of one directory, read by the provider.
 fn read_one(path: &str, depth: u32) -> Vec<Entry> {
-    let dir = crate::DirHandle {
-        id: crate::DirId::ROOT,
-        path: PathBuf::from(path),
-        depth,
-    };
+    let dir = crate::DirHandle::detached(path, depth);
     let (mut out, mut errs) = (Vec::new(), Vec::new());
     crate::Provider::read_dir(
         &MacProvider::new(),
@@ -847,11 +840,7 @@ fn p1_walk_07_a_scan_of_slash_skips_the_data_volume_mount() {
     let skip_in = |path: &str, root_depth: u32| {
         // /System/Volumes, read as `path` in a scan rooted `root_depth`
         // levels up.
-        let dir = crate::DirHandle {
-            id: crate::DirId::ROOT,
-            path: PathBuf::from(path),
-            depth: root_depth,
-        };
+        let dir = crate::DirHandle::detached(path, root_depth);
         let data = read_one("/System/Volumes", root_depth)
             .into_iter()
             .find(|e| e.name.as_bytes() == b"Data")
@@ -885,11 +874,7 @@ fn p1_walk_07_a_scan_of_system_skips_the_firmlinks_below_it() {
     };
     let provider = MacProvider::new();
     let skip = |root_depth| {
-        let dir = crate::DirHandle {
-            id: crate::DirId::ROOT,
-            path: PathBuf::from("/System/Library"),
-            depth: root_depth,
-        };
+        let dir = crate::DirHandle::detached("/System/Library", root_depth);
         crate::Provider::skip(&provider, &dir, &caches, &WalkOptions::default())
     };
     assert_eq!(skip(1), Some(crate::Skip::Firmlinked), "rooted at /System");
@@ -899,6 +884,14 @@ fn p1_walk_07_a_scan_of_system_skips_the_firmlinks_below_it() {
         None,
         "rooted at /System/Library: no mount point below"
     );
+    // Under -x the mount point is another volume and stays out, so the
+    // firmlinks are the way in.
+    let dir = crate::DirHandle::detached("/System/Library", 1);
+    let opts = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    assert_eq!(crate::Provider::skip(&provider, &dir, &caches, &opts), None);
 }
 
 /// A scan of `/` on the machine running the test: `/Users` is counted once,
@@ -918,7 +911,12 @@ fn p1_walk_07_a_scan_of_slash_counts_users_once() {
     walk_with(
         &MacProvider::new(),
         Path::new("/"),
-        &WalkOptions::default(),
+        // -x, as `du -skx` reads /Users below: no other volume mounted
+        // under it is counted on either side.
+        &WalkOptions {
+            one_file_system: true,
+            ..WalkOptions::default()
+        },
         |event| match event {
             ScanEvent::Entry(entry) => {
                 let path = if entry.dir == Some(crate::DirId::ROOT) {
@@ -952,10 +950,12 @@ fn p1_walk_07_a_scan_of_slash_counts_users_once() {
         under_data, 0,
         "nothing under the Data volume's mount point is read"
     );
-    assert!(skipped.contains(&(
-        PathBuf::from("/System/Volumes/Data"),
-        crate::Skip::Firmlinked
-    )));
+    // Listed, not entered: under -x as another volume.
+    assert!(
+        skipped
+            .iter()
+            .any(|(path, _)| path == Path::new("/System/Volumes/Data"))
+    );
     let out = env.command("du").args(["-skx", "/Users"]).output().unwrap();
     let du: u64 = String::from_utf8(out.stdout)
         .unwrap()
@@ -970,6 +970,58 @@ fn p1_walk_07_a_scan_of_slash_counts_users_once() {
         ours.abs_diff(du) * 50 <= du,
         "/Users: {ours} KiB read, du -skx says {du} KiB"
     );
+}
+
+#[test]
+fn p1_walk_06_mount_classes() {
+    use super::volume::class;
+    use crate::VolumeClass;
+    assert_eq!(class("apfs"), VolumeClass::Local);
+    assert_eq!(class("devfs"), VolumeClass::Kernel);
+    assert_eq!(class("smbfs"), VolumeClass::Network);
+    assert_eq!(class("autofs"), VolumeClass::Network);
+    assert_eq!(class("macfuse"), VolumeClass::Network);
+    assert_eq!(class("exfat"), VolumeClass::Foreign);
+    assert_eq!(class("cd9660"), VolumeClass::ReadOnlyImage);
+}
+
+#[test]
+fn p1_walk_06_mount_info_reads_the_mount_table() {
+    // The boot volume is mounted at /; its record comes from getfsstat.
+    let dev = |path: &str| {
+        crate::Provider::root(
+            &MacProvider::new(),
+            Path::new(path),
+            &WalkOptions::default(),
+        )
+        .unwrap()
+        .dev
+    };
+    let info = super::volume::mount_info(Path::new("/"), dev("/")).unwrap();
+    assert_eq!(info.mount_point, Path::new("/"));
+    assert_eq!(info.class, crate::VolumeClass::Local);
+    assert!(
+        info.total_bytes > 0,
+        "MNT_NOWAIT still gives the cached sizes"
+    );
+}
+
+#[test]
+fn p1_walk_06_a_mount_reached_by_another_path_is_found_by_its_device() {
+    // The Data volume's mount point spelled through `..`: no getfsstat row
+    // has that path, so the row is found by the device the entry reports,
+    // with its cached sizes, and nothing is asked of the mount itself.
+    let data = Path::new("/System/Volumes/Data");
+    if !data.exists() {
+        return;
+    }
+    let dev = crate::Provider::root(&MacProvider::new(), data, &WalkOptions::default())
+        .unwrap()
+        .dev;
+    let spelled = Path::new("/System/../System/Volumes/Data");
+    let info = super::volume::mount_info(spelled, dev).unwrap();
+    assert_eq!(info.mount_point, data);
+    assert!(info.total_bytes > 0, "the getfsstat row's cached sizes");
 }
 
 #[test]
@@ -1036,6 +1088,53 @@ fn p1_walk_07_a_modified_clone_may_share_but_names_no_group() {
             .flags
             .contains(Flags::MAY_SHARE)
     );
+}
+
+#[test]
+fn p1_walk_06_the_system_and_data_volumes_have_their_own_mount_ids() {
+    // macOS 26 gives the two volumes of the boot volume group one st_dev;
+    // their real devices differ.
+    let slash = read_one("/", 0);
+    let (Some(users), Some(system)) = (
+        slash.iter().find(|e| e.name.as_bytes() == b"Users"),
+        slash.iter().find(|e| e.name.as_bytes() == b"System"),
+    ) else {
+        return;
+    };
+    if users.boundary != Boundary::Firmlink {
+        return;
+    }
+    assert_ne!(
+        users.mnt_id, system.mnt_id,
+        "the Data volume is another mount"
+    );
+    let root = crate::Provider::root(&MacProvider::new(), Path::new("/"), &WalkOptions::default())
+        .unwrap();
+    assert_eq!(root.mnt_id, system.mnt_id);
+    // The root's volume row carries the root entry's own device, as every
+    // other row carries its entry's, so no two rows share a device: a
+    // System-volume root is not reported with the Data volume's.
+    let opts = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    let (mut root_dev, mut volumes) = (None, Vec::new());
+    walk_with(
+        &MacProvider::new(),
+        Path::new("/System/Volumes"),
+        &opts,
+        |event| match event {
+            ScanEvent::Entry(entry) if entry.dir == Some(crate::DirId::ROOT) => {
+                root_dev = Some(entry.dev);
+            }
+            ScanEvent::Volume(volume) => volumes.push(volume),
+            _ => {}
+        },
+    )
+    .unwrap();
+    assert_eq!(Some(volumes[0].dev), root_dev, "the root's volume row");
+    let devs: std::collections::HashSet<u64> = volumes.iter().map(|v| v.dev).collect();
+    assert_eq!(devs.len(), volumes.len(), "{volumes:?}");
 }
 
 #[test]

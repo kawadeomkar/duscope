@@ -121,6 +121,8 @@ pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat, attrs: At
         ctime_ns: time(stat.st_ctime, stat.st_ctime_nsec),
         nlink: u32::from(stat.st_nlink),
         dev: bulk::dev(stat.st_dev),
+        // stat names no volume; the device stands in.
+        mnt_id: bulk::dev(stat.st_dev),
         ino: stat.st_ino,
         bsd_flags: stat.st_flags,
         ext_flags: None,
