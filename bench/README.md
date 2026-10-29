@@ -341,11 +341,14 @@ still override.
 
 P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
 alternating runs each, and kept mimalloc where it gains at least 2% (musl) or 10% (macOS);
-`results/allocator.json` holds the runs. On the musl build (aarch64, a Debian 12 container on
-an Apple M5 Pro) mimalloc took the p50 from 3.04 s to 0.41 s, 86.6% faster, so the Linux
-archives and `.deb`s allocate with it, built with arena eager commit and transparent huge pages
-off (`.cargo/config.toml`), which keeps a scan's peak with `--attrs full` at 120–135 bytes per
-entry on T1–T3, within the RSS budget, where mimalloc's defaults reached 168–244. On macOS
+`results/allocator.json` holds the runs. On the x86_64 musl build on bench-linux mimalloc took
+the p50 from 1.02 s to 0.39 s, 62.1% faster. Both binaries were built on a GitHub-hosted
+runner, because from-scratch builds on the bench host crashed rustc. A first measurement, of the
+aarch64 build in a Debian 12 container on an Apple M5 Pro, went from 3.04 s to 0.41 s, 86.6%
+faster. So the Linux archives and `.deb`s allocate with mimalloc, built with arena eager commit
+and transparent huge pages off (`.cargo/config.toml`), which keeps a scan's peak with
+`--attrs full` at 120–135 bytes per entry on T1–T3, within the RSS budget, where mimalloc's
+defaults reached 168–244. On macOS
 (arm64, APFS) it gained 1.7% (4.16 s to 4.09 s), so macOS keeps the system allocator.
 
 ## Files

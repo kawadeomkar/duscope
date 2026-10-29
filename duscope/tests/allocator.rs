@@ -18,17 +18,19 @@ fn read(relative: &str) -> String {
 fn p1_bench_03_the_allocator_follows_the_measured_rule() {
     let result: serde_json::Value =
         serde_json::from_str(&read("bench/results/allocator.json")).unwrap();
-    let gain = |platform: &str| {
+    // The bench runners' rows decide: bench-linux's x86_64 run replaced the
+    // provisional one from an aarch64 container on the bench Mac.
+    let gain = |platform: &str, arch: &str| {
         result["measurements"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|m| m["platform"] == platform)
+            .find(|m| m["platform"] == platform && m["arch"] == arch)
             .and_then(|m| m["gain_pct"].as_f64())
-            .unwrap_or_else(|| panic!("no {platform} measurement"))
+            .unwrap_or_else(|| panic!("no {platform} {arch} measurement"))
     };
-    let musl = gain("linux") >= 2.0;
-    let macos = gain("macos") >= 10.0;
+    let musl = gain("linux", "x86_64") >= 2.0;
+    let macos = gain("macos", "arm64") >= 10.0;
     let manifest = read("duscope/Cargo.toml");
     let main = read("duscope/src/main.rs");
     let musl_dependency =
