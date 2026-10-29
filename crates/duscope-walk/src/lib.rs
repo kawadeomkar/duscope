@@ -208,11 +208,13 @@ pub trait Provider: Send + Sync {
     }
 
     /// The workers a walk runs when [`WalkOptions::threads`] is 0: twice the
-    /// logical CPUs, clamped to 4..=32 (D40's provisional default), until
-    /// bench-linux's thread sweep, committed as
-    /// `bench/results/thread-sweep-linux-<arch>.json`, sets the count by the
-    /// rule in `bench/sweep.py` (P1-BENCH-01). The macOS provider's count
-    /// comes from bench-macos's sweep.
+    /// logical CPUs, clamped to 4..=32 (D40). bench-linux's thread sweep,
+    /// `bench/results/thread-sweep-linux-x86_64.json` (P1-BENCH-01), holds it
+    /// to the rule's bound: its 20 threads ran warm T1 within 5% of the best
+    /// (0.243 s against 12 threads' 0.235 s), where the fixed count the rule
+    /// rounds to, 8, ran 13% slower. Linux machines span 2 to 64 cores, so the
+    /// count scales with them instead (DEV-54). The macOS provider's fixed
+    /// count comes from bench-macos's sweep.
     fn default_threads(&self) -> usize {
         let cpus = thread::available_parallelism().map_or(1, NonZeroUsize::get);
         cpus.saturating_mul(2).clamp(4, 32)
@@ -220,7 +222,9 @@ pub trait Provider: Send + Sync {
 }
 
 /// A directory the walk asks a provider to read. It keeps its parent's
-/// handle, so the directories on its path can be walked back to the root.
+/// handle, so the directories on its path can be walked back to the root,
+/// and, while the walk keeps them, its parent's descriptor and its own (see
+/// `platform::DirFd`).
 #[derive(Debug)]
 pub struct DirHandle {
     id: DirId,
@@ -233,17 +237,25 @@ pub struct DirHandle {
     ino: u64,
     mnt_id: u64,
     parent: Option<Arc<DirHandle>>,
+    /// The parent's descriptor, to open this directory relative to, until
+    /// it is opened.
+    parent_fd: Mutex<Option<Arc<platform::DirFd>>>,
+    /// This directory's descriptor, from its first open until the walk has
+    /// read the directory whole.
+    fd: Mutex<Option<Arc<platform::DirFd>>>,
 }
 
 impl DirHandle {
     /// The handle of `entry`, a directory numbered `id` at `rel` below the
-    /// root (empty when no exclude needs it), inside `parent`.
+    /// root (empty when no exclude needs it), inside `parent`, whose
+    /// descriptor it opens relative to when `parent_fd` holds it.
     fn new(
         id: DirId,
         path: PathBuf,
         rel: Vec<u8>,
         entry: &Entry,
         parent: Option<Arc<DirHandle>>,
+        parent_fd: Option<Arc<platform::DirFd>>,
     ) -> DirHandle {
         DirHandle {
             id,
@@ -254,7 +266,41 @@ impl DirHandle {
             ino: entry.ino,
             mnt_id: entry.mnt_id,
             parent,
+            parent_fd: Mutex::new(parent_fd),
+            fd: Mutex::new(None),
         }
+    }
+
+    /// Takes the parent's descriptor, which only the first open uses.
+    pub(crate) fn take_parent_fd(&self) -> Option<Arc<platform::DirFd>> {
+        self.parent_fd
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// The directory's descriptor, while the walk keeps it.
+    pub(crate) fn kept_fd(&self) -> Option<Arc<platform::DirFd>> {
+        self.fd
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Keeps `fd`, the directory's descriptor, until it has been read whole.
+    pub(crate) fn keep_fd(&self, fd: Arc<platform::DirFd>) {
+        *self.fd.lock().unwrap_or_else(PoisonError::into_inner) = Some(fd);
+    }
+
+    /// Lets go of the directory's descriptor once it has been read whole;
+    /// a subdirectory not yet opened still holds it.
+    fn release_fd(&self) {
+        let fd = self
+            .fd
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        drop(fd);
     }
 
     /// A handle for tests: `path`, `depth` levels below a root, with a
@@ -274,6 +320,8 @@ impl DirHandle {
             ino: 0,
             mnt_id: 0,
             parent,
+            parent_fd: Mutex::new(None),
+            fd: Mutex::new(None),
         }
     }
 
@@ -614,7 +662,7 @@ pub fn walk_with<P: Provider + ?Sized>(
         threads,
         ..WalkSummary::default()
     };
-    let root_dir = DirHandle::new(DirId::ROOT, root.to_owned(), Vec::new(), &entry, None);
+    let root_dir = DirHandle::new(DirId::ROOT, root.to_owned(), Vec::new(), &entry, None, None);
     let (root_dev, root_mnt_id) = (entry.dev, entry.mnt_id);
     sink(ScanEvent::Entry(entry));
     if let Ok(mut volume) = provider.volume(root) {
@@ -850,8 +898,9 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             errno,
         };
         self.send(batch, jobs, worker, shared);
-        if let Some(split) = split {
-            Self::finish_part(&split, shared);
+        match split {
+            Some(split) => Self::finish_part(&split, shared),
+            None => dir.release_fd(),
         }
     }
 
@@ -1059,10 +1108,12 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     return None;
                 };
                 entry.dir = Some(id);
-                // The path only a directory needs: a file costs no copy.
-                let path = match resolved.get(i) {
-                    Some(Some(target)) => target.clone(),
-                    _ => dir.path.join(entry.name.as_os_str()),
+                // The path only a directory needs: a file costs no copy. A
+                // directory reached through a link opens by its path; any
+                // other relative to this one's descriptor, while it is kept.
+                let (path, parent_fd) = match resolved.get(i) {
+                    Some(Some(target)) => (target.clone(), None),
+                    _ => (dir.path.join(entry.name.as_os_str()), dir.kept_fd()),
                 };
                 let mut skip = excluded;
                 if skip.is_none() {
@@ -1091,6 +1142,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     rel,
                     entry,
                     Some(Arc::clone(dir)),
+                    parent_fd,
                 ))));
             }
         }
@@ -1291,6 +1343,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     /// the last part closes the directory, so the close follows every entry.
     fn finish_part(split: &Split, shared: &PoolShared<Job, Event>) {
         if split.parts.fetch_sub(1, Ordering::AcqRel) == 1 {
+            split.dir.release_fd();
             let close = Batch {
                 dir: split.dir.id,
                 entries: Vec::new(),

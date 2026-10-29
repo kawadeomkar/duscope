@@ -138,7 +138,7 @@ impl Provider for LinuxProvider {
         later: &mut Vec<NameRef>,
         flush: &mut Flush<'_>,
     ) -> io::Result<()> {
-        let fd = posix::open_dir(dir.path())?;
+        let fd = posix::open_handle(dir)?;
         let mut names = Vec::new();
         DENTS.with_borrow_mut(|buf| {
             dents::list(fd.as_fd(), buf, &mut names, &mut |names| {
@@ -162,7 +162,7 @@ impl Provider for LinuxProvider {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
-        let fd = posix::open_dir(dir.path())?;
+        let fd = posix::open_handle(dir)?;
         self.read_names(fd.as_fd(), dir, names.iter().cloned(), opts, out, errs);
         Ok(())
     }

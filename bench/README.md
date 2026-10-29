@@ -331,17 +331,24 @@ Above 8 the sweep samples counts rather than taking every one; the rule rounds t
 so the gaps would not change its answer. The author
 commits the files, each platform provider's `default_threads` takes the rule's count and cites
 the file, and `duscope/tests/thread_sweep.rs` fails when a committed file and the default
-disagree. `--threads` and `DUSCOPE_THREADS` still override.
+disagree. Linux is the exception (DEV-54): its count stays twice the logical CPUs, clamped to
+4–32, since Linux machines span 2 to 64 cores, and bench-linux's file holds that count to the
+rule's bound instead. On bench-linux's 10 CPUs it is 20 threads, 0.243 s on warm T1 against the
+best 0.235 s at 12. The rule's fixed count, 8, was 13% slower. `--threads` and `DUSCOPE_THREADS`
+still override.
 
 ## The allocator
 
 P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
 alternating runs each, and kept mimalloc where it gains at least 2% (musl) or 10% (macOS);
-`results/allocator.json` holds the runs. On the musl build (aarch64, a Debian 12 container on
-an Apple M5 Pro) mimalloc took the p50 from 3.04 s to 0.41 s, 86.6% faster, so the Linux
-archives and `.deb`s allocate with it, built with arena eager commit and transparent huge pages
-off (`.cargo/config.toml`), which keeps a scan's peak with `--attrs full` at 120–135 bytes per
-entry on T1–T3, within the RSS budget, where mimalloc's defaults reached 168–244. On macOS
+`results/allocator.json` holds the runs. On the x86_64 musl build on bench-linux mimalloc took
+the p50 from 1.02 s to 0.39 s, 62.1% faster. Both binaries were built on a GitHub-hosted
+runner, because from-scratch builds on the bench host crashed rustc. A first measurement, of the
+aarch64 build in a Debian 12 container on an Apple M5 Pro, went from 3.04 s to 0.41 s, 86.6%
+faster. So the Linux archives and `.deb`s allocate with mimalloc, built with arena eager commit
+and transparent huge pages off (`.cargo/config.toml`), which keeps a scan's peak with
+`--attrs full` at 120–135 bytes per entry on T1–T3, within the RSS budget, where mimalloc's
+defaults reached 168–244. On macOS
 (arm64, APFS) it gained 1.7% (4.16 s to 4.09 s), so macOS keeps the system allocator.
 
 ## Files

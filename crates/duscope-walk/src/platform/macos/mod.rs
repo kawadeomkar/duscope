@@ -190,7 +190,7 @@ impl Provider for MacProvider {
         later: &mut Vec<NameRef>,
         flush: &mut Flush<'_>,
     ) -> io::Result<()> {
-        let fd = posix::open_dir(dir.path())?;
+        let fd = posix::open_handle(dir)?;
         let (out_start, errs_start) = (out.len(), errs.len());
         // The device of the first entry that is no boundary, for the clone
         // check: the entries may have been flushed by the time it runs.
@@ -294,7 +294,7 @@ impl Provider for MacProvider {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
-        let fd = posix::open_dir(dir.path())?;
+        let fd = posix::open_handle(dir)?;
         // One answer per batch: a filesystem that refuses attribute reads
         // refuses them for every name.
         let mut attrs = true;
