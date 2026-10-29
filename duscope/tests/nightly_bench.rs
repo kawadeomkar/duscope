@@ -889,6 +889,60 @@ fn p0_bench_02_macos_cold_runs_read_a_disk_image_the_cold_command_remounts() {
     assert_eq!(run("").len(), 1);
 }
 
+#[test]
+fn p1_bench_01_macos_sweeps_read_the_trees_the_harness_reads() {
+    let jobs = jobs(&read(NIGHTLY));
+    let macos = job(&jobs, "bench-macos");
+    let step = Step::new();
+    // caffeinate stands in for the command it wraps: one argument a line.
+    step.stub(
+        "caffeinate",
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$STUB_DIR/args\"\n",
+    );
+    // The image exists and is attached, so the harness step leaves it as it is.
+    step.stub("hdiutil", "#!/usr/bin/env bash\nexit 1\n");
+    step.stub(
+        "mount",
+        "#!/usr/bin/env bash\necho \"/dev/disk9s1 on $MOUNTED (apfs, local, journaled)\"\n",
+    );
+    let home = step.dir.join("bench-home");
+    fs::create_dir_all(home.join("trees.sparsebundle")).unwrap();
+    let volume = home.join("trees-volume");
+    let vars = [
+        ("BENCH_HOME", home.to_str().unwrap()),
+        ("MOUNTED", volume.to_str().unwrap()),
+        ("DUSCOPE_BIN", "/usr/local/bin/duscope"),
+        ("TREES", "T1"),
+        ("COMPETITORS", "none"),
+        ("MACOS_COLD_COMPETITORS", "dua,du"),
+        ("MODE", "both"),
+        ("SCALE", "1"),
+    ];
+    let args = |name: &str| -> Vec<String> {
+        succeeded(&step.run(&macos.step_script(name), &root(), &vars), name);
+        fs::read_to_string(step.dir.join("args"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    let after = |args: &[String], flag: &str| -> String {
+        args[args.iter().position(|a| a == flag).unwrap() + 1].clone()
+    };
+    let harness = args("Run the harness");
+    let sweep = args("Thread sweep");
+    assert!(sweep.iter().any(|a| a == "sweep"), "{sweep:?}");
+    // Warm sweeps read the trees on the internal disk, cold sweeps the image's,
+    // dropping the caches as the harness does.
+    for flag in ["--trees-dir", "--cold-trees-dir", "--cold-cmd"] {
+        assert_eq!(after(&sweep, flag), after(&harness, flag), "{flag}");
+    }
+    assert_eq!(
+        after(&sweep, "--trees-dir"),
+        home.join("trees").to_str().unwrap()
+    );
+}
+
 /// git with a private configuration and no automatic maintenance.
 fn git(step: &Step, cwd: &Path, args: &[&str]) -> String {
     let out = Command::new("git")

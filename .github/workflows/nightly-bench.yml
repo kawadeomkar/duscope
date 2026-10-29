@@ -256,8 +256,13 @@ jobs:
         if: ${{ !cancelled() && env.SWEEP == 'true' }}
         run: |
           home=${BENCH_HOME:-$HOME/duscope-bench}
+          image="$home/trees.sparsebundle"
+          volume="$home/trees-volume"
+          cold="$PWD/bench/drop-caches.sh --remount $(printf %q "$image") $(printf %q "$volume")"
+          # The trees the harness reads: warm on the internal disk, cold on the
+          # image the harness step attached.
           file=$(caffeinate -is bench/run.sh sweep --duscope "$DUSCOPE_BIN" --trees "$TREES" --mode "$MODE" \
-            --scale "$SCALE" --trees-dir "$home/trees-volume/trees" --cold-cmd "$PWD/bench/drop-caches.sh --remount $(printf %q "$home/trees.sparsebundle") $(printf %q "$home/trees-volume")" \
+            --scale "$SCALE" --trees-dir "$home/trees" --cold-trees-dir "$volume/trees" --cold-cmd "$cold" \
             --results-dir "$RUNNER_TEMP/sweep")
           echo "file=$file" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
