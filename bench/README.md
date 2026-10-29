@@ -315,7 +315,9 @@ warm and cold by default, five runs each, and writes
 `bench/results/thread-sweep-<platform>-<arch>.json`: the usual header, one row per tree, mode and
 thread count (the result file's row fields plus `threads`), and `default`. On scaled trees
 (`--scale` below 1) it is a smoke run: the file is `thread-sweep-<platform>-<arch>-x<scale>.json`
-and `default` is null.
+and `default` is null. `--trees-dir`, `--cold-trees-dir` and `--cold-cmd` mean what they mean in
+`run`, so bench-macos sweeps the trees its harness reads: warm on the internal disk, cold on the
+disk image ([Cold runs](#cold-runs)).
 
 The default is set by a fixed rule (P1-BENCH-01): among the warm T1 rows, the smallest thread
 count whose p50 is within 5% of the best p50, rounded to the nearest of 4, 8, 16 and 32, ties to

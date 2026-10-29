@@ -78,6 +78,9 @@ def cmd_sweep(args, harness) -> int:
     modes = ["warm", "cold"] if args.mode == "both" else [args.mode]
     tree_list = harness._trees(args)
     scaled = any(float(t.scale) != 1.0 for t in tree_list)
+    # Cold rows can read trees in a directory of their own, as in `run`
+    # (bench/README.md, "Cold runs").
+    tree_dirs = {"warm": args.trees_dir, "cold": args.cold_trees_dir or args.trees_dir}
     hyperfine = shlex.split(args.hyperfine)
     if "cold" in modes and not args.cold_cmd.strip():
         raise harness.UsageError("--cold-cmd is empty: a cold run needs the command that drops the caches before every run")
@@ -88,14 +91,18 @@ def cmd_sweep(args, harness) -> int:
     duscope = tools.resolve(tools.PINS["duscope"], key, args.tools_dir, False, args.duscope, harness.log)
     if duscope.status != "ready" or duscope.path is None:
         raise measure.MeasureError(f"duscope at {args.duscope} is unavailable: {duscope.reason}")
-    stamps = [trees.build(t, args.trees_dir, args.jobs, log=harness.log) for t in tree_list]
+    # The trees in each directory a mode measures; the first mode's describe them
+    # in the result file.
+    dirs = list(dict.fromkeys(tree_dirs[m] for m in modes))
+    built = {d: [trees.build(t, d, args.jobs, log=harness.log) for t in tree_list] for d in dirs}
+    stamps = built[dirs[0]]
 
     rows: List[Dict[str, object]] = []
     raw_dir = tempfile.mkdtemp(prefix="duscope-sweep-")
     try:
         for t in tree_list:
-            path = trees.tree_root(t, args.trees_dir)
             for mode in modes:
+                path = trees.tree_root(t, tree_dirs[mode])
                 session = measure.Session(
                     hyperfine, t.name, path, mode, args.runs, args.warmup, args.cold_cmd, raw_dir, harness.log
                 )
@@ -135,7 +142,8 @@ def cmd_sweep(args, harness) -> int:
                 "dirs": t.dirs,
                 "files": t.files,
                 "digest": stamp["digest"],
-                "filesystem": harness.filesystem(trees.tree_root(t, args.trees_dir)),
+                "filesystem": harness.filesystem(trees.tree_root(t, dirs[0])),
+                "cold_filesystem": harness.filesystem(trees.tree_root(t, dirs[1])) if len(dirs) > 1 else None,
             }
             for t, stamp in zip(tree_list, stamps)
         ],

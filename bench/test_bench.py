@@ -343,6 +343,49 @@ class Sweep(unittest.TestCase):
     def test_p1_bench_01_no_warm_t1_rows_give_no_default(self):
         self.assertIsNone(sweep.default_threads(self.rows({4: 1.0}, mode="cold")))
 
+    def test_p1_bench_01_cold_rows_read_their_own_trees(self):
+        """--cold-trees-dir gives the cold rows their own trees, as in `run`."""
+        with tempfile.TemporaryDirectory() as scratch:
+            # A stand-in for duscope: it names itself and exits 0.
+            duscope = os.path.join(scratch, "duscope")
+            with open(duscope, "w", encoding="utf-8") as f:
+                f.write("#!/bin/sh\necho 'duscope 0.0.1'\n")
+            os.chmod(duscope, 0o755)
+            warm, cold, results = (os.path.join(scratch, d) for d in ("warm", "cold", "results"))
+            argv = [
+                "sweep", "--duscope", duscope, "--trees", "T3", "--scale", "0.0005", "--jobs", "1",
+                "--threads", "1,2", "--trees-dir", warm, "--cold-trees-dir", cold,
+                "--mode", "both", "--cold-cmd", "true", "--runs", "1", "--warmup", "0",
+                "--hyperfine", f"{shlex.quote(sys.executable)} {shlex.quote(STUB)}",
+                "--results-dir", results,
+            ]
+            smoked = []
+            smoke = measure.smoke
+
+            def record(tool, path):
+                smoked.append((tool.tool.name, os.path.dirname(path)))
+                smoke(tool, path)
+
+            with mock.patch.object(measure, "smoke", record), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(harness.main(argv), 0)
+            # Each thread count runs on the trees its mode reads, and only there.
+            self.assertEqual(
+                sorted(smoked),
+                [("duscope-t1", cold), ("duscope-t1", warm), ("duscope-t2", cold), ("duscope-t2", warm)],
+            )
+            for d in (warm, cold):
+                self.assertTrue(os.path.isfile(trees.stamp_path(trees.tree("T3", 0.0005), d)), d)
+            [name] = os.listdir(results)
+            with open(os.path.join(results, name), encoding="utf-8") as f:
+                result = json.load(f)
+            self.assertEqual(
+                sorted((r["mode"], r["threads"]) for r in result["results"]),
+                [("cold", 1), ("cold", 2), ("warm", 1), ("warm", 2)],
+            )
+            self.assertEqual(result["trees"][0]["filesystem"], result["trees"][0]["cold_filesystem"])
+            self.assertIsNotNone(result["trees"][0]["cold_filesystem"])
+
 
 if __name__ == "__main__":
     unittest.main()

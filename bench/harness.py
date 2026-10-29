@@ -135,6 +135,7 @@ def parser() -> argparse.ArgumentParser:
     swept.add_argument("--threads", default=",".join(map(str, sweep.THREADS)), help="the thread counts, comma-separated (default 1 to 8, then the steps up to 64)")
     swept.add_argument("--mode", choices=("warm", "cold", "both"), default="both", help="warm caches, cold caches, or both (default both)")
     swept.add_argument("--cold-cmd", default=shlex.quote(os.path.join(BENCH, "drop-caches.sh")), help="the command that drops the caches before each cold run (default bench/drop-caches.sh)")
+    swept.add_argument("--cold-trees-dir", help="where the trees the cold runs measure live (default --trees-dir)")
     swept.add_argument("--runs", type=int, default=5, help="measured runs at each thread count (default 5)")
     swept.add_argument("--warmup", type=int, default=1, help="warm-up runs before each warm count (default 1)")
     swept.add_argument("--tools-dir", default=os.path.join(BENCH, ".tools"), help=argparse.SUPPRESS)
