@@ -1074,6 +1074,7 @@ fn p1_walk_06_a_handle_walks_back_to_the_root() {
         b"a".to_vec(),
         &entry,
         Some(Arc::clone(&root)),
+        None,
     );
     let paths: Vec<&Path> = child.ancestors().map(DirHandle::path).collect();
     assert_eq!(paths, [Path::new("/r/a"), Path::new("/r")]);

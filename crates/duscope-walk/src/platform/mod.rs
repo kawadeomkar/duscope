@@ -16,9 +16,17 @@ use std::sync::Once;
 
 use crate::Provider;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use posix::DirFd;
+
+/// A directory's open descriptor: none is opened on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[derive(Debug)]
+pub(crate) enum DirFd {}
+
 /// Sets the process up for walking, once, whichever provider is built
-/// first: the descriptor limit is raised, and on macOS dataless files are
-/// never downloaded.
+/// first: the descriptor limit is raised and the descriptor table grown, and
+/// on macOS dataless files are never downloaded.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn setup() {
     static SETUP: Once = Once::new();
@@ -28,6 +36,10 @@ pub(crate) fn setup() {
         macos::keep_dataless_files();
     });
 }
+
+/// Sets the process up for walking: nothing to do on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn setup() {}
 
 /// This platform's provider.
 #[cfg(target_os = "macos")]
