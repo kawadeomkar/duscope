@@ -270,6 +270,47 @@ fn p1_core_02_a_file_root_is_numbered_alone() {
     assert_eq!(rollup.entry_at(0), EntryIdx::ROOT);
 }
 
+#[test]
+fn p1_core_02_entries_below_a_missing_directory_stay_out_of_the_totals() {
+    // A truncated stream: the root holds a file and a directory, and the
+    // entries of directory 2 arrive though its own entry never does.
+    let node = |name: &str, dir: bool, apparent: u64| Node {
+        path: vec![name.as_bytes().to_vec()],
+        dir,
+        apparent,
+        allocated: apparent,
+        mtime: 7,
+    };
+    let root = Node {
+        path: Vec::new(),
+        dir: true,
+        apparent: 1,
+        allocated: 1,
+        mtime: 1,
+    };
+    let (missing, one) = (DirId::new(2), DirId::new(1));
+    let mut arena = Arena::new(Attrs::Basic);
+    for event in [
+        ScanEvent::Entry(entry(&root, DirId::ROOT, Some(DirId::ROOT))),
+        ScanEvent::Entry(entry(&node("a", false, 10), DirId::ROOT, None)),
+        ScanEvent::Entry(entry(&node("d", true, 100), DirId::ROOT, Some(one))),
+        ScanEvent::Entry(entry(&node("lost", false, 1000), missing, None)),
+        ScanEvent::Entry(entry(
+            &node("lost-dir", true, 1000),
+            missing,
+            Some(DirId::new(3)),
+        )),
+    ] {
+        arena.push(event).unwrap();
+    }
+    let rollup = roll_up(&mut arena);
+    assert_eq!(rollup.len(), 3, "the root, a and d are numbered");
+    let rec = arena.dir(DirId::ROOT);
+    assert_eq!((rec.cum_apparent, rec.cum_allocated), (111, 111));
+    assert_eq!((rec.n_files, rec.n_dirs, rec.last_id), (1, 1, 2));
+    assert_eq!(rec.max_mtime_ns, 7);
+}
+
 /// One directory holding `names` as files, delivered in the order given.
 fn flat(names: &[Vec<u8>]) -> Arena {
     let mut arena = Arena::new(Attrs::Basic);
