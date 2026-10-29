@@ -331,7 +331,11 @@ Above 8 the sweep samples counts rather than taking every one; the rule rounds t
 so the gaps would not change its answer. The author
 commits the files, each platform provider's `default_threads` takes the rule's count and cites
 the file, and `duscope/tests/thread_sweep.rs` fails when a committed file and the default
-disagree. `--threads` and `DUSCOPE_THREADS` still override.
+disagree. Linux is the exception (DEV-54): its count stays twice the logical CPUs, clamped to
+4–32, since Linux machines span 2 to 64 cores, and bench-linux's file holds that count to the
+rule's bound instead. On bench-linux's 10 CPUs it is 20 threads, 0.243 s on warm T1 against the
+best 0.235 s at 12. The rule's fixed count, 8, was 13% slower. `--threads` and `DUSCOPE_THREADS`
+still override.
 
 ## The allocator
 

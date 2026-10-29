@@ -208,11 +208,13 @@ pub trait Provider: Send + Sync {
     }
 
     /// The workers a walk runs when [`WalkOptions::threads`] is 0: twice the
-    /// logical CPUs, clamped to 4..=32 (D40's provisional default), until
-    /// bench-linux's thread sweep, committed as
-    /// `bench/results/thread-sweep-linux-<arch>.json`, sets the count by the
-    /// rule in `bench/sweep.py` (P1-BENCH-01). The macOS provider's count
-    /// comes from bench-macos's sweep.
+    /// logical CPUs, clamped to 4..=32 (D40). bench-linux's thread sweep,
+    /// `bench/results/thread-sweep-linux-x86_64.json` (P1-BENCH-01), holds it
+    /// to the rule's bound: its 20 threads ran warm T1 within 5% of the best
+    /// (0.243 s against 12 threads' 0.235 s), where the fixed count the rule
+    /// rounds to, 8, ran 13% slower. Linux machines span 2 to 64 cores, so the
+    /// count scales with them instead (DEV-54). The macOS provider's fixed
+    /// count comes from bench-macos's sweep.
     fn default_threads(&self) -> usize {
         let cpus = thread::available_parallelism().map_or(1, NonZeroUsize::get);
         cpus.saturating_mul(2).clamp(4, 32)
