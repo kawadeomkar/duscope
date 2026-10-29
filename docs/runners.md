@@ -287,8 +287,11 @@ A runner on a home network must not reach the rest of it: a competitor built
 from crates.io runs its build script on the machine. `bench-linux` refuses new
 outbound connections to private addresses, except DNS, DHCP and NTP, with this
 `/etc/nftables.conf` (owned by root, so the `runner` user cannot change it), and
-has IPv6 turned off in `/etc/sysctl.d/60-duscope-bench.conf`, since the LAN's
-hosts also have global IPv6 addresses that no private-range rule would catch:
+refuses every new outbound IPv6 connection, since the LAN's hosts also have
+global IPv6 addresses that no private-range rule would catch. The last rule is
+what does that: `/etc/sysctl.d/60-duscope-bench.conf` turns IPv6 off for `all`
+and `default`, but systemd-networkd turns it back on for the interfaces it
+manages, so `eth0` still has a link-local and a global address:
 
 ```text
 flush ruleset
