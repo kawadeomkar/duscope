@@ -12,7 +12,8 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
 
 1. **`main` is green and measured.** The last CI run on `main` passed on all three runners, and
    the latest nightly harness result on the `bench-results` branch is at most 72 hours old and
-   within the phase's gate.
+   within the phase's gate: bench-linux's, while bench-macos is paused
+   ([runners.md](runners.md#paused)).
 
    ```sh
    gh run list --workflow ci.yml --branch main --limit 1

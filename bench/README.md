@@ -2,8 +2,9 @@
 
 The harness times disk-usage tools with [hyperfine](https://github.com/sharkdp/hyperfine) on
 three seeded trees and writes one JSON result file per run. `just bench` runs it on developer
-machines; the nightly job (`nightly-bench.yml`, on the `bench-macos` and `bench-linux`
-self-hosted runners) runs the full matrix, and the `bench-regression` CI job runs it on T1. Both
+machines; the nightly job (`nightly-bench.yml`, on the `bench-linux` self-hosted runner, and
+on `bench-macos` when it is not paused, [docs/runners.md](../docs/runners.md#paused)) runs the
+full matrix, and the `bench-regression` CI job runs it on T1. Both
 measure duscope, built from the checkout, as the subject every competitor is paired with; `du`
 is one of the competitors. Without `--subject`, the subject is `du`.
 
@@ -322,7 +323,7 @@ disk image ([Cold runs](#cold-runs)).
 The default is set by a fixed rule (P1-BENCH-01): among the warm T1 rows, the smallest thread
 count whose p50 is within 5% of the best p50, rounded to the nearest of 4, 8, 16 and 32, ties to
 the smaller. The bench runners run the sweep on a dispatch of `nightly-bench.yml` with `sweep`
-ticked, in place of the harness (so the day's nightly result stays as it was), which leaves each
+ticked (and `macos` for bench-macos while it is paused), in place of the harness (so the day's nightly result stays as it was), which leaves each
 runner's file as a `thread-sweep-<platform>` artifact. A full dispatch (three trees, warm and
 cold, a cache drop before every cold run) may not fit the job's 300 minutes on bench-linux:
 dispatch one tree at a time with `trees`, T1 first, since the rule reads only its warm rows.
