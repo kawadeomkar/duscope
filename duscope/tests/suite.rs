@@ -254,9 +254,10 @@ fn p1_test_01_scan_totals_equal_du_on_a_system_tree() {
     assert_du_parity(&env, &root);
 }
 
-/// The scan's peak RSS per entry with `--attrs full` on each benchmark tree
-/// that is built: at most 130 bytes on T1 and T2 and 160 on T3, held by the
-/// median of five runs. The peak moves by a few bytes per entry from run to
+/// The scan's peak RSS per entry on each benchmark tree that is built, held by
+/// the median of five runs: with basic attributes at most 100 bytes on T1 and
+/// T2 and 130 on T3 (P1-CORE-01's budget), and with `--attrs full` at most 130
+/// on T1 and T2 and 160 on T3 (P1-TEST-01's); the gate holds both (DEV-49). The peak moves by a few bytes per entry from run to
 /// run with how the workers' batches overlap (Linux T1 measured 128.2 to
 /// 132.6), so the highest run would fail some nights with no change. The
 /// trees are `DUSCOPE_BENCH_TREES`, else `bench/.trees`; hyperfine
@@ -279,17 +280,24 @@ fn p1_test_01_peak_rss_per_entry_on_the_bench_trees() {
     let hyperfine = std::env::var_os("HYPERFINE").unwrap_or_else(|| "hyperfine".into());
     let bin = shipped(&env);
     let mut measured = 0;
-    for (tree, budget) in [("T1", 130u64), ("T2", 130), ("T3", 160)] {
+    let budgets = [
+        ("basic", [("T1", 100u64), ("T2", 100), ("T3", 130)]),
+        ("full", [("T1", 130), ("T2", 130), ("T3", 160)]),
+    ];
+    for (attrs, (tree, budget)) in budgets
+        .iter()
+        .flat_map(|(attrs, trees)| trees.iter().map(move |t| (*attrs, *t)))
+    {
         let root = trees.join(tree);
         if !root.is_dir() {
             eprintln!("skipped {tree}: not built under {}", trees.display());
             continue;
         }
-        let scan = &scan_json(&env, &["--attrs", "full", "--treemap", "never"], &root)["scan"];
+        let scan = &scan_json(&env, &["--attrs", attrs, "--treemap", "never"], &root)["scan"];
         let entries = scan["file_count"].as_u64().unwrap() + scan["dir_count"].as_u64().unwrap();
-        let export = env.tmp_dir().join(format!("{tree}.json"));
+        let export = env.tmp_dir().join(format!("{tree}-{attrs}.json"));
         let command = format!(
-            "{} scan --attrs full --json --treemap never {}",
+            "{} scan --attrs {attrs} --json --treemap never {}",
             shell_quote(&bin.to_string_lossy()),
             shell_quote(&root.to_string_lossy())
         );
@@ -333,13 +341,13 @@ fn p1_test_01_peak_rss_per_entry_on_the_bench_trees() {
         let runs: Vec<String> = peaks.iter().map(|&p| per_entry(p)).collect();
         let (peak, tenths) = (peaks[2], peaks[2] * 10 / entries);
         eprintln!(
-            "{tree}: {entries} entries, median peak {peak} bytes, {} bytes per entry (runs {}; budget {budget})",
+            "{tree} --attrs {attrs}: {entries} entries, median peak {peak} bytes, {} bytes per entry (runs {}; budget {budget})",
             per_entry(peak),
             runs.join(", ")
         );
         assert!(
             tenths <= budget * 10,
-            "{tree}: over {budget} bytes per entry"
+            "{tree} --attrs {attrs}: over {budget} bytes per entry"
         );
         measured += 1;
     }
