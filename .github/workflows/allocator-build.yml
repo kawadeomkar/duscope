@@ -1,8 +1,9 @@
 # Temporary, on this branch only (never merged): builds x86_64 musl binaries
 # for measurements on bench-linux on a GitHub-hosted runner, since
 # from-scratch builds on the bench host's VMs crash rustc at random. This run
-# builds the shipped binary with each directory opened relative to its
-# parent's descriptor (P1-WALK-02), and main before it, to time the two.
+# builds the binary with each directory opened relative to its parent's
+# descriptor (P1-WALK-02) with symbols and frame pointers, for a perf profile
+# of the scan's single-threaded tail after the walk.
 name: Allocator build (temporary)
 
 on:
@@ -12,38 +13,32 @@ on:
 permissions:
   contents: read
 
-env:
-  BEFORE: 29826bf773a1f65d8a9636fc2699e03c203c452b
-
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ env.BEFORE }}
-          path: before
       - name: Install the pinned toolchain, the musl target and musl-tools
         run: |
           rustup toolchain install --profile minimal && rustc --version
           rustup target add x86_64-unknown-linux-musl
           sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q musl-tools
-      - name: Build the shipped binary, with the change and before it
+      - name: Build with symbols and frame pointers
+        env:
+          RUSTFLAGS: -C force-frame-pointers=yes
+          CARGO_PROFILE_RELEASE_STRIP: "false"
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: |
           cargo build --release --locked -p duscope --target x86_64-unknown-linux-musl
-          mkdir -p out && cp target/x86_64-unknown-linux-musl/release/duscope out/duscope-fixed
-          (cd before && cargo build --release --locked -p duscope --target x86_64-unknown-linux-musl)
-          cp before/target/x86_64-unknown-linux-musl/release/duscope out/duscope-before
+          mkdir -p out && cp target/x86_64-unknown-linux-musl/release/duscope out/duscope-symbols
           sha256sum out/* | tee out/SHA256SUMS
-          echo "commit: $GITHUB_SHA; before: $BEFORE" >> out/SHA256SUMS
+          echo "commit: $GITHUB_SHA" >> out/SHA256SUMS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: fixed-binary
+          name: profiling-binary
           path: out/
           if-no-files-found: error
           retention-days: 7
