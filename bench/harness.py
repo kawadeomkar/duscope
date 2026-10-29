@@ -103,6 +103,8 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--command", action="append", metavar="NAME=CMD", help="also pair this command line with the subject; {tree} is the tree (repeatable)")
     run.add_argument("--mode", choices=("warm", "cold", "both"), default="warm", help="warm caches, cold caches, or both (default warm)")
     run.add_argument("--cold-cmd", default=shlex.quote(os.path.join(BENCH, "drop-caches.sh")), help="the command that drops the caches before each cold run (default bench/drop-caches.sh)")
+    run.add_argument("--cold-trees-dir", help="where the trees the cold runs measure live (default --trees-dir)")
+    run.add_argument("--cold-competitors", help="the pinned tools paired with the subject in cold runs: a comma-separated list, all or none (default --competitors)")
     run.add_argument("--runs", type=int, default=10, help="measured runs of each tool in each pair (default 10)")
     run.add_argument("--warmup", type=int, default=2, help="warm-up runs of each tool at the start of each warm pair (default 2)")
     run.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
@@ -332,10 +334,18 @@ def cmd_run(args) -> int:
     modes = ["warm", "cold"] if args.mode == "both" else [args.mode]
     tree_list = _trees(args)
     competitors = _names(args.competitors, tools.COMPETITORS + ("du",), "competitor", allow_none=True)
+    cold_competitors = competitors
+    if args.cold_competitors is not None:
+        cold_competitors = _names(args.cold_competitors, tools.COMPETITORS + ("du",), "competitor", allow_none=True)
     commands = _pairs(args.command, "--command")
     if args.subject not in tools.PINS:
         raise UsageError(f"unknown subject {args.subject!r}: choose from {', '.join(tools.PINS)}")
     competitors = [c for c in competitors if c != args.subject]
+    cold_competitors = [c for c in cold_competitors if c != args.subject]
+    # Each mode's tools and trees: cold runs can measure fewer tools, on trees in
+    # a directory of their own (bench/README.md, "Cold runs").
+    wanted = {"warm": set(competitors) | set(commands), "cold": set(cold_competitors) | set(commands)}
+    tree_dirs = {"warm": args.trees_dir, "cold": args.cold_trees_dir or args.trees_dir}
     clash = [n for n in commands if n in tools.PINS or n == args.subject]
     if clash:
         raise UsageError(f"--command names clash with pinned tools: {', '.join(clash)}")
@@ -352,7 +362,11 @@ def cmd_run(args) -> int:
     subject = _resolve_tools(args, [args.subject], key)[0]
     if subject.status != "ready":
         raise measure.MeasureError(f"the subject {subject.tool.name} is unavailable: {subject.reason}")
-    others = _resolve_tools(args, competitors, key)
+    # The tools of the modes this run measures, in the order they were named.
+    names: List[str] = []
+    for mode in modes:
+        names += [c for c in (competitors if mode == "warm" else cold_competitors) if c not in names]
+    others = _resolve_tools(args, names, key)
     for name, command in commands.items():
         try:
             others.append(tools.ad_hoc(name, command))
@@ -362,7 +376,11 @@ def cmd_run(args) -> int:
         if r.status != "ready":
             log(f"{r.tool.name}: {r.status}: {r.reason}")
 
-    stamps = [trees.build(t, args.trees_dir, args.jobs, log=log) for t in tree_list]
+    # The trees in each directory a mode measures; the first mode's describe them
+    # in the result file.
+    dirs = list(dict.fromkeys(tree_dirs[m] for m in modes))
+    built = {d: [trees.build(t, d, args.jobs, log=log) for t in tree_list] for d in dirs}
+    stamps = built[dirs[0]]
 
     # hyperfine's per-round exports go to a temporary directory, removed however
     # the run ends; --keep-raw keeps them under bench/.runs/ instead.
@@ -374,20 +392,28 @@ def cmd_run(args) -> int:
         failures: Dict[str, str] = {}
         results: List[Dict[str, object]] = []
         measured = set()
+        smoked = set()
         for t in tree_list:
-            path = trees.tree_root(t, args.trees_dir)
-            measure.smoke(subject, path)
-            ready = []
-            for r in others:
-                if r.status != "ready" or r.tool.name in failures:
-                    continue
-                try:
-                    measure.smoke(r, path)
-                    ready.append(r)
-                except measure.MeasureError as e:
-                    failures[r.tool.name] = str(e)
-                    log(f"{r.tool.name}: failed on {t.name}: {e}")
             for mode in modes:
+                # Each tool runs once on each tree it is measured on before hyperfine
+                # does, so a failure names the tool.
+                path = trees.tree_root(t, tree_dirs[mode])
+                if (subject.tool.name, path) not in smoked:
+                    measure.smoke(subject, path)
+                    smoked.add((subject.tool.name, path))
+                ready = []
+                for r in others:
+                    if r.status != "ready" or r.tool.name in failures or r.tool.name not in wanted[mode]:
+                        continue
+                    if (r.tool.name, path) not in smoked:
+                        try:
+                            measure.smoke(r, path)
+                        except measure.MeasureError as e:
+                            failures[r.tool.name] = str(e)
+                            log(f"{r.tool.name}: failed on {t.name}: {e}")
+                            continue
+                        smoked.add((r.tool.name, path))
+                    ready.append(r)
                 session = measure.Session(hyperfine, t.name, path, mode, args.runs, args.warmup, args.cold_cmd, raw_dir, log)
                 subject_command = subject.command()
                 if not ready:
@@ -453,6 +479,7 @@ def cmd_run(args) -> int:
             "runs": args.runs,
             "warmup": args.warmup,
             "cold_command": args.cold_cmd if "cold" in modes else None,
+            "cold_competitors": cold_competitors if "cold" in modes and args.cold_competitors is not None else None,
         },
         "trees": [
             {
@@ -464,7 +491,8 @@ def cmd_run(args) -> int:
                 "files": t.files,
                 "apparent_bytes": stamp["apparent_bytes"],
                 "digest": stamp["digest"],
-                "filesystem": filesystem(trees.tree_root(t, args.trees_dir)),
+                "filesystem": filesystem(trees.tree_root(t, dirs[0])),
+                "cold_filesystem": filesystem(trees.tree_root(t, dirs[1])) if len(dirs) > 1 else None,
                 "build_s": float(stamp["build_s"]),
             }
             for t, stamp in zip(tree_list, stamps)

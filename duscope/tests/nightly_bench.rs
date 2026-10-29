@@ -804,7 +804,7 @@ fn p0_bench_02_bench_runners_hold_the_fixture_tree_to_its_budget() {
 }
 
 #[test]
-fn p0_bench_02_macos_trees_live_on_a_disk_image_the_cold_command_remounts() {
+fn p0_bench_02_macos_cold_runs_read_a_disk_image_the_cold_command_remounts() {
     let script = job(&jobs(&read(NIGHTLY)), "bench-macos").step_script("Run the harness");
     let step = Step::new();
     let calls = step.dir.join("calls.log");
@@ -828,6 +828,7 @@ fn p0_bench_02_macos_trees_live_on_a_disk_image_the_cold_command_remounts() {
             ("MOUNTED", mounted),
             ("TREES", "T1"),
             ("COMPETITORS", "none"),
+            ("MACOS_COLD_COMPETITORS", "dua,du"),
             ("MODE", "cold"),
             ("SCALE", "1"),
         ]
@@ -864,7 +865,14 @@ fn p0_bench_02_macos_trees_live_on_a_disk_image_the_cold_command_remounts() {
     let args = fs::read_to_string(step.dir.join("harness-args")).unwrap();
     let args: Vec<&str> = args.lines().collect();
     let after = |flag: &str| args[args.iter().position(|a| *a == flag).unwrap() + 1];
-    assert_eq!(after("--trees-dir"), volume.join("trees").to_str().unwrap());
+    // Warm runs read the trees on the internal disk; cold runs read the image's,
+    // pairing the subject with dua and du only.
+    assert_eq!(after("--trees-dir"), home.join("trees").to_str().unwrap());
+    assert_eq!(
+        after("--cold-trees-dir"),
+        volume.join("trees").to_str().unwrap()
+    );
+    assert_eq!(after("--cold-competitors"), "dua,du");
     assert_eq!(
         after("--cold-cmd"),
         format!(

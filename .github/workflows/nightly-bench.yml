@@ -42,6 +42,9 @@ on:
       competitors:
         description: "bench/run.sh --competitors"
         default: "all"
+      macos_cold_competitors:
+        description: "bench/run.sh --cold-competitors on bench-macos, whose cold runs read a disk image"
+        default: "dua,du"
       mode:
         description: "bench/run.sh --mode: warm, cold or both"
         default: "both"
@@ -70,6 +73,7 @@ env:
   # reach the scripts as environment variables, never pasted into them.
   TREES: ${{ inputs.trees || 'all' }}
   COMPETITORS: ${{ inputs.competitors || 'all' }}
+  MACOS_COLD_COMPETITORS: ${{ inputs.macos_cold_competitors || 'dua,du' }}
   MODE: ${{ inputs.mode || 'both' }}
   SCALE: ${{ inputs.scale || '1' }}
   SWEEP: ${{ inputs.sweep && 'true' || 'false' }}
@@ -198,10 +202,12 @@ jobs:
           results="$RUNNER_TEMP/bench-results"
           rm -rf "$results"
           status=0
-          # The trees live on an APFS disk image that the cold command detaches and
-          # attaches around each purge, which alone leaves APFS's metadata cached
+          # The cold runs' trees live on an APFS disk image that the cold command
+          # detaches and attaches around each purge, which alone leaves APFS's
+          # metadata cached; the warm runs' trees stay on the internal disk, since
+          # the image is slow even warm, and only dua and du are paired cold
           # (bench/README.md, "Cold runs"). The first night creates the image; a
-          # night after a reboot attaches it, so warm-only runs find the trees too.
+          # night after a reboot attaches it.
           image="$home/trees.sparsebundle"
           volume="$home/trees-volume"
           if [[ ! -d $image ]]; then
@@ -221,9 +227,9 @@ jobs:
           # bench-macos is a laptop that sleeps when idle: caffeinate keeps it awake
           # until the harness exits.
           file=$(caffeinate -is bench/run.sh run --subject duscope --tool-path "duscope=$DUSCOPE_BIN" \
-            --trees "$TREES" --competitors "$COMPETITORS" \
-            --mode "$MODE" --scale "$SCALE" --trees-dir "$volume/trees" --tools-dir "$home/tools" \
-            --cold-cmd "$cold" --results-dir "$results") || status=$?
+            --trees "$TREES" --competitors "$COMPETITORS" --cold-competitors "$MACOS_COLD_COMPETITORS" \
+            --mode "$MODE" --scale "$SCALE" --trees-dir "$home/trees" --cold-trees-dir "$volume/trees" \
+            --tools-dir "$home/tools" --cold-cmd "$cold" --results-dir "$results") || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
           if [[ -n $file && -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
       # The result file is published even when a tool could not be measured: the
