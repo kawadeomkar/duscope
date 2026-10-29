@@ -5,7 +5,7 @@ Every external crate a workspace crate depends on directly has a row here. The r
 ## Policy
 
 - **Admission.** A new crate needs all of the following:
-  - a release in the last twelve months
+  - a release in the last twelve months, or a crate the proposal names, at its newest release: unicode-width 0.2.2, released 2025-10-06 (DEV-43)
   - two maintainers, or the code vendored instead (see [VENDOR.md](VENDOR.md))
   - semver 1.0 or later, or an exact pin
   - pure Rust, unless it is SQLite or libc
