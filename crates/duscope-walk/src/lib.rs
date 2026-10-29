@@ -437,6 +437,17 @@ pub fn walk(
     walk_with(&*provider, root, opts, sink)
 }
 
+/// Sets the process up for walking: raises the descriptor limit, grows the
+/// descriptor table to hold the descriptors a walk keeps open, and on macOS
+/// keeps dataless files from downloading. A walk with this platform's
+/// provider does it itself; a program that starts a thread before its first
+/// walk calls it first, while it has one thread, because Linux makes a
+/// process with more than one wait for an RCU grace period to grow the
+/// table.
+pub fn prepare() {
+    platform::setup();
+}
+
 /// Makes SIGINT set `flag`, the [`WalkOptions::cancel`] of the walks it is
 /// given to: a running walk then stops within a directory per worker and
 /// returns [`WalkError::Cancelled`]. A later call replaces the flag.

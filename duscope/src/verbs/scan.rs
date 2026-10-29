@@ -270,6 +270,8 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     let ResolvedPath { real: root, .. } = resolve_path(&cwd, &given);
     unresolved_link(&root, &given)?;
     let mut opts = options(walk_args, excludes)?;
+    // The walk's setup, before the interrupt watcher starts a thread.
+    duscope_walk::prepare();
     // Ctrl-C stops the walk; if it has not stopped soon after, the process
     // ends anyway. Nothing is written before a scan completes, and once the
     // walk is over the result is written whole.

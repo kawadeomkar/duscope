@@ -29,19 +29,54 @@ const OPEN_MAX: libc::rlim_t = 10_240;
 /// directory is recorded as unreadable with `EMFILE`.
 const PARK_LIMIT: Duration = Duration::from_secs(2);
 
+/// The most descriptors a walk keeps open (see [`DirFd`]).
+const KEEP_MAX: usize = 1024;
+
+/// The descriptor table a walk starts with: room for [`KEEP_MAX`] kept
+/// descriptors beside the workers' own and the rest of the process.
+const FD_TABLE: usize = 2 * KEEP_MAX;
+
 /// Raises the soft `RLIMIT_NOFILE` to `min(hard, 65536)`, once per process,
-/// and lets the walk keep half the limit it ends at open (see [`DirFd`]).
-/// A refusal leaves the limit as it was: the walk then parks workers on
-/// `EMFILE` instead.
+/// lets the walk keep [`KEEP_MAX`] descriptors open, or half the limit it
+/// ends at when that is less, and grows the descriptor table to hold
+/// [`FD_TABLE`] of them. A refusal leaves the limit as it was: the walk then
+/// parks workers on `EMFILE` instead.
+///
+/// Linux grows a process's table by doubling it from 64 entries, and when
+/// the process has more than one thread each step waits for an RCU grace
+/// period, during which no thread can open a descriptor: on bench-linux the
+/// steps a walk took cost warm T1 18 ms (252.5 ms against 234.1 ms with the
+/// table already grown). Grown here, before the first walk, the table never
+/// grows during one.
 pub(crate) fn raise_nofile_limit() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         raise();
         if let Some(limit) = nofile() {
             let soft = usize::try_from(limit.rlim_cur).unwrap_or(usize::MAX);
-            KEEP_LIMIT.store(soft / 2, Ordering::Relaxed);
+            KEEP_LIMIT.store(KEEP_MAX.min(soft / 2), Ordering::Relaxed);
+            grow_fd_table(FD_TABLE.min(soft));
         }
     });
+}
+
+/// Grows the descriptor table to at least `entries`, by placing a
+/// descriptor at `entries - 1` and closing it: the table never shrinks.
+fn grow_fd_table(entries: usize) {
+    let Ok(last) = libc::c_int::try_from(entries.saturating_sub(1)) else {
+        return;
+    };
+    let Ok(root) = open_dir(Path::new("/")) else {
+        return;
+    };
+    // SAFETY: `root` is open; F_DUPFD_CLOEXEC returns a new descriptor at or
+    // above `last`, or -1.
+    let high = unsafe { libc::fcntl(root.as_raw_fd(), libc::F_DUPFD_CLOEXEC, last) };
+    if high >= 0 {
+        // SAFETY: `high` was just returned by fcntl and is owned by nothing
+        // else.
+        drop(unsafe { OwnedFd::from_raw_fd(high) });
+    }
 }
 
 /// The descriptor limit, soft and hard.
@@ -79,9 +114,10 @@ fn raise() {
 /// Descriptors the walk keeps open now, in every walk of the process.
 static KEPT: AtomicUsize = AtomicUsize::new(0);
 
-/// How many descriptors the walk may keep: half the soft limit
-/// [`raise_nofile_limit`] ends at, leaving the other half to the workers'
-/// own opens and the rest of the process; none before it has run.
+/// How many descriptors the walk may keep: [`KEEP_MAX`], or half the soft
+/// limit [`raise_nofile_limit`] ends at when that is less, leaving the other
+/// half to the workers' own opens and the rest of the process; none before
+/// it has run.
 static KEEP_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
 /// The most descriptors kept at once, for the test that bounds it.
@@ -91,11 +127,11 @@ static KEPT_PEAK: AtomicUsize = AtomicUsize::new(0);
 /// A directory's open descriptor. The walk keeps it in the directory's
 /// handle while it reads the directory, so its stat batches read through it
 /// and each subdirectory opens relative to it: one name looked up instead
-/// of every directory from the root, and a directory below `PATH_MAX`
-/// reached. A subdirectory's handle holds it until that subdirectory is
-/// opened, so it closes once the last one is. At most [`KEEP_LIMIT`] are
-/// kept at once; a directory opened beyond it is not, and its
-/// subdirectories open by path.
+/// of every directory from the root, and a directory whose path is longer
+/// than `PATH_MAX` read. A subdirectory's handle holds it until that
+/// subdirectory is opened, so it closes once the last one is. At most
+/// [`KEEP_LIMIT`] are kept at once; a directory opened beyond it is not, and
+/// its subdirectories open by path.
 #[derive(Debug)]
 pub(crate) struct DirFd {
     fd: OwnedFd,
@@ -445,6 +481,8 @@ mod tests {
 
     use std::os::fd::AsFd;
 
+    #[cfg(target_os = "linux")]
+    use super::FD_TABLE;
     use super::{
         KEEP_LIMIT, KEPT, KEPT_PEAK, NOFILE_TARGET, OPEN_MAX, calls, list_names, open_at, open_dir,
         raise_nofile_limit, with_c_name,
@@ -498,6 +536,23 @@ mod tests {
             "soft limit {} below {floor}",
             limit.rlim_cur
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn p1_walk_02_the_descriptor_table_is_grown_before_a_walk() {
+        raise_nofile_limit();
+        // The table's size, which never shrinks.
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let size: usize = status
+            .lines()
+            .find_map(|line| line.strip_prefix("FDSize:"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let soft = usize::try_from(nofile().rlim_cur).unwrap();
+        assert!(size >= FD_TABLE.min(soft), "a table of {size} descriptors");
     }
 
     #[test]
