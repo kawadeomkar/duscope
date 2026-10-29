@@ -269,3 +269,119 @@ fn p1_core_02_a_file_root_is_numbered_alone() {
     assert_eq!(rollup.len(), 1);
     assert_eq!(rollup.entry_at(0), EntryIdx::ROOT);
 }
+
+/// One directory holding `names` as files, delivered in the order given.
+fn flat(names: &[Vec<u8>]) -> Arena {
+    let mut arena = Arena::new(Attrs::Basic);
+    let root = Node {
+        path: Vec::new(),
+        dir: true,
+        apparent: 0,
+        allocated: 0,
+        mtime: 0,
+    };
+    arena
+        .push(ScanEvent::Entry(entry(
+            &root,
+            DirId::ROOT,
+            Some(DirId::ROOT),
+        )))
+        .unwrap();
+    for name in names {
+        let node = Node {
+            path: vec![name.clone()],
+            dir: false,
+            apparent: 0,
+            allocated: 0,
+            mtime: 0,
+        };
+        arena
+            .push(ScanEvent::Entry(entry(&node, DirId::ROOT, None)))
+            .unwrap();
+    }
+    arena
+        .push(ScanEvent::DirClosed {
+            dir: DirId::ROOT,
+            errno: None,
+        })
+        .unwrap();
+    arena
+}
+
+/// T3's shape: one directory of 1,000,000 files named `f0000000` to
+/// `f0999999`, delivered shuffled, as a hashed directory lists them. Timing,
+/// so ignored; run it with `--release -- --ignored --nocapture`.
+#[test]
+#[ignore = "a timing; run in a release build by name"]
+fn p1_core_02_a_million_siblings_roll_up_within_100_ms() {
+    let mut names: Vec<Vec<u8>> = (0..1_000_000)
+        .map(|i| format!("f{i:07}").into_bytes())
+        .collect();
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    for i in (1..names.len()).rev() {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        names.swap(i, usize::try_from(rng % (i as u64 + 1)).unwrap());
+    }
+    let mut arena = flat(&names);
+    let started = std::time::Instant::now();
+    let rollup = roll_up(&mut arena);
+    let elapsed = started.elapsed();
+    eprintln!("roll-up of 1,000,000 siblings: {elapsed:?}");
+    assert_eq!(arena.entry(rollup.entry_at(1)).name, b"f0000000");
+    assert_eq!(arena.entry(rollup.entry_at(1_000_000)).name, b"f0999999");
+    assert!(elapsed.as_millis() < 100, "{elapsed:?}");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// Siblings come out in bytewise order whatever leading run they share,
+    /// whether one name begins another, and whether they differ only past
+    /// the 8 bytes the sort key holds.
+    #[test]
+    fn p1_core_02_siblings_sort_bytewise_whatever_they_share(
+        shared in prop::collection::vec(1u8..=255, 0..12),
+        tails in prop::collection::vec(
+            (
+                prop::collection::vec(prop::sample::select(vec![b'a', b'b', 0x01, 0xfe]), 0..3),
+                prop::collection::vec(1u8..=255, 0..12),
+            ),
+            1..60,
+        ),
+        seed in any::<u64>(),
+    ) {
+        // A shared run, then up to 2 bytes from a 4-letter alphabet (so many
+        // names agree well past 8 bytes when the run is long), then any.
+        let mut names: Vec<Vec<u8>> = tails
+            .into_iter()
+            .map(|(common, rest)| {
+                let mut name = shared.clone();
+                name.extend(common);
+                name.extend(rest);
+                name.retain(|&b| b != b'/');
+                name
+            })
+            .filter(|name| !name.is_empty())
+            .collect();
+        names.sort();
+        names.dedup();
+        let mut delivered = names.clone();
+        let mut rng = seed | 1;
+        for i in (1..delivered.len()).rev() {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            delivered.swap(i, usize::try_from(rng % (i as u64 + 1)).unwrap());
+        }
+        let mut arena = flat(&delivered);
+        let rollup = roll_up(&mut arena);
+        let order: Vec<Vec<u8>> = rollup
+            .preorder()
+            .skip(1)
+            .map(|idx| arena.entry(idx).name.to_vec())
+            .collect();
+        prop_assert_eq!(order, names);
+    }
+}
