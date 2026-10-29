@@ -3,8 +3,8 @@
 //!
 //! ci.yml is read as text, without a YAML crate: its jobs are the keys indented
 //! by two spaces under the top-level `jobs:`, and job-level keys are indented by
-//! four, which is how the file is written. These tests read files only; they never
-//! run the duscope binary.
+//! four, which is how the file is written. These tests read files, and run one
+//! step's script under bash with stub commands; they never run the duscope binary.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -643,4 +643,110 @@ fn p1_test_01_the_platform_job_runs_the_ignored_tests_as_root() {
         ),
         "bench-regression drops main's result when the comparison fails"
     );
+}
+
+/// The `run: |` script of the step with this name in `job`, dedented.
+fn step_script(job: &Job, name: &str) -> String {
+    let mut lines = job
+        .lines
+        .iter()
+        .skip_while(|line| line.trim() != format!("- name: {name}"))
+        .skip(1);
+    let run = lines
+        .by_ref()
+        .find(|line| line.trim() == "run: |")
+        .unwrap_or_else(|| panic!("job `{}`: no `run: |` in step `{name}`", job.id));
+    let indent = run.len() - run.trim_start().len() + 2;
+    let mut script = String::new();
+    for line in lines {
+        if !line.trim().is_empty() && line.len() - line.trim_start().len() < indent {
+            break;
+        }
+        script.push_str(line.get(indent..).unwrap_or_default());
+        script.push('\n');
+    }
+    script
+}
+
+#[test]
+fn p0_ci_01_build_time_builds_again_before_failing() {
+    let jobs = jobs(&read(WORKFLOW));
+    let job = jobs.iter().find(|j| j.id == "build-time").unwrap();
+    let script = step_script(job, "Cold cargo build --release");
+    // cargo logs its arguments (and fails when asked); date hands out the
+    // instants listed in `times`, one a call, so each build takes what the
+    // case says.
+    let stubs = [
+        (
+            "cargo",
+            "#!/usr/bin/env bash\necho \"$*\" >> \"$STUB_DIR/cargo.log\"\n[[ -z ${CARGO_FAILS:-} ]]\n",
+        ),
+        (
+            "date",
+            "#!/usr/bin/env bash\nhead -n 1 \"$STUB_DIR/times\"\ntail -n +2 \"$STUB_DIR/times\" > \"$STUB_DIR/times.next\"\nmv \"$STUB_DIR/times.next\" \"$STUB_DIR/times\"\n",
+        ),
+    ];
+    let build = "build --release --locked --offline -p duscope";
+    // (start and end of each build, cargo fails, succeeds, cargo's calls)
+    let cases: &[(&[&str], bool, bool, &[&str])] = &[
+        (&["0", "50"], false, true, &[build]),
+        (
+            &["0", "70", "100", "150"],
+            false,
+            true,
+            &[build, "clean", build],
+        ),
+        (
+            &["0", "70", "100", "170"],
+            false,
+            false,
+            &[build, "clean", build],
+        ),
+        (&["0", "50"], true, false, &[build]),
+    ];
+    for (times, cargo_fails, succeeds, calls) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for (name, body) in stubs {
+            let path = bin.join(name);
+            fs::write(&path, body).unwrap();
+            let mut mode = fs::metadata(&path).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+            fs::set_permissions(&path, mode).unwrap();
+        }
+        fs::write(dir.join("times"), times.join("\n") + "\n").unwrap();
+        fs::write(dir.join("step.sh"), &script).unwrap();
+        let mut search = vec![bin];
+        search.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let mut step = std::process::Command::new("bash");
+        step.args(["--noprofile", "--norc", "-eo", "pipefail"])
+            .arg(dir.join("step.sh"))
+            .current_dir(dir)
+            .env("PATH", std::env::join_paths(search).unwrap())
+            .env("STUB_DIR", dir)
+            .env("BUILD_TIME_BUDGET_SECS", "63")
+            .env("GITHUB_STEP_SUMMARY", dir.join("summary"));
+        if *cargo_fails {
+            step.env("CARGO_FAILS", "1");
+        }
+        let out = step.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.success(), *succeeds, "{times:?}\n{stdout}");
+        let log = fs::read_to_string(dir.join("cargo.log")).unwrap_or_default();
+        assert_eq!(log.lines().collect::<Vec<_>>(), *calls, "{times:?}");
+        // A build over budget warns before the second; failing names both.
+        let over = times.len() > 2;
+        assert_eq!(
+            stdout.contains("::warning title=build-time::"),
+            over,
+            "{stdout}"
+        );
+        assert_eq!(
+            stdout.contains("::error title=build-time::"),
+            over && !succeeds,
+            "{stdout}"
+        );
+    }
 }
