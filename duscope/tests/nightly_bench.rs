@@ -635,6 +635,13 @@ fn p0_bench_02_an_offline_runner_is_skipped_with_a_notice() {
         // The API cannot be read: no token, or one without Administration read.
         (None, "unknown", "unknown"),
     ];
+    // A run that measures bench-macos: a scheduled one once MACOS_NIGHTLY is
+    // true. The event is always named, since the tests may run under Actions.
+    let measured = [
+        ("GITHUB_EVENT_NAME", "schedule"),
+        ("MACOS_NIGHTLY", "true"),
+        ("MACOS_DISPATCH", "false"),
+    ];
     for (runners, macos, linux) in cases {
         let step = Step::new();
         if let Some(runners) = runners {
@@ -643,7 +650,7 @@ fn p0_bench_02_an_offline_runner_is_skipped_with_a_notice() {
                 &format!(r#"{{"runners": [{}]}}"#, runners.join(", ")),
             );
         }
-        let stdout = succeeded(&step.run(&script, &step.dir, &[]), "the probe");
+        let stdout = succeeded(&step.run(&script, &step.dir, &measured), "the probe");
         let outputs = step.outputs();
         let want = BTreeMap::from([
             ("linux".to_owned(), (*linux).to_owned()),
@@ -656,6 +663,55 @@ fn p0_bench_02_an_offline_runner_is_skipped_with_a_notice() {
             _ => [*macos, *linux].iter().filter(|s| **s != "online").count(),
         };
         assert_eq!(notices, expected, "{runners:?}\n{stdout}");
+    }
+}
+
+#[test]
+fn p0_bench_02_a_paused_macos_runner_runs_only_on_a_dispatch_that_asks() {
+    let workflow = read(NIGHTLY);
+    // Paused: scheduled runs leave bench-macos out (docs/runners.md, "Paused").
+    assert!(
+        workflow.contains("  MACOS_NIGHTLY: \"false\"\n"),
+        "MACOS_NIGHTLY"
+    );
+    assert!(
+        workflow.contains("  MACOS_DISPATCH: ${{ inputs.macos && 'true' || 'false' }}\n"),
+        "MACOS_DISPATCH"
+    );
+    let script = job(&jobs(&workflow), "probe").step_script("Which bench runners are online");
+    let both = [
+        runner("online", "bench-macos"),
+        runner("online", "bench-linux"),
+    ];
+    // (event, MACOS_NIGHTLY, MACOS_DISPATCH, bench-macos's status)
+    let cases = [
+        ("schedule", "false", "false", "paused"),
+        ("schedule", "true", "false", "online"),
+        ("workflow_dispatch", "false", "false", "paused"),
+        ("workflow_dispatch", "false", "true", "online"),
+        // A dispatch goes by its input alone.
+        ("workflow_dispatch", "true", "false", "paused"),
+    ];
+    for (event, nightly, dispatch, macos) in cases {
+        let step = Step::new();
+        step.answer(
+            "runners.json",
+            &format!(r#"{{"runners": [{}]}}"#, both.join(", ")),
+        );
+        let vars = [
+            ("GITHUB_EVENT_NAME", event),
+            ("MACOS_NIGHTLY", nightly),
+            ("MACOS_DISPATCH", dispatch),
+        ];
+        let stdout = succeeded(&step.run(&script, &step.dir, &vars), "the probe");
+        let outputs = step.outputs();
+        assert_eq!(outputs["macos"], macos, "{vars:?}\n{stdout}");
+        assert_eq!(outputs["linux"], "online", "{vars:?}\n{stdout}");
+        assert_eq!(
+            stdout.contains("bench-macos is paused"),
+            macos == "paused",
+            "{vars:?}\n{stdout}"
+        );
     }
 }
 
@@ -717,6 +773,25 @@ fn p0_bench_02_two_consecutive_skips_open_the_offline_issue() {
             *want,
             "linux {linux}, before {before:?}, open {open}\n{stdout}"
         );
+    }
+    // A paused bench-macos is not down: it opens no issue however often it was
+    // skipped, and with bench-linux online the open issue is closed.
+    let jobs_paused = r#"{"jobs": [{"name": "probe", "conclusion": "success"}, {"name": "bench-macos", "conclusion": "skipped"}, {"name": "bench-linux", "conclusion": "success"}]}"#;
+    for (open, want) in [
+        (false, &[][..]),
+        (true, &["issue comment 7", "issue close 7"][..]),
+    ] {
+        let step = Step::new();
+        step.answer("issues.json", if open { open_issue } else { "[]" });
+        step.answer("runs.json", runs);
+        step.answer("jobs-99.json", jobs_paused);
+        let out = step.run(
+            &script,
+            &step.dir,
+            &[("MACOS", "paused"), ("LINUX", "online")],
+        );
+        let stdout = succeeded(&out, "the offline-issue step");
+        assert_eq!(step.writes(), want, "paused, open {open}\n{stdout}");
     }
     // The issue it opens is titled as the spec names it and links the run.
     let step = Step::new();

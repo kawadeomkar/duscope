@@ -7,9 +7,10 @@ phase gates are judged on their numbers, never on GitHub's shared runners, which
 are too noisy for absolute targets. This page describes the machines, how a
 runner is set up, and what keeps a public repository's code off them.
 
-Every night at 03:17 Pacific the workflow runs `bench/run.sh` on both machines
-(the three trees, the pinned competitors, warm and cold caches) and pushes the
-result files to the `bench-results` branch as `<date>-<platform>.json`.
+Every night at 03:17 Pacific the workflow runs `bench/run.sh` (the three trees,
+the pinned competitors, warm and cold caches) on bench-linux, and on bench-macos
+when it is not [paused](#paused), as it is now, and pushes the result files to
+the `bench-results` branch as `<date>-<platform>.json`.
 [bench/README.md](../bench/README.md) documents the harness and the result file;
 `bench/compare.py` reads the files as baselines.
 
@@ -28,7 +29,7 @@ anything in this table is a new row in the [change log](#change-log).
 | Filesystem of `BENCH_HOME` | APFS, the Data volume, holding the warm runs' trees; the cold runs' trees on an APFS sparse-bundle disk image inside it ([below](#bench-macos-the-authors-macbook-pro)) | ext4, the root filesystem (`relatime,discard`) |
 | Free space and inodes | 471 GiB; APFS allocates inodes as needed | 58 GB and 8.1 million inodes, with the tools installed and no trees yet |
 | Network | Wi-Fi on the home LAN; not filtered ([Network](#network)) | bridged to the home LAN, DHCP; outbound to the internet only ([Network](#network)) |
-| Power and location | on AC power at the author's home, woken at 03:10 every day | the Proxmox host, in the author's home |
+| Power and location | on AC power at the author's home, woken at 03:10 every day while its nightly runs | the Proxmox host, in the author's home |
 
 ### bench-macos: the author's MacBook Pro
 
@@ -56,6 +57,25 @@ trees stay in `BENCH_HOME/trees` on the Data volume: the image is slow even warm
 (`du` on T1 took 13 s there), so warm runs on it would measure the image. Each
 copy takes 3.6 GiB. Cold runs pair the subject with dua and `du` only, since all
 eight tools cold on the image would not fit the job's 300 minutes.
+
+#### Paused
+
+Scheduled runs leave bench-macos out. A full macOS run would take about three
+hours of the laptop, the author's own machine (the run of 2026-10-28 had reached
+T2's cold runs after an hour and forty minutes). The macOS nightly comes back when a dedicated Mac
+(a Mac mini, say) takes the `bench-macos` label: setting `MACOS_NIGHTLY` to
+`"true"` in `nightly-bench.yml` does it. Until then a dispatch runs bench-macos
+on request, at a time the laptop is free:
+
+```sh
+gh workflow run nightly-bench.yml --repo kawadeomkar/duscope -f macos=true
+```
+
+The probe reports a paused runner as `paused`, which is neither online nor
+offline: its job is skipped with a notice and no `nightly-bench offline` issue
+is opened for it. With no macOS job the daily wake at 03:10 serves nothing;
+`sudo pmset repeat cancel` removes it (and any other repeating power event).
+The runner itself can stay registered: it is idle without jobs.
 
 ### bench-linux: a VM on Proxmox
 
@@ -365,8 +385,9 @@ GitHub-hosted runner, asks the API which runners are online. The bench job of a
 runner that is offline (or missing, or when the API cannot be read) is skipped
 with a notice. When a platform is skipped twice in a row, the probe opens the
 issue `nightly-bench offline` and pins it, or updates its description, which
-notifies no one, when it is open; the next run with both runners online closes it. A release needs a nightly result
-at most 72 hours old.
+notifies no one, when it is open; the next run with all its runners online
+closes it. A [paused](#paused) runner is skipped too, but never counts as
+offline. A release needs a nightly result at most 72 hours old.
 
 To look at a runner: the `gh api .../runners` command above shows its status;
 on the machine, `./svc.sh status` (Linux) or `sudo launchctl print
@@ -398,3 +419,4 @@ platform and architecture.
 | 2026-10-25 | `bench-linux` | 10 vCPUs, one per core of the host (was 4), for the thread sweep |
 | 2026-10-25 | `bench-macos` | the trees on an APFS disk image, which the cold command remounts around each purge |
 | 2026-10-28 | `bench-macos` | the warm runs' trees back on the Data volume, in `BENCH_HOME/trees`; the image holds the cold runs' trees, measured with dua and `du` only |
+| 2026-10-28 | `bench-macos` | [paused](#paused): left out of scheduled runs until a dedicated Mac takes the label; a dispatch with `macos` ticked runs it |

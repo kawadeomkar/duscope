@@ -11,6 +11,11 @@
 # fixture tree to P0-TEST-01's 30-second build budget, which these quiet machines
 # can assert and shared CI runners cannot.
 #
+# bench-macos is paused: it is the author's laptop, and a full run would take
+# about three hours of it. Scheduled runs measure bench-linux alone until a dedicated
+# Mac takes the label and MACOS_NIGHTLY below becomes true; a dispatch with
+# `macos` ticked runs bench-macos too (docs/runners.md, "Paused").
+#
 # A public repository's pull requests must never reach a self-hosted machine.
 # This workflow has no pull_request trigger, every job on a bench-* label also
 # carries `if: github.event_name != 'pull_request'`, and only main's copy of the
@@ -23,8 +28,8 @@
 # An offline runner never fails the run: the probe asks the API which runners
 # are online, the bench job of a runner that is not is skipped with a notice,
 # and the second consecutive skip opens the pinned issue "nightly-bench
-# offline" (or updates its description), which the next run with both runners
-# online closes.
+# offline" (or updates its description), which the next run with all its
+# runners online closes. A paused runner is not offline.
 
 name: Nightly bench
 
@@ -55,6 +60,10 @@ on:
         description: "run P1-BENCH-01's thread sweep (bench/run.sh sweep) on the trees instead of the harness"
         type: boolean
         default: false
+      macos:
+        description: "run bench-macos too, which scheduled runs leave out while it is paused (docs/runners.md)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -77,6 +86,10 @@ env:
   MODE: ${{ inputs.mode || 'both' }}
   SCALE: ${{ inputs.scale || '1' }}
   SWEEP: ${{ inputs.sweep && 'true' || 'false' }}
+  # Whether bench-macos runs: on schedule when MACOS_NIGHTLY is true, which it is
+  # not while the runner is paused; on a dispatch when `macos` is ticked.
+  MACOS_NIGHTLY: "false"
+  MACOS_DISPATCH: ${{ inputs.macos && 'true' || 'false' }}
 
 jobs:
   probe:
@@ -99,8 +112,14 @@ jobs:
           GH_TOKEN: ${{ secrets.BENCH_RUNNERS_TOKEN }}
         run: |
           # Each platform's status: online, offline, missing (no runner has the
-          # label) or unknown (the API could not be read). Listing runners needs
-          # the Administration (read) permission, which GITHUB_TOKEN never has.
+          # label), unknown (the API could not be read) or, for macOS, paused
+          # (this run leaves it out). Listing runners needs the Administration
+          # (read) permission, which GITHUB_TOKEN never has.
+          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
+            macos_wanted=$MACOS_DISPATCH
+          else
+            macos_wanted=$MACOS_NIGHTLY
+          fi
           read_ok=true
           if ! runners=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runners" \
               --jq '.runners[] | {status, labels: [.labels[].name]}' 2>"$RUNNER_TEMP/runners.err"); then
@@ -109,7 +128,9 @@ jobs:
           fi
           for platform in macos linux; do
             label="bench-$platform"
-            if [[ $read_ok == false ]]; then
+            if [[ $platform == macos && $macos_wanted != true ]]; then
+              status=paused
+            elif [[ $read_ok == false ]]; then
               status=unknown
             else
               status=$(jq -rs --arg label "$label" '
@@ -120,7 +141,9 @@ jobs:
             fi
             echo "$platform=$status" >> "$GITHUB_OUTPUT"
             echo "$label: $status"
-            if [[ $status != online && $read_ok == true ]]; then
+            if [[ $status == paused ]]; then
+              echo "::notice title=nightly-bench::bench-macos is paused (docs/runners.md), so it is skipped; a dispatch with macos ticked runs it"
+            elif [[ $status != online && $read_ok == true ]]; then
               echo "::notice title=nightly-bench::the $label runner is $status, so bench-$platform is skipped"
             fi
           done
@@ -144,7 +167,8 @@ jobs:
           again=""
           for platform in macos linux; do
             case $platform in macos) status=$MACOS ;; linux) status=$LINUX ;; esac
-            [[ $status == online ]] && continue
+            # A paused runner is left out on purpose, not down.
+            [[ $status == online || $status == paused ]] && continue
             down="$down bench-$platform ($status)"
             if [[ -n $previous ]]; then
               before=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$previous/jobs" \
@@ -154,7 +178,7 @@ jobs:
           done
           if [[ -z $down ]]; then
             if [[ -n $issue ]]; then
-              gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "Both bench runners are online again: $run_url"
+              gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "The bench runners are online again: $run_url"
               gh issue close "$issue" --repo "$GITHUB_REPOSITORY"
             fi
             exit 0
@@ -165,7 +189,7 @@ jobs:
           fi
           body="Skipped twice in a row:$again. Not online now:$down. Latest run: $run_url
 
-          docs/runners.md says how to check a runner and re-register it. The next run with both runners online closes this issue."
+          docs/runners.md says how to check a runner and re-register it. The next run with all its runners online closes this issue."
           if [[ -n $issue ]]; then
             # The description says where things stand; editing it notifies no one,
             # so a runner that stays away for weeks does not ping every night.
