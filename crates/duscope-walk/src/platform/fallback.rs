@@ -55,7 +55,7 @@ impl Provider for FallbackProvider {
         errs: &mut Vec<ScanError>,
         later: &mut Vec<NameRef>,
     ) -> io::Result<()> {
-        let fd = posix::open_dir(dir.path())?;
+        let fd = posix::open_handle(dir)?;
         self.read_open(fd.as_fd(), dir, opts, out, errs, later)
     }
 
@@ -67,7 +67,7 @@ impl Provider for FallbackProvider {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
-        let fd = posix::open_dir(dir.path())?;
+        let fd = posix::reopen(dir)?;
         self.read_names(fd.as_fd(), dir, names.iter().cloned(), opts, out, errs);
         Ok(())
     }
