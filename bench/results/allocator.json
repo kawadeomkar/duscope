@@ -28,6 +28,35 @@
       "mimalloc_p50_s": 0.407,
       "gain_pct": 86.6,
       "decision": "mimalloc"
+    },
+    {
+      "platform": "linux",
+      "arch": "x86_64",
+      "allocator_baseline": "musl 1.2 (the Rust musl target's)",
+      "machine": "bench-linux (docs/runners.md): 10 vCPUs of an Intel Core i9-10900K, ext4; both binaries built on a GitHub-hosted ubuntu-24.04 runner from e91e44a's source (run 40834951104, on a temporary branch that adds only the build workflow), since from-scratch builds on the bench host crashed rustc",
+      "date": "2026-10-29",
+      "tree": "T2",
+      "mode": "warm",
+      "runs": 3,
+      "system_p50_s": 1.024,
+      "mimalloc_p50_s": 0.388,
+      "gain_pct": 62.1,
+      "decision": "mimalloc",
+      "harness": {
+        "commit": "e91e44a6600eb339e609c77bf2741eafe364179f",
+        "hyperfine": "2.0.0",
+        "warmup": 2
+      },
+      "system_times_s": [
+        0.9893,
+        1.0244,
+        1.0286
+      ],
+      "mimalloc_times_s": [
+        0.3685,
+        0.4019,
+        0.3882
+      ]
     }
   ],
   "musl_peak_rss_bytes_per_entry": {
