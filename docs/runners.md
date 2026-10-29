@@ -61,7 +61,7 @@ eight tools cold on the image would not fit the job's 300 minutes.
 #### Paused
 
 Scheduled runs leave bench-macos out. A full macOS run would take about three
-hours of the laptop, the author's own machine (2026-10-29's run had reached
+hours of the laptop, the author's own machine (the run of 2026-10-28 had reached
 T2's cold runs after an hour and forty minutes). The macOS nightly comes back when a dedicated Mac
 (a Mac mini, say) takes the `bench-macos` label: setting `MACOS_NIGHTLY` to
 `"true"` in `nightly-bench.yml` does it. Until then a dispatch runs bench-macos
@@ -419,4 +419,4 @@ platform and architecture.
 | 2026-10-25 | `bench-linux` | 10 vCPUs, one per core of the host (was 4), for the thread sweep |
 | 2026-10-25 | `bench-macos` | the trees on an APFS disk image, which the cold command remounts around each purge |
 | 2026-10-28 | `bench-macos` | the warm runs' trees back on the Data volume, in `BENCH_HOME/trees`; the image holds the cold runs' trees, measured with dua and `du` only |
-| 2026-10-29 | `bench-macos` | [paused](#paused): left out of scheduled runs until a dedicated Mac takes the label; a dispatch with `macos` ticked runs it |
+| 2026-10-28 | `bench-macos` | [paused](#paused): left out of scheduled runs until a dedicated Mac takes the label; a dispatch with `macos` ticked runs it |
