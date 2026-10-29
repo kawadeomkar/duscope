@@ -2,6 +2,7 @@
 //! same ids charged by every scan of an unchanged tree.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use duscope_testkit::TestEnv;
@@ -44,12 +45,27 @@ fn paths(arena: &Arena) -> Vec<PathBuf> {
     out
 }
 
-#[test]
-fn p1_core_03_du_parity_on_the_fixture_tree_with_hard_links() {
-    let env = TestEnv::new();
-    let root = env.fixtures().root();
-    let (arena, rollup) = scan(&root, 0);
-    let mut ours = rollup.charges().du_compatible(&arena, DirId::ROOT);
+/// What `du -s -k` prints for `root`: the total in KiB, and its stderr.
+fn du_sk(env: &TestEnv, root: &Path) -> (u64, String) {
+    let out = env
+        .command("du")
+        .args(["-s", "-k"])
+        .arg(root)
+        .output()
+        .unwrap();
+    let total = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    (total, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// The scan's total as `du -s -k` counts it, in KiB.
+fn du_kib(arena: &Arena, rollup: &RollUp) -> u64 {
+    let mut ours = rollup.charges().du_compatible(arena, DirId::ROOT);
     // Apple's du leaves out a directory it cannot read, its own blocks
     // included; GNU du counts them.
     if cfg!(target_os = "macos") {
@@ -59,20 +75,66 @@ fn p1_core_03_du_parity_on_the_fixture_tree_with_hard_links() {
                 .allocated;
         }
     }
-    let out = env
-        .command("du")
-        .args(["-s", "-k"])
-        .arg(&root)
-        .output()
-        .unwrap();
-    let du: u64 = String::from_utf8(out.stdout)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert_eq!(ours.div_ceil(1024), du, "du -sk");
+    ours.div_ceil(1024)
+}
+
+/// The entries whose allocation differs from `lstat`'s now, one a line: a
+/// scan that misread an entry, or a tree that changed after it.
+fn changed_since(arena: &Arena, root: &Path) -> String {
+    let paths = paths(arena);
+    let mut lines = String::new();
+    for view in arena.entries() {
+        if matches!(
+            view.kind,
+            Kind::Socket | Kind::Fifo | Kind::Char | Kind::Block
+        ) {
+            continue;
+        }
+        // Entries below an unreadable directory have no lstat to compare.
+        let path = root.join(&paths[view.idx.index()]);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let now = std::os::unix::fs::MetadataExt::blocks(&meta) * 512;
+        if now != view.allocated {
+            let _ = writeln!(
+                lines,
+                "{}: {} in the scan, {now} now",
+                path.display(),
+                view.allocated
+            );
+        }
+    }
+    lines
+}
+
+#[test]
+fn p1_core_03_du_parity_on_the_fixture_tree_with_hard_links() {
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    // du reads the tree before and after the scan. Readings that differ mean
+    // du's view of the tree changed while the test ran, so it reads again; a
+    // scan that disagrees with a steady du fails at once.
+    let mut unsteady = Vec::new();
+    let (arena, rollup, du, stderr) = loop {
+        let (before, _) = du_sk(&env, &root);
+        let (arena, rollup) = scan(&root, 0);
+        let (after, stderr) = du_sk(&env, &root);
+        if before == after {
+            break (arena, rollup, after, stderr);
+        }
+        unsteady.push((before, after));
+        assert!(
+            unsteady.len() < 3,
+            "du read different totals before and after each scan: {unsteady:?}"
+        );
+    };
+    assert_eq!(
+        du_kib(&arena, &rollup),
+        du,
+        "du -sk (after unsteady readings {unsteady:?})\nentries whose allocation changed:\n{}du's stderr:\n{stderr}",
+        changed_since(&arena, &root)
+    );
     // The hard-links case: one 256 KiB inode with four links counts once.
     let groups: Vec<_> = rollup.charges().hardlinks(&arena).collect();
     assert!(
