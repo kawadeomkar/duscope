@@ -125,8 +125,9 @@ static KEEP_LIMIT: AtomicUsize = AtomicUsize::new(0);
 static KEPT_PEAK: AtomicUsize = AtomicUsize::new(0);
 
 /// A directory's open descriptor. The walk keeps it in the directory's
-/// handle while it reads the directory, so its stat batches read through it
-/// and each subdirectory opens relative to it: one name looked up instead
+/// handle while it reads the directory, so its stat batches reopen the
+/// directory through it and each subdirectory opens relative to it: one
+/// name looked up instead
 /// of every directory from the root, and a directory whose path is longer
 /// than `PATH_MAX` read. A subdirectory's handle holds it until that
 /// subdirectory is opened, so it closes once the last one is. At most
@@ -233,15 +234,11 @@ fn open_at(dir: Option<BorrowedFd<'_>>, path: &CStr) -> io::Result<OwnedFd> {
     parked(|| unsafe { libc::openat(dir, path.as_ptr(), OPEN_DIR) })
 }
 
-/// The descriptor to read `dir` through: the one the walk keeps for it, or
-/// a new one, opened relative to its parent's while the walk keeps that
-/// and by path otherwise (the root, a directory reached through a link, a
-/// subdirectory of one opened beyond the limit). A new descriptor is kept
-/// in the handle while fewer than [`KEEP_LIMIT`] are.
+/// Opens `dir` to read it: relative to its parent's descriptor while the
+/// walk keeps that, and by path otherwise (the root, a directory reached
+/// through a link, a subdirectory of one opened beyond the limit). The
+/// descriptor is kept in the handle while fewer than [`KEEP_LIMIT`] are.
 pub(crate) fn open_handle(dir: &DirHandle) -> io::Result<Arc<DirFd>> {
-    if let Some(fd) = dir.kept_fd() {
-        return Ok(fd);
-    }
     let fd = match (dir.take_parent_fd(), dir.path().file_name()) {
         (Some(parent), Some(name)) => {
             with_c_name(name.as_bytes(), |name| open_at(Some(parent.as_fd()), name))?
@@ -261,6 +258,21 @@ pub(crate) fn open_handle(dir: &DirHandle) -> io::Result<Arc<DirFd>> {
         dir.keep_fd(Arc::clone(&fd));
     }
     Ok(fd)
+}
+
+/// Opens `dir` again, for a stat batch: as `.` relative to the descriptor
+/// the walk keeps for it, so the batch reads the directory that was listed,
+/// and by path when none is kept. Each batch reads through a descriptor of
+/// its own: in a process with more than one thread, every call through a
+/// descriptor takes and drops a reference on the open file behind it, and
+/// the workers reading one directory's batches through the one kept
+/// descriptor slowed warm T3, a directory of 1,000,000 files, by 4% on
+/// bench-linux.
+pub(crate) fn reopen(dir: &DirHandle) -> io::Result<OwnedFd> {
+    match dir.kept_fd() {
+        Some(fd) => open_at(Some(fd.as_fd()), c"."),
+        None => open_dir(dir.path()),
+    }
 }
 
 /// The descriptor `open` returns, retrying on `EINTR` and parking on
@@ -484,7 +496,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::FD_TABLE;
     use super::{
-        KEEP_LIMIT, KEPT, KEPT_PEAK, NOFILE_TARGET, OPEN_MAX, calls, list_names, open_at, open_dir,
+        KEEP_LIMIT, KEPT, KEPT_PEAK, NOFILE_TARGET, OPEN_MAX, list_names, open_at, open_dir,
         raise_nofile_limit, with_c_name,
     };
     use crate::{DirHandle, NameRef, STAT_BATCH, ScanEvent, WalkOptions, walk};
@@ -675,7 +687,9 @@ mod tests {
     }
 
     #[test]
-    fn p1_walk_02_stat_batches_read_through_the_directorys_descriptor() {
+    fn p1_walk_02_stat_batches_read_the_directory_that_was_listed() {
+        // The directory is swapped for another after its read: a stat batch
+        // still reads the one listed, through the descriptor kept for it.
         let env = TestEnv::new();
         let dir = env.tmp_dir().join("wide");
         std::fs::create_dir(&dir).unwrap();
@@ -691,17 +705,18 @@ mod tests {
             ..WalkOptions::default()
         };
         let (mut out, mut errs, mut later) = (Vec::new(), Vec::new(), Vec::new());
-        let (_, _, before) = calls::now();
         provider
             .read_dir_split(&handle, &opts, &mut out, &mut errs, &mut later)
             .unwrap();
+        std::fs::rename(&dir, env.tmp_dir().join("moved")).unwrap();
+        std::fs::create_dir(&dir).unwrap();
         let names: Vec<NameRef> = out.iter().take(10).map(|e| e.name.clone()).collect();
+        let mut batch = Vec::new();
         provider
-            .stat_names(&handle, &names, &opts, &mut out, &mut errs)
+            .stat_names(&handle, &names, &opts, &mut batch, &mut errs)
             .unwrap();
-        let (_, _, after) = calls::now();
         assert!(errs.is_empty(), "{errs:?}");
-        assert_eq!(after - before, 1, "opens for the read and its stat batch");
+        assert_eq!(batch.len(), names.len());
     }
 
     #[test]

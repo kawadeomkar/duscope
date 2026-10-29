@@ -162,7 +162,7 @@ impl Provider for LinuxProvider {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
-        let fd = posix::open_handle(dir)?;
+        let fd = posix::reopen(dir)?;
         self.read_names(fd.as_fd(), dir, names.iter().cloned(), opts, out, errs);
         Ok(())
     }

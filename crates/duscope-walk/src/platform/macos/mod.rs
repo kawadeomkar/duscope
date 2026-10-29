@@ -294,7 +294,7 @@ impl Provider for MacProvider {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
-        let fd = posix::open_handle(dir)?;
+        let fd = posix::reopen(dir)?;
         // One answer per batch: a filesystem that refuses attribute reads
         // refuses them for every name.
         let mut attrs = true;
