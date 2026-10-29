@@ -66,6 +66,39 @@ pub struct EntryRec {
     nlink_or_dir: u32,
 }
 
+impl EntryRec {
+    /// The directory the entry is in.
+    pub(crate) fn parent(&self) -> DirId {
+        DirId::new(self.parent)
+    }
+
+    /// The entry's own directory, when it is one.
+    pub(crate) fn dir(&self) -> Option<DirId> {
+        (self.kind == kind_code(Kind::Dir)).then(|| DirId::new(self.nlink_or_dir))
+    }
+
+    /// Apparent and allocated bytes.
+    pub(crate) fn sizes(&self) -> (u64, u64) {
+        (self.apparent, self.allocated)
+    }
+
+    /// Modification time.
+    pub(crate) fn mtime_ns(&self) -> i64 {
+        self.mtime_ns
+    }
+}
+
+/// The directory records, written while the entries' records are read
+/// ([`Arena::records_and_dirs`]).
+pub(crate) struct DirsMut<'a>(&'a mut Chunked<DirRec>);
+
+impl DirsMut<'_> {
+    /// The directory record of `dir`.
+    pub(crate) fn get(&mut self, dir: DirId) -> &mut DirRec {
+        self.0.slot(dir.index())
+    }
+}
+
 /// One directory's record beside its entry: 48 bytes, the cumulative fields
 /// zero until the roll-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -579,6 +612,31 @@ impl Arena {
             .unwrap_or_else(|| panic!("no entry {idx:?}"))
     }
 
+    /// The record of `idx`, for a pass over many entries that reads a field
+    /// or two of each: [`Arena::entry`] reads them all.
+    ///
+    /// # Panics
+    ///
+    /// When `idx` is not an entry of this arena.
+    pub(crate) fn record(&self, idx: EntryIdx) -> &EntryRec {
+        self.rec(idx)
+    }
+
+    /// Every entry's record, in index order.
+    pub(crate) fn records(&self) -> impl Iterator<Item = &EntryRec> {
+        self.entries.iter()
+    }
+
+    /// The name of `idx`.
+    ///
+    /// # Panics
+    ///
+    /// When `idx` is not an entry of this arena.
+    pub(crate) fn name(&self, idx: EntryIdx) -> &[u8] {
+        let rec = self.rec(idx);
+        self.names.get(rec.name_at, rec.name_len)
+    }
+
     /// The `--attrs full` attributes of `idx`; `None` in a basic scan, and
     /// for an entry the walk delivered without them in a full scan.
     pub fn full(&self, idx: EntryIdx) -> Option<FullAttrs> {
@@ -602,6 +660,12 @@ impl Arena {
     /// The directory record of `dir`, for the roll-up.
     pub(crate) fn dir_mut(&mut self, dir: DirId) -> &mut DirRec {
         self.dirs.slot(dir.index())
+    }
+
+    /// Every entry's record in index order, beside the directory records to
+    /// write: for a pass that reads the one and adds into the other.
+    pub(crate) fn records_and_dirs(&mut self) -> (impl Iterator<Item = &EntryRec>, DirsMut<'_>) {
+        (self.entries.iter(), DirsMut(&mut self.dirs))
     }
 
     /// Every entry, in scan order.
