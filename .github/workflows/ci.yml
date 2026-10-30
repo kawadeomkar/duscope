@@ -58,22 +58,25 @@ env:
   LYCHEE_VERSION: "0.24.2"
   LYCHEE_SHA256: "1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a"
   # Cold release build budgets in seconds, one per CPU model of the shared
-  # ubuntu-24.04 runners (P1-REL-01, DEV-59): each model's median cold build of
-  # the phase-1 code plus 10%, rounded up, under the spec's 90 s ceiling.
-  # Measured on 2026-10-30 with 63 cold builds on 32 runners (run 41019367504 and
-  # run 41019871348), medians: EPYC 7763 60.4 s (44 builds), Xeon Platinum 8370C
-  # 59.9 s (2), Xeon Platinum 8573C 53.8 s (2), EPYC 9V74 48.7 s (10), Xeon
-  # 6973P-C 45.4 s (2), EPYC 9V45 43.6 s (3).
+  # ubuntu-24.04 runners (P1-REL-01, DEV-59): each model's slowest cold build of
+  # the phase-1 code seen so far plus 10%, rounded up, under the spec's 90 s
+  # ceiling. Not the median: runners of one model differ by up to a fifth (an
+  # EPYC 9V74 built in 47.5 to 56.0 s, a Xeon Platinum 8573C in 53.8 s and then
+  # 63.8 s), and the second build below runs on the same runner. The slowest
+  # builds of 65 on 33 runners (run 41019367504, run 41019871348 and this job's
+  # run 41030925722, 2026-10-30): EPYC 7763 63.5 s (44 builds), Xeon Platinum
+  # 8573C 63.8 s (4), Xeon Platinum 8370C 60.3 s (2), EPYC 9V74 56.0 s (10),
+  # Xeon 6973P-C 45.5 s (2), EPYC 9V45 44.2 s (3).
   # A model not listed is held to the largest budget, with a notice to add it. A
   # build over its budget is measured once more before the job fails (DEV-53).
   # The size budget lives in the justfile as size_budget.
   BUILD_TIME_BUDGETS: |
-    AMD EPYC 7763 64-Core Processor=67
-    Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz=66
-    INTEL(R) XEON(R) PLATINUM 8573C=60
-    AMD EPYC 9V74 80-Core Processor=54
-    Intel(R) Xeon(R) 6973P-C=50
-    AMD EPYC 9V45 96-Core Processor=48
+    INTEL(R) XEON(R) PLATINUM 8573C=71
+    AMD EPYC 7763 64-Core Processor=70
+    Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz=67
+    AMD EPYC 9V74 80-Core Processor=62
+    Intel(R) Xeon(R) 6973P-C=51
+    AMD EPYC 9V45 96-Core Processor=49
 
 jobs:
   fmt:
@@ -599,11 +602,10 @@ jobs:
           echo "cold build budget on ${cpu:-this CPU}: ${budget} s" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "BUILD_TIME_BUDGET_SECS=$budget" >> "$GITHUB_ENV"
       # `-p duscope`: the binary a user builds. The unpublished test members
-      # (mktree, duscope-testkit) are not part of a release build. Even on one CPU
-      # model a cold build varies by more than the budget's 10% margin (47.5 to
-      # 56.0 s on an EPYC 9V74), so a build over budget is measured again from
-      # cold and fails only when the second is over too, as bench-regression
-      # measures again (DEV-53).
+      # (mktree, duscope-testkit) are not part of a release build. A build over
+      # budget is measured again from cold and fails only when the second is over
+      # too, as bench-regression measures again (DEV-53): that absorbs a moment's
+      # noise on the runner, while the budgets above absorb a slower runner.
       - name: Cold cargo build --release
         run: |
           # Called as a command, not in $(...), so a failed build fails the step.
