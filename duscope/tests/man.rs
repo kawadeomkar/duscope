@@ -15,22 +15,14 @@ fn duscope(env: &TestEnv) -> Command {
     Command::from_std(env.cmd())
 }
 
-/// Whether this is a CI run (`CI` set, and not `0` or `false`). CI installs
-/// every program these tests drive (ci.yml installs zsh, fish and mandoc),
-/// so there a missing one fails the test instead of skipping it, which a
-/// passing test's captured output would hide.
-fn in_ci() -> bool {
-    std::env::var("CI").is_ok_and(|v| !matches!(v.as_str(), "" | "0" | "false"))
-}
-
-/// Skips a check that needs `program`, which is not installed here; fails
-/// it in CI.
+/// Skips a check that needs `program`, which is not installed here. CI
+/// installs every program these tests drive (ci.yml installs zsh, fish and
+/// mandoc), so there a missing one fails the test instead of skipping it,
+/// which a passing test's captured output would hide.
 fn missing(program: &str) {
-    assert!(
-        !in_ci(),
-        "{program} is not installed, and CI must run this check: install it in ci.yml"
-    );
-    eprintln!("skipped: {program} is not installed");
+    duscope_testkit::skip(&format!(
+        "{program} is not installed (ci.yml must install it)"
+    ));
 }
 
 /// Whether `program` runs here.

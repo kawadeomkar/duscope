@@ -1,7 +1,8 @@
 //! P1-WALK-06: mounts on real filesystems. These tests mount filesystems,
 //! so they are ignored by default and run with `DUSCOPE_TEST_PLATFORM=1`
 //! (`just check-full`; the CI platform job runs them under sudo). On Linux
-//! they need root and skip without it.
+//! they need root: without it they skip, except in CI, where a missing
+//! prerequisite fails the test (`duscope_testkit::skip`).
 //!
 //! The file selects tests with `cfg(target_os)`, which the scanner keeps
 //! inside `src/platform/` elsewhere: building and mounting a filesystem
@@ -140,27 +141,38 @@ fn mount_linux<'a>(env: &'a TestEnv, work: &Path, root: &Path) -> (Mounted<'a>, 
     // exFAT needs exfatprogs and the kernel's exfat driver.
     let exfat = work.join("exfat.img");
     run(env, "truncate", &[&"-s", &"16M", &exfat]);
-    let has_exfat = env
-        .command("mkfs.exfat")
-        .arg(&exfat)
-        .output()
-        .is_ok_and(|o| o.status.success())
-        && env
-            .command("mount")
-            .args([
-                &"-o" as &dyn AsRef<std::ffi::OsStr>,
-                &"loop",
-                &exfat,
-                &root.join("exfat"),
-            ])
-            .output()
-            .is_ok_and(|o| o.status.success());
-    if has_exfat {
-        mounted.points.push(root.join("exfat"));
-        fs::write(root.join("exfat/inside"), b"foreign").unwrap();
-    } else {
-        eprintln!("note: no exFAT here; that part is skipped");
-    }
+    let failed = |step: &str, out: std::io::Result<std::process::Output>| match out {
+        Ok(out) if out.status.success() => None,
+        Ok(out) => Some(format!(
+            "{step}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => Some(format!("{step}: {e}")),
+    };
+    let why = failed("mkfs.exfat", env.command("mkfs.exfat").arg(&exfat).output()).or_else(|| {
+        failed(
+            "mount -o loop",
+            env.command("mount")
+                .args([
+                    &"-o" as &dyn AsRef<std::ffi::OsStr>,
+                    &"loop",
+                    &exfat,
+                    &root.join("exfat"),
+                ])
+                .output(),
+        )
+    });
+    let has_exfat = match why {
+        None => {
+            mounted.points.push(root.join("exfat"));
+            fs::write(root.join("exfat/inside"), b"foreign").unwrap();
+            true
+        }
+        Some(why) => {
+            duscope_testkit::skip(&format!("no exFAT here, so that part is left out ({why})"));
+            false
+        }
+    };
 
     // The root bind-mounted below itself: entering it would loop.
     run(env, "mount", &[&"--bind", &root, &root.join("sub/cycle")]);
@@ -178,7 +190,7 @@ fn p1_walk_06_linux_mounts_are_crossed_confined_and_cycles_stopped() {
     }
     let uid = env.command("id").arg("-u").output().unwrap();
     if String::from_utf8_lossy(&uid.stdout).trim() != "0" {
-        eprintln!("skipped: mounting needs root");
+        duscope_testkit::skip("mounting needs root");
         return;
     }
     let work = env.tmp_dir().join("platform");
@@ -326,7 +338,7 @@ fn p1_walk_06_linux_mount_ids_hold_for_same_device_binds_and_reused_ids() {
     }
     let uid = env.command("id").arg("-u").output().unwrap();
     if String::from_utf8_lossy(&uid.stdout).trim() != "0" {
-        eprintln!("skipped: mounting needs root");
+        duscope_testkit::skip("mounting needs root");
         return;
     }
     let root = env.tmp_dir().join("platform-ids");

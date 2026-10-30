@@ -76,7 +76,7 @@ disagree, so a pin changes in both places in the same pull request.
 | `just setup` | install the pinned toolchains and tools for this platform |
 | `just check` | `just fmt`, `just clippy`, `just test`, `just docs` and `just deny`: the pull-request gate |
 | `just check-full` | `just check` plus the advisory database and the ignored platform tests; what CI runs (needs the network) |
-| `just platform-tests` | the ignored platform tests, by name, in a release build; they need root and skip without it (CI runs them under `sudo`) |
+| `just platform-tests` | the ignored platform tests, by name, in a release build; they need root and skip without it (CI runs them under `sudo`, and there a missing prerequisite fails them) |
 | `just test-pkg P2-QRY-06` | the tests of one package (names starting `p2_qry_06_`) |
 | `just test-crate duscope-core` | the tests of one crate |
 | `just size [TARGET]` | release build and the stripped binary size against the budget (`size_budget`, 5.25 MB) |

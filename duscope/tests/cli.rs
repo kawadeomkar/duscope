@@ -48,7 +48,6 @@ fn flags(dir: &Path) -> Vec<(&'static str, Vec<String>)> {
         format!("--exclude-from={}", p(&patterns)),
         format!("--ignore-from={}", p(&ignore)),
         s("--exclude-caches"),
-        s("--skip-containers"),
         s("--provider=fallback"),
         s("--test-now=2037-01-01T00:00:00Z"),
     ];
@@ -199,12 +198,22 @@ fn p1_cli_01_exit_codes() {
     let failed = duscope(&env).args(["scan", &long]).assert().code(1);
     let stderr = String::from_utf8_lossy(&failed.get_output().stderr).into_owned();
     assert!(stderr.starts_with("duscope: cannot read /aaa"), "{stderr}");
-    // A flag of a later phase.
-    duscope(&env)
-        .args(["scan", "--save"])
-        .arg(&tree)
-        .assert()
-        .code(2);
+    // Flags of a later phase: hidden, and refused before the scan.
+    for args in [
+        ["scan", "--save"],
+        ["scan", "--skip-containers"],
+        ["top", "--skip-containers"],
+    ] {
+        let refused = duscope(&env)
+            .args(args)
+            .arg("--json")
+            .arg(&tree)
+            .assert()
+            .code(2);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&refused.get_output().stdout).unwrap();
+        assert_eq!(envelope["error"]["code"], "not_available", "{args:?}");
+    }
 }
 
 #[test]

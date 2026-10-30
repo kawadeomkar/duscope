@@ -614,9 +614,11 @@ jobs:
   # The tap's version bump (P1-PKG-02): brew bump-formula-pr points the formula at
   # the tag's source archive and opens the pull request in kawadeomkar/homebrew-tap,
   # whose tests.yml builds the bottles and publish.yml merges them (the tap has no
-  # autobump.yml, so the two never race). Not for a pre-release. A re-run of the
-  # release finds the formula at the tag, or its bump pull request open, and stops
-  # there without opening another.
+  # autobump.yml, so the two never race). The first release finds no formula to
+  # bump and opens packaging/homebrew/duscope.rb as the pull request instead, so it
+  # gets its bottles the same way. Not for a pre-release. A re-run of the release
+  # finds the formula at the tag, or its pull request open, and stops there
+  # without opening another.
   homebrew:
     needs:
       - plan
@@ -629,9 +631,13 @@ jobs:
       HOMEBREW_NO_INSTALL_FROM_API: "1"
       TAG: ${{ needs.plan.outputs.tag }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Open the version-bump pull request in the tap
         env:
-          # Reads the tap's pull requests, which the tap token may.
+          # Reads and opens the tap's pull requests and pushes the first
+          # release's branch, which the tap token may.
           GH_TOKEN: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
         shell: bash
         run: |
@@ -639,20 +645,37 @@ jobs:
           version=${TAG#v}
           url="https://github.com/kawadeomkar/duscope/archive/refs/tags/$TAG.tar.gz"
           brew tap kawadeomkar/tap
-          formula="$(brew --repository kawadeomkar/tap)/Formula/duscope.rb"
-          [[ -f $formula ]] || {
-            echo "::error::kawadeomkar/tap has no Formula/duscope.rb to bump; commit the formula to the tap (docs/RELEASING.md, step 5)"
-            exit 1
-          }
-          if grep -qF "\"$url\"" "$formula"; then
+          tap="$(brew --repository kawadeomkar/tap)"
+          formula="$tap/Formula/duscope.rb"
+          if [[ -f $formula ]] && grep -qF "\"$url\"" "$formula"; then
             echo "::notice::the tap's formula is already at $TAG"
             exit 0
           fi
-          # bump-formula-pr pushes the branch bump-duscope-<version>; a second run
+          # bump-formula-pr pushes the branch bump-duscope-<version>, and the
+          # first release's pull request takes the same name; a second run
           # would fail on the duplicate pull request and the existing branch.
           open=$(gh pr list --repo kawadeomkar/homebrew-tap --state open --head "bump-duscope-$version" --json url --jq '.[0].url // empty')
           if [[ -n $open ]]; then
-            echo "::notice::the tap's bump pull request for $TAG is already open: $open"
+            echo "::notice::the tap's pull request for $TAG is already open: $open"
+            exit 0
+          fi
+          if [[ ! -f $formula ]]; then
+            # The first release: no formula to bump, so this repository's goes
+            # in as the pull request, with the tag's archive and its checksum.
+            sha256=$(curl -fsSL "$url" | shasum -a 256 | cut -d' ' -f1)
+            git -C "$tap" switch -c "bump-duscope-$version"
+            mkdir -p "$tap/Formula"
+            sed -e "s|@URL@|$url|" -e "s|@SHA256@|$sha256|" packaging/homebrew/duscope.rb > "$formula"
+            git -C "$tap" add Formula/duscope.rb
+            git -C "$tap" -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "duscope $version (new formula)"
+            # The tap token pushes the branch, as bump-formula-pr's does.
+            gh auth setup-git
+            git -C "$tap" push origin "bump-duscope-$version"
+            gh pr create --repo kawadeomkar/homebrew-tap --base main --head "bump-duscope-$version" \
+              --title "duscope $version (new formula)" \
+              --body "The duscope formula, from packaging/homebrew/duscope.rb at $TAG."
             exit 0
           fi
           # --no-fork: the token may push a branch to the tap and open the pull

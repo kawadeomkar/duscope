@@ -69,6 +69,34 @@ pub fn test_now() -> &'static str {
     instant()
 }
 
+/// Whether this is a CI run: `CI` set to anything but empty, `0` or
+/// `false` (GitHub Actions sets it to `true`).
+pub fn in_ci() -> bool {
+    ci_says(std::env::var("CI").ok().as_deref())
+}
+
+fn ci_says(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !matches!(v, "" | "0" | "false"))
+}
+
+/// Notes on stderr that a check skips here, `why` naming what this machine
+/// lacks: root, a tool, a fixture case its filesystem could not build. In
+/// CI it fails the test instead: CI's runners have every prerequisite of
+/// their platform, so a check CI must run cannot pass by skipping. The
+/// caller returns, or leaves the part out, after it.
+///
+/// # Panics
+///
+/// In CI.
+pub fn skip(why: &str) {
+    skip_when(in_ci(), why);
+}
+
+fn skip_when(ci: bool, why: &str) {
+    assert!(!ci, "skipped in CI, which must run this check: {why}");
+    eprintln!("skipped: {why}");
+}
+
 /// The duscope binary of the current build: beside the `deps/` directory
 /// that holds the running test executable.
 ///
@@ -534,5 +562,31 @@ impl Fixtures {
     /// The build record.
     pub fn record(&self) -> &Record {
         &self.record
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ci_says, skip_when};
+
+    #[test]
+    fn p1_test_01_ci_is_any_value_but_empty_0_or_false() {
+        for value in ["true", "1", "yes"] {
+            assert!(ci_says(Some(value)), "{value}");
+        }
+        for value in [None, Some(""), Some("0"), Some("false")] {
+            assert!(!ci_says(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn p1_test_01_a_skip_outside_ci_returns() {
+        skip_when(false, "nothing to check here");
+    }
+
+    #[test]
+    #[should_panic(expected = "skipped in CI, which must run this check: no exFAT")]
+    fn p1_test_01_a_skip_in_ci_fails_the_test() {
+        skip_when(true, "no exFAT");
     }
 }

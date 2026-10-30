@@ -1,8 +1,8 @@
 # Temporary, on this branch only (never merged): builds x86_64 musl binaries
 # for measurements on bench-linux on a GitHub-hosted runner, since
 # from-scratch builds on the bench host's VMs crash rustc at random. This run
-# builds the shipped binary with the lighter roll-up (P1-CORE-02), stacked
-# on the relative-open fix (P1-WALK-02), to time against that fix alone.
+# builds the shipped binary with the siblings sorted on every CPU (P1-CORE-02),
+# and main before it, to time the two.
 name: Allocator build (temporary)
 
 on:
@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
 
+env:
+  BEFORE: 9ffdaee8d1859b3e5e6d421a2f99cc2bc3dc4829
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -20,17 +23,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.BEFORE }}
+          path: before
       - name: Install the pinned toolchain, the musl target and musl-tools
         run: |
           rustup toolchain install --profile minimal && rustc --version
           rustup target add x86_64-unknown-linux-musl
           sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q musl-tools
-      - name: Build the shipped binary
+      - name: Build the shipped binary, with the change and before it
         run: |
           cargo build --release --locked -p duscope --target x86_64-unknown-linux-musl
           mkdir -p out && cp target/x86_64-unknown-linux-musl/release/duscope out/duscope-fixed
+          (cd before && cargo build --release --locked -p duscope --target x86_64-unknown-linux-musl)
+          cp before/target/x86_64-unknown-linux-musl/release/duscope out/duscope-before
           sha256sum out/* | tee out/SHA256SUMS
-          echo "commit: $GITHUB_SHA" >> out/SHA256SUMS
+          echo "commit: $GITHUB_SHA; before: $BEFORE" >> out/SHA256SUMS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fixed-binary

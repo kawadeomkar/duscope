@@ -401,3 +401,50 @@ fn p1_cli_03_by_type_plain_carries_the_share_of_the_root() {
         );
     }
 }
+
+#[test]
+fn p1_cli_03_by_type_rows_follow_the_sort_they_report() {
+    let env = TestEnv::new();
+    let tree = env.fixtures().case_root("extensions");
+    let tree = tree.to_str().unwrap();
+    // Each sort the flags ask for is the one `query.sort` reports, and the
+    // rows follow it, `other` last.
+    let cases: [(&[&str], &str); 4] = [
+        (&[], "allocated_desc"),
+        (&["--sort", "count"], "count_desc"),
+        (&["--sort", "path", "-r"], "path_desc"),
+        (&["--sort", "size", "-r"], "allocated_asc"),
+    ];
+    for (flags, sort) in cases {
+        let args = [&["by-type"], flags, &[tree]].concat();
+        let (_, value) = json(&env, &args);
+        assert_eq!(value["query"]["sort"], sort, "{flags:?}");
+        let rows = value["entries"].as_array().unwrap();
+        let ranked: Vec<&serde_json::Value> =
+            rows.iter().filter(|e| e["class"] != "other").collect();
+        let key = |e: &serde_json::Value| -> (u64, String) {
+            match sort {
+                "count_desc" => (e["file_count"].as_u64().unwrap(), String::new()),
+                "path_desc" => (0, e["class"].as_str().unwrap().to_owned()),
+                _ => (e["allocated_bytes"].as_u64().unwrap(), String::new()),
+            }
+        };
+        let ascending = sort.ends_with("_asc");
+        for pair in ranked.windows(2) {
+            let (a, b) = (key(pair[0]), key(pair[1]));
+            assert!(
+                if ascending { a <= b } else { a >= b },
+                "{flags:?}: {} before {}",
+                pair[0]["class"],
+                pair[1]["class"]
+            );
+        }
+        if let Some(i) = rows.iter().position(|e| e["class"] == "other") {
+            assert_eq!(i, rows.len() - 1, "{flags:?}: other is last");
+        }
+        assert!(
+            ranked.len() >= 3,
+            "{flags:?}: the fixture has classes to order"
+        );
+    }
+}
