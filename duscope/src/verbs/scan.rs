@@ -39,6 +39,10 @@ pub struct Scanned {
     pub root: PathBuf,
     /// The root as given.
     pub root_as_given: PathBuf,
+    /// Whether `--clones` was given. Clones are counted by default, so only
+    /// an explicit ask warns `clones_unavailable` on a filesystem without
+    /// clone ids.
+    pub clones_asked: bool,
     /// When the scan started and finished, Unix nanoseconds.
     pub started_ns: i64,
     /// When it finished.
@@ -209,6 +213,18 @@ pub fn warnings(scanned: &Scanned) -> Vec<Warning> {
             hint: Some("Rerun duscope scan once the tree is quiet".to_owned()),
         });
     }
+    if scanned.clones_asked && summary.clones_unavailable {
+        warnings.push(Warning {
+            code: "clones_unavailable",
+            message: "--clones was asked of a filesystem without clone ids; its clones count \
+                      in full, as du counts them"
+                .to_owned(),
+            count: None,
+            hint: Some(
+                "Only APFS reports clone ids; rerun duscope without --clones elsewhere".to_owned(),
+            ),
+        });
+    }
     if upper_bound {
         warnings.push(Warning {
             code: "upper_bound",
@@ -328,6 +344,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         elapsed: started.elapsed(),
         root,
         root_as_given: given,
+        clones_asked: walk_args.clones,
         started_ns,
         finished_ns: now(walk_args)?,
     })
@@ -613,7 +630,7 @@ mod tests {
     use duscope_core::rollup::roll_up;
     use duscope_walk::{Attrs, MemProvider, ScanEvent, WalkOptions, walk_with};
 
-    use super::{Scanned, scan_block};
+    use super::{Scanned, scan_block, warnings};
     use crate::cli::{Cli, Verb};
     use crate::out::{Format, Output, Units};
     use crate::verbs::query::top_envelope;
@@ -638,6 +655,7 @@ mod tests {
             elapsed: Duration::ZERO,
             root: "/t".into(),
             root_as_given: "/t".into(),
+            clones_asked: false,
             started_ns: 0,
             finished_ns: 0,
         }
@@ -654,6 +672,23 @@ mod tests {
         };
         assert_eq!(block(&scanned(true))["fs_type"], "mem");
         assert_eq!(block(&scanned(false))["fs_type"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn p1_walk_07_clones_unavailable_warns_only_when_clones_were_asked() {
+        let codes =
+            |scanned: &Scanned| warnings(scanned).iter().map(|w| w.code).collect::<Vec<_>>();
+        let mut scanned = scanned(true);
+        scanned.summary.clones_unavailable = true;
+        // Clones on by default, on a filesystem without clone ids: quiet.
+        assert!(codes(&scanned).is_empty());
+        scanned.clones_asked = true;
+        assert_eq!(codes(&scanned), ["clones_unavailable"]);
+        let warning = &warnings(&scanned)[0];
+        assert!(warning.message.contains("--clones"), "{}", warning.message);
+        assert!(warning.hint.is_some());
+        scanned.summary.clones_unavailable = false;
+        assert!(codes(&scanned).is_empty());
     }
 
     #[test]
@@ -677,6 +712,7 @@ mod tests {
             elapsed: Duration::ZERO,
             root: "/t".into(),
             root_as_given: "/t".into(),
+            clones_asked: false,
             started_ns: 0,
             finished_ns: 0,
         };
