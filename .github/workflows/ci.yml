@@ -57,12 +57,23 @@ env:
   # The markdown link checker of the docs job, verified against this checksum.
   LYCHEE_VERSION: "0.24.2"
   LYCHEE_SHA256: "1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a"
-  # Cold release build budget in seconds: the phase-1 code measured plus 10%
-  # (P1-REL-01), under the spec's 90 s ceiling. This job measured 56.6 s on the
-  # P1-CLI-04 branch (run 40352275456); plus 10% is 62.26 s, rounded up to 63 s.
-  # A build over it is measured once more before the job fails (DEV-53).
+  # Cold release build budgets in seconds, one per CPU model of the shared
+  # ubuntu-24.04 runners (P1-REL-01, DEV-59): each model's median cold build of
+  # the phase-1 code plus 10%, rounded up, under the spec's 90 s ceiling.
+  # Measured on 2026-10-30 with 63 cold builds on 32 runners (run 41019367504 and
+  # run 41019871348), medians: EPYC 7763 60.4 s (44 builds), Xeon Platinum 8370C
+  # 59.9 s (2), Xeon Platinum 8573C 53.8 s (2), EPYC 9V74 48.7 s (10), Xeon
+  # 6973P-C 45.4 s (2), EPYC 9V45 43.6 s (3).
+  # A model not listed is held to the largest budget, with a notice to add it. A
+  # build over its budget is measured once more before the job fails (DEV-53).
   # The size budget lives in the justfile as size_budget.
-  BUILD_TIME_BUDGET_SECS: "63"
+  BUILD_TIME_BUDGETS: |
+    AMD EPYC 7763 64-Core Processor=67
+    Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz=66
+    INTEL(R) XEON(R) PLATINUM 8573C=60
+    AMD EPYC 9V74 80-Core Processor=54
+    Intel(R) Xeon(R) 6973P-C=50
+    AMD EPYC 9V45 96-Core Processor=48
 
 jobs:
   fmt:
@@ -574,12 +585,25 @@ jobs:
       # time, so they happen first and the timed build runs offline.
       - name: Fetch dependencies (not timed)
         run: cargo fetch --locked
+      # The shared runners come with several CPU models, whose cold builds of the
+      # same code differ by a third, so each model has a budget of its own.
+      - name: This machine's budget
+        run: |
+          cpu=$(sed -n 's/^model name[[:space:]]*: //p' "${DUSCOPE_TEST_CPUINFO:-/proc/cpuinfo}" \
+            | head -n 1 | sed 's/[[:space:]]*$//')
+          budget=$(awk -F= -v cpu="$cpu" '$1 == cpu { print $2; exit }' <<< "$BUILD_TIME_BUDGETS")
+          if [[ -z $budget ]]; then
+            budget=$(cut -d= -f2 <<< "$BUILD_TIME_BUDGETS" | sort -n | tail -n 1)
+            echo "::notice title=build-time::no budget for ${cpu:-this CPU} in BUILD_TIME_BUDGETS; holding it to the largest, ${budget} s"
+          fi
+          echo "cold build budget on ${cpu:-this CPU}: ${budget} s" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "BUILD_TIME_BUDGET_SECS=$budget" >> "$GITHUB_ENV"
       # `-p duscope`: the binary a user builds. The unpublished test members
-      # (mktree, duscope-testkit) are not part of a release build. The shared
-      # runners' cold build took 39 to 65 s over 25 runs on 2026-10-28 (median 58),
-      # a spread wider than the budget's 10% margin, so a build over budget is
-      # measured again from cold and fails only when the second is over too, as
-      # bench-regression measures again (DEV-53).
+      # (mktree, duscope-testkit) are not part of a release build. Even on one CPU
+      # model a cold build varies by more than the budget's 10% margin (47.5 to
+      # 56.0 s on an EPYC 9V74), so a build over budget is measured again from
+      # cold and fails only when the second is over too, as bench-regression
+      # measures again (DEV-53).
       - name: Cold cargo build --release
         run: |
           # Called as a command, not in $(...), so a failed build fails the step.

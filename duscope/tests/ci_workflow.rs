@@ -750,3 +750,80 @@ fn p0_ci_01_build_time_builds_again_before_failing() {
         );
     }
 }
+
+/// The `CPU model=seconds` lines of `BUILD_TIME_BUDGETS` in the workflow's
+/// `env`.
+fn build_budgets(workflow: &str) -> Vec<(String, u32)> {
+    workflow
+        .lines()
+        .skip_while(|line| line.trim_end() != "  BUILD_TIME_BUDGETS: |")
+        .skip(1)
+        .take_while(|line| line.starts_with("    "))
+        .map(|line| {
+            let (cpu, secs) = line.trim().rsplit_once('=').unwrap();
+            (cpu.to_owned(), secs.parse().unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn p0_ci_01_each_cpu_model_has_its_build_budget() {
+    let workflow = read(WORKFLOW);
+    let budgets = build_budgets(&workflow);
+    assert!(budgets.len() >= 2, "{budgets:?}");
+    for (cpu, secs) in &budgets {
+        assert!(*secs < 90, "{cpu}: the spec's ceiling is 90 s");
+    }
+    let table: String = budgets
+        .iter()
+        .map(|(cpu, secs)| format!("{cpu}={secs}\n"))
+        .collect();
+    let largest = budgets.iter().map(|(_, secs)| *secs).max().unwrap();
+    let jobs = jobs(&workflow);
+    let job = jobs.iter().find(|j| j.id == "build-time").unwrap();
+    let script = step_script(job, "This machine's budget");
+    // The budget the step hands the build step, and what it printed, on a
+    // machine whose /proc/cpuinfo names `model`.
+    let pick = |model: &str| {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let cpuinfo = dir.join("cpuinfo");
+        let core = |n: u32| format!("processor\t: {n}\nmodel name\t: {model}\nflags\t\t: fpu\n\n");
+        fs::write(&cpuinfo, core(0) + &core(1)).unwrap();
+        fs::write(dir.join("step.sh"), &script).unwrap();
+        let out = std::process::Command::new("bash")
+            .args(["--noprofile", "--norc", "-eo", "pipefail"])
+            .arg(dir.join("step.sh"))
+            .env("BUILD_TIME_BUDGETS", &table)
+            .env("DUSCOPE_TEST_CPUINFO", &cpuinfo)
+            .env("GITHUB_ENV", dir.join("env"))
+            .env("GITHUB_STEP_SUMMARY", dir.join("summary"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{model}: {out:?}");
+        let env = fs::read_to_string(dir.join("env")).unwrap();
+        let secs: u32 = env
+            .trim()
+            .strip_prefix("BUILD_TIME_BUDGET_SECS=")
+            .unwrap()
+            .parse()
+            .unwrap();
+        (secs, String::from_utf8(out.stdout).unwrap())
+    };
+    // Each listed model gets its own, a trailing space in cpuinfo or not.
+    for (cpu, secs) in &budgets {
+        let (got, stdout) = pick(cpu);
+        assert_eq!(got, *secs, "{cpu}");
+        assert!(!stdout.contains("::notice"), "{stdout}");
+        assert_eq!(pick(&format!("{cpu}  ")).0, *secs, "{cpu}, padded");
+    }
+    // A model not listed is held to the largest, and says so.
+    let (got, stdout) = pick("Some Future CPU @ 9.99GHz");
+    assert_eq!(got, largest);
+    assert!(
+        stdout.contains(
+            "::notice title=build-time::no budget for Some Future CPU @ 9.99GHz in BUILD_TIME_BUDGETS"
+        ),
+        "{stdout}"
+    );
+}

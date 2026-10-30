@@ -56,26 +56,22 @@ fn read(relative: &str) -> String {
 }
 
 #[test]
-fn p1_rel_01_the_build_time_budget_is_the_measured_one() {
+fn p1_rel_01_the_build_time_budgets_are_the_measured_ones() {
     let ci = read(".github/workflows/ci.yml");
-    let line = ci
+    let head = "  BUILD_TIME_BUDGETS: |";
+    let budgets: Vec<u32> = ci
         .lines()
-        .find(|l| l.trim_start().starts_with("BUILD_TIME_BUDGET_SECS:"))
-        .unwrap();
-    let secs: u32 = line
-        .split(':')
-        .nth(1)
-        .unwrap()
-        .trim()
-        .trim_matches('"')
-        .parse()
-        .unwrap();
-    assert!(secs < 90, "the build-time budget is still the 90 s ceiling");
-    // Its comment names the CI run that measured it, as size_budget's does.
-    let before: Vec<&str> = ci
-        .lines()
-        .take_while(|l| !l.trim_start().starts_with("BUILD_TIME_BUDGET_SECS:"))
+        .skip_while(|l| l.trim_end() != head)
+        .skip(1)
+        .take_while(|l| l.starts_with("    "))
+        .map(|l| l.trim().rsplit_once('=').unwrap().1.parse().unwrap())
         .collect();
+    assert!(!budgets.is_empty(), "ci.yml has no BUILD_TIME_BUDGETS");
+    for secs in &budgets {
+        assert!(*secs < 90, "a build-time budget is still the 90 s ceiling");
+    }
+    // Their comment names the CI run that measured them, as size_budget's does.
+    let before: Vec<&str> = ci.lines().take_while(|l| l.trim_end() != head).collect();
     let mut comment: Vec<&str> = before
         .iter()
         .rev()
@@ -86,7 +82,7 @@ fn p1_rel_01_the_build_time_budget_is_the_measured_one() {
     let comment = comment.join(" ");
     assert!(
         comment.contains("(run ") && comment.contains(" s"),
-        "BUILD_TIME_BUDGET_SECS's comment cites no measured run: {comment}"
+        "BUILD_TIME_BUDGETS's comment cites no measured run: {comment}"
     );
 }
 
