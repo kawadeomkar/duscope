@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use duscope_core::arena::Arena;
-use duscope_core::query::{ArenaView, ByTypeQuery, Filters, Node, SizeKind, TreeView, by_type};
+use duscope_core::query::{
+    ArenaView, ByTypeQuery, Filters, Node, SizeKind, SortKey, TreeView, by_type,
+};
 use duscope_core::rollup::roll_up;
 use duscope_core::rules::{Class, Classes};
 use duscope_testkit::{TestEnv, golden};
@@ -173,6 +175,8 @@ fn p1_map_02_buffer_snapshots_on_the_fixture_tree() {
             filters: Filters::default(),
             limit: None,
             size: SizeKind::Allocated,
+            sort: SortKey::Size,
+            reverse: false,
         },
     )
     .entries

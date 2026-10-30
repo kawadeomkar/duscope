@@ -258,6 +258,8 @@ fn legend(
             filters: Filters::default(),
             limit: None,
             size,
+            sort: query::SortKey::Size,
+            reverse: false,
         },
     );
     page.entries

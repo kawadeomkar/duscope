@@ -193,6 +193,8 @@ pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
         filters: prepared.filters.clone(),
         limit: prepared.limit,
         size: prepared.size,
+        sort: prepared.sort,
+        reverse: prepared.reverse,
     };
     let page: Page<ByTypeEntry> = query::by_type(&prepared.scanned.view(), &q);
     let (envelope, footer) = envelope(

@@ -10,7 +10,8 @@
 //! applies too. A hard-linked file counts once, at the link charged with
 //! it; a clone's allocated bytes count at the member charged with them,
 //! its apparent bytes and the file itself at each member, as in the
-//! totals. `other` is always the last row.
+//! totals. Classes sort by `--sort` (size by default; file count; newest
+//! file; name), and `other` is always the last row.
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -18,7 +19,7 @@ use std::path::Path;
 use crate::envelope::{ByTypeEntry, Example, name_fields};
 use crate::rules::{Class, Classes, ext};
 
-use super::{Filters, Node, Page, SizeKind, TreeView, abs_path, pct};
+use super::{Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, pct};
 
 /// What `by-type` was asked.
 #[derive(Debug, Clone)]
@@ -33,6 +34,10 @@ pub struct ByTypeQuery<'c> {
     pub limit: Option<usize>,
     /// The size classes are ranked and shown by.
     pub size: SizeKind,
+    /// `--sort`: by size, file count, newest file or class name.
+    pub sort: SortKey,
+    /// `-r`: the key reversed; equals keep the legend's order.
+    pub reverse: bool,
 }
 
 /// What one class adds up to.
@@ -41,6 +46,8 @@ struct Tally {
     allocated: u64,
     apparent: u64,
     files: u64,
+    /// The newest file's modification time, Unix nanoseconds.
+    newest_mtime_ns: i64,
     /// The largest files: (size, id), largest first.
     largest: Vec<(u64, u32)>,
 }
@@ -64,8 +71,29 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
         SizeKind::Allocated => tallies[index(class)].allocated,
         SizeKind::Apparent => tallies[index(class)].apparent,
     };
-    // Largest first, `other` last; legend order among equals.
-    classes.sort_by_key(|&class| (class == Class::Other, std::cmp::Reverse(size_of(class))));
+    // By the key, `other` last; legend order among equals (the sort is
+    // stable and the classes start in that order).
+    let key = |class: Class| {
+        let tally = &tallies[index(class)];
+        let value = match q.sort {
+            SortKey::Size => -i128::from(size_of(class)),
+            SortKey::Count => -i128::from(tally.files),
+            SortKey::Mtime => -i128::from(tally.newest_mtime_ns),
+            SortKey::Path => 0,
+        };
+        if q.reverse { -value } else { value }
+    };
+    classes.sort_by(|&a, &b| {
+        let by_name = match (q.sort, q.reverse) {
+            (SortKey::Path, false) => a.as_str().cmp(b.as_str()),
+            (SortKey::Path, true) => b.as_str().cmp(a.as_str()),
+            _ => std::cmp::Ordering::Equal,
+        };
+        (a == Class::Other)
+            .cmp(&(b == Class::Other))
+            .then(key(a).cmp(&key(b)))
+            .then(by_name)
+    });
     let total_count = classes.len() as u64;
     if let Some(limit) = q.limit {
         classes.truncate(limit);
@@ -183,6 +211,11 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
         let tally = &mut tallies[index(class)];
         tally.allocated += node.counted(SizeKind::Allocated);
         tally.apparent += node.counted(SizeKind::Apparent);
+        tally.newest_mtime_ns = if tally.files == 0 {
+            node.mtime_ns
+        } else {
+            tally.newest_mtime_ns.max(node.mtime_ns)
+        };
         tally.files += 1;
         if q.examples > 0 {
             let size = node.counted(q.size);
