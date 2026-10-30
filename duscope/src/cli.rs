@@ -131,7 +131,8 @@ pub struct WalkArgs {
     pub exclude_caches: bool,
 
     /// Don't enter ~/Library/Containers (macOS)
-    #[arg(long)]
+    // The containers rule arrives in phase 5 (P5-WALK-03).
+    #[arg(long, hide = true)]
     pub skip_containers: bool,
 
     /// Read every directory with this provider

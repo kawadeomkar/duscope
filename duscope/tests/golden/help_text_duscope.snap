@@ -72,9 +72,6 @@ Scan:
       --exclude-caches
           Don't enter cache directories (node_modules, target, .venv, …)
 
-      --skip-containers
-          Don't enter ~/Library/Containers (macOS)
-
       --exclude <GLOB>
           Don't enter directories matching this glob
 

@@ -252,8 +252,15 @@ pub fn now(walk_args: &WalkArgs) -> Result<i64, Failure> {
     }
 }
 
-/// Scans the tree `walk_args` names.
+/// Scans the tree `walk_args` names; a walk flag of a later phase is
+/// refused before anything is read.
 pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failure> {
+    if walk_args.skip_containers {
+        return Err(not_yet(
+            "--skip-containers",
+            "the rule that skips ~/Library/Containers",
+        ));
+    }
     let given = match &walk_args.path {
         Some(path) => path.clone(),
         None => std::env::current_dir().map_err(|e| {
