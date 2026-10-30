@@ -1171,17 +1171,121 @@ fn p1_pkg_02_a_rerun_opens_no_second_bump() {
             .find(needle)
             .unwrap_or_else(|| panic!("the homebrew step has no `{needle}`:\n{script}"))
     };
-    // Before bumping: the formula already at the tag, or the bump pull
-    // request (on the branch bump-formula-pr pushes) already open, ends the
-    // step with success.
+    // Before opening anything: the formula already at the tag, or the pull
+    // request (on the branch bump-formula-pr pushes, which the first
+    // release's takes too) already open, ends the step with success.
     let bump = at("brew bump-formula-pr");
-    assert!(at("grep -qF \"\\\"$url\\\"\" \"$formula\"") < bump);
-    assert!(
-        at(
-            "gh pr list --repo kawadeomkar/homebrew-tap --state open --head \"bump-duscope-$version\""
-        ) < bump
+    let first = at("gh pr create");
+    let at_tag = at("grep -qF \"\\\"$url\\\"\" \"$formula\"");
+    let open = at(
+        "gh pr list --repo kawadeomkar/homebrew-tap --state open --head \"bump-duscope-$version\"",
     );
-    assert_eq!(script.matches("exit 0").count(), 2, "{script}");
-    // A tap without the formula fails with what to do, not brew's own error.
-    assert!(at("Formula/duscope.rb to bump") < bump);
+    assert!(at_tag < open && open < first && first < bump, "{script}");
+    assert_eq!(script.matches("exit 0").count(), 3, "{script}");
+}
+
+#[test]
+fn p1_pkg_02_the_first_release_opens_the_formula_as_a_pull_request() {
+    let jobs = jobs(&read(WORKFLOW));
+    let homebrew = job(&jobs, "homebrew");
+    // The template is read from the tag's checkout.
+    assert!(
+        homebrew
+            .lines
+            .iter()
+            .any(|line| line.trim().starts_with("- uses: actions/checkout@")),
+        "the homebrew job checks out the repository"
+    );
+    let script = homebrew.step_script("Open the version-bump pull request in the tap");
+    let at = |needle: &str| {
+        script
+            .find(needle)
+            .unwrap_or_else(|| panic!("the homebrew step has no `{needle}`:\n{script}"))
+    };
+    // A tap without the formula gets this repository's, filled in, on the
+    // branch a rerun looks for, as a pull request the tap's tests.yml
+    // bottles; the bump is for a tap that has one.
+    let missing = at("if [[ ! -f $formula ]]; then");
+    assert!(missing < at("brew bump-formula-pr"));
+    for needle in [
+        "curl -fsSL \"$url\" | shasum -a 256",
+        "git -C \"$tap\" switch -c \"bump-duscope-$version\"",
+        "sed -e \"s|@URL@|$url|\" -e \"s|@SHA256@|$sha256|\" packaging/homebrew/duscope.rb > \"$formula\"",
+        "git -C \"$tap\" push origin \"bump-duscope-$version\"",
+        "gh pr create --repo kawadeomkar/homebrew-tap --base main --head \"bump-duscope-$version\"",
+    ] {
+        assert!(
+            at(needle) > missing,
+            "`{needle}` comes after the missing-formula check"
+        );
+    }
+    assert!(
+        !script.contains("::error::"),
+        "a tap without the formula is not an error:\n{script}"
+    );
+}
+
+#[test]
+fn p1_pkg_02_the_formula_template_builds_the_binary_and_tests_paths() {
+    let formula = read("packaging/homebrew/duscope.rb");
+    // The two placeholders the release fills, once each.
+    assert_eq!(formula.matches("url \"@URL@\"").count(), 1, "{formula}");
+    assert_eq!(
+        formula.matches("sha256 \"@SHA256@\"").count(),
+        1,
+        "{formula}"
+    );
+    assert_eq!(formula.matches('@').count(), 4, "no other placeholder");
+    // The proposal's formula, with livecheck and a fetch that leaves the
+    // build offline; the root Cargo.toml is a workspace, so the install
+    // names the binary's package.
+    for needle in [
+        "class Duscope < Formula",
+        "license any_of: [\"Apache-2.0\", \"MIT\"]",
+        "livecheck do",
+        "strategy :github_latest",
+        "depends_on \"rust\" => :build",
+        "deny_network_access!",
+        "system \"cargo\", \"fetch\", *std_cargo_fetch_args",
+        "system \"cargo\", \"install\", *std_cargo_args(path: \"duscope\")",
+        "generate_completions_from_executable(bin/\"duscope\", \"completions\")",
+        "Utils.safe_popen_read(bin/\"duscope\", \"man\")",
+    ] {
+        assert!(formula.contains(needle), "the formula has no `{needle}`");
+    }
+    assert!(
+        read("duscope/Cargo.toml").contains("name = \"duscope\""),
+        "the binary's package lives in duscope/"
+    );
+    // The test asserts on paths, never byte counts, and lists files, which
+    // `top` leaves out by default.
+    let test = &formula[formula.find("test do").expect("a test block")..];
+    let asserts: Vec<&str> = test
+        .lines()
+        .filter(|line| line.trim_start().starts_with("assert"))
+        .collect();
+    assert!(
+        asserts.iter().any(|line| line.contains("/a/big.bin")),
+        "{asserts:?}"
+    );
+    assert!(
+        asserts
+            .iter()
+            .all(|line| !line.chars().any(|c| c.is_ascii_digit())),
+        "no byte counts: {asserts:?}"
+    );
+    assert!(test.contains("duscope top --files "), "{test}");
+    // Ruby reads it, where Ruby is installed (every CI runner has it).
+    match Command::new("ruby")
+        .arg("-c")
+        .arg(root().join("packaging/homebrew/duscope.rb"))
+        .output()
+    {
+        Ok(out) => assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(_) => duscope_testkit::skip("ruby is not installed"),
+    }
 }

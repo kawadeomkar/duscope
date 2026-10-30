@@ -75,15 +75,16 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    crates.io takes five new crates at once and about one every ten minutes after that, so a
    release that adds crates may need `publish-crates` re-run after the wait (DEV-12).
 
-5. **Homebrew.** `release.yml` opens the version-bump pull request in
-   `kawadeomkar/homebrew-tap` (the tap has no `autobump.yml`, so the two never race). Let the
-   tap's `tests.yml` build the bottles on it, then run the tap's `publish.yml` on the pull
+5. **Homebrew.** `release.yml` opens a pull request in `kawadeomkar/homebrew-tap` with the
+   `HOMEBREW_GITHUB_API_TOKEN` secret ([Secrets](#secrets); the tap has no `autobump.yml`, so
+   the two never race): the version bump, or, for the first release, when the tap has no
+   formula yet, the formula itself, copied from `packaging/homebrew/duscope.rb` with the tag's
+   source archive and its checksum. Let the tap's `tests.yml` build the bottles on it (it also
+   audits the formula and runs its test), then run the tap's `publish.yml` on the pull
    request, which merges it with the bottle block. A re-run of the release opens no second
-   pull request: the job stops when the formula is already at the tag or its bump pull request
-   is open. The job needs `Formula/duscope.rb` in the tap to bump; the first one, for v0.1.0,
-   is committed to the tap by hand once the tag exists (v0.0.1's placeholder binary has no
-   `man`, `completions` or `top` for the formula's install and test), and the job then finds it
-   at the tag.
+   pull request: the job stops when the formula is already at the tag or its pull request is
+   open. A change to the formula beyond the version goes into `packaging/homebrew/duscope.rb`
+   and, as its own pull request, into the tap.
 
 6. **apt.** `apt.yml` picks up the `.deb` assets, rebuilds the repository with `reprepro`,
    signs it with the subkey (it fails when the subkey expires within 60 days) and publishes it
@@ -114,7 +115,7 @@ Every secret the release and benchmark pipelines read, and the one key outside G
 | --- | --- | --- | --- | --- | --- | --- |
 | crates.io trusted publishing | `release.yml`, `publish-crates`: `rust-lang/crates-io-auth-action` trades the job's OIDC token for a crates.io token that lives 30 minutes | the six `duscope*` crates, publishing from `kawadeomkar/duscope`'s `release.yml` only | crates.io, each crate's Settings → Trusted Publishing | at the v0.1.0 release | never (no standing secret) | author |
 | `CARGO_REGISTRY_TOKEN` | none from v0.1.0; v0.0.1 published with it | `publish-update` on `duscope*` (DEV-12) | repository secret | 2026-10-25 | revoke after v0.1.0 publishes through trusted publishing | author |
-| `HOMEBREW_GITHUB_API_TOKEN` | `release.yml`, the tap's version-bump pull request | fine-grained: contents and pull requests (write) on `kawadeomkar/homebrew-tap` only | repository secret | at the v0.1.0 release | 12 months after creation | author |
+| `HOMEBREW_GITHUB_API_TOKEN` | `release.yml`, the tap's pull request: the version bump, or the first release's formula | fine-grained: contents and pull requests (write) on `kawadeomkar/homebrew-tap` only | repository secret | at the v0.1.0 release | 12 months after creation | author |
 | `BENCH_RUNNERS_TOKEN` | `nightly-bench.yml`, the probe that lists the runners (DEV-4) | fine-grained: Administration (read) on `kawadeomkar/duscope`, nothing else | repository secret | 2026-10-25 | 12 months after creation | author |
 | `APT_SIGNING_SUBKEY` and `APT_SIGNING_PASSPHRASE` | `apt.yml` (from phase 5) | the signing subkey of the apt key; the primary key stays offline (P5-SEC-02) | repository secrets | at P5-SEC-02 | 12 months after creation; `apt.yml` fails 60 days before | author |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` | the MCP smoke scripts and the eval (from phase 3) | each vendor's key with a monthly budget cap | repository secrets | at phase 3 | 12 months after creation | author |
