@@ -369,7 +369,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "duscope"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "cargo_metadata",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "duscope-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cargo_metadata",
  "duscope-testkit",
@@ -412,14 +412,14 @@ dependencies = [
 
 [[package]]
 name = "duscope-mcp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "duscope-core",
 ]
 
 [[package]]
 name = "duscope-testkit"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "mktree",
  "tempfile",
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "duscope-treemap"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "duscope-core",
  "proptest",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "duscope-tui"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "duscope-core",
  "duscope-treemap",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "duscope-walk"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
  "crossbeam-deque",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "mktree"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "sha2",
