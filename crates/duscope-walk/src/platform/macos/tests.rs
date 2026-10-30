@@ -716,6 +716,7 @@ fn p1_walk_05_full_attrs_add_no_calls_per_entry() {
 fn p1_walk_07_clones_carry_equal_clone_ids() {
     let env = TestEnv::new();
     if !env.fixtures().built("clones") {
+        duscope_testkit::skip("the clones case was not built: the fixture tree is not on APFS");
         return;
     }
     let root = env.fixtures().case_root("clones");
@@ -756,10 +757,14 @@ fn p1_walk_07_storage_flags_follow_the_filesystem() {
     if fixtures.built("compressed") {
         let file = &entries[&fixtures.case_root("compressed").join("text-1m.txt")];
         assert!(file.flags.contains(Flags::COMPRESSED), "{:?}", file.flags);
+    } else {
+        duscope_testkit::skip("the compressed case was not built, so COMPRESSED is unchecked");
     }
     if fixtures.built("sparse") {
         let file = &entries[&fixtures.case_root("sparse").join("hole-only.bin")];
         assert!(file.flags.contains(Flags::SPARSE), "{:?}", file.flags);
+    } else {
+        duscope_testkit::skip("the sparse case was not built, so SPARSE is unchecked");
     }
     // Each flag agrees with st_flags, where stat reports it.
     for (path, entry) in &entries {
@@ -810,6 +815,7 @@ fn read_one(path: &str, depth: u32) -> Vec<Entry> {
 fn p1_walk_07_firmlinks_carry_the_firmlink_boundary() {
     let firmlinks = super::firmlinks();
     if firmlinks.is_empty() {
+        duscope_testkit::skip("this system has no firmlinks");
         return;
     }
     let slash = read_one("/", 0);
@@ -833,6 +839,7 @@ fn p1_walk_07_firmlinks_carry_the_firmlink_boundary() {
 #[test]
 fn p1_walk_07_a_scan_of_slash_skips_the_data_volume_mount() {
     if super::data_volume().is_none() || !Path::new("/System/Volumes/Data").exists() {
+        duscope_testkit::skip("this system has no Data volume at /System/Volumes/Data");
         return;
     }
     let provider = MacProvider::new();
@@ -870,7 +877,8 @@ fn p1_walk_07_a_scan_of_system_skips_the_firmlinks_below_it() {
         .into_iter()
         .find(|e| e.name.as_bytes() == b"Caches" && e.boundary == Boundary::Firmlink)
     else {
-        return; // no /System/Library/Caches firmlink on this system
+        duscope_testkit::skip("this system has no /System/Library/Caches firmlink");
+        return;
     };
     let provider = MacProvider::new();
     let skip = |root_depth| {
@@ -1013,6 +1021,7 @@ fn p1_walk_06_a_mount_reached_by_another_path_is_found_by_its_device() {
     // with its cached sizes, and nothing is asked of the mount itself.
     let data = Path::new("/System/Volumes/Data");
     if !data.exists() {
+        duscope_testkit::skip("this system has no Data volume at /System/Volumes/Data");
         return;
     }
     let dev = crate::Provider::root(&MacProvider::new(), data, &WalkOptions::default())
@@ -1064,7 +1073,8 @@ fn p1_walk_07_a_modified_clone_may_share_but_names_no_group() {
         out.status.success()
     };
     if !cp("pure.bin") || !cp("partial.bin") {
-        return; // not APFS
+        duscope_testkit::skip("cp -c cannot clone here: not APFS");
+        return;
     }
     // Overwrite the first 64 KiB of one clone in place.
     {
@@ -1099,9 +1109,11 @@ fn p1_walk_06_the_system_and_data_volumes_have_their_own_mount_ids() {
         slash.iter().find(|e| e.name.as_bytes() == b"Users"),
         slash.iter().find(|e| e.name.as_bytes() == b"System"),
     ) else {
+        duscope_testkit::skip("/ has no Users or no System here");
         return;
     };
     if users.boundary != Boundary::Firmlink {
+        duscope_testkit::skip("/Users is not a firmlink here");
         return;
     }
     assert_ne!(

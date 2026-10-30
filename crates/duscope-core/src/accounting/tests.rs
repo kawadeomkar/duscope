@@ -176,8 +176,12 @@ fn p1_core_03_two_scans_of_an_unchanged_tree_charge_the_same_ids() {
 #[test]
 fn p1_core_03_a_clone_group_is_counted_once() {
     let env = TestEnv::new();
-    if !env.fixtures().built("clones") || cfg!(not(target_os = "macos")) {
-        // Clone ids are read on APFS only.
+    // Clone ids are read on APFS only.
+    if cfg!(not(target_os = "macos")) {
+        return;
+    }
+    if !env.fixtures().built("clones") {
+        duscope_testkit::skip("the clones case was not built: the fixture tree is not on APFS");
         return;
     }
     let root = env.fixtures().case_root("clones");
