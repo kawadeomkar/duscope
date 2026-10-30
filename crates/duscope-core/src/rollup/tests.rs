@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use duscope_walk::{Attrs, Boundary, DirId, Entry, Flags, Kind, NameRef, ScanEvent, Share};
 use proptest::prelude::*;
 
-use super::roll_up;
+use super::{number_and_total, roll_up};
 use crate::arena::{Arena, EntryIdx};
 
 /// A tree as paths: each node's path below the root, kind, sizes and mtime.
@@ -309,6 +309,49 @@ fn p1_core_02_entries_below_a_missing_directory_stay_out_of_the_totals() {
     assert_eq!((rec.cum_apparent, rec.cum_allocated), (111, 111));
     assert_eq!((rec.n_files, rec.n_dirs, rec.last_id), (1, 1, 2));
     assert_eq!(rec.max_mtime_ns, 7);
+}
+
+/// A tree of 100,000 entries in some 12,500 directories, delivered
+/// shuffled, numbered with its siblings sorted on one thread and on several:
+/// the numbering, every id and the root's totals are the same.
+#[test]
+fn p1_core_02_siblings_sort_alike_on_any_number_of_threads() {
+    let mut rng = 0x2545_f491_4f6c_dd1du64;
+    let picks: Vec<(u16, bool, u16, u8)> = (0..100_000)
+        .map(|_| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let part = |shift: u32, mask: u64| rng >> shift & mask;
+            (
+                u16::try_from(part(0, 0xffff)).unwrap(),
+                part(16, 7) == 0,
+                u16::try_from(part(24, 0xffff)).unwrap(),
+                u8::try_from(part(40, 0xff)).unwrap(),
+            )
+        })
+        .collect();
+    let nodes = tree(&picks);
+    let rolled_on = |threads| {
+        let mut arena = Arena::new(Attrs::Basic);
+        for event in events(&nodes, 7) {
+            arena.push(event).unwrap();
+        }
+        let rollup = number_and_total(&mut arena, threads);
+        let root = *arena.dir(DirId::ROOT);
+        (
+            rollup,
+            root.cum_allocated,
+            root.n_files,
+            root.n_dirs,
+            root.last_id,
+        )
+    };
+    let one = rolled_on(1);
+    assert_eq!(one.0.len(), nodes.len());
+    for threads in [2, 5, 16] {
+        assert!(one == rolled_on(threads), "{threads} threads");
+    }
 }
 
 /// One directory holding `names` as files, delivered in the order given.

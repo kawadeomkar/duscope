@@ -7,6 +7,8 @@
 //! which `diff` relies on. A directory's subtree is the contiguous range
 //! `id ..= last_id`, and its own files are `id + 1 ..= files_end`.
 
+use std::num::NonZero;
+
 use duscope_walk::DirId;
 
 use crate::accounting::{Charges, charge};
@@ -61,13 +63,30 @@ impl RollUp {
 /// once ([`charge`]): a later link's bytes leave `cum_apparent` and
 /// `cum_allocated`, a later clone's leave `cum_allocated`.
 pub fn roll_up(arena: &mut Arena) -> RollUp {
-    let mut rollup = number_and_total(arena);
+    let threads = sort_threads(arena.len());
+    let mut rollup = number_and_total(arena, threads);
     rollup.charges = charge(arena, &rollup);
     rollup
 }
 
-/// The roll-up with every entry's bytes counted.
-fn number_and_total(arena: &mut Arena) -> RollUp {
+/// The arenas whose siblings are sorted on one thread: below this many
+/// entries, starting threads costs about what the sort does.
+const PARALLEL_SORT_MIN: usize = 1 << 16;
+
+/// The threads the sibling sort spreads over: one for a small arena, else
+/// one per CPU, at most 16.
+fn sort_threads(entries: usize) -> usize {
+    if entries < PARALLEL_SORT_MIN {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, NonZero::get)
+        .min(16)
+}
+
+/// The roll-up with every entry's bytes counted, the siblings sorted on
+/// `threads` threads.
+fn number_and_total(arena: &mut Arena, threads: usize) -> RollUp {
     let n = arena.len();
     if n == 0 {
         return RollUp {
@@ -76,15 +95,14 @@ fn number_and_total(arena: &mut Arena) -> RollUp {
             charges: Charges::default(),
         };
     }
-    let children = Children::of(arena);
+    let mut children = Children::of(arena);
+    children.sort(arena, threads);
     let mut order = Vec::with_capacity(n);
 
     // Pre-order: a directory, its files in name order, then each
     // subdirectory's subtree in name order. The stack holds subdirectories
     // still to visit, last first.
     let mut stack: Vec<u32> = vec![EntryIdx::ROOT.get()];
-    // One directory's files and subdirectories, as sort keys.
-    let (mut files, mut subdirs) = (Vec::new(), Vec::new());
     // Each directory and its own id, in pre-order, for the cumulative pass.
     let mut dirs: Vec<(DirId, u32)> = Vec::with_capacity(arena.dir_count());
     while let Some(raw) = stack.pop() {
@@ -92,26 +110,16 @@ fn number_and_total(arena: &mut Arena) -> RollUp {
         let Some(dir) = arena.record(EntryIdx::from_raw(raw)).dir() else {
             continue;
         };
-        // Each part of the children sorted by name, in 16 bytes a child of
-        // this directory alone.
-        let key = |&entry: &u32| SortKey { tail: 0, entry };
-        files.clear();
-        files.extend(children.files(dir).iter().map(key));
-        subdirs.clear();
-        subdirs.extend(children.subdirs(dir).iter().map(key));
-        SortKey::sort(&mut files, arena);
-        SortKey::sort(&mut subdirs, arena);
-        for key in &files {
-            number(&mut order, key.entry);
-        }
-        stack.extend(subdirs.iter().rev().map(|key| key.entry));
+        let files = children.files(dir);
+        order.extend_from_slice(files);
+        stack.extend(children.subdirs(dir).iter().rev());
         let files_end = id + u32::try_from(files.len()).unwrap_or(u32::MAX);
         arena.dir_mut(dir).files_end = files_end;
         dirs.push((dir, id));
     }
     // Each entry's id, made once the children index is gone, so the two
     // never take memory at the same time: a scan's peak is here.
-    drop((children, files, subdirs, stack));
+    drop((children, stack));
     let mut ids = vec![u32::MAX; n];
     for (id, &raw) in order.iter().enumerate() {
         ids[raw as usize] = u32::try_from(id).unwrap_or(u32::MAX);
@@ -190,6 +198,20 @@ struct SortKey {
 }
 
 impl SortKey {
+    /// Sorts `entries` by name, bytewise, through `keys`, a buffer of 16
+    /// bytes an entry kept for the next call.
+    fn sort_entries(entries: &mut [u32], keys: &mut Vec<SortKey>, arena: &Arena) {
+        if entries.len() < 2 {
+            return;
+        }
+        keys.clear();
+        keys.extend(entries.iter().map(|&entry| SortKey { tail: 0, entry }));
+        SortKey::sort(keys, arena);
+        for (slot, key) in entries.iter_mut().zip(keys.iter()) {
+            *slot = key.entry;
+        }
+    }
+
     /// Sorts `keys` by their entries' names, bytewise.
     fn sort(keys: &mut [SortKey], arena: &Arena) {
         let name = |key: &SortKey| arena.name(EntryIdx::from_raw(key.entry));
@@ -269,6 +291,55 @@ impl Children {
             subdirs_at: front,
             flat,
         }
+    }
+
+    /// Sorts each directory's files, and its subdirectories, by name. The
+    /// directories are cut into `threads` runs holding about as many
+    /// children each, and each run sorted on a thread of its own: a run's
+    /// children are one range of `flat`, apart from every other run's. The
+    /// order is the same on any number of threads, since siblings' names
+    /// differ.
+    fn sort(&mut self, arena: &Arena, threads: usize) {
+        let dirs = self.subdirs_at.len();
+        let per_run = self.flat.len().div_ceil(threads.max(1)).max(1);
+        // The first directory of each run, and one past the last run's.
+        let mut cuts = vec![0];
+        for dir in 1..dirs {
+            let since = self.starts[dir] - self.starts[*cuts.last().unwrap_or(&0)];
+            if since as usize >= per_run {
+                cuts.push(dir);
+            }
+        }
+        cuts.push(dirs);
+        let (starts, subdirs_at) = (&self.starts, &self.subdirs_at);
+        let sort_run = |first: usize, end: usize, run: &mut [u32]| {
+            let base = starts[first] as usize;
+            let mut keys = Vec::new();
+            for dir in first..end {
+                let (start, middle, stop) = (
+                    starts[dir] as usize - base,
+                    subdirs_at[dir] as usize - base,
+                    starts[dir + 1] as usize - base,
+                );
+                SortKey::sort_entries(&mut run[start..middle], &mut keys, arena);
+                SortKey::sort_entries(&mut run[middle..stop], &mut keys, arena);
+            }
+        };
+        std::thread::scope(|scope| {
+            let mut rest = self.flat.as_mut_slice();
+            for pair in cuts.windows(2) {
+                let (first, end) = (pair[0], pair[1]);
+                let len = (starts[end] - starts[first]) as usize;
+                let (run, after) = rest.split_at_mut(len);
+                rest = after;
+                if end == dirs {
+                    // The last run on this thread, which waits for the others.
+                    sort_run(first, end, run);
+                } else {
+                    scope.spawn(move || sort_run(first, end, run));
+                }
+            }
+        });
     }
 
     fn files(&self, dir: DirId) -> &[u32] {
