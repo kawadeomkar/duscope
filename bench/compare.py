@@ -9,19 +9,19 @@ CURRENT is a result file (bench/README.md, "Result file"). Each BASELINE is a
 result file or a directory of them: a checkout of the `bench-results` branch,
 or the job's downloaded artifacts. CURRENT itself is never its own baseline, so
 a directory may hold it. Two checks run in each mode CURRENT measured the tool
-in, each against the median of the newest `--last` matching results by
-`started_at`, and each regresses beyond `--tolerance`:
+in, each against the median of the newest `--last` results from the same
+machine (the same `platform`, `host.arch`, `host.cpu` and `host.logical_cpus`)
+and tree (equal `trees[].digest`), by `started_at`, and each regresses beyond
+`--tolerance`:
 
-- the tool's p50, against results from the same machine: the same `platform`,
-  `host.arch`, `host.cpu` and `host.logical_cpus`, since an absolute time is
-  only comparable on the hardware that measured it;
+- the tool's p50, since an absolute time is only comparable on the hardware
+  that measured it;
 - for each competitor CURRENT paired with the tool, the pair's
-  `subject_ratio_p50` (the tool's time over the competitor's), against results
-  of the same `platform` and `host.arch` on any CPU: a ratio cancels most of a
-  machine's speed, so a GitHub-hosted runner can be held to the ratios the
-  bench runners measured.
-
-Both need the same tree (equal `trees[].digest`). The tool defaults to
+  `subject_ratio_p50` (the tool's time over the competitor's). A ratio cancels
+  a machine's speed only in part: duscope's parallel walk and a competitor
+  scale differently with the CPU, and on the shared ubuntu-24.04 runners
+  duscope/diskus on T1 ran at 0.51 on one CPU model and 0.60 to 0.67 on
+  another, with four CPUs each. The tool defaults to
 CURRENT's subject. One line per check goes to stdout; inside GitHub Actions
 (GITHUB_ACTIONS=true) a regression is also an error annotation and a check
 with no baseline a notice. A baseline file that cannot be read is reported on
@@ -88,12 +88,12 @@ def result_files(paths: List[str]) -> List[str]:
 
 
 def kind(data: dict) -> Tuple[str, str]:
-    """The machine kind ratios compare across: the OS and the architecture."""
+    """The machine's kind: the OS and the architecture."""
     return data["platform"], data["host"]["arch"]
 
 
 def machine(data: dict) -> Tuple[str, str, Optional[str], Optional[int]]:
-    """The machine absolute times compare on: the kind, the CPU and its count."""
+    """The machine results compare on: the kind, the CPU and its count."""
     return (*kind(data), data["host"].get("cpu"), data["host"].get("logical_cpus"))
 
 
@@ -130,7 +130,6 @@ def compare(current: dict, baselines: List[dict], tree: str, tool: str, last: in
         raise InputError(f"no {tool} result on {tree} to compare")
     same_tree = [b for b in baselines if digest(b, tree) == digest(current, tree)]
     same_machine = [b for b in same_tree if machine(b) == machine(current)]
-    same_kind = [b for b in same_tree if kind(b) == kind(current)]
     checks = []
     for mode in modes:
         now = p50(current, tree, mode, tool)
@@ -141,7 +140,7 @@ def compare(current: dict, baselines: List[dict], tree: str, tool: str, last: in
         for competitor, ratio in sorted(ratios(current, tree, mode, tool).items()):
             prior = [
                 (b["started_at"], ratios(b, tree, mode, tool)[competitor])
-                for b in same_kind
+                for b in same_machine
                 if competitor in ratios(b, tree, mode, tool)
             ]
             checks.append(Check(mode, competitor, ratio, *baseline(prior, last)))
@@ -198,7 +197,7 @@ def main(argv: List[str]) -> int:
             what, now, unit, scope = f"{args.tree} {c.mode} {tool}", f"p50 {c.value:.3f} s", " s", "this machine"
         else:
             what, now, unit, scope = (
-                f"{args.tree} {c.mode} {tool}/{c.competitor}", f"ratio {c.value:.3f}", "", "this machine kind"
+                f"{args.tree} {c.mode} {tool}/{c.competitor}", f"ratio {c.value:.3f}", "", "this machine"
             )
         if c.median is None:
             line = f"{what}: no baseline (no earlier result on {scope} and tree); {now}"

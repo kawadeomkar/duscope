@@ -221,13 +221,15 @@ jobs:
           just platform-tests
 
   bench-regression:
-    # The harness on T1 against the last five results of this job on pushes to main
-    # (DEV-20, bench/compare.py): duscope's p50 against runs on the same machine, and
-    # its ratio to each competitor against the bench runners' nightly ratios. A
-    # regression beyond 15% fails only when a second measurement reproduces it.
-    # main keeps its result whatever the comparison says, so a slowdown merged on
-    # purpose fails pull requests only until main's own results make up most of the
-    # five (three pushes).
+    # The harness on T1 against this job's results on pushes to main (DEV-20,
+    # bench/compare.py): duscope's p50 and its ratio to diskus, each against the
+    # last five results from the same CPU model. The shared runners come with
+    # several, and the ratio differs between them as the time does (on
+    # ubuntu-24.04, 0.51 on one model and 0.60 to 0.67 on another). A regression
+    # beyond 15% fails only when a second measurement reproduces it. main keeps its
+    # result whatever the comparison says, so a slowdown merged on purpose fails
+    # pull requests only until main's own results make up most of each CPU model's
+    # five.
     name: bench-regression (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -267,26 +269,21 @@ jobs:
         run: |
           base="$RUNNER_TEMP/baselines"
           mkdir -p "$base"
-          # This job's result files from the last five pushes to main that kept one,
-          # whatever else in those runs failed. Only pushes: a pull request from a
-          # fork's branch named main is a pull_request run, never a push to this main.
+          # This job's result files from the last 30 pushes to main that kept one,
+          # whatever else in those runs failed: enough for compare.py to find five
+          # from this run's CPU model among the shared runners' several. Only
+          # pushes: a pull request from a fork's branch named main is a
+          # pull_request run, never a push to this main.
           ids=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
-            --event push --status completed --limit 20 --json databaseId --jq '.[].databaseId')
+            --event push --status completed --limit 30 --json databaseId --jq '.[].databaseId')
           found=0
           for id in $ids; do
             if gh run download "$id" --repo "$GITHUB_REPOSITORY" --name "bench-regression-$OS" \
               --dir "$base/$id" 2>/dev/null; then
               found=$((found + 1))
-              (( found < 5 )) || break
             fi
           done
           echo "$found baseline result(s) from main"
-          # The bench runners' nightly results, for the ratio checks.
-          if git fetch --quiet --depth 1 origin bench-results; then
-            git worktree add --quiet "$base/nightly" FETCH_HEAD
-          else
-            echo "no bench-results branch yet"
-          fi
       - name: Compare with main
         env:
           FILE: ${{ steps.measure.outputs.file }}
