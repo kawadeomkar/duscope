@@ -366,6 +366,8 @@ fn p1_cli_03_by_type_lets_directory_rules_win() {
             filters: Filters::default(),
             limit: None,
             size: SizeKind::Apparent,
+            sort: SortKey::Size,
+            reverse: false,
         },
     );
     let summary: Vec<(&str, u64, u64)> = page
@@ -403,11 +405,79 @@ fn p1_cli_03_by_type_lets_directory_rules_win() {
             filters: Filters::default(),
             limit: Some(1),
             size: SizeKind::Apparent,
+            sort: SortKey::Size,
+            reverse: false,
         },
     );
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.total_count, 4);
     assert!(page.entries[0].largest.is_empty());
+}
+
+#[test]
+fn p1_cli_03_by_type_sorts_by_its_sort_key() {
+    // media is the largest class, code has the most files, archives the
+    // newest file; `other` is larger and newer than all and stays last.
+    let file = |name: &str, bytes: u64, mtime_ns: i64| Entry {
+        apparent: bytes,
+        allocated: bytes,
+        mtime_ns,
+        ..entry(name, 0, Kind::File)
+    };
+    let (arena, rollup) = stream(vec![
+        Entry {
+            dir: Some(DirId::new(0)),
+            ..entry("r", 0, Kind::Dir)
+        },
+        file("a.jpg", 9 * MIB, 5),
+        file("a.rs", MIB, 1),
+        file("b.rs", MIB, 2),
+        file("c.rs", MIB, 3),
+        file("d.tar.gz", 2 * MIB, 9),
+        file("e.zip", MIB / 2, 4),
+        file("x.qqq", 50 * MIB, 10),
+    ]);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
+    let classes = Classes::vendored();
+    let order = |sort, reverse| {
+        let page = by_type(
+            &view,
+            &ByTypeQuery {
+                classes: &classes,
+                examples: 0,
+                filters: Filters::default(),
+                limit: None,
+                size: SizeKind::Allocated,
+                sort,
+                reverse,
+            },
+        );
+        page.entries.iter().map(|e| e.class).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        order(SortKey::Size, false),
+        ["media", "code", "archives", "other"]
+    );
+    assert_eq!(
+        order(SortKey::Size, true),
+        ["archives", "code", "media", "other"]
+    );
+    assert_eq!(
+        order(SortKey::Count, false),
+        ["code", "archives", "media", "other"]
+    );
+    assert_eq!(
+        order(SortKey::Mtime, false),
+        ["archives", "media", "code", "other"]
+    );
+    assert_eq!(
+        order(SortKey::Path, false),
+        ["archives", "code", "media", "other"]
+    );
+    assert_eq!(
+        order(SortKey::Path, true),
+        ["media", "code", "archives", "other"]
+    );
 }
 
 #[test]
@@ -574,6 +644,8 @@ fn p1_cli_03_shared_bytes_count_once_in_tree_and_by_type() {
                 filters: Filters::default(),
                 limit: None,
                 size,
+                sort: SortKey::Size,
+                reverse: false,
             },
         );
         // The classes add up to the root: the later link not at all, the
@@ -710,6 +782,8 @@ fn p1_cli_03_by_type_examples_carry_their_names() {
             filters: Filters::default(),
             limit: None,
             size: SizeKind::Apparent,
+            sort: SortKey::Size,
+            reverse: false,
         },
     );
     let examples = &page.entries[0].largest;
@@ -735,6 +809,8 @@ fn p1_cli_03_a_directory_rule_above_the_root_applies_below_it() {
             filters: Filters::default(),
             limit: None,
             size: SizeKind::Apparent,
+            sort: SortKey::Size,
+            reverse: false,
         },
     );
     let summary: Vec<(&str, u64)> = page
