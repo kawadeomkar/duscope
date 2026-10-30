@@ -1,0 +1,5 @@
+duscope: debug: duscope::verbs::scan: <root>/closed: Permission denied (os error N)
+duscope: walk: N entries, N directories, N MB in N s: N entries/s, N MB/s
+duscope: roll-up: N s
+duscope: volume <mount>: <type>, entered, N MB, N MB free
+duscope: workers: N threads

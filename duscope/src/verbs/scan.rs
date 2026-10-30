@@ -17,7 +17,9 @@ use duscope_core::query::{ArenaView, SizeKind, TreeView, clock, timegrammar};
 use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::{RollUp, roll_up};
 use duscope_core::rules::Caches;
-use duscope_walk::{Attrs, DirId, IgnoreRules, Skip, WalkError, WalkOptions, WalkSummary, walk};
+use duscope_walk::{
+    Attrs, DirId, IgnoreRules, NameRef, ScanEvent, Skip, WalkError, WalkOptions, WalkSummary, walk,
+};
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
 
 use super::{Exit, Failure};
@@ -304,13 +306,18 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     let started_ns = now(walk_args)?;
     let mut arena = Arena::new(opts.attrs);
     let mut push_error = None;
+    let mut errors = log::log_enabled!(log::Level::Debug).then(|| DirErrors::new(&root));
     let walked = walk(&root, &opts, |event| {
+        if let Some(errors) = &mut errors {
+            errors.note(&event);
+        }
         if push_error.is_none()
             && let Err(e) = arena.push(event)
         {
             push_error = Some(e);
         }
     });
+    let walk_time = started.elapsed();
     drop(interrupts);
     let summary = walked.map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
@@ -336,8 +343,10 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             )
         });
     }
+    let rolled = Instant::now();
     let rollup = roll_up(&mut arena);
-    Ok(Scanned {
+    let rollup_time = rolled.elapsed();
+    let scanned = Scanned {
         arena,
         rollup,
         summary,
@@ -347,7 +356,121 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         clones_asked: walk_args.clones,
         started_ns,
         finished_ns: now(walk_args)?,
-    })
+    };
+    phases(&scanned, walk_time, rollup_time);
+    Ok(scanned)
+}
+
+/// `-v`: the walk and the roll-up, with counts and rates; `-vv` adds each
+/// volume the walk met and its worker threads.
+fn phases(scanned: &Scanned, walk_time: Duration, rollup_time: Duration) {
+    if !log::log_enabled!(log::Level::Info) {
+        return;
+    }
+    let summary = &scanned.summary;
+    let bytes = scanned.view().node(0).allocated;
+    let secs = walk_time.as_secs_f64();
+    // Whole numbers per second, over at least a microsecond.
+    let rate = |n: u64| {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let per_second = (n as f64 / secs.max(1e-6)) as u64;
+        thousands(per_second)
+    };
+    log::info!(
+        "walk: {} entries, {} directories, {} MB in {secs:.3} s: {} entries/s, {} MB/s",
+        thousands(summary.entries),
+        thousands(summary.dirs),
+        thousands(bytes / 1_000_000),
+        rate(summary.entries),
+        rate(bytes / 1_000_000),
+    );
+    log::info!("roll-up: {:.3} s", rollup_time.as_secs_f64());
+    for volume in scanned.arena.volumes() {
+        let entered = match volume.reason {
+            None => "entered".to_owned(),
+            Some(reason) => format!("not entered ({})", reason.as_str()),
+        };
+        log::debug!(
+            target: crate::log::DETAIL,
+            "volume {}: {}, {entered}, {} MB, {} MB free",
+            volume.mount_point.display(),
+            volume.fs_type,
+            thousands(volume.total_bytes / 1_000_000),
+            thousands(volume.free_bytes / 1_000_000),
+        );
+    }
+    log::debug!(target: crate::log::DETAIL, "workers: {} threads", summary.threads);
+}
+
+/// `--debug`: each directory's errors, logged as the walk delivers them,
+/// with the path spelled from the directories met so far.
+struct DirErrors {
+    root: Vec<u8>,
+    dirs: HashMap<DirId, (Vec<u8>, DirId)>,
+}
+
+impl DirErrors {
+    fn new(root: &Path) -> DirErrors {
+        DirErrors {
+            root: root.as_os_str().as_bytes().to_vec(),
+            dirs: HashMap::new(),
+        }
+    }
+
+    /// Records a directory, or logs an error, a vanished entry or a skip.
+    fn note(&mut self, event: &ScanEvent) {
+        match event {
+            ScanEvent::Entry(entry) => {
+                if let Some(dir) = entry.dir
+                    && dir != DirId::ROOT
+                {
+                    self.dirs
+                        .insert(dir, (entry.name.as_bytes().to_vec(), entry.parent));
+                }
+            }
+            ScanEvent::DirClosed {
+                dir,
+                errno: Some(errno),
+            } => log::debug!(
+                "{}: {}",
+                self.path(*dir, None),
+                io::Error::from_raw_os_error(*errno)
+            ),
+            ScanEvent::Error(error) => log::debug!(
+                "{}: {}",
+                self.path(error.dir, Some(error.name.as_bytes())),
+                io::Error::from_raw_os_error(error.errno)
+            ),
+            ScanEvent::Vanished { dir, name } => log::debug!(
+                "{}: vanished during the scan",
+                self.path(*dir, name.as_ref().map(NameRef::as_bytes))
+            ),
+            _ => {}
+        }
+    }
+
+    /// The path of `dir`, and of `name` in it.
+    fn path(&self, dir: DirId, name: Option<&[u8]>) -> String {
+        let mut names: Vec<&[u8]> = name.into_iter().collect();
+        let mut at = dir;
+        while at != DirId::ROOT {
+            let Some((name, parent)) = self.dirs.get(&at) else {
+                break;
+            };
+            names.push(name);
+            at = *parent;
+        }
+        let mut path = self.root.clone();
+        for name in names.iter().rev() {
+            path.push(b'/');
+            path.extend_from_slice(name);
+        }
+        String::from_utf8_lossy(&path).into_owned()
+    }
 }
 
 /// The walk options the flags ask for.
@@ -370,6 +493,9 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
     };
     for pattern in excludes {
         add(pattern, "--exclude")?;
+    }
+    for pattern in &args.config_excludes {
+        add(pattern, "the configuration's [excludes]")?;
     }
     for file in &args.exclude_from {
         let text = read_flag_file(file, "--exclude-from")?;
@@ -403,7 +529,7 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
             .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--exclude: {e}")))?;
     }
     let exclude_caches = if args.exclude_caches {
-        Caches::vendored().compile()
+        caches(args)?.compile()
     } else {
         Vec::new()
     };
@@ -423,6 +549,23 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
         cancel: Arc::new(AtomicBool::new(false)),
         fallback: args.provider == Some(ProviderArg::Fallback),
     })
+}
+
+/// The cache rules: the vendored ones, with the configuration's
+/// `[caches] extra` table merged over them.
+fn caches(args: &WalkArgs) -> Result<Caches, Failure> {
+    let Some(file) = &args.caches_extra else {
+        return Ok(Caches::vendored());
+    };
+    let refused = |message: String| {
+        Failure::new(Exit::Usage, "usage", format!("[caches] extra {message}"))
+            .hint("Fix the configuration file, or run duscope with --config none")
+    };
+    let text =
+        std::fs::read_to_string(file).map_err(|e| refused(format!("{}: {e}", file.display())))?;
+    let user =
+        Caches::parse(&text, &file.display().to_string()).map_err(|e| refused(e.to_string()))?;
+    Ok(Caches::vendored().merged(user))
 }
 
 /// An `--exclude` pattern as the walk matches it.
@@ -726,6 +869,7 @@ mod tests {
             units: Units::default(),
             null: false,
             header: false,
+            quiet: false,
         };
         let (envelope, _) =
             top_envelope(scanned, &args.walk, None, "scan", true, true, &output).unwrap();

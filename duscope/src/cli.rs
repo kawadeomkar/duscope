@@ -14,9 +14,14 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{ArgAction, ArgMatches, Args, Parser, Subcommand, ValueEnum};
+use duscope_core::config::{Config, Setting};
+use duscope_core::query::timegrammar;
 
+use crate::log::Verbosity;
 use crate::out::OutputArgs;
+use crate::verbs::{Exit, Failure};
 
 /// Fast, queryable disk-usage analyzer.
 #[derive(Debug, Parser)]
@@ -44,6 +49,51 @@ pub struct Cli {
     /// How the result is written, before or after the verb.
     #[command(flatten)]
     pub output: OutputArgs,
+    /// The configuration file and what goes to stderr, before or after the
+    /// verb.
+    #[command(flatten)]
+    pub global: GlobalArgs,
+}
+
+/// The flags every verb takes before or after its name, beside the output
+/// flags: the configuration file and how much goes to stderr.
+#[derive(Debug, Clone, Default, Args)]
+#[command(next_help_heading = "Output")]
+pub struct GlobalArgs {
+    /// The configuration file, or none for the built-in defaults
+    ///
+    /// Default: DUSCOPE_CONFIG, else $XDG_CONFIG_HOME/duscope/config.toml
+    #[arg(long, global = true, value_name = "FILE")]
+    pub config: Option<OsString>,
+
+    /// Print phase timings to stderr; -vv adds each volume and the workers
+    #[arg(short = 'v', long, global = true, action = ArgAction::Count, conflicts_with = "quiet")]
+    pub verbose: u8,
+
+    /// Print each directory's errors to stderr as they happen
+    #[arg(long, global = true, conflicts_with = "quiet")]
+    pub debug: bool,
+
+    /// Don't print warnings to stderr
+    #[arg(short = 'q', long, global = true)]
+    pub quiet: bool,
+}
+
+impl GlobalArgs {
+    /// What `-q`, `-v`, `-vv` and `--debug` ask of the logger.
+    pub fn verbosity(&self) -> Verbosity {
+        if self.debug {
+            Verbosity::Debug
+        } else if self.quiet {
+            Verbosity::Quiet
+        } else {
+            match self.verbose {
+                0 => Verbosity::Normal,
+                1 => Verbosity::Verbose,
+                _ => Verbosity::VeryVerbose,
+            }
+        }
+    }
 }
 
 /// The verbs of phase 1.
@@ -144,6 +194,21 @@ pub struct WalkArgs {
     // test-only
     #[arg(long, hide = true, value_name = "RFC3339")]
     pub test_now: Option<String>,
+
+    /// The configuration file's `[excludes] patterns`, which every scan
+    /// leaves out beside `--exclude`.
+    #[arg(skip)]
+    pub config_excludes: Vec<String>,
+
+    /// The configuration file's `[classes] extra`, merged over the vendored
+    /// classes unless `--classes` names a table.
+    #[arg(skip)]
+    pub classes_extra: Option<PathBuf>,
+
+    /// The configuration file's `[caches] extra`, merged over the vendored
+    /// cache rules.
+    #[arg(skip)]
+    pub caches_extra: Option<PathBuf>,
 }
 
 /// The flags of the list verbs: what to show and how to filter it.
@@ -455,6 +520,130 @@ pub enum ProviderArg {
     Native,
     /// readdir and fstatat
     Fallback,
+}
+
+/// Fills from the configuration file what no flag and no environment
+/// variable set: flag > environment > file > built-in. clap reads
+/// `DUSCOPE_THREADS` and `DUSCOPE_THEME` into their flags, so a flag still
+/// unset here was given neither way; `matches` (the verb's, or the top
+/// level's without one) tell a defaulted `--attrs` from a given one. The
+/// format goes to [`OutputArgs::configured`], below `DUSCOPE_FORMAT` and the
+/// agent variables. A value the flag would refuse is a usage error naming
+/// the file and line.
+pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Result<(), Failure> {
+    let d = &config.defaults;
+    let refused = |key: &str, line: usize, why: &str| refused(config, key, line, why);
+    if let Some(format) = &d.format {
+        cli.output.configured = Some(choice(config, "format", format)?);
+    }
+    cli.output.quiet = cli.global.quiet;
+    if let Some(age) = &d.max_age {
+        timegrammar::parse_age(&age.value).map_err(|e| refused("max_age", age.line, &e))?;
+    }
+    // Asked only of a verb that has --attrs: clap panics on an unknown id.
+    let attrs_defaulted = || matches.value_source("attrs") == Some(ValueSource::DefaultValue);
+    let walk_defaults = |walk: &mut WalkArgs| -> Result<(), Failure> {
+        if walk.threads.is_none()
+            && let Some(threads) = &d.threads
+        {
+            let n = parse_threads(&threads.value.to_string())
+                .map_err(|_| refused("threads", threads.line, &format!("at most {MAX_THREADS}")))?;
+            walk.threads = Some(n);
+        }
+        if walk.size.is_none()
+            && !walk.apparent_size
+            && let Some(size) = &d.size
+        {
+            walk.size = Some(choice(config, "size", size)?);
+        }
+        if let Some(attrs) = &d.attrs
+            && attrs_defaulted()
+        {
+            walk.attrs = choice(config, "attrs", attrs)?;
+        }
+        if !walk.clones && !walk.no_clones && d.clones.as_ref().is_some_and(|c| !c.value) {
+            walk.no_clones = true;
+        }
+        walk.config_excludes.clone_from(&config.excludes);
+        walk.classes_extra.clone_from(&config.classes_extra);
+        walk.caches_extra.clone_from(&config.caches_extra);
+        Ok(())
+    };
+    let query_defaults = |query: &mut QueryArgs| {
+        if query.limit.is_none()
+            && let Some(limit) = &d.limit
+        {
+            query.limit = Some(usize::try_from(limit.value).unwrap_or(usize::MAX));
+        }
+    };
+    let scan_defaults = |scan: &mut ScanArgs| -> Result<(), Failure> {
+        walk_defaults(&mut scan.walk)?;
+        if scan.theme.is_none()
+            && let Some(theme) = &d.theme
+        {
+            scan.theme = Some(OsString::from(&theme.value));
+        }
+        if scan.color_by.is_none()
+            && let Some(by) = &d.color_by
+        {
+            scan.color_by = Some(choice(config, "color_by", by)?);
+        }
+        Ok(())
+    };
+    match &mut cli.verb {
+        None => scan_defaults(&mut cli.scan)?,
+        Some(Verb::Scan(args)) => scan_defaults(args)?,
+        Some(Verb::Top(args)) => {
+            walk_defaults(&mut args.walk)?;
+            query_defaults(&mut args.query);
+        }
+        Some(Verb::Tree(args)) => {
+            walk_defaults(&mut args.walk)?;
+            query_defaults(&mut args.query);
+        }
+        Some(Verb::ByType(args)) => {
+            walk_defaults(&mut args.walk)?;
+            query_defaults(&mut args.query);
+            if args.classes.is_none() {
+                args.classes.clone_from(&config.classes_extra);
+            }
+        }
+        Some(Verb::Stale(args)) => {
+            walk_defaults(&mut args.walk)?;
+            query_defaults(&mut args.query);
+        }
+        Some(Verb::Man | Verb::Completions(_)) => {}
+    }
+    Ok(())
+}
+
+/// A `[defaults]` value the flag would refuse: a usage error naming the file
+/// and line.
+fn refused(config: &Config, key: &str, line: usize, why: &str) -> Failure {
+    Failure::new(
+        Exit::Usage,
+        "usage",
+        format!("{}: [defaults] {key}: {why}", config.at(line)),
+    )
+    .hint("Fix the configuration file, or run duscope with --config none")
+}
+
+/// The value of a flag of enumerated values that the `[defaults]` key
+/// `setting` gives.
+fn choice<T: ValueEnum>(
+    config: &Config,
+    key: &str,
+    setting: &Setting<String>,
+) -> Result<T, Failure> {
+    T::from_str(&setting.value, false).map_err(|_| {
+        let names: Vec<String> = T::value_variants()
+            .iter()
+            .filter_map(ValueEnum::to_possible_value)
+            .map(|v| v.get_name().to_owned())
+            .collect();
+        let why = format!("{:?} is not one of {}", setting.value, names.join("|"));
+        refused(config, key, setting.line, &why)
+    })
 }
 
 /// The most worker threads a scan starts. More than this is a typing

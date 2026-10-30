@@ -76,6 +76,8 @@ impl From<FormatArg> for Format {
 
 /// How this command writes its result.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// The flags' switches.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Output {
     /// The format.
     pub format: Format,
@@ -87,6 +89,8 @@ pub struct Output {
     pub null: bool,
     /// `--header`: `--plain` starts with the field names.
     pub header: bool,
+    /// `-q`: no warnings on stderr.
+    pub quiet: bool,
 }
 
 impl Output {
@@ -117,6 +121,12 @@ impl Output {
                 _ => None,
             }
         };
+        // The configuration file's format stands in for the terminal test,
+        // below the environment's choice.
+        let explicit = explicit.or_else(|| {
+            let env_decides = env.duscope_format.is_some() || env.agent || env.ci;
+            args.configured.filter(|_| !env_decides).map(Format::from)
+        });
         let human = match treemap {
             Some(TreemapWhen::Never) | None => Format::Table,
             Some(_) => Format::Treemap,
@@ -142,6 +152,7 @@ impl Output {
             },
             null: args.null,
             header: args.header,
+            quiet: args.quiet,
         })
     }
 
@@ -386,7 +397,7 @@ impl Output {
         if self.is_machine() {
             stderr_line(footer);
         }
-        if !self.is_json() {
+        if !self.is_json() && !self.quiet {
             warn(&envelope.warnings);
         }
         written

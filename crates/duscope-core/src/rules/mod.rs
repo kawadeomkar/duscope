@@ -520,7 +520,7 @@ impl Caches {
 }
 
 /// The 1-based line of the start of `span` in `text`.
-fn line_of(text: &str, span: &Range<usize>) -> usize {
+pub(crate) fn line_of(text: &str, span: &Range<usize>) -> usize {
     // Bytes, not a str slice: a span need not fall on a char boundary.
     let before = &text.as_bytes()[..span.start.min(text.len())];
     before.split(|&b| b == b'\n').count()

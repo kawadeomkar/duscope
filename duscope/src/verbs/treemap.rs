@@ -140,7 +140,7 @@ pub fn draw(
         glyphs,
         ls_colors,
     } = style;
-    let classes = Classes::vendored();
+    let classes = super::query::classes(args.walk.classes_extra.as_deref(), "[classes] extra")?;
     let size = scan::size_kind(&args.walk);
     let opts = PaintOpts {
         pack,

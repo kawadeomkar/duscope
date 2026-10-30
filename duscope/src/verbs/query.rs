@@ -2,6 +2,8 @@
 //! the rows `scan` prints. Each turns its flags into a query of
 //! `duscope_core::query`, runs it on the arena, and writes the envelope.
 
+use std::path::Path;
+
 use duscope_core::CoreError;
 use duscope_core::envelope::{
     ByTypeEntry, Envelope, QueryBlock, SCHEMA_VERSION, StaleEntry, Tool, TopEntry, Warning,
@@ -160,23 +162,33 @@ pub fn tree(args: &TreeArgs, output: &Output) -> Result<(), Failure> {
     output.list(&envelope, &footer)
 }
 
+/// The file classes: the vendored ones, with the table `file` names (from
+/// `label`, a flag or a configuration key) merged over them.
+pub fn classes(file: Option<&Path>, label: &str) -> Result<Classes, Failure> {
+    let Some(file) = file else {
+        return Ok(Classes::vendored());
+    };
+    let text = std::fs::read_to_string(file).map_err(|e| {
+        Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("{label} {}: {e}", file.display()),
+        )
+    })?;
+    let user = Classes::parse(&text, &file.display().to_string())
+        .map_err(|e| Failure::new(Exit::Usage, "usage", format!("{label} {e}")))?;
+    Ok(Classes::vendored().merged(user))
+}
+
 /// `by-type`.
 pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
-    let classes = match &args.classes {
-        None => Classes::vendored(),
-        Some(file) => {
-            let text = std::fs::read_to_string(file).map_err(|e| {
-                Failure::new(
-                    Exit::Usage,
-                    "usage",
-                    format!("--classes {}: {e}", file.display()),
-                )
-            })?;
-            let user = Classes::parse(&text, &file.display().to_string())
-                .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--classes {e}")))?;
-            Classes::vendored().merged(user)
-        }
+    // --classes, else the configuration's [classes] extra.
+    let label = if args.classes == args.walk.classes_extra {
+        "[classes] extra"
+    } else {
+        "--classes"
     };
+    let classes = classes(args.classes.as_deref(), label)?;
     limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let prepared = prepare(

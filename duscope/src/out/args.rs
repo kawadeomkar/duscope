@@ -44,6 +44,15 @@ pub struct OutputArgs {
     /// Start --plain output with a line of field names
     #[arg(long, global = true)]
     pub header: bool,
+
+    /// The configuration file's `format`, which decides only when no flag,
+    /// `DUSCOPE_FORMAT`, agent variable or `CI` does.
+    #[arg(skip)]
+    pub configured: Option<FormatArg>,
+
+    /// `-q`: warnings stay off stderr.
+    #[arg(skip)]
+    pub quiet: bool,
 }
 
 /// `--format`.
