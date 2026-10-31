@@ -220,6 +220,54 @@ fn p2_qry_01_a_folding_volume_matches_case_and_nfc() {
 }
 
 #[test]
+fn p2_qry_01_a_file_subtree_and_out_of_range_bounds() {
+    let env = TestEnv::new();
+    let mut tree = MemProvider::new("/t");
+    tree.file("a/x", 10).file("a/y", 20).file("b", 30);
+    let index = mem_index(&tree, &env.tmp_dir());
+    let b = resolve_in_index(&index, Path::new("/t/b")).unwrap();
+    // A subtree that is one file is that file, under either plan.
+    for plan in [Plan::Range, Plan::Walk] {
+        let one = index.largest_files(b, 1, None, Some(plan)).unwrap();
+        assert_eq!((one.ids, one.total_count), (vec![b], 1));
+    }
+    // Every row, and a minimum past the largest size an index holds.
+    let all = index.largest_files(0, usize::MAX, None, None).unwrap();
+    assert_eq!(all.ids.len(), 3);
+    let none = index
+        .largest_files(
+            0,
+            10,
+            Some(Cut {
+                before: i64::MAX,
+                min_allocated: u64::MAX,
+            }),
+            None,
+        )
+        .unwrap();
+    assert_eq!((none.ids.len(), none.total_count), (0, 0));
+}
+
+#[test]
+fn p2_qry_01_a_root_typed_in_another_case_holds_the_path() {
+    let env = TestEnv::new();
+    let mut tree = MemProvider::new("/Volumes/USB/Photos");
+    tree.compares_names(false, Normalization::None)
+        .file("2024/\u{3bf}\u{3b4}\u{3bf}\u{3c3}", 5);
+    let index = mem_index(&tree, &env.tmp_dir());
+    // The root's own components fold, and a final sigma typed in capitals
+    // matches the stored medial one.
+    let asked = Path::new("/volumes/usb/PHOTOS/2024/\u{39f}\u{394}\u{39f}\u{3a3}");
+    let id = resolve_in_index(&index, asked).unwrap();
+    assert_eq!(
+        index.path(id),
+        "2024/\u{3bf}\u{3b4}\u{3bf}\u{3c3}".as_bytes()
+    );
+    // A different root is not this one.
+    assert!(resolve_in_index(&index, Path::new("/volumes/usb/Video/2024")).is_none());
+}
+
+#[test]
 fn p2_qry_01_under_binds_the_subtree() {
     let env = TestEnv::new();
     let mut tree = MemProvider::new("/t");

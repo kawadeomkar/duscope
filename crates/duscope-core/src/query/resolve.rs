@@ -90,14 +90,22 @@ pub fn short_id(index_dir: &Path, id: &str) -> String {
 /// a query binds as `:root_id` and `:root_last`. A path the scan does not
 /// hold is [`CoreError::ScanNotFound`].
 pub fn under(index: &Index, path: &Path) -> Result<(u32, u32), CoreError> {
+    let id = entry_at(index, path, "--under ")?;
+    Ok((id, index.node(id).last_id))
+}
+
+/// The entry of `index` at `path`, or why there is none: a read that failed
+/// is a damaged file, not a missing path. `what` names the flag in the
+/// message.
+fn entry_at(index: &Index, path: &Path, what: &str) -> Result<u32, CoreError> {
     match resolve_in_index(index, path) {
-        Some(id) => Ok((id, index.node(id).last_id)),
+        Some(id) => Ok(id),
         None if index.failure().is_some() => Err(CoreError::IndexCorrupt {
             file: index.file().display().to_string(),
             message: index.failure().unwrap_or_default(),
         }),
         None => Err(CoreError::ScanNotFound(format!(
-            "--under {} is not in scan {}, whose root is {}",
+            "{what}{} is not in scan {}, whose root is {}",
             path.display(),
             index.meta().scan_id,
             index.root_path().display()
@@ -146,20 +154,8 @@ pub fn resolve_scan(
 ) -> Result<Option<Resolved>, CoreError> {
     let named = |index: Index| -> Result<Option<Resolved>, CoreError> {
         let path = q.path.unwrap_or(index.root_path());
-        match resolve_in_index(&index, path) {
-            Some(base) => Ok(Some(resolved(index, base, q))),
-            // A read that failed is a damaged file, not a missing path.
-            None if index.failure().is_some() => Err(CoreError::IndexCorrupt {
-                file: index.file().display().to_string(),
-                message: index.failure().unwrap_or_default(),
-            }),
-            None => Err(CoreError::ScanNotFound(format!(
-                "{} is not in scan {}, whose root is {}",
-                path.display(),
-                index.meta().scan_id,
-                index.root_path().display()
-            ))),
-        }
+        let base = entry_at(&index, path, "")?;
+        Ok(Some(resolved(index, base, q)))
     };
     match selector {
         ScanSelector::Latest => Ok(latest(q, usable)),
@@ -215,8 +211,7 @@ fn latest(q: &ScanQuery<'_>, usable: impl Fn(&Index) -> bool) -> Option<Resolved
         }
         // A directory the scan listed but did not enter holds nothing of
         // what is under it now: a scan of it measures it.
-        if let Some(base) = resolve_in_index(&index, path).filter(|&base| index.entered(base, path))
-        {
+        if let Some(base) = resolve_in_index(&index, path).filter(|&base| index.entered(base)) {
             found = Some((index, base));
         }
     }
