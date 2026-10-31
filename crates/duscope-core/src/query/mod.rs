@@ -8,6 +8,7 @@
 //! rows with the count before `--limit` ([`Page`]).
 
 mod by_type;
+pub mod plan;
 pub mod resolve;
 mod stale;
 pub mod timegrammar;
@@ -34,10 +35,11 @@ use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::rollup::RollUp;
 
 pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
+pub use plan::{Cut, Plan, Ranked};
 /// The regular expressions `--regex` takes, matched against path bytes.
 pub use regex::bytes::Regex;
 pub use resolve::{
-    Resolved, ScanQuery, ScanSelector, index_files, resolve_scan, short_id, shortest_prefix,
+    Resolved, ScanQuery, ScanSelector, index_files, resolve_scan, short_id, shortest_prefix, under,
 };
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
 pub use top::{TopQuery, top};
