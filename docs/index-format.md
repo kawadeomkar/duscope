@@ -126,6 +126,11 @@ One row per directory, the root included.
 | `dev` | INTEGER | no | device id |
 | `flags` | INTEGER | no | [flag bits](#flags) |
 | `errors` | INTEGER | yes | the errno that kept the directory from being read (listed with no children); NULL when it was read whole |
+| `atime` | INTEGER | yes | the directory's own access time; NULL unless the scan collected `full` attributes |
+| `btime` | INTEGER | yes | its creation time; NULL unless collected and the filesystem has one |
+| `mode` | INTEGER | yes | its mode bits; NULL unless collected |
+| `uid` | INTEGER | yes | its owner's user id; NULL unless collected |
+| `gid` | INTEGER | yes | its group id; NULL unless collected |
 
 ### `files`
 
@@ -275,6 +280,7 @@ stays 0; bits 9 to 11 are set on directories only, and bit 12 on files only.
 | `error_count` | INTEGER | directories and entries the scan could not read |
 | `vanished_count` | INTEGER | entries that disappeared during the scan |
 | `excluded_count` | INTEGER | files left out and directories not entered because an exclude or cache rule matched them |
+| `clones_unavailable` | INTEGER | 1 when clones were to be counted on a filesystem that reports no clone ids (every one but APFS) |
 | `n_entries` | INTEGER | rows in `dirs` and `files` together |
 | `incremental` | INTEGER | 1 when an incremental rescan wrote the file |
 | `parent_scan_id` | TEXT | the scan a rescan started from; NULL for a fresh scan |

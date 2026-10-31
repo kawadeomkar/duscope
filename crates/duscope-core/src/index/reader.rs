@@ -168,6 +168,7 @@ impl Index {
             error_count: unsigned(meta.int("error_count")),
             vanished_count: unsigned(meta.int("vanished_count")),
             excluded_count: unsigned(meta.int("excluded_count")),
+            clones_unavailable: meta.int("clones_unavailable") != 0,
             incremental: meta.int("incremental") != 0,
             parent_scan_id: meta.opt_text("parent_scan_id"),
             source: meta.text("source"),
@@ -267,12 +268,13 @@ impl Index {
         })
     }
 
-    /// The directories that could not be read.
-    pub fn unreadable_dirs(&self) -> u64 {
+    /// The directories with ids from `first` to `last` that could not be
+    /// read: the whole scan's, or a subtree's.
+    pub fn unreadable_dirs(&self, first: u32, last: u32) -> u64 {
         self.db
             .query_row(
-                "SELECT COUNT(*) FROM dirs WHERE errors IS NOT NULL",
-                [],
+                "SELECT COUNT(*) FROM dirs WHERE errors IS NOT NULL AND id BETWEEN ?1 AND ?2",
+                [first, last],
                 |row| row.get::<_, i64>(0),
             )
             .map_or_else(
@@ -300,39 +302,69 @@ impl Index {
     }
 
     /// The entry at `rel`, a path below the root given as its components,
-    /// matched byte for byte; `None` when the scan holds no such entry.
+    /// matched byte for byte; `None` when the scan holds no such entry. A
+    /// directory's subdirectories are found through `dirs (parent_id,
+    /// name)`, its own files in their id range.
     pub fn lookup<'a>(&self, rel: impl IntoIterator<Item = &'a [u8]>) -> Option<u32> {
         let mut at = 0u32;
-        let mut is_dir = self.node(0).is_dir();
         for name in rel {
-            if !is_dir {
+            let dir = self.node(at);
+            if !dir.is_dir() {
                 return None;
             }
-            let child = |table: &str| -> rusqlite::Result<Option<u32>> {
-                self.db
-                    .prepare(&format!(
-                        "SELECT id FROM {table} WHERE parent_id = ?1 AND name = ?2"
-                    ))?
-                    .query_row(rusqlite::params![at, name], |row| row.get(0))
-                    .optional()
-            };
-            let found = match child("dirs") {
-                Ok(Some(id)) => Some((id, true)),
-                Ok(None) => match child("files") {
-                    Ok(found) => found.map(|id| (id, false)),
-                    Err(e) => {
-                        self.fail(&e);
-                        None
-                    }
-                },
+            let found = self
+                .db
+                .prepare("SELECT id FROM dirs WHERE parent_id = ?1 AND name = ?2")
+                .and_then(|mut stmt| {
+                    stmt.query_row(rusqlite::params![at, name], |row| row.get(0))
+                        .optional()
+                })
+                .and_then(|found: Option<u32>| match found {
+                    Some(id) => Ok(Some(id)),
+                    None => self
+                        .db
+                        .prepare("SELECT id FROM files WHERE id BETWEEN ?1 AND ?2 AND name = ?3")?
+                        .query_row(rusqlite::params![at + 1, dir.files_end, name], |row| {
+                            row.get(0)
+                        })
+                        .optional(),
+                });
+            at = match found {
+                Ok(found) => found?,
                 Err(e) => {
                     self.fail(&e);
-                    None
+                    return None;
                 }
             };
-            (at, is_dir) = found?;
         }
         Some(at)
+    }
+
+    /// Whether the scan read the entry `id`, at `path`: not a directory it
+    /// listed but kept out of (an exclude, a cache rule), could not read,
+    /// or a mount point it did not enter.
+    pub fn entered(&self, id: u32, path: &Path) -> bool {
+        let skipped = self
+            .db
+            .query_row(
+                "SELECT flags & ?2 != 0 OR errors IS NOT NULL FROM dirs WHERE id = ?1",
+                [id, EXCLUDED | EXCLUDED_CACHE],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional();
+        match skipped {
+            Ok(Some(true)) => return false,
+            Ok(_) => {}
+            Err(e) => {
+                self.fail(&e);
+                return false;
+            }
+        }
+        let path = path.as_os_str().as_bytes();
+        !self
+            .volumes()
+            .iter()
+            .any(|v| !v.entered && v.mount_point == path)
     }
 
     /// Keeps the first failed read.
@@ -395,8 +427,8 @@ impl Index {
         };
         let mut dirs = self.db.prepare(
             "SELECT id, last_id, files_end, parent_id, depth, cum_apparent, cum_allocated, \
-             n_files, n_dirs, mtime, ctime, max_mtime, flags, errors IS NOT NULL, name \
-             FROM dirs WHERE id >= ?1 AND id < ?2",
+             n_files, n_dirs, mtime, ctime, max_mtime, flags, errors IS NOT NULL, name, \
+             atime, btime, mode FROM dirs WHERE id >= ?1 AND id < ?2",
         )?;
         let mut rows = dirs.query([start, end])?;
         while let Some(row) = rows.next()? {
@@ -470,9 +502,9 @@ fn dir_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
         mtime_ns: row.get(9)?,
         max_mtime_ns: row.get(11)?,
         ctime_ns: row.get(10)?,
-        atime_ns: None,
-        btime_ns: None,
-        mode: None,
+        atime_ns: row.get(15)?,
+        btime_ns: row.get(16)?,
+        mode: row.get(17)?,
         nlink: 0,
         charged: true,
         linked_away: false,

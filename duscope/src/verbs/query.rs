@@ -113,9 +113,9 @@ pub fn top(args: &TopArgs, index_dir: Option<&Path>, output: &Output) -> Result<
         !args.no_cut_through,
         output,
     )?;
+    source.check()?;
     output.list(&envelope, &footer)?;
-    source.finish(&args.walk, output);
-    Ok(())
+    source.finish(&args.walk, output)
 }
 
 /// The envelope and footer of `top` (or `scan`, whose `query` is `None`:
@@ -191,9 +191,9 @@ pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         Vec::new(),
         output,
     );
+    source.check()?;
     output.list(&envelope, &footer)?;
-    source.finish(&args.walk, output);
-    Ok(())
+    source.finish(&args.walk, output)
 }
 
 /// The file classes: the vendored ones, with the table `file` names (from
@@ -256,9 +256,9 @@ pub fn by_type(
         Vec::new(),
         output,
     );
+    source.check()?;
     output.list(&envelope, &footer)?;
-    source.finish(&args.walk, output);
-    Ok(())
+    source.finish(&args.walk, output)
 }
 
 /// `stale`.
@@ -324,9 +324,9 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
         warnings,
         output,
     );
+    source.check()?;
     output.list(&envelope, &footer)?;
-    source.finish(&args.walk, output);
-    Ok(())
+    source.finish(&args.walk, output)
 }
 
 /// Scans' common preparation: the size kind, now, the filters, the limit
@@ -534,7 +534,7 @@ fn envelope<T>(
     } = prepared;
     let block = source.scan_block(walk, size);
     let footer = source.footer(&block, output);
-    let mut warnings = source.warnings();
+    let mut warnings = source.warnings(walk);
     warnings.extend(flag_warnings);
     warnings.extend(extra);
     let returned_count = page.entries.len() as u64;

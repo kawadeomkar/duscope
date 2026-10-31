@@ -39,6 +39,7 @@ fn meta(id: ScanId, root: &Path, started_at: i64) -> ScanMeta {
         error_count: 0,
         vanished_count: 0,
         excluded_count: 0,
+        clones_unavailable: false,
         incremental: false,
         parent_scan_id: None,
         source: "scan".to_owned(),
@@ -64,15 +65,12 @@ fn fixture_index(dir: &Path, attrs: Attrs) -> (Arena, RollUp, PathBuf, Index) {
     (arena, rollup, root, index)
 }
 
-/// A node as both views can answer it: an index keeps no link count, access
-/// or birth time, or mode for a directory, and spells the kinds it does not
-/// name (sockets, pipes, devices) as one.
+/// A node as both views can answer it: an index keeps no link count for a
+/// directory, and spells the kinds it does not name (sockets, pipes,
+/// devices) as one.
 fn comparable(mut node: Node) -> Node {
     if node.kind == Kind::Dir {
         node.nlink = 0;
-        node.atime_ns = None;
-        node.btime_ns = None;
-        node.mode = None;
     }
     if !matches!(node.kind, Kind::Dir | Kind::File | Kind::Symlink) {
         node.kind = Kind::Unknown;
@@ -428,6 +426,10 @@ fn p2_idx_03_latest_is_the_newest_usable_scan_holding_the_path() {
     // Older than --max-age: still read, marked stale.
     let r = latest(Path::new("/t/sub"), 30 * DAY, &all).unwrap();
     assert!(r.stale);
+    // A file in a scan is read too, found in its directory's id range.
+    let r = latest(Path::new("/t/y"), 12 * DAY, &all).unwrap();
+    assert_eq!(&*r.index.name(r.base), b"y");
+    assert!(!r.index.node(r.base).is_dir());
     // No scan holds the path: none, so the verb scans.
     assert!(latest(Path::new("/v"), 12 * DAY, &all).is_none());
     assert!(latest(Path::new("/t/sub/new"), 12 * DAY, &all).is_none());

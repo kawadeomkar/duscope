@@ -229,6 +229,7 @@ pub fn save(
         error_count: scanned.summary.unreadable_dirs + scanned.summary.entry_errors,
         vanished_count: scanned.arena.vanished(),
         excluded_count: scanned.summary.excluded,
+        clones_unavailable: scanned.summary.clones_unavailable,
         incremental: false,
         parent_scan_id: None,
         source: "scan".to_owned(),
@@ -287,20 +288,26 @@ pub fn warnings(scanned: &Scanned) -> Vec<Warning> {
         summary.mounts_excluded,
         scanned.arena.vanished(),
     );
-    if scanned.clones_asked && summary.clones_unavailable {
-        warnings.push(Warning {
-            code: "clones_unavailable",
-            message: "--clones was asked of a filesystem without clone ids; its clones count \
-                      in full, as du counts them"
-                .to_owned(),
-            count: None,
-            hint: Some(
-                "Only APFS reports clone ids; rerun duscope without --clones elsewhere".to_owned(),
-            ),
-        });
-    }
+    warnings.extend(clones_unavailable(
+        scanned.clones_asked && summary.clones_unavailable,
+    ));
     warnings.extend(upper_bound(scanned.view().node(0).upper_bound));
     warnings
+}
+
+/// `clones_unavailable`, when `--clones` was asked of a filesystem without
+/// clone ids.
+pub fn clones_unavailable(unavailable: bool) -> Option<Warning> {
+    unavailable.then(|| Warning {
+        code: "clones_unavailable",
+        message: "--clones was asked of a filesystem without clone ids; its clones count \
+                  in full, as du counts them"
+            .to_owned(),
+        count: None,
+        hint: Some(
+            "Only APFS reports clone ids; rerun duscope without --clones elsewhere".to_owned(),
+        ),
+    })
 }
 
 /// What a scan says of its own totals, in a fresh scan or a saved one:

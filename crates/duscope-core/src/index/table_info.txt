@@ -37,6 +37,11 @@ dirs
   16|dev|INTEGER|1||0
   17|flags|INTEGER|1||0
   18|errors|INTEGER|0||0
+  19|atime|INTEGER|0||0
+  20|btime|INTEGER|0||0
+  21|mode|INTEGER|0||0
+  22|uid|INTEGER|0||0
+  23|gid|INTEGER|0||0
 files
   0|id|INTEGER|0||1
   1|parent_id|INTEGER|1||0

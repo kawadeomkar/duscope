@@ -318,12 +318,18 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
     }
 
     fn node(&self, id: u32) -> Node {
+        // Saturating: an entry an index could not read is empty, at depth 0
+        // under the root, and the verb reports the failed read.
         let mut node = self.view.node(id + self.base);
         node.id = id;
-        node.parent = if id == 0 { 0 } else { node.parent - self.base };
-        node.depth -= self.depth;
-        node.files_end -= self.base;
-        node.last_id -= self.base;
+        node.parent = if id == 0 {
+            0
+        } else {
+            node.parent.saturating_sub(self.base)
+        };
+        node.depth = node.depth.saturating_sub(self.depth);
+        node.files_end = node.files_end.saturating_sub(self.base);
+        node.last_id = node.last_id.saturating_sub(self.base);
         node
     }
 
@@ -352,7 +358,7 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
         self.view
             .child_dirs(dir + self.base)
             .into_iter()
-            .map(|(id, last)| (id - self.base, last - self.base))
+            .map(|(id, last)| (id.saturating_sub(self.base), last.saturating_sub(self.base)))
             .collect()
     }
 }

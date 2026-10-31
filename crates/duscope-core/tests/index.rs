@@ -61,6 +61,7 @@ fn p2_idx_03_write_the_v2_0_fixture() {
         error_count: 0,
         vanished_count: 0,
         excluded_count: 0,
+        clones_unavailable: false,
         incremental: false,
         parent_scan_id: None,
         source: "scan".to_owned(),

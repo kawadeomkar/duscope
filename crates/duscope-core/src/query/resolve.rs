@@ -189,7 +189,9 @@ fn latest(q: &ScanQuery<'_>, usable: impl Fn(&Index) -> bool) -> Option<Resolved
         if !newer || !usable(&index) {
             continue;
         }
-        if let Some(base) = within(&index, path) {
+        // A directory the scan listed but did not enter holds nothing of
+        // what is under it now: a scan of it measures it.
+        if let Some(base) = within(&index, path).filter(|&base| index.entered(base, path)) {
             found = Some((index, base));
         }
     }

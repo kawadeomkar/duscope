@@ -84,6 +84,9 @@ pub struct ScanMeta {
     pub vanished_count: u64,
     /// Files left out and directories not entered by the excludes.
     pub excluded_count: u64,
+    /// Whether clones were to be counted on a filesystem without clone
+    /// ids, which `--clones` asked of the scan warns about.
+    pub clones_unavailable: bool,
     /// Whether an incremental rescan wrote the file.
     pub incremental: bool,
     /// The scan a rescan started from.
@@ -258,6 +261,7 @@ fn meta_rows(
     row.execute(params!["error_count", signed(meta.error_count)])?;
     row.execute(params!["vanished_count", signed(meta.vanished_count)])?;
     row.execute(params!["excluded_count", signed(meta.excluded_count)])?;
+    row.execute(params!["clones_unavailable", meta.clones_unavailable])?;
     row.execute(params!["n_entries", count(rollup.len())])?;
     row.execute(params!["incremental", meta.incremental])?;
     row.execute(params!["parent_scan_id", meta.parent_scan_id])?;
@@ -308,8 +312,8 @@ fn entry_rows(
     meta: &ScanMeta,
 ) -> rusqlite::Result<()> {
     let mut dir_row = tx.prepare(
-        "INSERT INTO dirs VALUES \
-         (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        "INSERT INTO dirs VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, \
+         ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
     )?;
     let mut file_row = tx.prepare(
         "INSERT INTO files VALUES \
@@ -344,6 +348,7 @@ fn entry_rows(
             let flags = dir_flags(arena, dir, view.flags.bits(), firmlink);
             let rec = arena.dir(dir);
             let name = if id == 0 { &meta.root[..] } else { view.name };
+            let full = arena.full(idx);
             insert_dir(
                 &mut dir_row,
                 &DirRow {
@@ -366,6 +371,11 @@ fn entry_rows(
                     dev,
                     flags,
                     errors: arena.unreadable().get(&dir).copied(),
+                    atime: full.map(|f| f.atime_ns),
+                    btime: full.and_then(|f| f.btime_ns),
+                    mode: full.map(|f| f.mode),
+                    uid: full.map(|f| f.uid),
+                    gid: full.map(|f| f.gid),
                 },
             )?;
             continue;
@@ -461,6 +471,11 @@ struct DirRow<'a> {
     dev: u64,
     flags: u32,
     errors: Option<i32>,
+    atime: Option<i64>,
+    btime: Option<i64>,
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
 }
 
 fn insert_dir(stmt: &mut Statement<'_>, r: &DirRow<'_>) -> rusqlite::Result<usize> {
@@ -484,6 +499,11 @@ fn insert_dir(stmt: &mut Statement<'_>, r: &DirRow<'_>) -> rusqlite::Result<usiz
         signed(r.dev),
         r.flags,
         r.errors,
+        r.atime,
+        r.btime,
+        r.mode,
+        r.uid,
+        r.gid,
     ])
 }
 

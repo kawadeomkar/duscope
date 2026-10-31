@@ -498,4 +498,158 @@ fn p2_idx_03_scans_lists_and_checks_the_saved_scans() {
     let out = run(&env, &["scans", "--check", id, "--json"]);
     assert_eq!(out.status.code(), Some(5));
     assert_eq!(envelope(&out)["error"]["code"], "index_corrupt");
+    // A verb reading it fails the same way, rather than print empty rows.
+    let out = run(&env, &["top", "--json", "--scan", id]);
+    assert_eq!(out.status.code(), Some(5));
+    assert_eq!(envelope(&out)["error"]["code"], "index_corrupt");
+}
+
+fn is_root(env: &TestEnv) -> bool {
+    let uid = env.command("id").arg("-u").output().unwrap();
+    String::from_utf8_lossy(&uid.stdout).trim() == "0"
+}
+
+#[test]
+fn p2_idx_03_a_saved_scan_read_at_a_path_counts_what_is_under_it() {
+    let env = TestEnv::new();
+    if is_root(&env) {
+        return duscope_testkit::skip("root reads a directory of mode 000");
+    }
+    let root = env.tmp_dir().join("tree");
+    fs::create_dir_all(root.join("open/sub")).unwrap();
+    fs::create_dir_all(root.join("locked")).unwrap();
+    fs::write(root.join("open/sub/f"), vec![1u8; 9000]).unwrap();
+    let locked = root.join("locked");
+    let mode = |m: u32| {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&locked, fs::Permissions::from_mode(m)).unwrap();
+    };
+    mode(0o000);
+    let root_s = root.to_str().unwrap();
+    let whole = ok(&run(&env, &["scan", root_s, "--save", "--json"]));
+    let codes = |v: &serde_json::Value| -> Vec<String> {
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert!(codes(&whole).contains(&"partial_read".to_owned()));
+    // Read at open/, nothing under it was unreadable: no partial_read, and
+    // --strict passes, as for a scan of open/ alone.
+    let open = root.join("open");
+    let read = ok(&run(
+        &env,
+        &["top", open.to_str().unwrap(), "--json", "--strict"],
+    ));
+    assert_eq!(read["scan"]["id"], whole["scan"]["id"]);
+    assert!(!codes(&read).contains(&"partial_read".to_owned()));
+    // At the root, --strict still fails.
+    let out = run(&env, &["top", root_s, "--json", "--strict"]);
+    assert_eq!(out.status.code(), Some(4));
+    // The locked directory was listed, not read: a query about it scans it.
+    mode(0o755);
+    fs::write(locked.join("g"), vec![1u8; 5000]).unwrap();
+    let fresh = ok(&run(
+        &env,
+        &["top", locked.to_str().unwrap(), "--json", "--files"],
+    ));
+    assert_ne!(fresh["scan"]["id"], whole["scan"]["id"]);
+    assert_eq!(fresh["entries"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn p2_idx_03_an_excluded_directory_is_scanned_when_asked_about() {
+    let env = TestEnv::new();
+    let home = home(&env);
+    let config = env.xdg_config_home().join("duscope");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "[excludes]\npatterns = [\"node_modules\"]\n",
+    )
+    .unwrap();
+    let whole = ok(&run(&env, &["top", home.to_str().unwrap(), "--json"]));
+    let modules = home.join("dev/node_modules");
+    // The scan listed node_modules but did not enter it; asked about it,
+    // the verb does not read that scan.
+    let sub = ok(&run(
+        &env,
+        &[
+            "top",
+            modules.to_str().unwrap(),
+            "--json",
+            "--config",
+            "none",
+        ],
+    ));
+    assert_ne!(sub["scan"]["id"], whole["scan"]["id"]);
+    assert!(sub["scan"]["total_allocated_bytes"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn p2_idx_03_an_index_file_needs_no_index_directory() {
+    let env = TestEnv::new();
+    let home = home(&env);
+    let saved_scan = ok(&run(
+        &env,
+        &["scan", home.to_str().unwrap(), "--save", "--json"],
+    ));
+    let id = saved_scan["scan"]["id"].as_str().unwrap();
+    let file = env.index_dir().join("scans").join(format!("{id}.db"));
+    let out = env
+        .cmd()
+        .args(["top", "--json", "--scan", file.to_str().unwrap()])
+        .env_remove("DUSCOPE_INDEX_DIR")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("HOME")
+        .output()
+        .unwrap();
+    assert_eq!(ok(&out)["scan"]["id"], id);
+    // A prefix has nowhere to be looked for.
+    let out = env
+        .cmd()
+        .args(["top", "--json", "--scan", &id[..6]])
+        .env_remove("DUSCOPE_INDEX_DIR")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("HOME")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+}
+
+#[test]
+fn p2_idx_03_a_save_that_fails_after_the_output_exits_1() {
+    let env = TestEnv::new();
+    if is_root(&env) {
+        return duscope_testkit::skip("root writes a read-only directory");
+    }
+    let home = home(&env);
+    let dir = env.tmp_dir().join("read-only");
+    fs::create_dir_all(&dir).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    let out = env
+        .cmd()
+        .args(["top", home.to_str().unwrap(), "--json"])
+        .env("DUSCOPE_INDEX_DIR", &dir)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    // The output stands, with the id the scan was to have; stderr says why.
+    let written = envelope(&out);
+    assert_eq!(written["ok"], true);
+    assert!(written["scan"]["id"].is_string());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--no-save"), "{stderr}");
+    let out = env
+        .cmd()
+        .args(["top", home.to_str().unwrap(), "--json", "--no-save"])
+        .env("DUSCOPE_INDEX_DIR", &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
 }

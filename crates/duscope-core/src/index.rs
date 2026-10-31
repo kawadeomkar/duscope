@@ -23,7 +23,7 @@ pub const INDEX_VERSION: &str = "2.0";
 
 /// The keys of `scan_meta`, every one present in an index; the DDL writes
 /// `index_version` and the writer the others.
-pub const SCAN_META_KEYS: [&str; 24] = [
+pub const SCAN_META_KEYS: [&str; 25] = [
     "index_version",
     "scan_id",
     "root",
@@ -42,6 +42,7 @@ pub const SCAN_META_KEYS: [&str; 24] = [
     "error_count",
     "vanished_count",
     "excluded_count",
+    "clones_unavailable",
     "n_entries",
     "incremental",
     "parent_scan_id",

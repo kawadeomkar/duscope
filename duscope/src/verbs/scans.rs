@@ -76,7 +76,18 @@ fn saved(dir: &Path) -> Vec<Index> {
     let mut scans: Vec<Index> = index_files(dir)
         .into_iter()
         .filter_map(|(_, file)| match Index::open(&file) {
-            Ok(index) => Some(index),
+            Ok(index) => {
+                // The root's row gives the listing its totals; a file whose
+                // rows cannot be read is left to --check.
+                let _ = index.node(0);
+                match index.failure() {
+                    None => Some(index),
+                    Some(e) => {
+                        log::warn!("cannot read the index {}: {e}", file.display());
+                        None
+                    }
+                }
+            }
             Err(e) => {
                 log::warn!("{e}");
                 None
@@ -92,7 +103,10 @@ fn saved(dir: &Path) -> Vec<Index> {
 /// The listing of saved scans.
 fn list(dir: &Path, output: &Output) -> Result<(), Failure> {
     let scans = saved(dir);
-    let ids: Vec<&str> = scans.iter().map(|s| s.meta().scan_id.as_str()).collect();
+    // People see each id's shortest prefix among every index file, so the
+    // prefix they type to --scan names this one.
+    let files = index_files(dir);
+    let ids: Vec<&str> = files.iter().map(|(id, _)| id.as_str()).collect();
     let entries: Vec<SavedScanEntry> = scans
         .iter()
         .map(|index| {

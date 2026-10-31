@@ -56,6 +56,7 @@ fn meta(id: &str) -> ScanMeta {
         error_count: 2,
         vanished_count: 0,
         excluded_count: 0,
+        clones_unavailable: false,
         incremental: false,
         parent_scan_id: None,
         source: "scan".to_owned(),

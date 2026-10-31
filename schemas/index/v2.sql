@@ -55,7 +55,12 @@ CREATE TABLE dirs (
     max_mtime         INTEGER NOT NULL,
     dev               INTEGER NOT NULL,
     flags             INTEGER NOT NULL,
-    errors            INTEGER
+    errors            INTEGER,
+    atime             INTEGER,
+    btime             INTEGER,
+    mode              INTEGER,
+    uid               INTEGER,
+    gid               INTEGER
 );
 
 -- Every entry that is not a directory.

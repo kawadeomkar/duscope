@@ -8,6 +8,7 @@
 //! outright, `--no-scan` fails where no saved scan answers, and `--no-save`
 //! keeps a scan the verb runs from being saved.
 
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -77,9 +78,24 @@ pub fn source(
         )
     })?;
     let path = walk.path.as_ref().map(|p| resolve_path(&cwd, p).real);
-    if let Some(dir) = &dir {
+    // An index file needs no index directory; a prefix does, and latest
+    // without one has nothing to find.
+    let index_dir = match (&dir, &selector) {
+        (Some(dir), _) => Some(dir.as_path()),
+        (None, ScanSelector::File(_)) => Some(cwd.as_path()),
+        (None, ScanSelector::Prefix(_)) => {
+            return Err(Failure::new(
+                Exit::NotFound,
+                "scan_not_found",
+                "no index directory to look for the scan in: neither HOME nor XDG_CACHE_HOME is set",
+            )
+            .hint("Run duscope with --index-dir naming the directory the scans are in"));
+        }
+        (None, ScanSelector::Latest) => None,
+    };
+    if let Some(index_dir) = index_dir {
         let q = ScanQuery {
-            index_dir: dir,
+            index_dir,
             path: path.as_deref(),
             cwd: &cwd,
             max_age_ns,
@@ -161,11 +177,28 @@ impl Source {
         }
     }
 
-    /// Directories the scan could not read.
+    /// Directories under the path the scan could not read.
     pub fn unreadable_dirs(&self) -> u64 {
         match self {
             Source::Fresh { scanned, .. } => scanned.summary.unreadable_dirs,
-            Source::Saved { index, .. } => index.unreadable_dirs(),
+            Source::Saved { index, base, .. } => {
+                index.unreadable_dirs(*base, index.node(*base).last_id)
+            }
+        }
+    }
+
+    /// Fails with `index_corrupt` when a read of a saved scan failed after
+    /// the file opened: the rows would be missing or empty.
+    pub fn check(&self) -> Result<(), Failure> {
+        match self {
+            Source::Saved { index, .. } => match index.failure() {
+                Some(message) => Err(core_failure(CoreError::IndexCorrupt {
+                    file: index.file().display().to_string(),
+                    message,
+                })),
+                None => Ok(()),
+            },
+            Source::Fresh { .. } => Ok(()),
         }
     }
 
@@ -226,19 +259,33 @@ impl Source {
     }
 
     /// The scan's warnings, the path's for `upper_bound`; and
-    /// `stale_index`.
-    pub fn warnings(&self) -> Vec<Warning> {
+    /// `stale_index`. `clones_unavailable` warns when this verb asked for
+    /// `--clones`, as a fresh scan does.
+    pub fn warnings(&self, walk: &WalkArgs) -> Vec<Warning> {
         match self {
             Source::Fresh { scanned, .. } => scan::warnings(scanned),
             Source::Saved { index, stale, .. } => {
-                let volumes = index.volumes();
-                let mounts_excluded = volumes.iter().filter(|v| !v.entered).count() as u64;
+                // What a scan of the path would have met: the volumes under
+                // it, the directories in it.
+                let view = self.view();
+                let under = view.root_path();
+                let mounts_excluded = index
+                    .volumes()
+                    .iter()
+                    .filter(|v| {
+                        !v.entered
+                            && Path::new(OsStr::from_bytes(&v.mount_point)).starts_with(under)
+                    })
+                    .count() as u64;
                 let mut warnings = scan::quality_warnings(
-                    index.unreadable_dirs(),
+                    self.unreadable_dirs(),
                     mounts_excluded,
                     index.meta().vanished_count,
                 );
-                warnings.extend(scan::upper_bound(self.view().node(0).upper_bound));
+                warnings.extend(scan::clones_unavailable(
+                    walk.clones && index.meta().clones_unavailable,
+                ));
+                warnings.extend(scan::upper_bound(view.node(0).upper_bound));
                 warnings.extend(stale.clone());
                 warnings
             }
@@ -262,18 +309,22 @@ impl Source {
     }
 
     /// Once the output is out: a fresh scan's index, under the index
-    /// directory. The save was not asked for, so its id is in the summary
-    /// line rather than a line of its own, and a failure is one line on
-    /// stderr while the verb still succeeds.
-    pub fn finish(&self, walk: &WalkArgs, output: &Output) {
+    /// directory, its id in the summary line already rather than a line of
+    /// its own. A failure is `index_write_failed` (exit 1), as for
+    /// `scan --save`: the output stands, but the id it carries names no
+    /// file.
+    pub fn finish(&self, walk: &WalkArgs, output: &Output) -> Result<(), Failure> {
         if let Source::Fresh {
             scanned,
             save: Some((id, dir)),
         } = self
-            && let Err(failure) = scan::save(scanned, walk, &[], id, Some(dir), output, false)
         {
-            crate::out::to_stderr(&failure);
+            scan::save(scanned, walk, &[], id, Some(dir), output, false).map_err(|failure| {
+                failure
+                    .hint("Rerun with --no-save, or with --index-dir naming a writable directory")
+            })?;
         }
+        Ok(())
     }
 }
 
