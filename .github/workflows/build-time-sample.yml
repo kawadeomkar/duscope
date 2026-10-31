@@ -1,4 +1,4 @@
-# Temporary, on this branch only (never merged): cold release builds of main
+# Temporary, on this branch only (never merged): cold release builds of main (SQLite at -O1)
 # (cc06004, the index in duscope-core) and of a spike with the index in its own
 # crate, on the shared ubuntu-24.04 runners, with cargo's timings per unit.
 name: Build-time sample (temporary)
@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [main-Os, split-Os, split-O3]
+        variant: [main-O1, split-O1]
         n: [1, 2, 3, 4, 5]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -33,12 +33,15 @@ jobs:
           VARIANT: ${{ matrix.variant }}
         run: |
           # .cargo/config.toml sets -Os for this target; the environment wins.
-          if [[ $VARIANT == *-O3 ]]; then export CFLAGS_x86_64_unknown_linux_gnu="-O3"; fi
+          # SQLite at -O1 through the per-package profile override; an empty
+          # CFLAGS for the target keeps .cargo/config.toml's -Os out of it.
+          export CFLAGS_x86_64_unknown_linux_gnu=""
+          override=(--config "profile.release.package.libsqlite3-sys.opt-level=1")
           cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n1)
           for i in 1 2; do
             cargo clean
             start=$(date +%s.%N)
-            cargo build --release --locked --offline -p duscope --timings
+            cargo build --release --locked --offline -p duscope --timings "${override[@]}"
             end=$(date +%s.%N)
             secs=$(awk -v s="$start" -v e="$end" 'BEGIN { printf "%.1f", e - s }')
             units=$(python3 - <<'PY'
@@ -49,7 +52,9 @@ jobs:
           out = []
           for name in want:
               for u in data:
-                  if u["name"] == name and (name != "libsqlite3-sys" or "run" in u.get("target", "")) and "build script" not in u.get("target", "").replace("(run)", ""):
+                  target = u.get("target", "")
+                  run = "(run)" in target
+                  if u["name"] == name and (run if name == "libsqlite3-sys" else "build script" not in target):
                       out.append(f'{name}={u["start"]:.1f}+{u["duration"]:.1f}')
                       break
           print(" ".join(out))
