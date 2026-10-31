@@ -20,6 +20,7 @@ globset.workspace = true
 log.workspace = true
 duscope-walk.workspace = true
 duscope-core.workspace = true
+duscope-index.workspace = true
 duscope-treemap.workspace = true
 duscope-tui.workspace = true
 duscope-mcp.workspace = true

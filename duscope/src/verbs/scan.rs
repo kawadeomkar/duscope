@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use duscope_core::arena::Arena;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
-use duscope_core::index::{IndexWriter, ScanId, ScanMeta, index_path, random_bytes};
+use duscope_index::{IndexWriter, ScanId, ScanMeta, index_path, random_bytes};
 use duscope_core::query::{ArenaView, SizeKind, TreeView, clock, timegrammar};
 use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::{RollUp, roll_up};

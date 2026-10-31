@@ -1,0 +1,23 @@
+[package]
+name = "duscope-index"
+description = "The SQLite index of duscope: the bulk writer and scan ids"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+include.workspace = true
+
+[dependencies]
+duscope-core.workspace = true
+duscope-walk.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+duscope-testkit.workspace = true
+
+[lints]
+workspace = true

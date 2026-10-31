@@ -7,10 +7,12 @@ use rusqlite::Connection;
 use rusqlite::types::Value;
 
 use super::{IndexWriter, ScanMeta, index_path};
-use crate::arena::Arena;
-use crate::index::{SCAN_META_KEYS, ScanId};
-use crate::query::{ArenaView, TreeView};
-use crate::rollup::{RollUp, roll_up};
+use duscope_core::arena::Arena;
+use duscope_core::index::SCAN_META_KEYS;
+use duscope_core::query::{ArenaView, TreeView};
+use duscope_core::rollup::{RollUp, roll_up};
+
+use crate::ScanId;
 
 /// A small tree: files and a symbolic link at the root, a directory with
 /// files and a subdirectory, an unreadable directory, and an entry its
@@ -269,7 +271,7 @@ fn p2_idx_02_scan_ids_are_twelve_hex_digits() {
         ScanId::new(b"/home/me", 1_700_000_000_000_000_000, [1; 8])
     );
     assert_ne!(
-        crate::index::random_bytes().unwrap(),
-        crate::index::random_bytes().unwrap()
+        crate::random_bytes().unwrap(),
+        crate::random_bytes().unwrap()
     );
 }
