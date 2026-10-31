@@ -68,6 +68,12 @@ fn main() -> ExitCode {
             verbs::report_interrupt();
             ExitCode::from(failure.exit.code())
         }
+        // The index is written after the output, which stands: the failure
+        // goes to stderr, never as a second envelope.
+        Err(failure) if failure.code == "index_write_failed" => {
+            out::to_stderr(&failure);
+            ExitCode::from(failure.exit.code())
+        }
         Err(failure) => {
             output.failure(&failure);
             ExitCode::from(failure.exit.code())

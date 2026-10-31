@@ -28,6 +28,10 @@ The configuration file to read, as
 .B none
 reads none.
 .TP
+.B DUSCOPE_INDEX_DIR
+Where saved scans are kept, as
+.BR \-\-index\-dir .
+.TP
 .B DUSCOPE_THREADS
 The scanner's worker threads, as
 .BR \-\-threads .
@@ -81,6 +85,14 @@ comma\-separated. A verbosity flag wins over it.
 As
 .B DUSCOPE_LOG
 when that is unset.
+.TP
+.B XDG_CACHE_HOME
+The directory of saved scans,
+.IR duscope/scans ;
+.I ~/Library/Caches
+on macOS and
+.I ~/.cache
+elsewhere when unset.
 .TP
 .B XDG_CONFIG_HOME
 The directory of

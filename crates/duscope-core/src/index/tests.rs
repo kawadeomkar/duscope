@@ -101,6 +101,36 @@ fn layout(db: &Connection) -> String {
 }
 
 #[test]
+fn p2_idx_02_the_default_index_dir_is_xdg_then_the_platform_cache() {
+    let vars = |pairs: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| std::ffi::OsString::from(v))
+        }
+    };
+    assert_eq!(
+        super::default_dir(vars(&[("XDG_CACHE_HOME", "/xdg"), ("HOME", "/h")])),
+        Some(PathBuf::from("/xdg/duscope"))
+    );
+    let platform = duscope_walk::cache_dir(Path::new("/h")).join("duscope");
+    for xdg in ["", "relative"] {
+        let pairs: &'static [(&str, &str)] = if xdg.is_empty() {
+            &[("XDG_CACHE_HOME", ""), ("HOME", "/h")]
+        } else {
+            &[("XDG_CACHE_HOME", "relative"), ("HOME", "/h")]
+        };
+        assert_eq!(
+            super::default_dir(vars(pairs)),
+            Some(platform.clone()),
+            "{xdg:?}"
+        );
+    }
+    assert_eq!(super::default_dir(vars(&[])), None);
+}
+
+#[test]
 fn p2_idx_01_ddl_matches_the_table_info_fixture() {
     let actual = layout(&applied(&[SCHEMA]));
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/index/table_info.txt");

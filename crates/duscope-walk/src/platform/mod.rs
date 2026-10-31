@@ -119,6 +119,44 @@ pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     posix::winsize::terminal_size()
 }
 
+/// The operating system and its kernel release.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn system() -> String {
+    posix::system::system()
+}
+
+/// The operating system: its name alone on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn system() -> String {
+    std::env::consts::OS.to_owned()
+}
+
+/// The effective user id.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn effective_uid() -> u32 {
+    posix::system::effective_uid()
+}
+
+/// The effective user id: none on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn effective_uid() -> u32 {
+    0
+}
+
+/// The user's cache directory under `home` when `XDG_CACHE_HOME` is unset:
+/// macOS's `~/Library/Caches`.
+#[cfg(target_os = "macos")]
+pub(crate) fn cache_dir(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("Library").join("Caches")
+}
+
+/// The user's cache directory under `home` when `XDG_CACHE_HOME` is unset:
+/// the XDG default, `~/.cache`.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn cache_dir(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".cache")
+}
+
 /// The size of the terminal on stdout: unknown on this platform.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {

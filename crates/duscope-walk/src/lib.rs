@@ -479,6 +479,23 @@ pub fn terminal_size() -> Option<(u16, u16)> {
     platform::terminal_size()
 }
 
+/// The operating system and its kernel release (`uname`: `Linux 6.8.0`,
+/// `Darwin 25.6.0`), which an index records as `platform`.
+pub fn system() -> String {
+    platform::system()
+}
+
+/// The effective user id, which an index records as `scanning_uid`.
+pub fn effective_uid() -> u32 {
+    platform::effective_uid()
+}
+
+/// The user's cache directory under `home` when `XDG_CACHE_HOME` is unset:
+/// `~/Library/Caches` on macOS, `~/.cache` elsewhere.
+pub fn cache_dir(home: &Path) -> PathBuf {
+    platform::cache_dir(home)
+}
+
 /// The result queue holds this many directory batches per worker, as in
 /// dua-core; a worker blocks on a full queue until the sink catches up.
 const QUEUED_BATCHES_PER_WORKER: usize = 2;

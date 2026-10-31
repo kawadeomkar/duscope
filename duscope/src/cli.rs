@@ -77,6 +77,18 @@ pub struct GlobalArgs {
     /// Don't print warnings to stderr
     #[arg(short = 'q', long, global = true)]
     pub quiet: bool,
+
+    /// Where saved scans are kept
+    ///
+    /// Default: $XDG_CACHE_HOME/duscope, else in the platform's cache directory
+    #[arg(
+        long,
+        global = true,
+        env = "DUSCOPE_INDEX_DIR",
+        hide_env_values = true,
+        value_name = "DIR"
+    )]
+    pub index_dir: Option<PathBuf>,
 }
 
 impl GlobalArgs {
@@ -344,8 +356,7 @@ pub struct ScanArgs {
     pub min_tile: Option<MinTile>,
 
     /// Save the scan as an index and print its id
-    // The index arrives in phase 2.
-    #[arg(long, hide = true)]
+    #[arg(long, help_heading = "Output")]
     pub save: bool,
 
     /// Open the interactive viewer on the result
@@ -537,6 +548,9 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         cli.output.configured = Some(choice(config, "format", format)?);
     }
     cli.output.quiet = cli.global.quiet;
+    if cli.global.index_dir.is_none() {
+        cli.global.index_dir = d.index_dir.as_ref().map(|dir| dir.value.clone());
+    }
     if let Some(age) = &d.max_age {
         timegrammar::parse_age(&age.value).map_err(|e| refused("max_age", age.line, &e))?;
     }
