@@ -176,3 +176,80 @@ fn p2_qry_04_errors_lists_what_a_scan_could_not_read() {
     let out = run(&env, &["explain", root.to_str().unwrap(), "--errors", id]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn p2_qry_04_a_link_is_explained_as_itself() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.fixtures().root()).unwrap();
+    ok(&run(
+        &env,
+        &["scan", root.to_str().unwrap(), "--save", "--json"],
+    ));
+    let link = root.join("cases/symlinks/to-dir");
+    let facts = ok(&run(&env, &["explain", link.to_str().unwrap(), "--json"]));
+    assert_eq!(facts["result"]["kind"], "symlink");
+    assert_eq!(facts["result"]["path"], link.to_str().unwrap());
+    assert!(facts["result"]["allocated_bytes"].as_u64().unwrap() < 8192);
+}
+
+#[test]
+fn p2_qry_04_a_directory_the_scan_did_not_enter_is_unknown() {
+    let env = TestEnv::new();
+    let home = fs::canonicalize(env.fixtures().path("home")).unwrap();
+    let config = env.xdg_config_home().join("duscope");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "[excludes]\npatterns = [\"node_modules\"]\n",
+    )
+    .unwrap();
+    let saved = ok(&run(
+        &env,
+        &["scan", home.to_str().unwrap(), "--save", "--json"],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap();
+    let modules = home.join("Projects/npm-app/node_modules");
+    let facts = ok(&run(
+        &env,
+        &["explain", modules.to_str().unwrap(), "--json", "--scan", id],
+    ));
+    assert_eq!(facts["scan"]["id"], id);
+    assert_eq!(facts["result"]["confidence"], "low");
+    assert!(facts["result"]["freeable_now_bytes"].is_null());
+    assert!(
+        facts["result"]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("did not enter"))
+    );
+}
+
+#[test]
+fn p2_qry_04_git_config_names_the_ignore_file_and_case() {
+    let env = TestEnv::new();
+    let repo = env.tmp_dir().join("repo");
+    fs::create_dir_all(repo.join(".git/info")).unwrap();
+    fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(repo.join("debug.log"), b"log").unwrap();
+    fs::write(repo.join("notes.TMP"), b"tmp").unwrap();
+    // core.excludesFile in the user's ~/.gitconfig; ignorecase in the
+    // repository's configuration.
+    fs::write(
+        env.home().join(".gitconfig"),
+        "[core]\n\texcludesfile = ~/.ignores\n",
+    )
+    .unwrap();
+    fs::write(env.home().join(".ignores"), "*.log\n").unwrap();
+    fs::write(repo.join(".git/config"), "[core]\n\tignorecase = true\n").unwrap();
+    fs::write(repo.join(".gitignore"), "*.tmp\n").unwrap();
+    let git = |name: &str| {
+        ok(&run(
+            &env,
+            &["explain", repo.join(name).to_str().unwrap(), "--json"],
+        ))["result"]["git"]
+            .clone()
+    };
+    assert_eq!(git("debug.log")["ignored"], true);
+    assert_eq!(git("notes.TMP")["ignored"], true);
+}

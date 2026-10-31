@@ -22,7 +22,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use duscope_walk::Flags;
-use rusqlite::OptionalExtension;
 
 use super::{TreeView, abs_path, flag_names, kind_name, timegrammar::iso8601};
 use crate::CoreError;
@@ -79,7 +78,8 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
     }
     if !shared.clone_groups.is_empty() {
         evidence.push(format!(
-            "clones: members outside the path {}, of clone groups under it {}",
+            "clones: members outside the path {}, of clone groups under it {} \
+             (members outside the scan are not known)",
             shared.clone_outside,
             shared.clone_groups.len()
         ));
@@ -95,8 +95,18 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
         evidence.push(cache);
     }
     let (repository, git_failed) = git_facts(&path, node.is_dir(), q, &mut evidence);
+    // A directory the scan listed but did not enter holds nothing in the
+    // index: what is under it, and so what deleting it frees, is unknown.
+    let entered = !node.is_dir() || index.entered(id);
+    if !entered {
+        evidence.push(
+            "dirs: the scan listed this directory but did not enter it (an exclude, an \
+             unreadable directory or a mount it did not cross)"
+                .to_owned(),
+        );
+    }
     let index_failed = index.failure().is_some();
-    let confidence = if git_failed || index_failed {
+    let confidence = if git_failed || index_failed || !entered {
         "low"
     } else if freeable_kind != "exact" || cache_medium {
         "medium"
@@ -125,8 +135,8 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
         is_clone: (!node.is_dir()).then_some(shared.own_clone.is_some()),
         clone_group_size: shared.own_clone,
         clone_members_outside: Some(shared.clone_outside),
-        freeable_now_bytes: Some(freeable),
-        freeable_kind: Some(freeable_kind),
+        freeable_now_bytes: entered.then_some(freeable),
+        freeable_kind: entered.then_some(freeable_kind),
         regenerable_by,
         cachedir_tag,
         git: repository,
@@ -158,7 +168,10 @@ fn freeable(
         .map(|&first| index.node(first).allocated)
         .sum();
     let unreadable = index.unreadable_dirs(node.id, node.last_id);
-    let may_share = node.flags.contains(Flags::MAY_SHARE) && shared.own_clone.is_none();
+    // Blocks shared with no clone id to say with which, or a clone member
+    // that no longer shares every block: what it frees is less than its size.
+    let may_share = node.flags.contains(Flags::MAY_SHARE)
+        && (shared.own_clone.is_none() || !node.flags.contains(Flags::SHARES_ALL));
     let kind = if node.upper_bound || unreadable > 0 || may_share {
         "upper_bound"
     } else if shared.links_outside > 0 || shared.clone_outside > 0 {
@@ -296,22 +309,42 @@ impl Shared {
             }
         }
         let inside = |id: u32| (first..=last).contains(&id);
-        let mut nlink = db.prepare("SELECT nlink FROM hardlinks WHERE first_id = ?1")?;
+        // Each group's whole size in one pass over each table: the links an
+        // inode has, and the members a clone group has in the scan.
+        let links: BTreeMap<u32, u64> = db
+            .prepare(
+                "SELECT first_id, nlink FROM hardlinks WHERE first_id IN \
+                 (SELECT link_first FROM shared_members WHERE id BETWEEN ?1 AND ?2)",
+            )?
+            .query_map([first, last], |row| {
+                Ok((
+                    row.get(0)?,
+                    u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
         for (&g, &n) in &shared.link_groups {
-            let links: i64 = nlink
-                .query_row([g], |row| row.get(0))
-                .optional()?
-                .unwrap_or(0);
-            let outside = u64::try_from(links).unwrap_or(0).saturating_sub(n);
+            let outside = links.get(&g).copied().unwrap_or(0).saturating_sub(n);
             shared.links_outside += outside;
             if outside > 0 && inside(g) {
                 shared.kept.insert(g);
             }
         }
-        let mut size = db.prepare("SELECT COUNT(*) FROM shared_members WHERE clone_first = ?1")?;
+        let sizes: BTreeMap<u32, u64> = db
+            .prepare(
+                "SELECT clone_first, COUNT(*) FROM shared_members WHERE clone_first IN \
+                 (SELECT clone_first FROM shared_members WHERE id BETWEEN ?1 AND ?2) \
+                 GROUP BY clone_first",
+            )?
+            .query_map([first, last], |row| {
+                Ok((
+                    row.get(0)?,
+                    u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
         for (&g, &n) in &shared.clone_groups {
-            let members: i64 = size.query_row([g], |row| row.get(0))?;
-            let members = u64::try_from(members).unwrap_or(0);
+            let members = sizes.get(&g).copied().unwrap_or(n);
             let outside = members.saturating_sub(n);
             shared.clone_outside += outside;
             if outside > 0 && inside(g) {
@@ -354,7 +387,7 @@ fn cache_facts(
         })
         .collect();
     let in_ancestors = |marker: &str| path.ancestors().skip(1).any(|dir| has_marker(dir, marker));
-    if let Some(rule) = caches.find(&components, in_ancestors, tag) {
+    if let Some(rule) = caches.matching(&components, in_ancestors, tag) {
         return (Some(rule.regenerable_by.as_str()), tag, false);
     }
     let name = path.file_name().map_or(&[][..], OsStr::as_bytes);
