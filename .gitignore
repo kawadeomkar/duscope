@@ -1,5 +1,8 @@
 plan/
 target/
+# plan/ above is the specification, at the top; this is the query plans'
+# tests in the source.
+!/crates/duscope-core/src/query/plan/
 
 # Editors / OS
 .idea/
