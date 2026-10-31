@@ -51,10 +51,12 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    `build-time` (against its CPU model's budget in `BUILD_TIME_BUDGETS` in `ci.yml`) on that
    commit must be green too.
 
-4. **Tag and watch.** Sign the tag with the key in
-   [.github/allowed_signers](../.github/allowed_signers) and push it:
+4. **Tag and watch.** On `main` at the release commit, sign the tag with the key in
+   [.github/allowed_signers](../.github/allowed_signers) and push it. A squash merge leaves the
+   pull request's own commits off `main`, and `verify-tag` refuses a tag on one of them:
 
    ```sh
+   git switch main && git pull --ff-only     # the release commit, not a branch's
    git tag -s vX.Y.Z -m "duscope X.Y.Z"
    git push origin vX.Y.Z
    # The tag's run: release.yml also runs on every pull request.
@@ -67,10 +69,13 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
 
    ```sh
    gh release download vX.Y.Z --dir /tmp/duscope-vX.Y.Z
-   for f in /tmp/duscope-vX.Y.Z/*.tar.* /tmp/duscope-vX.Y.Z/*.deb; do
+   for f in /tmp/duscope-vX.Y.Z/duscope-*.tar.xz /tmp/duscope-vX.Y.Z/*.deb; do
      gh attestation verify "$f" --repo kawadeomkar/duscope
    done
    ```
+
+   Each binary archive and `.deb` carries an attestation; `source.tar.gz`, cargo-dist's source
+   archive, carries none, so the loop leaves it out.
 
    crates.io takes five new crates at once and about one every ten minutes after that, so a
    release that adds crates may need `publish-crates` re-run after the wait (DEV-12).
@@ -120,6 +125,27 @@ Every secret the release and benchmark pipelines read, and the one key outside G
 | `APT_SIGNING_SUBKEY` and `APT_SIGNING_PASSPHRASE` | `apt.yml` (from phase 5) | the signing subkey of the apt key; the primary key stays offline (P5-SEC-02) | repository secrets | at P5-SEC-02 | 12 months after creation; `apt.yml` fails 60 days before | author |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` | the MCP smoke scripts and the eval (from phase 3) | each vendor's key with a monthly budget cap | repository secrets | at phase 3 | 12 months after creation | author |
 | Tag-signing key | `git tag -s`; `verify-tag` checks the public half in `.github/allowed_signers` | the author's SSH signing key | the author's machine | before v0.0.1 | at the author's discretion; a new key is a pull request to `allowed_signers` | author |
+
+**The tap token.** `HOMEBREW_GITHUB_API_TOKEN` is used only at the end of a release, when the
+`homebrew` job pushes the tap's branch, so a token without write access fails there with a 403
+("Permission to kawadeomkar/homebrew-tap.git denied"). Create it on GitHub's fine-grained token
+page (`github.com/settings/personal-access-tokens/new`) with repository access "Only select
+repositories" set to `kawadeomkar/homebrew-tap` and the repository permissions Contents and
+Pull requests set to "Read and write" (Contents "Read-only" is the 403). GitHub shows the value
+once: while it is on screen, check that it can push, then store it with
+`gh secret set HOMEBREW_GITHUB_API_TOKEN --repo kawadeomkar/duscope`:
+
+```sh
+read -rs T   # paste the token
+sha=$(gh api repos/kawadeomkar/homebrew-tap/commits/main --jq .sha)
+GH_TOKEN=$T gh api -X POST repos/kawadeomkar/homebrew-tap/git/refs -f ref=refs/heads/token-check -f sha="$sha" --jq .ref &&
+  GH_TOKEN=$T gh api -X DELETE repos/kawadeomkar/homebrew-tap/git/refs/heads/token-check &&
+  echo "the token can push to the tap"
+unset T
+```
+
+A failed `homebrew` job is re-run alone once the secret holds a working token
+(`gh run rerun <run> --failed`); it opens no second pull request.
 
 **Trusted publishing (DEV-22).** From v0.1.0 crates.io publishes through trusted publishing,
 not the long-lived `CARGO_REGISTRY_TOKEN`: no standing secret can be stolen and used to
