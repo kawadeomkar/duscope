@@ -48,12 +48,15 @@ fn meta(id: &str) -> ScanMeta {
         options: "{}".to_owned(),
         platform: "test".to_owned(),
         scanning_uid: 501,
+        thread_count: 4,
         size_kind: "allocated",
         volume_total: 1 << 40,
         volume_free: 1 << 39,
         unaccounted_bytes: None,
         error_count: 2,
         vanished_count: 0,
+        excluded_count: 0,
+        clones_unavailable: false,
         incremental: false,
         parent_scan_id: None,
         source: "scan".to_owned(),
@@ -130,7 +133,7 @@ fn p2_idx_02_the_index_holds_every_entry_in_preorder() {
             .unwrap();
         if id != 0 {
             assert_eq!(row_parent, Some(i64::from(node.parent)), "{id}");
-            assert_eq!(row_name, node.name, "{id}");
+            assert_eq!(row_name, &*view.name(id), "{id}");
         }
         if table == "dirs" {
             let (files_end, last_id, cum): (u32, u32, i64) = db

@@ -113,9 +113,9 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
 
 /// The row a directory becomes: itself, or the child it is cut through to,
 /// never one `--exclude` leaves out.
-fn cut_through<'v, V: TreeView + ?Sized>(
-    view: &'v V,
-    mut node: Node<'v>,
+fn cut_through<V: TreeView + ?Sized>(
+    view: &V,
+    mut node: Node,
     size: SizeKind,
     filters: &Filters,
 ) -> (u32, Vec<u32>) {
@@ -143,7 +143,7 @@ fn cut_through<'v, V: TreeView + ?Sized>(
 /// The row of `node`.
 fn entry(
     view: &(impl TreeView + ?Sized),
-    node: &Node<'_>,
+    node: &Node,
     via: &[u32],
     root_total: u64,
     size: SizeKind,

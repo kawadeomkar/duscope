@@ -146,14 +146,14 @@ impl DirPattern {
 
     /// Whether the last components of `path` match, the last against the
     /// last.
-    fn matches(&self, path: &[&[u8]]) -> bool {
+    fn matches<C: AsRef<[u8]>>(&self, path: &[C]) -> bool {
         path.len() >= self.components.len()
             && self
                 .components
                 .iter()
                 .rev()
                 .zip(path.iter().rev())
-                .all(|(glob, part)| glob.is_match(String::from_utf8_lossy(part).as_ref()))
+                .all(|(glob, part)| glob.is_match(String::from_utf8_lossy(part.as_ref()).as_ref()))
     }
 }
 
@@ -236,7 +236,7 @@ impl Classes {
 
     /// The class of a directory whose path, as components, is `path`; `None`
     /// when no directory rule matches.
-    pub fn of_dir(&self, path: &[&[u8]]) -> Option<Class> {
+    pub fn of_dir<C: AsRef<[u8]>>(&self, path: &[C]) -> Option<Class> {
         self.dir
             .iter()
             .find(|(pattern, _)| pattern.matches(path))

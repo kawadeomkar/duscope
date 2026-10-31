@@ -99,7 +99,7 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
 /// The row of `node`, `share` of its parent.
 fn entry(
     view: &(impl TreeView + ?Sized),
-    node: &Node<'_>,
+    node: &Node,
     root_total: u64,
     share: f64,
     size: SizeKind,

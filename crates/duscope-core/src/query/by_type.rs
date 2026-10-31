@@ -13,6 +13,7 @@
 //! totals. Classes sort by `--sort` (size by default; file count; newest
 //! file; name), and `other` is always the last row.
 
+use std::borrow::Cow;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -158,7 +159,7 @@ pub fn root_dirs<'p>(classes: &Classes, root: &'p Path) -> (Vec<&'p [u8]>, Optio
 pub fn classify(
     view: &(impl TreeView + ?Sized),
     classes: &Classes,
-    mut each: impl FnMut(&Node<'_>, Class),
+    mut each: impl FnMut(&Node, Class),
 ) {
     if view.is_empty() {
         return;
@@ -166,7 +167,8 @@ pub fn classify(
     let root = view.node(0);
     // The directory rules match a directory's last path components, the
     // root's own included.
-    let (mut components, above) = root_dirs(classes, view.root_path());
+    let (above_root, above) = root_dirs(classes, view.root_path());
+    let mut components: Vec<Cow<'_, [u8]>> = above_root.into_iter().map(Cow::Borrowed).collect();
     // The directories open above the current id: (last id, its class).
     let mut open: Vec<(u32, Option<Class>)> = vec![(u32::MAX, above)];
     for id in 0..=root.last_id {
@@ -177,14 +179,14 @@ pub fn classify(
         }
         let inherited = open.last().and_then(|&(_, class)| class);
         if node.is_dir() {
-            components.push(node.name);
+            components.push(view.name(id));
             let class = inherited.or_else(|| classes.of_dir(&components));
             open.push((node.last_id, class));
             each(&node, class.unwrap_or(Class::Other));
             continue;
         }
         let class = inherited.unwrap_or_else(|| {
-            let suffix = ext(node.name);
+            let suffix = ext(&view.name(id));
             if suffix.is_empty() {
                 let executable = node.mode.is_some_and(|mode| mode & 0o111 != 0);
                 if executable {
