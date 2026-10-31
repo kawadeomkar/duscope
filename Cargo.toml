@@ -89,6 +89,15 @@ lto = true
 codegen-units = 1
 strip = true
 
+# The bundled SQLite (P2-IDX-02) at -O1, on every target: one 250,000-line C file
+# whose compile at cc's -O3 sat on the critical path of a cold build, 28 to 43 s
+# of 74 to 99 s on the shared runners. At -O1 it takes RUNS_PENDING, and the
+# index writes as fast (0.78 to 0.96 us/entry on T1 and T2, against 0.80 to 1.00
+# at -O3; DEV-66). The override reaches SQLite alone: mimalloc keeps -O3, and the
+# `dist` profile inherits it.
+[profile.release.package.libsqlite3-sys]
+opt-level = 1
+
 # cargo-dist always builds with a profile named `dist`. It is the release profile
 # unchanged, so the archives hold the binary `just repro` builds for their target.
 [profile.dist]
