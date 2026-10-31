@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime};
 use duscope_core::envelope::{
     CheckedEntry, Listing, ListingQuery, PrunedEntry, SCHEMA_VERSION, SavedScanEntry, Tool,
 };
-use duscope_core::index::Index;
+use duscope_core::index::{Index, ScanId};
 use duscope_core::query::{
     ScanQuery, ScanSelector, TreeView, clock, index_files, resolve_scan, shortest_prefix,
     timegrammar,
@@ -70,12 +70,12 @@ pub fn run(args: &ScansArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     }
 }
 
-/// The saved scans that can be read, newest first, and a line on stderr
-/// for each file that cannot.
-fn saved(dir: &Path) -> Vec<Index> {
-    let mut scans: Vec<Index> = index_files(dir)
-        .into_iter()
-        .filter_map(|(_, file)| match Index::open(&file) {
+/// The saved scans among `files` that can be read, newest first, and a
+/// line on stderr for each file that cannot.
+fn saved(files: &[(ScanId, PathBuf)]) -> Vec<Index> {
+    let mut scans: Vec<Index> = files
+        .iter()
+        .filter_map(|(_, file)| match Index::open(file) {
             Ok(index) => {
                 // The root's row gives the listing its totals; a file whose
                 // rows cannot be read is left to --check.
@@ -102,10 +102,10 @@ fn saved(dir: &Path) -> Vec<Index> {
 
 /// The listing of saved scans.
 fn list(dir: &Path, output: &Output) -> Result<(), Failure> {
-    let scans = saved(dir);
     // People see each id's shortest prefix among every index file, so the
     // prefix they type to --scan names this one.
     let files = index_files(dir);
+    let scans = saved(&files);
     let ids: Vec<&str> = files.iter().map(|(id, _)| id.as_str()).collect();
     let entries: Vec<SavedScanEntry> = scans
         .iter()
@@ -152,7 +152,7 @@ fn prune(dir: &Path, now: i64, output: &Output) -> Result<(), Failure> {
     // The scans of each root, newest first: the first five stay, and any
     // younger than a week.
     let mut by_root: BTreeMap<Vec<u8>, Vec<Index>> = BTreeMap::new();
-    for index in saved(dir) {
+    for index in saved(&index_files(dir)) {
         by_root
             .entry(index.meta().root.clone())
             .or_default()

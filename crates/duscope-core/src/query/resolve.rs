@@ -129,6 +129,11 @@ pub fn resolve_scan(
         let path = q.path.unwrap_or(index.root_path());
         match within(&index, path) {
             Some(base) => Ok(Some(resolved(index, base, q))),
+            // A read that failed is a damaged file, not a missing path.
+            None if index.failure().is_some() => Err(CoreError::IndexCorrupt {
+                file: index.file().display().to_string(),
+                message: index.failure().unwrap_or_default(),
+            }),
             None => Err(CoreError::ScanNotFound(format!(
                 "{} is not in scan {}, whose root is {}",
                 path.display(),

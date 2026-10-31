@@ -306,30 +306,32 @@ impl Index {
     /// directory's subdirectories are found through `dirs (parent_id,
     /// name)`, its own files in their id range.
     pub fn lookup<'a>(&self, rel: impl IntoIterator<Item = &'a [u8]>) -> Option<u32> {
-        let mut at = 0u32;
+        let root = self.node(0);
+        // The entry reached, and the end of its own files when it is a
+        // directory.
+        let (mut at, mut files_end) = (0u32, root.is_dir().then_some(root.files_end));
         for name in rel {
-            let dir = self.node(at);
-            if !dir.is_dir() {
-                return None;
-            }
+            let end = files_end?;
             let found = self
                 .db
-                .prepare("SELECT id FROM dirs WHERE parent_id = ?1 AND name = ?2")
+                .prepare("SELECT id, files_end FROM dirs WHERE parent_id = ?1 AND name = ?2")
                 .and_then(|mut stmt| {
-                    stmt.query_row(rusqlite::params![at, name], |row| row.get(0))
-                        .optional()
+                    stmt.query_row(rusqlite::params![at, name], |row| {
+                        Ok((row.get(0)?, Some(row.get(1)?)))
+                    })
+                    .optional()
                 })
-                .and_then(|found: Option<u32>| match found {
-                    Some(id) => Ok(Some(id)),
+                .and_then(|found: Option<(u32, Option<u32>)>| match found {
+                    Some(dir) => Ok(Some(dir)),
                     None => self
                         .db
                         .prepare("SELECT id FROM files WHERE id BETWEEN ?1 AND ?2 AND name = ?3")?
-                        .query_row(rusqlite::params![at + 1, dir.files_end, name], |row| {
-                            row.get(0)
+                        .query_row(rusqlite::params![at + 1, end, name], |row| {
+                            Ok((row.get(0)?, None))
                         })
                         .optional(),
                 });
-            at = match found {
+            (at, files_end) = match found {
                 Ok(found) => found?,
                 Err(e) => {
                     self.fail(&e);

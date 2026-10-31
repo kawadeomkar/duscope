@@ -47,6 +47,8 @@ pub enum Source {
         index: Box<Index>,
         /// The entry the verb is about.
         base: u32,
+        /// The directories under it the scan could not read.
+        unreadable: u64,
         /// `stale_index`, when the scan is older than `--max-age`.
         stale: Option<Warning>,
     },
@@ -105,9 +107,13 @@ pub fn source(
             resolve_scan(&selector, &q, |index| usable(walk, index)).map_err(core_failure)?;
         if let Some(r) = resolved {
             let stale = r.stale.then(|| stale_index(&r.index, max_age));
+            let unreadable = r
+                .index
+                .unreadable_dirs(r.base, r.index.node(r.base).last_id);
             return Ok(Source::Saved {
                 index: Box::new(r.index),
                 base: r.base,
+                unreadable,
                 stale,
             });
         }
@@ -181,9 +187,7 @@ impl Source {
     pub fn unreadable_dirs(&self) -> u64 {
         match self {
             Source::Fresh { scanned, .. } => scanned.summary.unreadable_dirs,
-            Source::Saved { index, base, .. } => {
-                index.unreadable_dirs(*base, index.node(*base).last_id)
-            }
+            Source::Saved { unreadable, .. } => *unreadable,
         }
     }
 
