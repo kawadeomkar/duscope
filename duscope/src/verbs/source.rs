@@ -16,7 +16,7 @@ use duscope_core::CoreError;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
 use duscope_core::index::{Index, ScanId};
 use duscope_core::query::{
-    ScanQuery, ScanSelector, SizeKind, Subtree, TreeView, resolve_scan, short_id, timegrammar,
+    self, ScanQuery, ScanSelector, SizeKind, Subtree, TreeView, resolve_scan, short_id, timegrammar,
 };
 use duscope_core::resolve::resolve_path;
 use duscope_walk::Attrs;
@@ -180,6 +180,16 @@ impl Source {
         match self {
             Source::Fresh { scanned, .. } => Box::new(scanned.view()),
             Source::Saved { index, base, .. } => Box::new(Subtree::new(index.as_ref(), *base)),
+        }
+    }
+
+    /// Whether the directory at `dir`, above the rows' root, holds a file
+    /// `name`: the saved scan's answer where it holds `dir`, else the
+    /// filesystem's.
+    pub fn holds_file(&self, dir: &Path, name: &str) -> bool {
+        match self {
+            Source::Fresh { .. } => dir.join(name).is_file(),
+            Source::Saved { index, .. } => query::holds_file(index, dir, name),
         }
     }
 

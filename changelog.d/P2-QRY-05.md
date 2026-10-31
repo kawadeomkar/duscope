@@ -1,0 +1,4 @@
+### Added
+- `caches [path]` lists the regenerable cache directories under a path, largest first: `node_modules`, `target`, `.venv`, `build`, `Pods`, `vendor` and the others of the cache rules, each confirmed by its marker file in an ancestor (`package.json`, `Cargo.toml`, …), Xcode's `DerivedData`, and any directory holding a valid `CACHEDIR.TAG`. Each row names the command that regenerates the cache and its project, the nearest directory holding the marker. A cache inside a cache is part of the outer one, and a marker beyond a directory of the rule's own name confirms that directory, not the ones inside it.
+- `caches --by-project` gives one row per project, with its caches' bytes and the newest modification time anywhere in the project; `--min-size` (10 MiB by default) then applies to a project's total.
+- `caches --loose` also lists a cache's name without the marker that confirms it, marked `"confirmed": false`.
