@@ -14,6 +14,24 @@ pub enum CoreError {
         /// What is wrong.
         message: String,
     },
+    /// The configuration file is not valid.
+    #[error("{file}:{line}: {message}")]
+    Config {
+        /// The file's path.
+        file: String,
+        /// The 1-based line the problem is on.
+        line: usize,
+        /// What is wrong.
+        message: String,
+    },
+    /// The configuration file could not be read.
+    #[error("{file}: {source}")]
+    ConfigRead {
+        /// The file's path.
+        file: String,
+        /// Why.
+        source: std::io::Error,
+    },
     /// The scan does not fit the arena's record fields.
     #[error("the scan is too large for the arena: {0}")]
     ArenaFull(&'static str),

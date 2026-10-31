@@ -1,5 +1,39 @@
 .SH FILES
 .TP
+.I $XDG_CONFIG_HOME/duscope/config.toml
+The configuration file
+.RI ( ~/.config/duscope/config.toml
+when
+.B XDG_CONFIG_HOME
+is unset), or the file
+.B \-\-config
+or
+.B DUSCOPE_CONFIG
+names.
+.B [defaults]
+sets the defaults of
+.BR threads ,
+.BR theme ,
+.BR color_by ,
+.BR format ,
+.BR limit ,
+.BR size ,
+.B attrs
+and
+.BR clones ,
+under the flags' names; a flag or its environment variable wins over it.
+.B [excludes] patterns
+lists
+.B \-\-exclude
+patterns every scan leaves out;
+.B [classes] extra
+and
+.B [caches] extra
+name tables merged over the built\-in ones. Relative paths are the file's
+directory's. A
+.I .duscope.toml
+inside a scanned tree is never read.
+.TP
 .I theme.toml
 A theme for
 .B \-\-theme

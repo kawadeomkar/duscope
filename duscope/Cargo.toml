@@ -17,6 +17,7 @@ clap.workspace = true
 clap_complete.workspace = true
 clap_mangen.workspace = true
 globset.workspace = true
+log.workspace = true
 duscope-walk.workspace = true
 duscope-core.workspace = true
 duscope-treemap.workspace = true

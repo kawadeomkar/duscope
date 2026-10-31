@@ -384,6 +384,7 @@ dependencies = [
  "duscope-walk",
  "globset",
  "jsonschema",
+ "log",
  "mimalloc",
  "serde",
  "serde_json",

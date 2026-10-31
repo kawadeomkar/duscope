@@ -4,14 +4,18 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod cli;
+mod log;
 mod out;
 mod verbs;
 
+use std::io;
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
-use clap::{CommandFactory, FromArgMatches};
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
+use duscope_core::CoreError;
+use duscope_core::config::{Config, ConfigSource};
 
 use cli::{Cli, TreemapWhen, Verb};
 use out::Output;
@@ -25,16 +29,31 @@ use verbs::{Exit, Failure};
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
-    let cli = match parse() {
-        Ok(cli) => cli,
+    let (mut cli, matches) = match parse() {
+        Ok(parsed) => parsed,
         Err(error) => return refused(&error),
     };
+    log::init(log::filter(cli.global.verbosity(), |name| {
+        std::env::var(name).ok()
+    }));
     // scan draws a treemap on a terminal; the other verbs print tables.
     let treemap = match &cli.verb {
         None => Some(cli.scan.treemap.unwrap_or(TreemapWhen::Auto)),
         Some(Verb::Scan(args)) => Some(args.treemap.unwrap_or(TreemapWhen::Auto)),
         Some(_) => None,
     };
+    let source = ConfigSource::locate(cli.global.config.as_deref(), |name| std::env::var_os(name));
+    let configured = Config::load(&source)
+        .map_err(|e| config_failure(&e))
+        .and_then(|config| cli::apply_config(&mut cli, &matches, &config));
+    if let Err(failure) = configured {
+        // Reported as the flags ask, without the file's own format.
+        match Output::decide(&cli.output, treemap) {
+            Ok(output) => output.failure(&failure),
+            Err(_) => out::to_stderr(&failure),
+        }
+        return ExitCode::from(failure.exit.code());
+    }
     let output = match Output::decide(&cli.output, treemap) {
         Ok(output) => output,
         Err(failure) => {
@@ -56,9 +75,23 @@ fn main() -> ExitCode {
     }
 }
 
-/// The command line. Without a verb, `scan`'s flags and path come first;
-/// with one, only the global (output) flags may come before it.
-fn parse() -> Result<Cli, clap::Error> {
+/// A configuration file that cannot be used: one that is not there is a
+/// usage error (the flag or variable named it), one that cannot be read
+/// otherwise a runtime error, and one with a bad key or value a usage error.
+fn config_failure(error: &CoreError) -> Failure {
+    let failure = match error {
+        CoreError::ConfigRead { source, .. } if source.kind() != io::ErrorKind::NotFound => {
+            Failure::new(Exit::Runtime, "io_error", error.to_string())
+        }
+        _ => Failure::new(Exit::Usage, "usage", error.to_string()),
+    };
+    failure.hint("Fix the configuration file, or run duscope with --config none")
+}
+
+/// The command line and the matches of its verb (the top level's without
+/// one). Without a verb, `scan`'s flags and path come first; with one, only
+/// the global flags may come before it.
+fn parse() -> Result<(Cli, ArgMatches), clap::Error> {
     let mut command = Cli::command();
     let matches = command.try_get_matches_from_mut(std::env::args_os())?;
     if let Some((verb, _)) = matches.subcommand() {
@@ -79,7 +112,11 @@ fn parse() -> Result<Cli, clap::Error> {
             ));
         }
     }
-    Cli::from_arg_matches(&matches)
+    let cli = Cli::from_arg_matches(&matches)?;
+    let verb = matches
+        .subcommand()
+        .map_or_else(|| matches.clone(), |(_, sub)| sub.clone());
+    Ok((cli, verb))
 }
 
 /// A command line clap did not run: `--help` and `--version` (exit 0), or a
@@ -113,6 +150,7 @@ fn refused(error: &clap::Error) -> ExitCode {
         units: out::Units::default(),
         null: false,
         header: false,
+        quiet: false,
     }
     .failure(&failure);
     ExitCode::from(failure.exit.code())
