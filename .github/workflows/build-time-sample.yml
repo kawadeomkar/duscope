@@ -1,6 +1,6 @@
-# Temporary, on this branch only (never merged): cold release builds of main (SQLite at -O1)
-# (cc06004, the index in duscope-core) and of a spike with the index in its own
-# crate, on the shared ubuntu-24.04 runners, with cargo's timings per unit.
+# Temporary, on this branch only (never merged): cold release builds of the
+# p2-idx-02-sqlite-o1 branch (SQLite at -O1 through the profile override) on 16
+# shared ubuntu-24.04 runners, with cargo's timings per unit.
 name: Build-time sample (temporary)
 
 on:
@@ -15,15 +15,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [main-O1, split-O1]
-        n: [1, 2, 3, 4, 5]
+        variant: [o1]
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ startsWith(matrix.variant, 'main') && 'cc06004f458a66cc9343998d452cee3ccbd7da49' || 'cef1ede5d0bba743a6a5fc0e3dc210e6f6b023c3' }}
+          ref: 0036ceaf9f92d8cca7d81a8fd59aaadfc3cb9f75
       - name: Install the pinned toolchain
         run: rustup toolchain install --profile minimal && rustc --version
       - name: Fetch dependencies (not timed)
@@ -32,16 +32,11 @@ jobs:
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
-          # .cargo/config.toml sets -Os for this target; the environment wins.
-          # SQLite at -O1 through the per-package profile override; an empty
-          # CFLAGS for the target keeps .cargo/config.toml's -Os out of it.
-          export CFLAGS_x86_64_unknown_linux_gnu=""
-          override=(--config "profile.release.package.libsqlite3-sys.opt-level=1")
           cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n1)
           for i in 1 2; do
             cargo clean
             start=$(date +%s.%N)
-            cargo build --release --locked --offline -p duscope --timings "${override[@]}"
+            cargo build --release --locked --offline -p duscope --timings
             end=$(date +%s.%N)
             secs=$(awk -v s="$start" -v e="$end" 'BEGIN { printf "%.1f", e - s }')
             units=$(python3 - <<'PY'
