@@ -181,6 +181,18 @@ macOS scans with `--clones` (the default) only. WITHOUT ROWID.
 | `clone_id` | INTEGER | no | the clone id APFS reports for the group |
 | `first_id` | INTEGER | no | the lowest id in the group: the member charged with its bytes |
 
+### `shared_members`
+
+One row per file that is one of several links of an inode, or a member of a
+clone group, naming its groups: how `explain` tells the links and members
+inside a subtree from those outside it.
+
+| Column | Type | NULL | Meaning |
+| --- | --- | --- | --- |
+| `id` | INTEGER | no | the file's id |
+| `link_first` | INTEGER | yes | `hardlinks.first_id` of its inode; NULL when it has one link |
+| `clone_first` | INTEGER | yes | `clones.first_id` of its clone group; NULL when it is not a clone |
+
 ### `scan_errors`
 
 One row per entry a directory listed but the scan could not read; a directory

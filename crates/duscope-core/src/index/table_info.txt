@@ -70,6 +70,10 @@ clones WITHOUT ROWID
   0|dev|INTEGER|1||1
   1|clone_id|INTEGER|1||2
   2|first_id|INTEGER|1||0
+shared_members
+  0|id|INTEGER|0||1
+  1|link_first|INTEGER|0||0
+  2|clone_first|INTEGER|0||0
 scan_errors WITHOUT ROWID
   0|dir_id|INTEGER|1||1
   1|name|BLOB|1||2

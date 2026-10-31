@@ -12,6 +12,8 @@ include.workspace = true
 
 [dependencies]
 duscope-walk.workspace = true
+gix-ignore.workspace = true
+gix-index.workspace = true
 globset.workspace = true
 jiff.workspace = true
 regex.workspace = true
