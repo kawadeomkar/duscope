@@ -28,6 +28,7 @@ use duscope_walk::{Attrs, Flags, Kind};
 use rusqlite::config::DbConfig;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
+use unicode_normalization::UnicodeNormalization;
 
 use super::scanid::ScanId;
 use super::writer::{EXCLUDED, EXCLUDED_CACHE, LATER_LINK, ScanMeta, UPPER_BOUND};
@@ -197,6 +198,11 @@ impl Index {
         &self.path
     }
 
+    /// The connection, for the query plans.
+    pub(crate) fn db(&self) -> &Connection {
+        &self.db
+    }
+
     /// The index version the file records.
     pub fn version(&self) -> &str {
         &self.version
@@ -301,45 +307,109 @@ impl Index {
         Ok(rows.into_iter().filter(|r| r != "ok").collect())
     }
 
-    /// The entry at `rel`, a path below the root given as its components,
-    /// matched byte for byte; `None` when the scan holds no such entry. A
-    /// directory's subdirectories are found through `dirs (parent_id,
-    /// name)`, its own files in their id range.
+    /// The entry at `rel`, a path below the root given as its components;
+    /// `None` when the scan holds no such entry. A component matches byte
+    /// for byte, or, failing that, as its volume compares names: without
+    /// case where the volume is case-insensitive, in NFC where it treats a
+    /// name's composed and decomposed forms as one. Subdirectories are found
+    /// through `dirs (parent_id, name)`, files in their directory's id
+    /// range.
     pub fn lookup<'a>(&self, rel: impl IntoIterator<Item = &'a [u8]>) -> Option<u32> {
-        let root = self.node(0);
-        // The entry reached, and the end of its own files when it is a
-        // directory.
-        let (mut at, mut files_end) = (0u32, root.is_dir().then_some(root.files_end));
-        for name in rel {
-            let end = files_end?;
-            let found = self
+        let found = (|| -> rusqlite::Result<Option<u32>> {
+            let mut dirs = self
                 .db
-                .prepare("SELECT id, files_end FROM dirs WHERE parent_id = ?1 AND name = ?2")
-                .and_then(|mut stmt| {
-                    stmt.query_row(rusqlite::params![at, name], |row| {
+                .prepare("SELECT id, files_end FROM dirs WHERE parent_id = ?1 AND name = ?2")?;
+            let mut files = self
+                .db
+                .prepare("SELECT id FROM files WHERE id BETWEEN ?1 AND ?2 AND name = ?3")?;
+            let root = self.node(0);
+            // The entry reached, and the end of its own files when it is a
+            // directory.
+            let (mut at, mut files_end) = (0u32, root.is_dir().then_some(root.files_end));
+            for name in rel {
+                let Some(end) = files_end else {
+                    return Ok(None);
+                };
+                let exact = match dirs
+                    .query_row(rusqlite::params![at, name], |row| {
                         Ok((row.get(0)?, Some(row.get(1)?)))
                     })
-                    .optional()
-                })
-                .and_then(|found: Option<(u32, Option<u32>)>| match found {
-                    Some(dir) => Ok(Some(dir)),
-                    None => self
-                        .db
-                        .prepare("SELECT id FROM files WHERE id BETWEEN ?1 AND ?2 AND name = ?3")?
+                    .optional()?
+                {
+                    Some(dir) => Some(dir),
+                    None => files
                         .query_row(rusqlite::params![at + 1, end, name], |row| {
                             Ok((row.get(0)?, None))
                         })
-                        .optional(),
-                });
-            (at, files_end) = match found {
-                Ok(found) => found?,
-                Err(e) => {
-                    self.fail(&e);
-                    return None;
-                }
-            };
+                        .optional()?,
+                };
+                let found = match exact {
+                    Some(found) => Some(found),
+                    None => self.folded(at, end, name)?,
+                };
+                let Some(found) = found else {
+                    return Ok(None);
+                };
+                (at, files_end) = found;
+            }
+            Ok(Some(at))
+        })();
+        found.unwrap_or_else(|e| {
+            self.fail(&e);
+            None
+        })
+    }
+
+    /// The entry in directory `at` (its own files up to `files_end`) whose
+    /// name is `name` as the directory's volume compares names; `None` on a
+    /// volume that compares bytes, or when none matches.
+    fn folded(
+        &self,
+        at: u32,
+        files_end: u32,
+        name: &[u8],
+    ) -> rusqlite::Result<Option<(u32, Option<u32>)>> {
+        let volume: Option<(Option<bool>, String)> = self
+            .db
+            .query_row(
+                "SELECT v.case_sensitive, v.normalization FROM dirs AS d \
+                 JOIN scan_volumes AS v ON v.dev = d.dev WHERE d.id = ?1 LIMIT 1",
+                [at],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let fold = match volume {
+            Some((case_sensitive, normalization)) => Fold {
+                case: case_sensitive == Some(false),
+                nfc: normalization == "insensitive",
+            },
+            None => return Ok(None),
+        };
+        if !fold.case && !fold.nfc {
+            return Ok(None);
         }
-        Some(at)
+        let want = fold.apply(name);
+        let mut dirs = self
+            .db
+            .prepare("SELECT id, files_end, name FROM dirs WHERE parent_id = ?1 ORDER BY id")?;
+        let mut rows = dirs.query([at])?;
+        while let Some(row) = rows.next()? {
+            let candidate: Vec<u8> = row.get(2)?;
+            if fold.apply(&candidate) == want {
+                return Ok(Some((row.get(0)?, Some(row.get(1)?))));
+            }
+        }
+        let mut files = self
+            .db
+            .prepare("SELECT id, name FROM files WHERE id BETWEEN ?1 AND ?2 ORDER BY id")?;
+        let mut rows = files.query([at + 1, files_end])?;
+        while let Some(row) = rows.next()? {
+            let candidate: Vec<u8> = row.get(1)?;
+            if fold.apply(&candidate) == want {
+                return Ok(Some((row.get(0)?, None)));
+            }
+        }
+        Ok(None)
     }
 
     /// Whether the scan read the entry `id`, at `path`: not a directory it
@@ -557,6 +627,35 @@ fn file_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
         files_end: id,
         last_id: id,
     })
+}
+
+/// How a volume compares names: without case, in NFC, or both.
+#[derive(Debug, Clone, Copy)]
+struct Fold {
+    case: bool,
+    nfc: bool,
+}
+
+impl Fold {
+    /// `name` in the form the volume compares: NFC, then lower case, for a
+    /// name that is UTF-8; ASCII lower case for one that is not.
+    fn apply(self, name: &[u8]) -> Cow<'_, [u8]> {
+        match std::str::from_utf8(name) {
+            Ok(text) => {
+                let mut text: String = if self.nfc {
+                    text.nfc().collect()
+                } else {
+                    text.to_owned()
+                };
+                if self.case {
+                    text = text.to_lowercase();
+                }
+                Cow::Owned(text.into_bytes())
+            }
+            Err(_) if self.case => Cow::Owned(name.to_ascii_lowercase()),
+            Err(_) => Cow::Borrowed(name),
+        }
+    }
 }
 
 /// The node a failed read leaves: an empty file.
