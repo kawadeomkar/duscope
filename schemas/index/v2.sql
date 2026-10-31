@@ -102,6 +102,15 @@ CREATE TABLE clones (
     PRIMARY KEY (dev, clone_id)
 ) WITHOUT ROWID;
 
+-- Each hard-linked file and clone member, with its group: the lowest id
+-- among its links (hardlinks.first_id), and among its clone group's members
+-- (clones.first_id), so explain tells links inside a subtree from links out.
+CREATE TABLE shared_members (
+    id          INTEGER PRIMARY KEY,
+    link_first  INTEGER,
+    clone_first INTEGER
+);
+
 -- Entries a directory listed but could not read.
 CREATE TABLE scan_errors (
     dir_id INTEGER NOT NULL,

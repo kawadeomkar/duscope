@@ -38,6 +38,7 @@ crossbeam-deque = "=0.8.8"
 crossbeam-utils = "=0.8.23"
 # Default features off: the `log` feature only logs how patterns compile.
 gix-ignore = { version = "=0.24.1", default-features = false }
+gix-index = { version = "=0.58.0", default-features = false, features = ["sha1", "sha256"] }
 jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 globset = { version = "=0.4.20", default-features = false }
 libc = "=0.2.191"

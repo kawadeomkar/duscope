@@ -8,6 +8,7 @@
 //! rows with the count before `--limit` ([`Page`]).
 
 mod by_type;
+pub mod explain;
 pub mod plan;
 pub mod resolve;
 mod stale;
@@ -35,6 +36,7 @@ use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::rollup::RollUp;
 
 pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
+pub use explain::{ExplainQuery, explain, explain_unindexed};
 pub use plan::{Cut, Plan, Ranked};
 /// The regular expressions `--regex` takes, matched against path bytes.
 pub use regex::bytes::Regex;

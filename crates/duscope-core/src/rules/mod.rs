@@ -393,6 +393,28 @@ struct RuleFile {
 }
 
 impl Caches {
+    /// The first rule that confirms the directory at `path` (its components,
+    /// the directory's last) a cache, given whether an ancestor holds a
+    /// marker of a name and whether the directory holds a valid
+    /// `CACHEDIR.TAG`.
+    pub fn find(
+        &self,
+        path: &[&[u8]],
+        mut has_marker: impl FnMut(&str) -> bool,
+        cachedir_tag: bool,
+    ) -> Option<&CacheRule> {
+        self.rules
+            .iter()
+            .find(|rule| rule.matches(path, &mut has_marker, cachedir_tag))
+    }
+
+    /// The rules whose name matches `name`, whatever confirms them.
+    pub fn named(&self, name: &[u8]) -> impl Iterator<Item = &CacheRule> {
+        self.rules
+            .iter()
+            .filter(move |rule| rule.name_matches(name))
+    }
+
     /// The vendored table.
     ///
     /// # Panics
