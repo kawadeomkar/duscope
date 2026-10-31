@@ -34,6 +34,23 @@ directory's. A
 .I .duscope.toml
 inside a scanned tree is never read.
 .TP
+.I $XDG_CACHE_HOME/duscope/scans/<id>.db
+A scan saved with
+.BR "scan \-\-save" :
+one SQLite file, mode 0600, written once and never changed
+.RI ( ~/Library/Caches/duscope
+on macOS and
+.I ~/.cache/duscope
+elsewhere when
+.B XDG_CACHE_HOME
+is unset;
+.B \-\-index\-dir
+or
+.B DUSCOPE_INDEX_DIR
+names another directory). Its tables are described in
+.I docs/index-format.md
+in the source distribution.
+.TP
 .I theme.toml
 A theme for
 .B \-\-theme

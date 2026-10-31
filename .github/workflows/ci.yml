@@ -58,25 +58,19 @@ env:
   LYCHEE_VERSION: "0.24.2"
   LYCHEE_SHA256: "1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a"
   # Cold release build budgets in seconds, one per CPU model of the shared
-  # ubuntu-24.04 runners (P1-REL-01, DEV-59): each model's slowest cold build of
-  # the phase-1 code seen so far plus 10%, rounded up, under the spec's 90 s
-  # ceiling. Not the median: runners of one model differ by up to a fifth (an
-  # EPYC 9V74 built in 47.5 to 56.0 s, a Xeon Platinum 8573C in 53.8 s and then
-  # 63.8 s), and the second build below runs on the same runner. The slowest
-  # builds of 65 on 33 runners (run 41019367504, run 41019871348 and this job's
-  # run 41030925722, 2026-10-30): EPYC 7763 63.5 s (44 builds), Xeon Platinum
-  # 8573C 63.8 s (4), Xeon Platinum 8370C 60.3 s (2), EPYC 9V74 56.0 s (10),
-  # Xeon 6973P-C 45.5 s (2), EPYC 9V45 44.2 s (3).
+  # ubuntu-24.04 runners (P1-REL-01, DEV-59, DEV-62): each model's slowest cold
+  # build plus 10%, rounded up, and below the spec's 90 s ceiling (DEV-66). Not
+  # the median: runners of one model differ by up to a fifth, and the second
+  # build below runs on the same runner. With the bundled SQLite (P2-IDX-02),
+  # compiled at -Os (.cargo/config.toml), the slowest builds of 10 on 5 runners
+  # (run 41168481159, 2026-10-31): EPYC 7763 83.0 s (8 builds), EPYC 9V45 55.0 s
+  # (2); 83.0 s plus 10% is past the ceiling, so the 7763 is held to 89 s.
   # A model not listed is held to the largest budget, with a notice to add it. A
   # build over its budget is measured once more before the job fails (DEV-53).
   # The size budget lives in the justfile as size_budget.
   BUILD_TIME_BUDGETS: |
-    INTEL(R) XEON(R) PLATINUM 8573C=71
-    AMD EPYC 7763 64-Core Processor=70
-    Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz=67
-    AMD EPYC 9V74 80-Core Processor=62
-    Intel(R) Xeon(R) 6973P-C=51
-    AMD EPYC 9V45 96-Core Processor=49
+    AMD EPYC 7763 64-Core Processor=89
+    AMD EPYC 9V45 96-Core Processor=61
 
 jobs:
   fmt:

@@ -123,6 +123,9 @@ Output:
           - 2: Two units
           - 4: Four units: a calmer picture
 
+      --save
+          Save the scan as an index and print its id
+
       --json
           Print the JSON envelope (--format json)
 
@@ -175,3 +178,10 @@ Output:
 
   -q, --quiet
           Don't print warnings to stderr
+
+      --index-dir <DIR>
+          Where saved scans are kept
+          
+          Default: $XDG_CACHE_HOME/duscope, else in the platform's cache directory
+          
+          [env: DUSCOPE_INDEX_DIR]

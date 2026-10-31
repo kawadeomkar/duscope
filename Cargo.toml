@@ -44,6 +44,12 @@ libc = "=0.2.191"
 log = "=0.4.34"
 # The allocator of the musl builds only (P1-BENCH-03); no default features.
 mimalloc = { version = "=0.1.52", default-features = false }
+# The index (P2-IDX-02): `bundled` compiles the SQLite the binary ships, with
+# the features duscope does not use left out (.cargo/config.toml). 0.40.2 is
+# the newest release the 1.88 toolchain builds: 0.41 needs 1.89.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+# Scan ids: SHA-256 of the root, the start time and 8 random bytes.
+sha2 = { version = "=0.11.1", default-features = false }
 thiserror = "2.0.21"
 # Default features off: no `cjk`, whose ambiguous-width variant the map does not use.
 unicode-width = { version = "=0.2.2", default-features = false }
@@ -56,15 +62,10 @@ cargo_metadata = "=0.23.1"
 jsonschema = { version = "=0.60.0", default-features = false }
 # Default features off but `std`: no forked or timed-out test cases.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
-# The index DDL's test (P2-IDX-01) until the writer makes it a dependency of
-# duscope-core; `bundled` builds the SQLite the binary will ship. 0.40.2 is the
-# newest release the 1.88 toolchain builds: 0.41 needs 1.89.
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 schemars = { version = "1.2.3", default-features = false, features = ["derive"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
-sha2 = { version = "=0.11.1", default-features = false }
 tempfile = "3.27.0"
 termlens = { version = "=0.11.6", default-features = false }
 toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }

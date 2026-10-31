@@ -12,3 +12,21 @@
 [env]
 CFLAGS_aarch64_unknown_linux_musl = "-DMI_DEFAULT_ARENA_EAGER_COMMIT=0 -DMI_DEFAULT_ALLOW_THP=0"
 CFLAGS_x86_64_unknown_linux_musl = "-DMI_DEFAULT_ARENA_EAGER_COMMIT=0 -DMI_DEFAULT_ALLOW_THP=0"
+# The SQLite the index is built with (P2-IDX-02) leaves out what duscope does
+# not use: full-text search, R-trees, dbstat, column metadata, soundex, stat4,
+# extension loading, the deprecated interfaces and shared cache. It saves 0.63
+# MB of the 1.98 MB SQLite adds to the binary (x86_64). JSON stays: the scan's
+# options are JSON, and `query --sql` may read them. libsqlite3-sys applies
+# these after its own defaults.
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE -USQLITE_ENABLE_DBSTAT_VTAB -USQLITE_ENABLE_COLUMN_METADATA -USQLITE_SOUNDEX -USQLITE_ENABLE_STAT4 -USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DEFAULT_MEMSTATUS=0"
+# SQLite compiled for size on the targets where it is the only C code (mimalloc
+# is built for musl only): one 250,000-line file at cc's -O3 sat on the critical
+# path of a cold build, 28 to 43 s of 74 to 99 s on the shared runners, where
+# -Os takes 14 to 24 s and brings the slowest build to 83.0 s, under the 90 s
+# ceiling (run 41168481159; DEV-66). The index writes as fast (0.85 to 1.06
+# us/entry against 0.80 to 1.00 on T1 and T2). The musl builds keep -O3: their
+# C flags would reach mimalloc too.
+CFLAGS_x86_64_unknown_linux_gnu = "-Os"
+CFLAGS_aarch64_unknown_linux_gnu = "-Os"
+CFLAGS_aarch64_apple_darwin = "-Os"
+CFLAGS_x86_64_apple_darwin = "-Os"

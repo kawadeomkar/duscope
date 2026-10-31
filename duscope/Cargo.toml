@@ -36,6 +36,7 @@ assert_cmd.workspace = true
 cargo_metadata.workspace = true
 duscope-testkit.workspace = true
 jsonschema.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 termlens.workspace = true
 toml.workspace = true

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use duscope_core::arena::Arena;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
+use duscope_core::index::{IndexWriter, ScanId, ScanMeta, index_path, random_bytes};
 use duscope_core::query::{ArenaView, SizeKind, TreeView, clock, timegrammar};
 use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::{RollUp, roll_up};
@@ -52,16 +53,14 @@ pub struct Scanned {
 }
 
 /// `scan`: the root's largest entries, as `top` lists them, under the
-/// scan block; on a terminal the footer alone until the treemap arrives
-/// (P1-MAP-02).
-pub fn run(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
-    if args.save {
-        return Err(not_yet("--save", "the index"));
-    }
+/// scan block, or the treemap on a terminal; with `--save`, the index after
+/// them, under `index_dir` (`--index-dir`, `DUSCOPE_INDEX_DIR` or the
+/// configuration's) or the default directory.
+pub fn run(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     if args.interactive {
         return Err(not_yet("--interactive", "the interactive viewer"));
     }
-    super::query::scan(args, output)
+    super::query::scan(args, index_dir, output)
 }
 
 impl Scanned {
@@ -169,6 +168,111 @@ fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
             reason,
         })
         .collect()
+}
+
+/// The id a saved scan will have, chosen before its output is written so the
+/// output can carry it.
+pub fn scan_id(scanned: &Scanned) -> Result<ScanId, Failure> {
+    let random = random_bytes().map_err(|e| {
+        Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!("cannot read random bytes for the scan id: {e}"),
+        )
+    })?;
+    Ok(ScanId::new(
+        scanned.root.as_os_str().as_bytes(),
+        scanned.started_ns,
+        random,
+    ))
+}
+
+/// `--save`: the scan's index, written under the index directory once the
+/// output is out, then its id on stderr for people (the envelope carries it
+/// already). A failure is `index_write_failed` (exit 1), which `main`
+/// reports on stderr alone: the output already written stands.
+pub fn save(
+    scanned: &Scanned,
+    walk: &WalkArgs,
+    excludes: &[String],
+    id: &ScanId,
+    index_dir: Option<&Path>,
+    output: &Output,
+) -> Result<(), Failure> {
+    let failed = |message: String| {
+        Failure::new(Exit::Runtime, "index_write_failed", message)
+            .hint("Run duscope scan --save again with --index-dir naming a writable directory")
+    };
+    let dir =
+        match index_dir {
+            Some(dir) => dir.to_owned(),
+            None => duscope_core::index::default_dir(|name| std::env::var_os(name)).ok_or_else(
+                || failed("no index directory: neither HOME nor XDG_CACHE_HOME is set".to_owned()),
+            )?,
+        };
+    let root_volume = scanned.arena.volumes().first();
+    let meta = ScanMeta {
+        scan_id: id.clone(),
+        root: scanned.root.as_os_str().as_bytes().to_vec(),
+        root_as_given: scanned.root_as_given.as_os_str().as_bytes().to_vec(),
+        started_at: scanned.started_ns,
+        finished_at: scanned.finished_ns,
+        options: saved_options(walk, excludes),
+        platform: duscope_walk::system(),
+        scanning_uid: duscope_walk::effective_uid(),
+        size_kind: size_kind(walk).as_str(),
+        volume_total: root_volume.map_or(0, |v| v.total_bytes),
+        volume_free: root_volume.map_or(0, |v| v.free_bytes),
+        unaccounted_bytes: None,
+        error_count: scanned.summary.unreadable_dirs + scanned.summary.entry_errors,
+        vanished_count: scanned.arena.vanished(),
+        incremental: false,
+        parent_scan_id: None,
+        source: "scan".to_owned(),
+        tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+    let started = Instant::now();
+    IndexWriter::write(&scanned.arena, &scanned.rollup, &meta, &dir)
+        .map_err(|e| failed(e.to_string()))?;
+    let secs = started.elapsed().as_secs_f64();
+    let entries = scanned.rollup.len();
+    #[allow(clippy::cast_precision_loss)]
+    let per_entry = secs * 1e6 / entries.max(1) as f64;
+    log::info!(
+        "write: {} entries in {secs:.3} s: {per_entry:.2} µs/entry",
+        thousands(entries as u64)
+    );
+    if !output.is_json() {
+        crate::out::stderr_line(&format!(
+            "saved as {id} ({})",
+            index_path(&dir, id).display()
+        ));
+    }
+    Ok(())
+}
+
+/// The scan's options as `scan_meta.options` records them, for a rescan:
+/// `excludes` holds `--exclude`'s patterns and the configuration's,
+/// `exclude_files` and `ignore_files` the files `--exclude-from` and
+/// `--ignore-from` named.
+fn saved_options(walk: &WalkArgs, excludes: &[String]) -> String {
+    let excludes: Vec<&str> = excludes
+        .iter()
+        .chain(&walk.config_excludes)
+        .map(String::as_str)
+        .collect();
+    serde_json::json!({
+        "clones": !walk.no_clones,
+        "one_file_system": walk.one_file_system,
+        "include_network": walk.include_network,
+        "follow_symlinks": walk.follow_symlinks,
+        "excludes": excludes,
+        "exclude_files": walk.exclude_from,
+        "ignore_files": walk.ignore_from,
+        "threads": walk.threads.unwrap_or(0),
+        "size_kind": size_kind(walk).as_str(),
+    })
+    .to_string()
 }
 
 /// The scan's warnings.
@@ -871,7 +975,7 @@ mod tests {
             header: false,
             quiet: false,
         };
-        let (envelope, _) =
+        let (envelope, _, _) =
             top_envelope(scanned, &args.walk, None, "scan", true, true, &output).unwrap();
         assert_eq!(envelope.scan.vanished_count, 1);
         assert_eq!(envelope.scan.error_count, 0);

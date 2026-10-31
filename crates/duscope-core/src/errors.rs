@@ -32,6 +32,14 @@ pub enum CoreError {
         /// Why.
         source: std::io::Error,
     },
+    /// An index could not be written.
+    #[error("cannot write the index {file}: {message}")]
+    IndexWrite {
+        /// The index file's path.
+        file: String,
+        /// What failed.
+        message: String,
+    },
     /// The scan does not fit the arena's record fields.
     #[error("the scan is too large for the arena: {0}")]
     ArenaFull(&'static str),

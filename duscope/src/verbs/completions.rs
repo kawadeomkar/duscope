@@ -296,7 +296,6 @@ mod tests {
             "--cursor",
             "--interactive",
             "-i",
-            "--save",
             "--skip-containers",
         ] {
             assert!(hidden.iter().any(|h| h == flag), "{flag}: {hidden:?}");
