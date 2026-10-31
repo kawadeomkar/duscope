@@ -79,7 +79,7 @@ disagree, so a pin changes in both places in the same pull request.
 | `just platform-tests` | the ignored platform tests, by name, in a release build; they need root and skip without it (CI runs them under `sudo`, and there a missing prerequisite fails them) |
 | `just test-pkg P2-QRY-06` | the tests of one package (names starting `p2_qry_06_`) |
 | `just test-crate duscope-core` | the tests of one crate |
-| `just size [TARGET]` | release build and the stripped binary size against the budget (`size_budget`, 5.25 MB) |
+| `just size [TARGET]` | release build and the stripped binary size against the budget (`size_budget`, 6.48 MB) |
 | `just repro` | the reproducible release build, printing the binary's SHA-256 |
 | `just fixtures` | build the reference fixture tree under `target/fixtures.noindex` |
 | `just golden` | regenerate the golden files after an intended output change |
