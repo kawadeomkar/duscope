@@ -362,7 +362,7 @@ defaults reached 168–244. On macOS
 | `measure.py` | hyperfine in interleaved pairs, and the statistics |
 | `drop-caches.sh` | the cold-run cache drop |
 | `test_bench.py` | unit tests, run by `duscope/tests/bench_harness.rs` |
-| `compare.py` | the regression check: a result file against the results before it on the same machine kind and tree |
+| `compare.py` | the regression check: a result file against the results before it on the same machine and tree |
 | `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |
 | `testdata/` | a real hyperfine 2.0.0 export and the hyperfine stand-in the tests use |
 | `gab_bench.c` | the per-entry cost of `getattrlistbulk` attribute sets on macOS |

@@ -3,7 +3,7 @@ members = ["crates/*", "duscope", "tests/fixtures/mktree"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -16,11 +16,11 @@ include = ["/src", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [workspace.dependencies]
 # The workspace crates, in publish order: each depends only on crates above it.
-duscope-walk = { path = "crates/duscope-walk", version = "0.0.1" }
-duscope-core = { path = "crates/duscope-core", version = "0.0.1" }
-duscope-treemap = { path = "crates/duscope-treemap", version = "0.0.1" }
-duscope-tui = { path = "crates/duscope-tui", version = "0.0.1" }
-duscope-mcp = { path = "crates/duscope-mcp", version = "0.0.1" }
+duscope-walk = { path = "crates/duscope-walk", version = "0.1.0" }
+duscope-core = { path = "crates/duscope-core", version = "0.1.0" }
+duscope-treemap = { path = "crates/duscope-treemap", version = "0.1.0" }
+duscope-tui = { path = "crates/duscope-tui", version = "0.1.0" }
+duscope-mcp = { path = "crates/duscope-mcp", version = "0.1.0" }
 
 # Unpublished workspace members: the test environment and the fixture-tree generator.
 duscope-testkit = { path = "crates/duscope-testkit" }
@@ -44,6 +44,12 @@ libc = "=0.2.191"
 log = "=0.4.34"
 # The allocator of the musl builds only (P1-BENCH-03); no default features.
 mimalloc = { version = "=0.1.52", default-features = false }
+# The index (P2-IDX-02): `bundled` compiles the SQLite the binary ships, with
+# the features duscope does not use left out (.cargo/config.toml). 0.40.2 is
+# the newest release the 1.88 toolchain builds: 0.41 needs 1.89.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+# Scan ids: SHA-256 of the root, the start time and 8 random bytes.
+sha2 = { version = "=0.11.1", default-features = false }
 thiserror = "2.0.21"
 # Default features off: no `cjk`, whose ambiguous-width variant the map does not use.
 unicode-width = { version = "=0.2.2", default-features = false }
@@ -60,7 +66,6 @@ schemars = { version = "1.2.3", default-features = false, features = ["derive"] 
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
-sha2 = { version = "=0.11.1", default-features = false }
 tempfile = "3.27.0"
 termlens = { version = "=0.11.6", default-features = false }
 toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }

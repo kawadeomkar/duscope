@@ -9,8 +9,10 @@
 
 pub mod accounting;
 pub mod arena;
+pub mod config;
 pub mod envelope;
 mod errors;
+pub mod index;
 pub mod query;
 pub mod resolve;
 pub mod rollup;

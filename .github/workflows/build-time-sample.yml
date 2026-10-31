@@ -1,0 +1,77 @@
+# Temporary, on this branch only (never merged): samples the build-time job's
+# cold release build on the shared ubuntu-24.04 runners, with the CPU model of
+# each, and the size job's two binaries, for the budgets with the bundled
+# SQLite (P2-IDX-02).
+name: Build-time sample (temporary)
+
+on:
+  push:
+    branches: [p1-bench-03-allocator-build]
+
+permissions:
+  contents: read
+
+env:
+  JUST_VERSION: "1.59.0"
+
+jobs:
+  sample:
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --profile minimal && rustc --version
+      - name: Fetch dependencies (not timed)
+        run: cargo fetch --locked
+      - name: Two cold release builds
+        run: |
+          cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n1)
+          for i in 1 2; do
+            cargo clean
+            start=$(date +%s.%N)
+            cargo build --release --locked --offline -p duscope
+            end=$(date +%s.%N)
+            secs=$(awk -v s="$start" -v e="$end" 'BEGIN { printf "%.1f", e - s }')
+            echo "SAMPLE ${secs} | ${cpu} | $(nproc)" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+  size:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            target: ""
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --profile minimal && rustc --version
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - name: Install the musl target and musl-tools
+        if: matrix.target != ''
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup target add "$TARGET"
+          sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q musl-tools
+      - name: Size (over the old budget is expected)
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          just size "$TARGET" 2>&1 | tee "$RUNNER_TEMP/size.log" || true
+          echo "SIZE $(grep -m1 '^duscope: ' "$RUNNER_TEMP/size.log") (${TARGET:-$(rustc -vV | sed -n 's/^host: //p')})" | tee -a "$GITHUB_STEP_SUMMARY"

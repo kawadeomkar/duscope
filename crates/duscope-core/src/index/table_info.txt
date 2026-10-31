@@ -1,0 +1,77 @@
+scan_meta WITHOUT ROWID
+  0|key|TEXT|1||1
+  1|value||0||0
+scan_volumes
+  0|dev|INTEGER|1||0
+  1|mnt_id|INTEGER|1||0
+  2|mount_point|BLOB|1||0
+  3|fs_type|TEXT|1||0
+  4|read_only|INTEGER|1||0
+  5|entered|INTEGER|1||0
+  6|reason|TEXT|0||0
+  7|case_sensitive|INTEGER|0||0
+  8|normalization|TEXT|1||0
+  9|fsevents_uuid|TEXT|0||0
+  10|fsevents_event_id|INTEGER|0||0
+  11|os_build|TEXT|0||0
+dirs
+  0|id|INTEGER|0||1
+  1|last_id|INTEGER|1||0
+  2|files_end|INTEGER|1||0
+  3|parent_id|INTEGER|0||0
+  4|depth|INTEGER|1||0
+  5|name|BLOB|1||0
+  6|apparent|INTEGER|1||0
+  7|allocated|INTEGER|1||0
+  8|cum_apparent|INTEGER|1||0
+  9|cum_allocated|INTEGER|1||0
+  10|cum_du_compatible|INTEGER|1||0
+  11|n_files|INTEGER|1||0
+  12|n_dirs|INTEGER|1||0
+  13|mtime|INTEGER|1||0
+  14|ctime|INTEGER|1||0
+  15|max_mtime|INTEGER|1||0
+  16|dev|INTEGER|1||0
+  17|flags|INTEGER|1||0
+  18|errors|INTEGER|0||0
+files
+  0|id|INTEGER|0||1
+  1|parent_id|INTEGER|1||0
+  2|name|BLOB|1||0
+  3|apparent|INTEGER|1||0
+  4|allocated|INTEGER|1||0
+  5|charged|INTEGER|1||0
+  6|mtime|INTEGER|1||0
+  7|ctime|INTEGER|1||0
+  8|atime|INTEGER|0||0
+  9|btime|INTEGER|0||0
+  10|mode|INTEGER|0||0
+  11|uid|INTEGER|0||0
+  12|gid|INTEGER|0||0
+  13|nlink|INTEGER|1||0
+  14|kind|TEXT|1||0
+  15|flags|INTEGER|1||0
+  16|ext|TEXT|1||0
+hardlinks WITHOUT ROWID
+  0|dev|INTEGER|1||1
+  1|ino|INTEGER|1||2
+  2|first_id|INTEGER|1||0
+  3|nlink|INTEGER|1||0
+  4|seen|INTEGER|1||0
+clones WITHOUT ROWID
+  0|dev|INTEGER|1||1
+  1|clone_id|INTEGER|1||2
+  2|first_id|INTEGER|1||0
+scan_errors WITHOUT ROWID
+  0|dir_id|INTEGER|1||1
+  1|name|BLOB|1||2
+  2|errno|INTEGER|1||0
+type_stats
+  0|ext|TEXT|1||1
+  1|n|INTEGER|1||0
+  2|allocated|INTEGER|1||0
+  3|apparent|INTEGER|1||0
+index dirs_parent_name ON dirs (parent_id, name)
+index dirs_cum_allocated ON dirs (cum_allocated DESC)
+index files_allocated ON files (allocated DESC)
+index files_mtime ON files (mtime)

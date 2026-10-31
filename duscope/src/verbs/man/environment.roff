@@ -22,6 +22,16 @@ or
 the output is
 .BR \-\-plain .
 .TP
+.B DUSCOPE_CONFIG
+The configuration file to read, as
+.BR \-\-config ;
+.B none
+reads none.
+.TP
+.B DUSCOPE_INDEX_DIR
+Where saved scans are kept, as
+.BR \-\-index\-dir .
+.TP
 .B DUSCOPE_THREADS
 The scanner's worker threads, as
 .BR \-\-threads .
@@ -59,6 +69,36 @@ The extension colours of
 .TP
 .BR LC_ALL ", " LC_CTYPE ", " LANG
 Without UTF\-8 the treemap is drawn in ASCII.
+.TP
+.B DUSCOPE_LOG
+What is logged to stderr, in
+.BR RUST_LOG 's
+grammar: a level
+.RB ( debug ),
+a module
+.RB ( duscope_walk ),
+or both
+.RB ( duscope_walk=debug ),
+comma\-separated. A verbosity flag wins over it.
+.TP
+.B RUST_LOG
+As
+.B DUSCOPE_LOG
+when that is unset.
+.TP
+.B XDG_CACHE_HOME
+The directory of saved scans,
+.IR duscope/scans ;
+.I ~/Library/Caches
+on macOS and
+.I ~/.cache
+elsewhere when unset.
+.TP
+.B XDG_CONFIG_HOME
+The directory of
+.IR duscope/config.toml ;
+.I ~/.config
+when unset, on macOS too.
 .TP
 .B TZ
 The local zone that

@@ -13,11 +13,14 @@ use std::time::{Duration, Instant};
 
 use duscope_core::arena::Arena;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
+use duscope_core::index::{IndexWriter, ScanId, ScanMeta, index_path, random_bytes};
 use duscope_core::query::{ArenaView, SizeKind, TreeView, clock, timegrammar};
 use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::{RollUp, roll_up};
 use duscope_core::rules::Caches;
-use duscope_walk::{Attrs, DirId, IgnoreRules, Skip, WalkError, WalkOptions, WalkSummary, walk};
+use duscope_walk::{
+    Attrs, DirId, IgnoreRules, NameRef, ScanEvent, Skip, WalkError, WalkOptions, WalkSummary, walk,
+};
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
 
 use super::{Exit, Failure};
@@ -50,16 +53,14 @@ pub struct Scanned {
 }
 
 /// `scan`: the root's largest entries, as `top` lists them, under the
-/// scan block; on a terminal the footer alone until the treemap arrives
-/// (P1-MAP-02).
-pub fn run(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
-    if args.save {
-        return Err(not_yet("--save", "the index"));
-    }
+/// scan block, or the treemap on a terminal; with `--save`, the index after
+/// them, under `index_dir` (`--index-dir`, `DUSCOPE_INDEX_DIR` or the
+/// configuration's) or the default directory.
+pub fn run(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     if args.interactive {
         return Err(not_yet("--interactive", "the interactive viewer"));
     }
-    super::query::scan(args, output)
+    super::query::scan(args, index_dir, output)
 }
 
 impl Scanned {
@@ -167,6 +168,111 @@ fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
             reason,
         })
         .collect()
+}
+
+/// The id a saved scan will have, chosen before its output is written so the
+/// output can carry it.
+pub fn scan_id(scanned: &Scanned) -> Result<ScanId, Failure> {
+    let random = random_bytes().map_err(|e| {
+        Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!("cannot read random bytes for the scan id: {e}"),
+        )
+    })?;
+    Ok(ScanId::new(
+        scanned.root.as_os_str().as_bytes(),
+        scanned.started_ns,
+        random,
+    ))
+}
+
+/// `--save`: the scan's index, written under the index directory once the
+/// output is out, then its id on stderr for people (the envelope carries it
+/// already). A failure is `index_write_failed` (exit 1), which `main`
+/// reports on stderr alone: the output already written stands.
+pub fn save(
+    scanned: &Scanned,
+    walk: &WalkArgs,
+    excludes: &[String],
+    id: &ScanId,
+    index_dir: Option<&Path>,
+    output: &Output,
+) -> Result<(), Failure> {
+    let failed = |message: String| {
+        Failure::new(Exit::Runtime, "index_write_failed", message)
+            .hint("Run duscope scan --save again with --index-dir naming a writable directory")
+    };
+    let dir =
+        match index_dir {
+            Some(dir) => dir.to_owned(),
+            None => duscope_core::index::default_dir(|name| std::env::var_os(name)).ok_or_else(
+                || failed("no index directory: neither HOME nor XDG_CACHE_HOME is set".to_owned()),
+            )?,
+        };
+    let root_volume = scanned.arena.volumes().first();
+    let meta = ScanMeta {
+        scan_id: id.clone(),
+        root: scanned.root.as_os_str().as_bytes().to_vec(),
+        root_as_given: scanned.root_as_given.as_os_str().as_bytes().to_vec(),
+        started_at: scanned.started_ns,
+        finished_at: scanned.finished_ns,
+        options: saved_options(walk, excludes),
+        platform: duscope_walk::system(),
+        scanning_uid: duscope_walk::effective_uid(),
+        size_kind: size_kind(walk).as_str(),
+        volume_total: root_volume.map_or(0, |v| v.total_bytes),
+        volume_free: root_volume.map_or(0, |v| v.free_bytes),
+        unaccounted_bytes: None,
+        error_count: scanned.summary.unreadable_dirs + scanned.summary.entry_errors,
+        vanished_count: scanned.arena.vanished(),
+        incremental: false,
+        parent_scan_id: None,
+        source: "scan".to_owned(),
+        tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+    let started = Instant::now();
+    IndexWriter::write(&scanned.arena, &scanned.rollup, &meta, &dir)
+        .map_err(|e| failed(e.to_string()))?;
+    let secs = started.elapsed().as_secs_f64();
+    let entries = scanned.rollup.len();
+    #[allow(clippy::cast_precision_loss)]
+    let per_entry = secs * 1e6 / entries.max(1) as f64;
+    log::info!(
+        "write: {} entries in {secs:.3} s: {per_entry:.2} µs/entry",
+        thousands(entries as u64)
+    );
+    if !output.is_json() {
+        crate::out::stderr_line(&format!(
+            "saved as {id} ({})",
+            index_path(&dir, id).display()
+        ));
+    }
+    Ok(())
+}
+
+/// The scan's options as `scan_meta.options` records them, for a rescan:
+/// `excludes` holds `--exclude`'s patterns and the configuration's,
+/// `exclude_files` and `ignore_files` the files `--exclude-from` and
+/// `--ignore-from` named.
+fn saved_options(walk: &WalkArgs, excludes: &[String]) -> String {
+    let excludes: Vec<&str> = excludes
+        .iter()
+        .chain(&walk.config_excludes)
+        .map(String::as_str)
+        .collect();
+    serde_json::json!({
+        "clones": !walk.no_clones,
+        "one_file_system": walk.one_file_system,
+        "include_network": walk.include_network,
+        "follow_symlinks": walk.follow_symlinks,
+        "excludes": excludes,
+        "exclude_files": walk.exclude_from,
+        "ignore_files": walk.ignore_from,
+        "threads": walk.threads.unwrap_or(0),
+        "size_kind": size_kind(walk).as_str(),
+    })
+    .to_string()
 }
 
 /// The scan's warnings.
@@ -304,13 +410,18 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     let started_ns = now(walk_args)?;
     let mut arena = Arena::new(opts.attrs);
     let mut push_error = None;
+    let mut errors = log::log_enabled!(log::Level::Debug).then(|| DirErrors::new(&root));
     let walked = walk(&root, &opts, |event| {
+        if let Some(errors) = &mut errors {
+            errors.note(&event);
+        }
         if push_error.is_none()
             && let Err(e) = arena.push(event)
         {
             push_error = Some(e);
         }
     });
+    let walk_time = started.elapsed();
     drop(interrupts);
     let summary = walked.map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
@@ -336,8 +447,10 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
             )
         });
     }
+    let rolled = Instant::now();
     let rollup = roll_up(&mut arena);
-    Ok(Scanned {
+    let rollup_time = rolled.elapsed();
+    let scanned = Scanned {
         arena,
         rollup,
         summary,
@@ -347,7 +460,121 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         clones_asked: walk_args.clones,
         started_ns,
         finished_ns: now(walk_args)?,
-    })
+    };
+    phases(&scanned, walk_time, rollup_time);
+    Ok(scanned)
+}
+
+/// `-v`: the walk and the roll-up, with counts and rates; `-vv` adds each
+/// volume the walk met and its worker threads.
+fn phases(scanned: &Scanned, walk_time: Duration, rollup_time: Duration) {
+    if !log::log_enabled!(log::Level::Info) {
+        return;
+    }
+    let summary = &scanned.summary;
+    let bytes = scanned.view().node(0).allocated;
+    let secs = walk_time.as_secs_f64();
+    // Whole numbers per second, over at least a microsecond.
+    let rate = |n: u64| {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let per_second = (n as f64 / secs.max(1e-6)) as u64;
+        thousands(per_second)
+    };
+    log::info!(
+        "walk: {} entries, {} directories, {} MB in {secs:.3} s: {} entries/s, {} MB/s",
+        thousands(summary.entries),
+        thousands(summary.dirs),
+        thousands(bytes / 1_000_000),
+        rate(summary.entries),
+        rate(bytes / 1_000_000),
+    );
+    log::info!("roll-up: {:.3} s", rollup_time.as_secs_f64());
+    for volume in scanned.arena.volumes() {
+        let entered = match volume.reason {
+            None => "entered".to_owned(),
+            Some(reason) => format!("not entered ({})", reason.as_str()),
+        };
+        log::debug!(
+            target: crate::log::DETAIL,
+            "volume {}: {}, {entered}, {} MB, {} MB free",
+            volume.mount_point.display(),
+            volume.fs_type,
+            thousands(volume.total_bytes / 1_000_000),
+            thousands(volume.free_bytes / 1_000_000),
+        );
+    }
+    log::debug!(target: crate::log::DETAIL, "workers: {} threads", summary.threads);
+}
+
+/// `--debug`: each directory's errors, logged as the walk delivers them,
+/// with the path spelled from the directories met so far.
+struct DirErrors {
+    root: Vec<u8>,
+    dirs: HashMap<DirId, (Vec<u8>, DirId)>,
+}
+
+impl DirErrors {
+    fn new(root: &Path) -> DirErrors {
+        DirErrors {
+            root: root.as_os_str().as_bytes().to_vec(),
+            dirs: HashMap::new(),
+        }
+    }
+
+    /// Records a directory, or logs an error, a vanished entry or a skip.
+    fn note(&mut self, event: &ScanEvent) {
+        match event {
+            ScanEvent::Entry(entry) => {
+                if let Some(dir) = entry.dir
+                    && dir != DirId::ROOT
+                {
+                    self.dirs
+                        .insert(dir, (entry.name.as_bytes().to_vec(), entry.parent));
+                }
+            }
+            ScanEvent::DirClosed {
+                dir,
+                errno: Some(errno),
+            } => log::debug!(
+                "{}: {}",
+                self.path(*dir, None),
+                io::Error::from_raw_os_error(*errno)
+            ),
+            ScanEvent::Error(error) => log::debug!(
+                "{}: {}",
+                self.path(error.dir, Some(error.name.as_bytes())),
+                io::Error::from_raw_os_error(error.errno)
+            ),
+            ScanEvent::Vanished { dir, name } => log::debug!(
+                "{}: vanished during the scan",
+                self.path(*dir, name.as_ref().map(NameRef::as_bytes))
+            ),
+            _ => {}
+        }
+    }
+
+    /// The path of `dir`, and of `name` in it.
+    fn path(&self, dir: DirId, name: Option<&[u8]>) -> String {
+        let mut names: Vec<&[u8]> = name.into_iter().collect();
+        let mut at = dir;
+        while at != DirId::ROOT {
+            let Some((name, parent)) = self.dirs.get(&at) else {
+                break;
+            };
+            names.push(name);
+            at = *parent;
+        }
+        let mut path = self.root.clone();
+        for name in names.iter().rev() {
+            path.push(b'/');
+            path.extend_from_slice(name);
+        }
+        String::from_utf8_lossy(&path).into_owned()
+    }
 }
 
 /// The walk options the flags ask for.
@@ -370,6 +597,9 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
     };
     for pattern in excludes {
         add(pattern, "--exclude")?;
+    }
+    for pattern in &args.config_excludes {
+        add(pattern, "the configuration's [excludes]")?;
     }
     for file in &args.exclude_from {
         let text = read_flag_file(file, "--exclude-from")?;
@@ -403,7 +633,7 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
             .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--exclude: {e}")))?;
     }
     let exclude_caches = if args.exclude_caches {
-        Caches::vendored().compile()
+        caches(args)?.compile()
     } else {
         Vec::new()
     };
@@ -423,6 +653,23 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
         cancel: Arc::new(AtomicBool::new(false)),
         fallback: args.provider == Some(ProviderArg::Fallback),
     })
+}
+
+/// The cache rules: the vendored ones, with the configuration's
+/// `[caches] extra` table merged over them.
+fn caches(args: &WalkArgs) -> Result<Caches, Failure> {
+    let Some(file) = &args.caches_extra else {
+        return Ok(Caches::vendored());
+    };
+    let refused = |message: String| {
+        Failure::new(Exit::Usage, "usage", format!("[caches] extra {message}"))
+            .hint("Fix the configuration file, or run duscope with --config none")
+    };
+    let text =
+        std::fs::read_to_string(file).map_err(|e| refused(format!("{}: {e}", file.display())))?;
+    let user =
+        Caches::parse(&text, &file.display().to_string()).map_err(|e| refused(e.to_string()))?;
+    Ok(Caches::vendored().merged(user))
 }
 
 /// An `--exclude` pattern as the walk matches it.
@@ -726,8 +973,9 @@ mod tests {
             units: Units::default(),
             null: false,
             header: false,
+            quiet: false,
         };
-        let (envelope, _) =
+        let (envelope, _, _) =
             top_envelope(scanned, &args.walk, None, "scan", true, true, &output).unwrap();
         assert_eq!(envelope.scan.vanished_count, 1);
         assert_eq!(envelope.scan.error_count, 0);

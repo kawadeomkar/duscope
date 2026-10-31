@@ -123,6 +123,9 @@ Output:
           - 2: Two units
           - 4: Four units: a calmer picture
 
+      --save
+          Save the scan as an index and print its id
+
       --json
           Print the JSON envelope (--format json)
 
@@ -161,3 +164,24 @@ Output:
 
       --header
           Start --plain output with a line of field names
+
+      --config <FILE>
+          The configuration file, or none for the built-in defaults
+          
+          Default: DUSCOPE_CONFIG, else $XDG_CONFIG_HOME/duscope/config.toml
+
+  -v, --verbose...
+          Print phase timings to stderr; -vv adds each volume and the workers
+
+      --debug
+          Print each directory's errors to stderr as they happen
+
+  -q, --quiet
+          Don't print warnings to stderr
+
+      --index-dir <DIR>
+          Where saved scans are kept
+          
+          Default: $XDG_CACHE_HOME/duscope, else in the platform's cache directory
+          
+          [env: DUSCOPE_INDEX_DIR]

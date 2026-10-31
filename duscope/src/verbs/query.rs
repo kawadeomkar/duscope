@@ -2,6 +2,8 @@
 //! the rows `scan` prints. Each turns its flags into a query of
 //! `duscope_core::query`, runs it on the arena, and writes the envelope.
 
+use std::path::Path;
+
 use duscope_core::CoreError;
 use duscope_core::envelope::{
     ByTypeEntry, Envelope, QueryBlock, SCHEMA_VERSION, StaleEntry, Tool, TopEntry, Warning,
@@ -53,7 +55,7 @@ enum DepthUse {
 
 /// The rows of `scan`: the root's largest entries, as `top` lists them by
 /// default; on a terminal, or with `--treemap always`, the treemap.
-pub fn scan(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
+pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     // The map's flags are settled first: a refused one costs no scan.
     let style = if output.format == Format::Treemap {
         Some(super::treemap::style(args, output)?)
@@ -61,18 +63,30 @@ pub fn scan(args: &ScanArgs, output: &Output) -> Result<(), Failure> {
         None
     };
     let scanned = scan::scan(&args.walk, &args.exclude)?;
-    if let Some(style) = &style {
-        return super::treemap::draw(&scanned, args, output, style);
+    // The id is chosen before anything is written, so the output can carry
+    // it; the index is written only after the output is out.
+    let id = args.save.then(|| scan::scan_id(&scanned)).transpose()?;
+    let scanned = if let Some(style) = &style {
+        super::treemap::draw(&scanned, args, output, style)?;
+        scanned
+    } else {
+        let (mut envelope, footer, scanned) =
+            top_envelope(scanned, &args.walk, None, "scan", false, true, output)?;
+        envelope.scan.id = id.as_ref().map(ToString::to_string);
+        output.list(&envelope, &footer)?;
+        scanned
+    };
+    match &id {
+        Some(id) => scan::save(&scanned, &args.walk, &args.exclude, id, index_dir, output),
+        None => Ok(()),
     }
-    let (envelope, footer) = top_envelope(scanned, &args.walk, None, "scan", false, true, output)?;
-    output.list(&envelope, &footer)
 }
 
 /// `top`.
 pub fn top(args: &TopArgs, output: &Output) -> Result<(), Failure> {
     limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
-    let (envelope, footer) = top_envelope(
+    let (envelope, footer, _) = top_envelope(
         scanned,
         &args.walk,
         Some(&args.query),
@@ -85,7 +99,7 @@ pub fn top(args: &TopArgs, output: &Output) -> Result<(), Failure> {
 }
 
 /// The envelope and footer of `top` (or `scan`, whose `query` is `None`:
-/// the defaults) on a scan.
+/// the defaults) on a scan, and the scan back for `--save`.
 pub(super) fn top_envelope(
     scanned: Scanned,
     walk: &WalkArgs,
@@ -94,7 +108,7 @@ pub(super) fn top_envelope(
     files: bool,
     cut_through: bool,
     output: &Output,
-) -> Result<(Envelope<TopEntry>, String), Failure> {
+) -> Result<(Envelope<TopEntry>, String, Scanned), Failure> {
     let prepared = prepare(scanned, walk, query, output, DepthUse::Lists, false)?;
     let depth = query.and_then(|q| q.depth);
     let q = TopQuery {
@@ -148,7 +162,7 @@ pub fn tree(args: &TreeArgs, output: &Output) -> Result<(), Failure> {
     };
     let page = query::tree(&prepared.scanned.view(), &q);
     let depth = Some(args.query.depth.unwrap_or(2));
-    let (envelope, footer) = envelope(
+    let (envelope, footer, _) = envelope(
         prepared,
         &args.walk,
         "tree",
@@ -160,23 +174,33 @@ pub fn tree(args: &TreeArgs, output: &Output) -> Result<(), Failure> {
     output.list(&envelope, &footer)
 }
 
+/// The file classes: the vendored ones, with the table `file` names (from
+/// `label`, a flag or a configuration key) merged over them.
+pub fn classes(file: Option<&Path>, label: &str) -> Result<Classes, Failure> {
+    let Some(file) = file else {
+        return Ok(Classes::vendored());
+    };
+    let text = std::fs::read_to_string(file).map_err(|e| {
+        Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("{label} {}: {e}", file.display()),
+        )
+    })?;
+    let user = Classes::parse(&text, &file.display().to_string())
+        .map_err(|e| Failure::new(Exit::Usage, "usage", format!("{label} {e}")))?;
+    Ok(Classes::vendored().merged(user))
+}
+
 /// `by-type`.
 pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
-    let classes = match &args.classes {
-        None => Classes::vendored(),
-        Some(file) => {
-            let text = std::fs::read_to_string(file).map_err(|e| {
-                Failure::new(
-                    Exit::Usage,
-                    "usage",
-                    format!("--classes {}: {e}", file.display()),
-                )
-            })?;
-            let user = Classes::parse(&text, &file.display().to_string())
-                .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--classes {e}")))?;
-            Classes::vendored().merged(user)
-        }
+    // --classes, else the configuration's [classes] extra.
+    let label = if args.classes == args.walk.classes_extra {
+        "[classes] extra"
+    } else {
+        "--classes"
     };
+    let classes = classes(args.classes.as_deref(), label)?;
     limit(Some(&args.query), output)?;
     let scanned = scan::scan(&args.walk, &[])?;
     let prepared = prepare(
@@ -197,7 +221,7 @@ pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
         reverse: prepared.reverse,
     };
     let page: Page<ByTypeEntry> = query::by_type(&prepared.scanned.view(), &q);
-    let (envelope, footer) = envelope(
+    let (envelope, footer, _) = envelope(
         prepared,
         &args.walk,
         "by-type",
@@ -263,7 +287,7 @@ pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
     if args.atime {
         warnings.extend(atime_unreliable(prepared.scanned.arena.volumes()));
     }
-    let (envelope, footer) = envelope(
+    let (envelope, footer, _) = envelope(
         prepared,
         &args.walk,
         "stale",
@@ -457,7 +481,7 @@ fn filters(
     Ok((f, tz_unavailable))
 }
 
-/// The envelope of a verb's page, and the footer for people.
+/// The envelope of a verb's page, the footer for people, and the scan back.
 fn envelope<T>(
     prepared: Prepared,
     walk: &WalkArgs,
@@ -466,7 +490,7 @@ fn envelope<T>(
     page: Page<T>,
     extra: Vec<Warning>,
     output: &Output,
-) -> (Envelope<T>, String) {
+) -> (Envelope<T>, String, Scanned) {
     let Prepared {
         scanned,
         size,
@@ -505,7 +529,7 @@ fn envelope<T>(
         warnings,
         next: Vec::new(),
     };
-    (envelope, footer)
+    (envelope, footer, scanned)
 }
 
 /// `scan_age`: the scan finished longer ago than a tenth of the window

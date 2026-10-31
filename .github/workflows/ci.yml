@@ -57,12 +57,26 @@ env:
   # The markdown link checker of the docs job, verified against this checksum.
   LYCHEE_VERSION: "0.24.2"
   LYCHEE_SHA256: "1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a"
-  # Cold release build budget in seconds: the phase-1 code measured plus 10%
-  # (P1-REL-01), under the spec's 90 s ceiling. This job measured 56.6 s on the
-  # P1-CLI-04 branch (run 40352275456); plus 10% is 62.26 s, rounded up to 63 s.
-  # A build over it is measured once more before the job fails (DEV-53).
+  # Cold release build budgets in seconds, one per CPU model of the shared
+  # ubuntu-24.04 runners (P1-REL-01, DEV-59): each model's slowest cold build of
+  # the phase-1 code seen so far plus 10%, rounded up, under the spec's 90 s
+  # ceiling. Not the median: runners of one model differ by up to a fifth (an
+  # EPYC 9V74 built in 47.5 to 56.0 s, a Xeon Platinum 8573C in 53.8 s and then
+  # 63.8 s), and the second build below runs on the same runner. The slowest
+  # builds of 65 on 33 runners (run 41019367504, run 41019871348 and this job's
+  # run 41030925722, 2026-10-30): EPYC 7763 63.5 s (44 builds), Xeon Platinum
+  # 8573C 63.8 s (4), Xeon Platinum 8370C 60.3 s (2), EPYC 9V74 56.0 s (10),
+  # Xeon 6973P-C 45.5 s (2), EPYC 9V45 44.2 s (3).
+  # A model not listed is held to the largest budget, with a notice to add it. A
+  # build over its budget is measured once more before the job fails (DEV-53).
   # The size budget lives in the justfile as size_budget.
-  BUILD_TIME_BUDGET_SECS: "63"
+  BUILD_TIME_BUDGETS: |
+    INTEL(R) XEON(R) PLATINUM 8573C=71
+    AMD EPYC 7763 64-Core Processor=70
+    Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz=67
+    AMD EPYC 9V74 80-Core Processor=62
+    Intel(R) Xeon(R) 6973P-C=51
+    AMD EPYC 9V45 96-Core Processor=49
 
 jobs:
   fmt:
@@ -221,13 +235,15 @@ jobs:
           just platform-tests
 
   bench-regression:
-    # The harness on T1 against the last five results of this job on pushes to main
-    # (DEV-20, bench/compare.py): duscope's p50 against runs on the same machine, and
-    # its ratio to each competitor against the bench runners' nightly ratios. A
-    # regression beyond 15% fails only when a second measurement reproduces it.
-    # main keeps its result whatever the comparison says, so a slowdown merged on
-    # purpose fails pull requests only until main's own results make up most of the
-    # five (three pushes).
+    # The harness on T1 against this job's results on pushes to main (DEV-20,
+    # bench/compare.py): duscope's p50 and its ratio to diskus, each against the
+    # last five results from the same CPU model. The shared runners come with
+    # several, and the ratio differs between them as the time does (on
+    # ubuntu-24.04, 0.51 on one model and 0.60 to 0.67 on another). A regression
+    # beyond 15% fails only when a second measurement reproduces it. main keeps its
+    # result whatever the comparison says, so a slowdown merged on purpose fails
+    # pull requests only until main's own results make up most of each CPU model's
+    # five.
     name: bench-regression (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -267,26 +283,21 @@ jobs:
         run: |
           base="$RUNNER_TEMP/baselines"
           mkdir -p "$base"
-          # This job's result files from the last five pushes to main that kept one,
-          # whatever else in those runs failed. Only pushes: a pull request from a
-          # fork's branch named main is a pull_request run, never a push to this main.
+          # This job's result files from the last 30 pushes to main that kept one,
+          # whatever else in those runs failed: enough for compare.py to find five
+          # from this run's CPU model among the shared runners' several. Only
+          # pushes: a pull request from a fork's branch named main is a
+          # pull_request run, never a push to this main.
           ids=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
-            --event push --status completed --limit 20 --json databaseId --jq '.[].databaseId')
+            --event push --status completed --limit 30 --json databaseId --jq '.[].databaseId')
           found=0
           for id in $ids; do
             if gh run download "$id" --repo "$GITHUB_REPOSITORY" --name "bench-regression-$OS" \
               --dir "$base/$id" 2>/dev/null; then
               found=$((found + 1))
-              (( found < 5 )) || break
             fi
           done
           echo "$found baseline result(s) from main"
-          # The bench runners' nightly results, for the ratio checks.
-          if git fetch --quiet --depth 1 origin bench-results; then
-            git worktree add --quiet "$base/nightly" FETCH_HEAD
-          else
-            echo "no bench-results branch yet"
-          fi
       - name: Compare with main
         env:
           FILE: ${{ steps.measure.outputs.file }}
@@ -577,12 +588,24 @@ jobs:
       # time, so they happen first and the timed build runs offline.
       - name: Fetch dependencies (not timed)
         run: cargo fetch --locked
+      # The shared runners come with several CPU models, whose cold builds of the
+      # same code differ by a third, so each model has a budget of its own.
+      - name: This machine's budget
+        run: |
+          cpu=$(sed -n 's/^model name[[:space:]]*: //p' "${DUSCOPE_TEST_CPUINFO:-/proc/cpuinfo}" \
+            | head -n 1 | sed 's/[[:space:]]*$//')
+          budget=$(awk -F= -v cpu="$cpu" '$1 == cpu { print $2; exit }' <<< "$BUILD_TIME_BUDGETS")
+          if [[ -z $budget ]]; then
+            budget=$(cut -d= -f2 <<< "$BUILD_TIME_BUDGETS" | sort -n | tail -n 1)
+            echo "::notice title=build-time::no budget for ${cpu:-this CPU} in BUILD_TIME_BUDGETS; holding it to the largest, ${budget} s"
+          fi
+          echo "cold build budget on ${cpu:-this CPU}: ${budget} s" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "BUILD_TIME_BUDGET_SECS=$budget" >> "$GITHUB_ENV"
       # `-p duscope`: the binary a user builds. The unpublished test members
-      # (mktree, duscope-testkit) are not part of a release build. The shared
-      # runners' cold build took 39 to 65 s over 25 runs on 2026-10-28 (median 58),
-      # a spread wider than the budget's 10% margin, so a build over budget is
-      # measured again from cold and fails only when the second is over too, as
-      # bench-regression measures again (DEV-53).
+      # (mktree, duscope-testkit) are not part of a release build. A build over
+      # budget is measured again from cold and fails only when the second is over
+      # too, as bench-regression measures again (DEV-53): that absorbs a moment's
+      # noise on the runner, while the budgets above absorb a slower runner.
       - name: Cold cargo build --release
         run: |
           # Called as a command, not in $(...), so a failed build fails the step.

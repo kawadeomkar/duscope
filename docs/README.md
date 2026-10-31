@@ -8,6 +8,9 @@ ones at the top of the repository.
 - [github-settings.md](github-settings.md): the repository settings duscope
   depends on (branch protection and the required checks, merge methods,
   Actions, security, labels), as a checklist with the command that applies each.
+- [index-format.md](index-format.md): the SQLite file a saved scan is, table by
+  table and column by column, with its flags, accounting, `scan_meta` keys and
+  how to read it with `sqlite3` or DuckDB.
 - [RELEASING.md](RELEASING.md): the checklist every release tag follows, the
   patch-release subset, the secrets table and how to pull a release.
 - [rules.md](rules.md): the schemas of `classes.toml`, `caches.toml` and user

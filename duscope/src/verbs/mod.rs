@@ -78,9 +78,10 @@ impl fmt::Display for Failure {
 
 /// Runs the verb `cli` names, writing as `output` says.
 pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
+    let index_dir = cli.global.index_dir.as_deref();
     match cli.verb {
-        None => scan::run(&cli.scan, output),
-        Some(Verb::Scan(args)) => scan::run(&args, output),
+        None => scan::run(&cli.scan, index_dir, output),
+        Some(Verb::Scan(args)) => scan::run(&args, index_dir, output),
         Some(Verb::Top(args)) => query::top(&args, output),
         Some(Verb::Tree(args)) => query::tree(&args, output),
         Some(Verb::ByType(args)) => query::by_type(&args, output),

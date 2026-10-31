@@ -200,7 +200,7 @@ fn p1_cli_01_exit_codes() {
     assert!(stderr.starts_with("duscope: cannot read /aaa"), "{stderr}");
     // Flags of a later phase: hidden, and refused before the scan.
     for args in [
-        ["scan", "--save"],
+        ["scan", "--interactive"],
         ["scan", "--skip-containers"],
         ["top", "--skip-containers"],
     ] {

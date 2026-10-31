@@ -85,11 +85,13 @@ platform-tests:
       p1_walk_06_linux_mount_ids_hold_for_same_device_binds_and_reused_ids
       p1_walk_06_macos_an_exfat_image_is_crossed_and_confined
       platform::macos::tests::p1_walk_07_a_scan_of_slash_counts_users_once
+      p2_idx_02_a_full_tmpfs_fails_the_write_after_the_output
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Two of the four are built on each OS; a renamed test must not drop out unnoticed.
+    # Three are built on Linux and two on macOS; a renamed test must not drop out unnoticed.
+    expected=2; [[ $(uname -s) == Linux ]] && expected=3
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
-    [[ $found -eq 2 ]] || { echo "platform-tests: $found of this platform's 2 tests found; update the list" >&2; exit 1; }
+    [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
     cargo_test -- --ignored --exact "${tests[@]}"
 
 fmt:

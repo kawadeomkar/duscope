@@ -126,18 +126,25 @@ class Compare(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("no baseline", out)
 
-    def test_p0_bench_02_ratios_compare_across_cpus_of_a_kind(self):
-        # Five earlier runs on another CPU, du at 1.0x diskus: their absolute
-        # times do not count here, their ratios do.
-        base = self.baselines([0.5] * 5, cpu="Intel Xeon", cpus=4, ratios={"warm/diskus": 1.0})
-        for ratio, want in [(1.10, 0), (1.30, 1)]:
+    def test_p0_bench_02_ratios_need_the_same_cpu_too(self):
+        # Five earlier runs on another CPU of the kind, du at 0.5x diskus, as
+        # on the shared runners' faster model: neither their times nor their
+        # ratios count, so a slower model's 0.6x is no regression.
+        other = self.baselines([0.5] * 5, cpu="Intel Xeon", cpus=4, ratios={"warm/diskus": 0.5})
+        current = self.write(result({"warm": 1.0}, started_at="2026-10-25T10:00:00Z", ratios={"warm/diskus": 0.6}))
+        code, out = self.run_compare([current, *other])
+        self.assertEqual(code, 0, out)
+        self.assertIn("T1 warm du: no baseline", out)
+        self.assertIn("T1 warm du/diskus: no baseline (no earlier result on this machine and tree)", out)
+        # On the same CPU, the ratio is held to that CPU's earlier ratios.
+        same = self.baselines([1.0] * 5, ratios={"warm/diskus": 0.5})
+        for ratio, want in [(0.55, 0), (0.6, 1)]:
             current = self.write(
                 result({"warm": 1.0}, started_at="2026-10-25T10:00:00Z", ratios={"warm/diskus": ratio})
             )
-            code, out = self.run_compare([current, *base])
+            code, out = self.run_compare([current, *other, *same])
             self.assertEqual(code, want, out)
-            self.assertIn("T1 warm du: no baseline", out)
-            self.assertIn(f"T1 warm du/diskus: ratio {ratio:.3f} against a median of 1.000 over 5 results", out)
+            self.assertIn(f"T1 warm du/diskus: ratio {ratio:.3f} against a median of 0.500 over 5 results", out)
         # Another platform's ratios do not count.
         linux = self.baselines([0.5] * 5, platform="linux", ratios={"warm/diskus": 0.5})
         current = self.write(result({"warm": 1.0}, started_at="2026-10-25T10:00:00Z", ratios={"warm/diskus": 1.3}))
