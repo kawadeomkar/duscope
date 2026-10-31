@@ -15,8 +15,8 @@ use std::borrow::Cow;
 use std::io::{IsTerminal, Write as _};
 
 use duscope_core::envelope::{
-    ByTypeEntry, CheckedEntry, Envelope, ErrorEnvelope, Listing, PrunedEntry, SavedScanEntry,
-    StaleEntry, TopEntry, TreeEntry, Warning,
+    ByTypeEntry, CheckedEntry, Envelope, ErrorEnvelope, Listing, ObjectEnvelope, PrunedEntry,
+    SavedScanEntry, ScanErrorEntry, StaleEntry, TopEntry, TreeEntry, Warning,
 };
 use serde::Serialize;
 
@@ -461,7 +461,67 @@ impl Row for CheckedEntry {
     }
 }
 
+impl Row for ScanErrorEntry {
+    const FIELDS: &'static [&'static str] = &["kind", "errno", "message", "path"];
+    const COLUMNS: &'static [&'static str] = &["Kind", "Error", "Path"];
+
+    fn plain(&self) -> Vec<Cow<'_, [u8]>> {
+        vec![
+            Cow::Borrowed(self.kind.as_bytes()),
+            Cow::Owned(self.errno.to_string().into_bytes()),
+            Cow::Borrowed(self.message.as_bytes()),
+            Cow::Borrowed(&self.path_bytes),
+        ]
+    }
+
+    fn cells(&self, _units: Units, _size_kind: &str) -> Vec<String> {
+        vec![
+            self.kind.to_owned(),
+            self.message.clone(),
+            printable(&self.path).into_owned(),
+        ]
+    }
+}
+
 impl Output {
+    /// Writes a one-object answer (`explain`): the envelope under `--json`
+    /// and `--format ndjson`, `plain`'s name and value per line under
+    /// `--plain`, `people`'s aligned under the table format. Warnings go in
+    /// the envelope under JSON, on stderr otherwise.
+    pub fn object<T: Serialize>(
+        &self,
+        envelope: &ObjectEnvelope<T>,
+        plain: &[(&str, Vec<u8>)],
+        people: &[(String, String)],
+    ) -> Result<(), Failure> {
+        let written = match self.format {
+            Format::Json | Format::Ndjson => emit(|out| format::json(out, envelope)),
+            Format::Plain => emit(|out| {
+                let end = if self.null { b'\0' } else { b'\n' };
+                for (name, value) in plain {
+                    out.write_all(name.as_bytes())?;
+                    out.write_all(b"\t")?;
+                    out.write_all(value)?;
+                    out.write_all(&[end])?;
+                }
+                Ok(())
+            }),
+            Format::Table | Format::Treemap => {
+                let width = people.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+                emit(|out| {
+                    for (name, value) in people {
+                        writeln!(out, "{name:<width$}  {}", printable(value))?;
+                    }
+                    Ok(())
+                })
+            }
+        };
+        if !self.is_json() && !self.quiet {
+            warn(&envelope.warnings);
+        }
+        written
+    }
+
     /// Writes a listing of saved scans (`scans`) in the decided format,
     /// as [`Output::list`] writes a list verb's.
     pub fn listing<T: Row>(&self, listing: &Listing<T>, footer: &str) -> Result<(), Failure> {

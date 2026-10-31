@@ -490,6 +490,13 @@ pub fn effective_uid() -> u32 {
     platform::effective_uid()
 }
 
+/// Whether the directory at `dir` holds a valid `CACHEDIR.TAG`: a regular
+/// file whose first 43 bytes are the signature (`explain` asks of a path,
+/// as the walk asks of each directory under `--exclude-caches`).
+pub fn cachedir_tag(dir: &Path) -> bool {
+    platform::cachedir_tag(dir)
+}
+
 /// Whether the process with id `pid` is running (`scans --prune` keeps the
 /// temporary file of a write still in progress).
 pub fn process_alive(pid: u32) -> bool {

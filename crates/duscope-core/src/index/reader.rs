@@ -51,6 +51,10 @@ struct Block {
     entries: Vec<(Node, Vec<u8>)>,
 }
 
+/// What a scan could not read: a directory's id, the entry's name (none
+/// for the directory itself), and the error number.
+pub type ScanErrorRow = (u32, Option<Vec<u8>>, i32);
+
 /// A volume the scan met, as its index records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexVolume {
@@ -290,6 +294,28 @@ impl Index {
                 },
                 unsigned,
             )
+    }
+
+    /// What the scan could not read: each unreadable directory (its id, no
+    /// name, and the error number), and each entry a directory listed but
+    /// could not examine (the directory's id, the entry's name, the error
+    /// number).
+    pub fn scan_errors(&self) -> Result<Vec<ScanErrorRow>, CoreError> {
+        let read = || -> rusqlite::Result<Vec<ScanErrorRow>> {
+            let mut out: Vec<ScanErrorRow> = self
+                .db
+                .prepare("SELECT id, errors FROM dirs WHERE errors IS NOT NULL")?
+                .query_map([], |row| Ok((row.get(0)?, None, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let entries = self
+                .db
+                .prepare("SELECT dir_id, name, errno FROM scan_errors")?
+                .query_map([], |row| Ok((row.get(0)?, Some(row.get(1)?), row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out.extend(entries);
+            Ok(out)
+        };
+        read().map_err(|e| self.corrupt(&e))
     }
 
     /// `PRAGMA quick_check`: empty when the file is sound, else each

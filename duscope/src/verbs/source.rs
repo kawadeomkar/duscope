@@ -157,7 +157,7 @@ fn usable(walk: &WalkArgs, index: &Index) -> bool {
 }
 
 /// `stale_index`: the saved scan finished longer ago than `--max-age`.
-fn stale_index(index: &Index, max_age: &str) -> Warning {
+pub(super) fn stale_index(index: &Index, max_age: &str) -> Warning {
     let meta = index.meta();
     Warning {
         code: "stale_index",
@@ -333,7 +333,7 @@ impl Source {
 }
 
 /// The scan block of a saved scan.
-fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
+pub(super) fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
     let meta = index.meta();
     let root = index.node(0);
     let options: serde_json::Value = serde_json::from_str(&meta.options).unwrap_or_default();

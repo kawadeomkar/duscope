@@ -1,0 +1,3 @@
+### Added
+- `explain <path>` gives the facts about one path from the newest saved scan that holds it: its size and times, its links and how many lie outside it, its clone group, the bytes deleting it would free now (exact, or a lower or upper bound), the command that regenerates a cache directory and whether it holds a valid `CACHEDIR.TAG`, what git says of it (ignored, precious, tracked files inside), how sure each of these is, and where it came from. A path no saved scan holds is answered from a fresh `stat`, with low confidence.
+- `explain --errors <scan>` lists the directories and entries a saved scan could not read.
