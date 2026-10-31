@@ -112,23 +112,28 @@ impl Index {
                 total_count,
             });
         }
-        let rows = |extra: &str,
-                    more: &[Value],
-                    cap: Option<usize>|
-         -> rusqlite::Result<Vec<(u32, i64)>> {
-            let limit = cap.map_or(String::new(), |n| format!(" LIMIT {n}"));
-            let sql = format!(
-                "SELECT id, allocated FROM files{indexed} WHERE {cond}{extra} \
-                 ORDER BY allocated DESC, id{limit}"
-            );
-            let mut stmt = self.db().prepare(&sql)?;
-            let all: Vec<&Value> = params.iter().chain(more).collect();
-            let found = stmt.query_map(rusqlite::params_from_iter(all), |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
-            found.collect()
-        };
-        let found = rows("", &[], Some(limit)).map_err(corrupt)?;
+        // SQLite's LIMIT is a signed 64-bit integer.
+        let cap = i64::try_from(limit).unwrap_or(i64::MAX);
+        let found: Vec<(u32, i64)> = self
+            .db()
+            .prepare(&format!(
+                "SELECT id, allocated FROM files{indexed} WHERE {cond} \
+                 ORDER BY allocated DESC, id LIMIT {cap}"
+            ))
+            .and_then(|mut stmt| {
+                stmt.query_map(rusqlite::params_from_iter(&params), |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect()
+            })
+            .map_err(corrupt)?;
+        // A subtree that is one file is that file.
+        if !root.is_dir() {
+            return Ok(Ranked {
+                ids: found.into_iter().map(|(id, _)| id).collect(),
+                total_count,
+            });
+        }
         // The rows larger than the last one kept are all here, and few: they
         // are ranked by size, then path. The rows tied with the last one may
         // be most of the tree (a tree of equal files), so the first of them
@@ -276,10 +281,10 @@ impl Index {
     }
 }
 
-/// An unsigned value as the index stores it.
-#[allow(clippy::cast_possible_wrap)]
+/// A size bound as the index compares it: its signed integer, a bound
+/// past the largest the index can hold held to that largest.
 fn signed(value: u64) -> i64 {
-    value as i64
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

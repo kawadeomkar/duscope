@@ -4,11 +4,9 @@
 //! path, found downwards from the root with the case and normalisation
 //! folding of the volume each directory is on (P2-QRY-01).
 
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::index::Index;
-use crate::query::TreeView;
 
 /// A path as it was given, and the path it leads to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,18 +31,10 @@ pub fn resolve_path(cwd: &Path, given: &Path) -> ResolvedPath {
 }
 
 /// The entry of `index` at `path`, absolute and resolved: `None` when the
-/// scan's root does not contain it, or the scan holds no such entry.
+/// scan's root does not contain it, or the scan holds no such entry. The
+/// root and each name below it match as their volume compares names.
 pub fn resolve_in_index(index: &Index, path: &Path) -> Option<u32> {
-    let rel = path.strip_prefix(index.root_path()).ok()?;
-    let mut names = Vec::new();
-    for component in rel.components() {
-        match component {
-            Component::Normal(name) => names.push(name.as_bytes()),
-            Component::CurDir => {}
-            _ => return None,
-        }
-    }
-    index.lookup(names)
+    index.lookup(index.below_root(path)?)
 }
 
 #[cfg(test)]

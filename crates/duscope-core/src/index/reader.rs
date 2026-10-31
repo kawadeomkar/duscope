@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use duscope_walk::{Attrs, Flags, Kind};
 use rusqlite::config::DbConfig;
@@ -369,25 +369,9 @@ impl Index {
         files_end: u32,
         name: &[u8],
     ) -> rusqlite::Result<Option<(u32, Option<u32>)>> {
-        let volume: Option<(Option<bool>, String)> = self
-            .db
-            .query_row(
-                "SELECT v.case_sensitive, v.normalization FROM dirs AS d \
-                 JOIN scan_volumes AS v ON v.dev = d.dev WHERE d.id = ?1 LIMIT 1",
-                [at],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let fold = match volume {
-            Some((case_sensitive, normalization)) => Fold {
-                case: case_sensitive == Some(false),
-                nfc: normalization == "insensitive",
-            },
-            None => return Ok(None),
-        };
-        if !fold.case && !fold.nfc {
+        let Some(fold) = self.fold_of(at)? else {
             return Ok(None);
-        }
+        };
         let want = fold.apply(name);
         let mut dirs = self
             .db
@@ -412,10 +396,70 @@ impl Index {
         Ok(None)
     }
 
-    /// Whether the scan read the entry `id`, at `path`: not a directory it
-    /// listed but kept out of (an exclude, a cache rule), could not read,
-    /// or a mount point it did not enter.
-    pub fn entered(&self, id: u32, path: &Path) -> bool {
+    /// How the volume directory `dir` is on compares names; `None` where it
+    /// compares bytes.
+    fn fold_of(&self, dir: u32) -> rusqlite::Result<Option<Fold>> {
+        let volume: Option<(Option<bool>, String)> = self
+            .db
+            .query_row(
+                "SELECT v.case_sensitive, v.normalization FROM dirs AS d \
+                 JOIN scan_volumes AS v ON v.dev = d.dev WHERE d.id = ?1 LIMIT 1",
+                [dir],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(volume.and_then(|(case_sensitive, normalization)| {
+            let fold = Fold {
+                case: case_sensitive == Some(false),
+                nfc: normalization == "insensitive",
+            };
+            (fold.case || fold.nfc).then_some(fold)
+        }))
+    }
+
+    /// `path`, absolute, as components below the scan's root: matched byte
+    /// for byte, or as the root's volume compares names, so a root typed in
+    /// another case still holds the path. `None` when the root does not
+    /// contain it.
+    pub fn below_root<'p>(&self, path: &'p Path) -> Option<Vec<&'p [u8]>> {
+        let names = |rest: &mut dyn Iterator<Item = Component<'p>>| -> Option<Vec<&'p [u8]>> {
+            let mut out = Vec::new();
+            for component in rest {
+                match component {
+                    Component::Normal(name) => out.push(name.as_bytes()),
+                    Component::CurDir => {}
+                    _ => return None,
+                }
+            }
+            Some(out)
+        };
+        if let Ok(rel) = path.strip_prefix(&self.root) {
+            return names(&mut rel.components());
+        }
+        let fold = match self.fold_of(0) {
+            Ok(fold) => fold?,
+            Err(e) => {
+                self.fail(&e);
+                return None;
+            }
+        };
+        let mut asked = path.components();
+        for root in self.root.components() {
+            let given = asked.next()?;
+            let same = root == given
+                || fold.apply(root.as_os_str().as_bytes())
+                    == fold.apply(given.as_os_str().as_bytes());
+            if !same {
+                return None;
+            }
+        }
+        names(&mut asked)
+    }
+
+    /// Whether the scan read the entry `id`: not a directory it listed but
+    /// kept out of (an exclude, a cache rule), could not read, or a mount
+    /// point it did not enter.
+    pub fn entered(&self, id: u32) -> bool {
         let skipped = self
             .db
             .query_row(
@@ -432,7 +476,13 @@ impl Index {
                 return false;
             }
         }
-        let path = path.as_os_str().as_bytes();
+        // Its path as the scan stored it, which a mount point is spelt as.
+        let mut path = self.root.as_os_str().as_bytes().to_vec();
+        let rel = self.path(id);
+        if !rel.is_empty() {
+            path.push(b'/');
+            path.extend_from_slice(&rel);
+        }
         !self
             .volumes()
             .iter()
@@ -647,8 +697,10 @@ impl Fold {
                 } else {
                     text.to_owned()
                 };
+                // Each character's own lower case, not str::to_lowercase,
+                // which spells a final sigma differently.
                 if self.case {
-                    text = text.to_lowercase();
+                    text = text.chars().flat_map(char::to_lowercase).collect();
                 }
                 Cow::Owned(text.into_bytes())
             }
