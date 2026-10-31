@@ -1,17 +1,18 @@
-//! The list verbs: `top`, `tree`, `by-type`, `stale`, and the rows `scan`
-//! prints. Each turns its flags into a query of `duscope_core::query`, runs
-//! it on its source (a saved scan, or a scan run for it), and writes the
-//! envelope.
+//! The list verbs: `top`, `tree`, `by-type`, `stale`, `caches`, and the
+//! rows `scan` prints. Each turns its flags into a query of
+//! `duscope_core::query`, runs it on its source (a saved scan, or a scan
+//! run for it), and writes the envelope.
 
 use std::path::Path;
 
 use duscope_core::CoreError;
 use duscope_core::envelope::{
-    ByTypeEntry, Envelope, QueryBlock, SCHEMA_VERSION, StaleEntry, Tool, TopEntry, Warning,
+    ByTypeEntry, CacheEntry, Envelope, ProjectEntry, QueryBlock, SCHEMA_VERSION, StaleEntry, Tool,
+    TopEntry, Warning,
 };
 use duscope_core::query::{
-    self, ByTypeQuery, DEFAULT_MIN_SIZE, Filters, Page, Regex, SizeKind, StaleQuery, TimeField,
-    TopQuery, TreeQuery, timegrammar,
+    self, ByTypeQuery, CachesQuery, DEFAULT_MIN_SIZE, Filters, Page, Regex, SizeKind, StaleQuery,
+    TimeField, TopQuery, TreeQuery, timegrammar,
 };
 use duscope_core::rules::Classes;
 use duscope_walk::VolumeInfo;
@@ -20,10 +21,10 @@ use super::scan;
 use super::source::{self, Source, core_failure};
 use super::{Exit, Failure};
 use crate::cli::{
-    ByTypeArgs, KindArg, QueryArgs, ScanArgs, SortKey, StaleArgs, TimeField as TimeArg, TopArgs,
-    TreeArgs, WalkArgs,
+    ByTypeArgs, CachesArgs, KindArg, QueryArgs, ScanArgs, SortKey, StaleArgs, TimeField as TimeArg,
+    TopArgs, TreeArgs, WalkArgs,
 };
-use crate::out::{Format, Output};
+use crate::out::{Format, Output, Row};
 
 /// `--limit`'s default, and its cap without `--format ndjson` (which
 /// streams every row).
@@ -327,6 +328,77 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
     source.check()?;
     output.list(&envelope, &footer)?;
     source.finish(&args.walk, output)
+}
+
+/// `caches`: each cache by default, each project's with `--by-project`.
+pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    let rules = scan::cache_rules(args.walk.caches_extra.as_deref())?;
+    limit(Some(&args.query), output)?;
+    let source = source::source(&args.walk, &args.index, index_dir)?;
+    let mut prepared = prepare(
+        source,
+        &args.walk,
+        Some(&args.query),
+        output,
+        DepthUse::Filters,
+        false,
+    )?;
+    // --min-size is the query's own, with its default; by project, it is a
+    // project's total.
+    let min_size = prepared
+        .filters
+        .min_size
+        .take()
+        .unwrap_or(query::caches::DEFAULT_MIN_SIZE);
+    let given = &mut prepared.filters.given;
+    given.retain(|g| !g.starts_with("--min-size="));
+    given.insert(0, format!("--min-size={min_size}"));
+    if args.loose {
+        given.push("--loose".to_owned());
+    }
+    let source = &prepared.source;
+    let holds = |dir: &Path, name: &str| source.holds_file(dir, name);
+    let q = CachesQuery {
+        caches: &rules,
+        above: &holds,
+        loose: args.loose,
+        min_size,
+        filters: prepared.filters.clone(),
+        sort: prepared.sort,
+        reverse: prepared.reverse,
+        limit: prepared.limit,
+        size: prepared.size,
+    };
+    if args.by_project {
+        let page: Page<ProjectEntry> = query::projects(&*source.view(), &q);
+        write(
+            prepared,
+            &args.walk,
+            "caches --by-project",
+            &args.query,
+            page,
+            output,
+        )
+    } else {
+        let page: Page<CacheEntry> = query::caches(&*source.view(), &q);
+        write(prepared, &args.walk, "caches", &args.query, page, output)
+    }
+}
+
+/// Writes a verb's page as its envelope, and saves a scan run for it.
+fn write<T: Row>(
+    prepared: Prepared,
+    walk: &WalkArgs,
+    verb: &'static str,
+    query: &QueryArgs,
+    page: Page<T>,
+    output: &Output,
+) -> Result<(), Failure> {
+    let (envelope, footer, source) =
+        envelope(prepared, walk, verb, query.depth, page, Vec::new(), output);
+    source.check()?;
+    output.list(&envelope, &footer)?;
+    source.finish(walk, output)
 }
 
 /// Scans' common preparation: the size kind, now, the filters, the limit

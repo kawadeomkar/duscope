@@ -121,6 +121,8 @@ pub enum Verb {
     ByType(ByTypeArgs),
     /// Large files not modified (or accessed) since a date
     Stale(StaleArgs),
+    /// Regenerable caches (node_modules, target, .venv, …) and their projects
+    Caches(CachesArgs),
     /// Facts about one path: links, clones, what deleting it frees, caches, git
     Explain(ExplainArgs),
     /// List, prune or check the saved scans
@@ -511,6 +513,25 @@ pub struct StaleArgs {
     pub atime: bool,
 }
 
+/// `caches`' flags.
+#[derive(Debug, Clone, Args)]
+pub struct CachesArgs {
+    #[command(flatten)]
+    pub walk: WalkArgs,
+    #[command(flatten)]
+    pub query: QueryArgs,
+    #[command(flatten)]
+    pub index: IndexArgs,
+
+    /// One row per project: the directory holding the caches' marker
+    #[arg(long, help_heading = "Caches")]
+    pub by_project: bool,
+
+    /// Also list a cache's name without the marker that confirms it
+    #[arg(long, help_heading = "Caches")]
+    pub loose: bool,
+}
+
 /// `--size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SizeKind {
@@ -712,6 +733,10 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             }
         }
         Some(Verb::Stale(args)) => {
+            walk_defaults(&mut args.walk)?;
+            query_defaults(&mut args.query, &mut args.index);
+        }
+        Some(Verb::Caches(args)) => {
             walk_defaults(&mut args.walk)?;
             query_defaults(&mut args.query, &mut args.index);
         }
