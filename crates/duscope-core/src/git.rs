@@ -2,10 +2,13 @@
 //! path is ignored there (and precious, git's `$`-prefixed ignore syntax),
 //! and whether any tracked file lies at or under it.
 //!
-//! The ignore files are those git reads: the repository's `info/exclude`,
-//! the user's global file (`$XDG_CONFIG_HOME/git/ignore`), and each
-//! `.gitignore` from the repository's root down to the path. A directory git
-//! ignores hides everything under it, as git does not look inside. The
+//! The ignore files are those git reads: the repository's `info/exclude`
+//! (the common directory's, for a linked worktree), `core.excludesFile` from
+//! the repository's or the user's configuration (else git's default,
+//! `$XDG_CONFIG_HOME/git/ignore`), and each `.gitignore` from the
+//! repository's root down to the path, compared without case when
+//! `core.ignoreCase` is set. A directory git ignores hides everything under
+//! it, as git does not look inside. The
 //! repository's index file is read only when a repository is found, so a
 //! path outside one never reaches `gix-index`.
 
@@ -61,6 +64,11 @@ pub fn facts(
         return Ok(None);
     };
     let git_dir = git_dir(&root)?;
+    // A linked worktree keeps its own index; the shared exclude file and
+    // configuration are in the common directory.
+    let common = std::fs::read_to_string(git_dir.join("commondir"))
+        .map_or_else(|_| git_dir.clone(), |named| git_dir.join(named.trim()));
+    let config = Config::read(&common, &env);
     let rel: Vec<&[u8]> = path
         .strip_prefix(&root)
         .map_err(|e| e.to_string())?
@@ -70,8 +78,8 @@ pub fn facts(
             _ => None,
         })
         .collect();
-    let (ignored, precious) = ignored(&root, &git_dir, &rel, is_dir, &env)?;
-    let tracked_inside = tracked_inside(&git_dir, &rel)?;
+    let (ignored, precious) = ignored(&root, &common, &config, &rel, is_dir)?;
+    let tracked_inside = tracked_inside(&git_dir, &config, &rel)?;
     Ok(Some(GitFacts {
         repo_root: root,
         ignored,
@@ -97,25 +105,97 @@ fn git_dir(root: &Path) -> Result<PathBuf, String> {
     Ok(root.join(named))
 }
 
+/// What git's configuration says that these facts read: the ignore file
+/// beside `info/exclude`, whether names compare without case, and the
+/// object format.
+#[derive(Debug, Default)]
+struct Config {
+    excludes_file: Option<PathBuf>,
+    ignore_case: bool,
+    sha256: bool,
+}
+
+impl Config {
+    /// The repository's configuration (in its common directory), then the
+    /// user's (`$XDG_CONFIG_HOME/git/config`, `~/.gitconfig`), the
+    /// repository's winning; the excludes file defaults to
+    /// `$XDG_CONFIG_HOME/git/ignore`.
+    fn read(common: &Path, env: &impl Fn(&str) -> Option<OsString>) -> Config {
+        let home = env("HOME").filter(|v| !v.is_empty()).map(PathBuf::from);
+        let xdg = env("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|h| h.join(".config")));
+        let read = |file: Option<PathBuf>| file.and_then(|f| std::fs::read_to_string(f).ok());
+        let repo = read(Some(common.join("config"))).unwrap_or_default();
+        let user = [
+            read(home.as_ref().map(|h| h.join(".gitconfig"))),
+            read(xdg.as_ref().map(|x| x.join("git").join("config"))),
+        ];
+        let value = |key: &str| {
+            core_value(&repo, key)
+                .or_else(|| user.iter().flatten().find_map(|t| core_value(t, key)))
+        };
+        let expand = |path: String| match (path.strip_prefix("~/"), &home) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ => PathBuf::from(path),
+        };
+        Config {
+            excludes_file: value("excludesfile")
+                .map(expand)
+                .or_else(|| xdg.map(|x| x.join("git").join("ignore"))),
+            ignore_case: value("ignorecase").is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            sha256: repo.lines().any(|line| {
+                let line: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+                line.eq_ignore_ascii_case("objectformat=sha256")
+            }),
+        }
+    }
+}
+
+/// `key` (lower case) in the `[core]` section of a git configuration file.
+fn core_value(text: &str, key: &str) -> Option<String> {
+    let mut core = false;
+    let mut found = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            core = line
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .eq_ignore_ascii_case("core");
+            continue;
+        }
+        if let (true, Some((name, value))) = (core, line.split_once('='))
+            && name.trim().eq_ignore_ascii_case(key)
+        {
+            found = Some(value.trim().trim_matches('"').to_owned());
+        }
+    }
+    found
+}
+
 /// Whether the path at `rel` below `root` is ignored, and precious.
 fn ignored(
     root: &Path,
-    git_dir: &Path,
+    common: &Path,
+    config: &Config,
     rel: &[&[u8]],
     is_dir: bool,
-    env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<(bool, bool), String> {
     let parse = Ignore {
         support_precious: true,
     };
-    let global = env("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|config| config.join("git").join("ignore"));
     let mut buf = Vec::new();
-    let mut search = gix_ignore::Search::from_git_dir(git_dir, global, &mut buf, parse)
-        .map_err(|e| format!("{}: {e}", git_dir.display()))?;
+    let mut search =
+        gix_ignore::Search::from_git_dir(common, config.excludes_file.clone(), &mut buf, parse)
+            .map_err(|e| format!("{}: {e}", common.display()))?;
+    let case = if config.ignore_case {
+        Case::Fold
+    } else {
+        Case::Sensitive
+    };
     // Each .gitignore from the root down to the path's directory.
     let mut dir = root.to_owned();
     let dirs = rel.len().saturating_sub(usize::from(!is_dir));
@@ -143,7 +223,7 @@ fn ignored(
         let matched = search.pattern_matching_relative_path(
             prefix.as_slice().into(),
             Some(!last || is_dir),
-            Case::Sensitive,
+            case,
         );
         if let Some(m) = matched.filter(|m| !m.pattern.is_negative()) {
             return Ok((true, m.kind == gix_ignore::Kind::Precious));
@@ -153,18 +233,13 @@ fn ignored(
 }
 
 /// Whether the repository's index tracks a file at or under `rel`.
-fn tracked_inside(git_dir: &Path, rel: &[&[u8]]) -> Result<bool, String> {
+fn tracked_inside(git_dir: &Path, config: &Config, rel: &[&[u8]]) -> Result<bool, String> {
     let file = git_dir.join("index");
     if !file.exists() {
         return Ok(false);
     }
     // SHA-256 repositories say so in their configuration.
-    let config = std::fs::read_to_string(git_dir.join("config")).unwrap_or_default();
-    let sha256 = config
-        .lines()
-        .map(|l| l.replace(' ', "").to_ascii_lowercase())
-        .any(|l| l == "objectformat=sha256");
-    let kind = if sha256 {
+    let kind = if config.sha256 {
         gix_index::hash::Kind::Sha256
     } else {
         gix_index::hash::Kind::Sha1
@@ -181,4 +256,46 @@ fn tracked_inside(git_dir: &Path, rel: &[&[u8]]) -> Result<bool, String> {
                 .strip_prefix(prefix.as_slice())
                 .is_some_and(|rest| rest.first() == Some(&b'/'))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::fs;
+
+    use duscope_testkit::TestEnv;
+
+    use super::{Config, core_value};
+
+    #[test]
+    fn p2_qry_04_git_config_is_read_as_git_writes_it() {
+        let text = "[core]\n\trepositoryformatversion = 1\n\tignorecase = true\n\
+                    \texcludesFile = \"~/ignores\"\n[extensions]\n\tobjectformat = sha256\n";
+        assert_eq!(core_value(text, "ignorecase").as_deref(), Some("true"));
+        assert_eq!(
+            core_value(text, "excludesfile").as_deref(),
+            Some("~/ignores")
+        );
+        assert_eq!(core_value(text, "objectformat"), None);
+        let env = TestEnv::new();
+        let common = env.tmp_dir().join("git");
+        fs::create_dir_all(&common).unwrap();
+        fs::write(common.join("config"), text).unwrap();
+        let home = env.home();
+        let vars = |name: &str| match name {
+            "HOME" => Some(OsString::from(&home)),
+            _ => None,
+        };
+        let config = Config::read(&common, &vars);
+        assert!(config.sha256 && config.ignore_case);
+        assert_eq!(config.excludes_file, Some(home.join("ignores")));
+        // Without a setting, git's default global file.
+        fs::write(common.join("config"), "[core]\n\tbare = false\n").unwrap();
+        let config = Config::read(&common, &vars);
+        assert!(!config.sha256 && !config.ignore_case);
+        assert_eq!(
+            config.excludes_file,
+            Some(home.join(".config").join("git").join("ignore"))
+        );
+    }
 }
