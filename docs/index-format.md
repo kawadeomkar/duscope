@@ -257,7 +257,7 @@ stays 0.
 | `started_at` | INTEGER | when the scan started |
 | `finished_at` | INTEGER | when it finished |
 | `attrs` | TEXT | `basic`, or `full` when the scan collected `atime`, `btime`, `mode`, `uid` and `gid` |
-| `options` | TEXT | the scan's options as JSON: `clones`, `one_file_system`, `include_network`, `follow_symlinks`, `excludes`, `ignore_files`, `threads`, `size_kind`; a rescan reuses them |
+| `options` | TEXT | the scan's options as JSON: `clones`, `one_file_system`, `include_network`, `follow_symlinks`, `excludes`, `exclude_files`, `ignore_files`, `threads`, `size_kind`; a rescan reuses them |
 | `platform` | TEXT | the operating system and its kernel or Darwin version |
 | `scanning_uid` | INTEGER | the user id the scan ran as |
 | `size_kind` | TEXT | the size output shows by default, `allocated` or `apparent`; both are stored |

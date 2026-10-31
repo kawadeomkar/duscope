@@ -4,11 +4,10 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # Stripped release binary budget in bytes: the larger of the two release targets
 # CI holds to it, measured plus 10% (P1-REL-01), and again with the bundled
-# SQLite (P2-IDX-02, DEV-66). Run 41166622315 measured x86_64 musl at 6,389,632
-# bytes (mimalloc and SQLite at -O3) and arm64 macOS at 5,010,896 (4,615,008 with
-# SQLite at -Os); plus 10% is 7,028,595, so 7.03 MB. The spec's ceiling stays
-# 8 MB.
-size_budget := "7030000"
+# SQLite at -O1 (P2-IDX-02, DEV-66). Run 41236633872 measured x86_64 musl at
+# 5,889,920 bytes and arm64 macOS at 4,878,880; plus 10% is 6,478,912, so
+# 6.48 MB. The spec's ceiling stays 8 MB.
+size_budget := "6480000"
 
 # Developer tools installed by `just setup`, mirrored in CONTRIBUTING.md.
 cargo_deny_version := "0.20.2"
