@@ -2,7 +2,7 @@
 //! it (or `--scan`), else from a fresh `stat`; and with `--errors`, what a
 //! saved scan could not read.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use duscope_core::envelope::{
     Envelope, Explain, ObjectEnvelope, ObjectQuery, QueryBlock, SCHEMA_VERSION, ScanErrorEntry,
@@ -10,8 +10,8 @@ use duscope_core::envelope::{
 };
 use duscope_core::index::Index;
 use duscope_core::query::{
-    ExplainQuery, ScanQuery, ScanSelector, SizeKind, abs_path, clock, explain, explain_unindexed,
-    resolve_scan, timegrammar,
+    ExplainQuery, Resolved, ScanQuery, ScanSelector, SizeKind, abs_path, clock, explain,
+    explain_unindexed, resolve_scan, timegrammar,
 };
 use duscope_core::resolve::resolve_path;
 
@@ -23,48 +23,98 @@ use crate::out::{Output, thousands};
 /// `--max-age` when neither the flag nor the configuration sets it.
 const DEFAULT_MAX_AGE: &str = "7d";
 
-/// `explain`.
-pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
-    let max_age = args.max_age.as_deref().unwrap_or(DEFAULT_MAX_AGE);
-    let max_age_ns = timegrammar::parse_age(max_age)
-        .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--max-age {e}")))?;
-    let now = match &args.test_now {
-        Some(text) => timegrammar::parse_date(text)
-            .map(|date| date.ns)
-            .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--test-now {e}")))?,
-        None => clock::now(),
-    };
-    let cwd = std::env::current_dir().map_err(|e| {
-        Failure::new(
-            Exit::Runtime,
-            "io_error",
-            format!("cannot read the working directory: {e}"),
-        )
-    })?;
-    let dir = index_dir
-        .map(Path::to_owned)
-        .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)));
-    let lookup_dir = dir.clone().unwrap_or_else(|| cwd.clone());
-    if let Some(selector) = &args.errors {
-        let selector = ScanSelector::parse(selector).map_err(core_failure)?;
-        let q = ScanQuery {
-            index_dir: &lookup_dir,
-            path: None,
-            cwd: &cwd,
+/// What both forms of `explain` resolve a saved scan with.
+struct Lookup {
+    max_age: String,
+    max_age_ns: i64,
+    now: i64,
+    cwd: PathBuf,
+    /// The index directory, when one can be found.
+    dir: Option<PathBuf>,
+}
+
+impl Lookup {
+    fn new(args: &ExplainArgs, index_dir: Option<&Path>) -> Result<Lookup, Failure> {
+        let max_age = args
+            .max_age
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MAX_AGE.to_owned());
+        let max_age_ns = timegrammar::parse_age(&max_age)
+            .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--max-age {e}")))?;
+        let now = match &args.test_now {
+            Some(text) => timegrammar::parse_date(text)
+                .map(|date| date.ns)
+                .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--test-now {e}")))?,
+            None => clock::now(),
+        };
+        let cwd = std::env::current_dir().map_err(|e| {
+            Failure::new(
+                Exit::Runtime,
+                "io_error",
+                format!("cannot read the working directory: {e}"),
+            )
+        })?;
+        let dir = index_dir
+            .map(Path::to_owned)
+            .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)));
+        Ok(Lookup {
+            max_age,
             max_age_ns,
             now,
+            cwd,
+            dir,
+        })
+    }
+
+    /// The saved scan `selector` names for `path`: `None` when latest finds
+    /// none. Without an index directory latest has nothing to find and a
+    /// prefix nowhere to look; an index file needs none.
+    fn resolve(
+        &self,
+        selector: &ScanSelector,
+        path: Option<&Path>,
+    ) -> Result<Option<Resolved>, Failure> {
+        let dir = match (&self.dir, selector) {
+            (Some(dir), _) => dir.as_path(),
+            (None, ScanSelector::File(_)) => self.cwd.as_path(),
+            (None, ScanSelector::Latest) => return Ok(None),
+            (None, ScanSelector::Prefix(_)) => {
+                return Err(Failure::new(
+                    Exit::NotFound,
+                    "scan_not_found",
+                    "no index directory to look for the scan in: neither HOME nor \
+                     XDG_CACHE_HOME is set",
+                )
+                .hint("Run duscope with --index-dir naming the directory the scans are in"));
+            }
         };
-        let Some(resolved) = resolve_scan(&selector, &q, |_| true).map_err(core_failure)? else {
+        let q = ScanQuery {
+            index_dir: dir,
+            path,
+            cwd: &self.cwd,
+            max_age_ns: self.max_age_ns,
+            now: self.now,
+        };
+        resolve_scan(selector, &q, |_| true).map_err(core_failure)
+    }
+}
+
+/// `explain`.
+pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    let lookup = Lookup::new(args, index_dir)?;
+    if let Some(selector) = &args.errors {
+        let selector = ScanSelector::parse(selector).map_err(core_failure)?;
+        let Some(resolved) = lookup.resolve(&selector, None)? else {
             return Err(Failure::new(
                 Exit::NotFound,
                 "scan_not_found",
-                format!("no saved scan holds {}", cwd.display()),
+                format!("no saved scan holds {}", lookup.cwd.display()),
             )
             .hint("Run duscope scans to list the saved scans"));
         };
         return errors(&resolved.index, output);
     }
-    let path = resolve_path(&cwd, args.path.as_deref().unwrap_or(Path::new("."))).real;
+    let path = unresolved_last(&lookup.cwd, args.path.as_deref().unwrap_or(Path::new(".")));
     let selector = match &args.scan {
         Some(text) => ScanSelector::parse(text).map_err(core_failure)?,
         None => ScanSelector::Latest,
@@ -75,26 +125,12 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
         caches: &caches,
         env: &env,
     };
-    // Without an index directory, latest has nothing to find; a prefix or a
-    // file still names one.
-    let resolved = if dir.is_none() && selector == ScanSelector::Latest {
-        None
-    } else {
-        let sq = ScanQuery {
-            index_dir: &lookup_dir,
-            path: Some(&path),
-            cwd: &cwd,
-            max_age_ns,
-            now,
-        };
-        resolve_scan(&selector, &sq, |_| true).map_err(core_failure)?
-    };
-    let (scan, result, warnings) = match resolved {
+    let (scan, result, warnings) = match lookup.resolve(&selector, Some(&path))? {
         Some(r) => {
             let facts = explain(&r.index, r.base, &q).map_err(core_failure)?;
             let warnings = r
                 .stale
-                .then(|| stale_index(&r.index, max_age))
+                .then(|| stale_index(&r.index, &lookup.max_age))
                 .into_iter()
                 .collect();
             let size = if r.index.meta().size_kind == "apparent" {
@@ -125,6 +161,17 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
     };
     let lines = people(&envelope.result, output);
     output.object(&envelope, &plain(&envelope.result), &lines)
+}
+
+/// `given`, absolute, with every symbolic link above its last component
+/// resolved and the last one kept: `explain` speaks of a link, not of what
+/// it leads to.
+fn unresolved_last(cwd: &Path, given: &Path) -> PathBuf {
+    let absolute: PathBuf = cwd.join(given).components().collect();
+    match (absolute.parent(), absolute.file_name()) {
+        (Some(parent), Some(name)) => resolve_path(cwd, parent).real.join(name),
+        _ => resolve_path(cwd, given).real,
+    }
 }
 
 /// The facts for people: one line each, name and value.
@@ -242,7 +289,9 @@ fn errors(index: &Index, output: &Output) -> Result<(), Failure> {
             let mut path = abs_path(index, id);
             let kind = match name {
                 Some(name) => {
-                    path.push(b'/');
+                    if path.last() != Some(&b'/') {
+                        path.push(b'/');
+                    }
                     path.extend_from_slice(&name);
                     "entry"
                 }
