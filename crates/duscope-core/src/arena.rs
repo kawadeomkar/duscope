@@ -39,7 +39,7 @@ impl EntryIdx {
     }
 
     /// The index with this number.
-    pub(crate) const fn from_raw(raw: u32) -> EntryIdx {
+    pub const fn from_raw(raw: u32) -> EntryIdx {
         EntryIdx(raw)
     }
 }

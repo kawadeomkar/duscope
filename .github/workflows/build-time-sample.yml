@@ -1,7 +1,6 @@
-# Temporary, on this branch only (never merged): the build-time job's cold
-# release build on the shared ubuntu-24.04 runners with the bundled SQLite
-# compiled at -O3 (cc's default for the release profile), -O2 and -Os, with
-# cargo's timings to show the critical path (P2-IDX-02).
+# Temporary, on this branch only (never merged): cold release builds of main
+# (cc06004, the index in duscope-core) and of a spike with the index in its own
+# crate, on the shared ubuntu-24.04 runners, with cargo's timings per unit.
 name: Build-time sample (temporary)
 
 on:
@@ -16,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        opt: [O3, O2, Os]
+        variant: [main-Os, split-Os, split-O3]
         n: [1, 2, 3, 4, 5]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -24,17 +23,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ startsWith(matrix.variant, 'main') && 'cc06004f458a66cc9343998d452cee3ccbd7da49' || 'cef1ede5d0bba743a6a5fc0e3dc210e6f6b023c3' }}
       - name: Install the pinned toolchain
         run: rustup toolchain install --profile minimal && rustc --version
       - name: Fetch dependencies (not timed)
         run: cargo fetch --locked
       - name: Two cold release builds
         env:
-          OPT: ${{ matrix.opt }}
+          VARIANT: ${{ matrix.variant }}
         run: |
-          # The host target's C flags reach SQLite alone: mimalloc is built
-          # for musl only.
-          if [[ $OPT != O3 ]]; then export CFLAGS_x86_64_unknown_linux_gnu="-$OPT"; fi
+          # .cargo/config.toml sets -Os for this target; the environment wins.
+          if [[ $VARIANT == *-O3 ]]; then export CFLAGS_x86_64_unknown_linux_gnu="-O3"; fi
           cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n1)
           for i in 1 2; do
             cargo clean
@@ -42,14 +41,19 @@ jobs:
             cargo build --release --locked --offline -p duscope --timings
             end=$(date +%s.%N)
             secs=$(awk -v s="$start" -v e="$end" 'BEGIN { printf "%.1f", e - s }')
-            sqlite=$(python3 - <<'PY'
+            units=$(python3 - <<'PY'
           import json, re, glob
           html = open(sorted(glob.glob("target/cargo-timings/cargo-timing*.html"))[-1]).read()
           data = json.loads(re.search(r"const UNIT_DATA = (\[.*?\]);", html, re.S).group(1))
-          run = [u for u in data if u["name"] == "libsqlite3-sys" and "run" in u.get("target", "")]
-          print(f'{run[0]["duration"]:.1f}' if run else "?")
+          want = ["libsqlite3-sys", "rusqlite", "duscope-walk", "duscope-core", "duscope-index", "duscope-treemap", "duscope-tui", "duscope-mcp", "duscope"]
+          out = []
+          for name in want:
+              for u in data:
+                  if u["name"] == name and (name != "libsqlite3-sys" or "run" in u.get("target", "")) and "build script" not in u.get("target", "").replace("(run)", ""):
+                      out.append(f'{name}={u["start"]:.1f}+{u["duration"]:.1f}')
+                      break
+          print(" ".join(out))
           PY
             )
-            size=$(stat -c %s target/release/duscope)
-            echo "SAMPLE ${OPT} ${secs} sqlite-build-script ${sqlite} size ${size} | ${cpu} | $(nproc)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "SAMPLE ${VARIANT} ${secs} | ${cpu} | ${units}" | tee -a "$GITHUB_STEP_SUMMARY"
           done

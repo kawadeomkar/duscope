@@ -18,6 +18,7 @@ include = ["/src", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 # The workspace crates, in publish order: each depends only on crates above it.
 duscope-walk = { path = "crates/duscope-walk", version = "0.1.0" }
 duscope-core = { path = "crates/duscope-core", version = "0.1.0" }
+duscope-index = { path = "crates/duscope-index", version = "0.1.0" }
 duscope-treemap = { path = "crates/duscope-treemap", version = "0.1.0" }
 duscope-tui = { path = "crates/duscope-tui", version = "0.1.0" }
 duscope-mcp = { path = "crates/duscope-mcp", version = "0.1.0" }

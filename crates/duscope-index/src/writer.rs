@@ -18,13 +18,14 @@ use std::path::{Path, PathBuf};
 use duscope_walk::{Attrs, Boundary, DirId, Skip};
 use rusqlite::{Connection, Statement, Transaction, params};
 
-use super::scanid::ScanId;
-use super::schema_parts;
-use crate::CoreError;
-use crate::arena::{Arena, EntryIdx};
-use crate::query::kind_name;
-use crate::rollup::RollUp;
-use crate::rules::ext;
+use duscope_core::CoreError;
+use duscope_core::arena::{Arena, EntryIdx};
+use duscope_core::index::schema_parts;
+use duscope_core::query::kind_name;
+use duscope_core::rollup::RollUp;
+use duscope_core::rules::ext;
+
+use crate::scanid::ScanId;
 
 /// Flag bit 8 of `dirs.flags`: the directory is a firmlink into the Data
 /// volume (`boundary = firmlink`), beside the eight bits of `Flags`

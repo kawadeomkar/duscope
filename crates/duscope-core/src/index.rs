@@ -4,14 +4,9 @@
 //! The DDL is `schemas/index/v2.sql`, copied byte for byte into
 //! `index/schema.sql` so the published crate carries it.
 
-pub mod scanid;
-pub mod writer;
-
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub use scanid::{ScanId, random_bytes};
-pub use writer::{FIRMLINK, IndexWriter, ScanMeta, index_path};
 
 /// The index version this build writes and reads: major.minor, apart from the
 /// envelope's `schema_version`. A reader opens every minor of its major.
