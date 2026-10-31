@@ -15,7 +15,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use duscope_walk::{Attrs, Boundary, DirId, Skip};
+use duscope_walk::{Attrs, Boundary, DirId, FullAttrs, Skip};
 use rusqlite::{Connection, Statement, Transaction, params};
 
 use super::scanid::ScanId;
@@ -348,7 +348,6 @@ fn entry_rows(
             let flags = dir_flags(arena, dir, view.flags.bits(), firmlink);
             let rec = arena.dir(dir);
             let name = if id == 0 { &meta.root[..] } else { view.name };
-            let full = arena.full(idx);
             insert_dir(
                 &mut dir_row,
                 &DirRow {
@@ -371,11 +370,7 @@ fn entry_rows(
                     dev,
                     flags,
                     errors: arena.unreadable().get(&dir).copied(),
-                    atime: full.map(|f| f.atime_ns),
-                    btime: full.and_then(|f| f.btime_ns),
-                    mode: full.map(|f| f.mode),
-                    uid: full.map(|f| f.uid),
-                    gid: full.map(|f| f.gid),
+                    full: arena.full(idx),
                 },
             )?;
             continue;
@@ -471,11 +466,8 @@ struct DirRow<'a> {
     dev: u64,
     flags: u32,
     errors: Option<i32>,
-    atime: Option<i64>,
-    btime: Option<i64>,
-    mode: Option<u32>,
-    uid: Option<u32>,
-    gid: Option<u32>,
+    /// The attributes `--attrs full` collected.
+    full: Option<FullAttrs>,
 }
 
 fn insert_dir(stmt: &mut Statement<'_>, r: &DirRow<'_>) -> rusqlite::Result<usize> {
@@ -499,11 +491,11 @@ fn insert_dir(stmt: &mut Statement<'_>, r: &DirRow<'_>) -> rusqlite::Result<usiz
         signed(r.dev),
         r.flags,
         r.errors,
-        r.atime,
-        r.btime,
-        r.mode,
-        r.uid,
-        r.gid,
+        r.full.map(|f| f.atime_ns),
+        r.full.and_then(|f| f.btime_ns),
+        r.full.map(|f| f.mode),
+        r.full.map(|f| f.uid),
+        r.full.map(|f| f.gid),
     ])
 }
 

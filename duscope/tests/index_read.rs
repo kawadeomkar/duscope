@@ -653,3 +653,159 @@ fn p2_idx_03_a_save_that_fails_after_the_output_exits_1() {
         .unwrap();
     assert!(out.status.success());
 }
+
+fn platform_tests() -> bool {
+    let on = std::env::var_os("DUSCOPE_TEST_PLATFORM").is_some_and(|v| v == "1");
+    if !on {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+    }
+    on
+}
+
+/// Runs a command of the test environment, failing the test on an error.
+fn system(env: &TestEnv, program: &str, args: &[&dyn AsRef<std::ffi::OsStr>]) {
+    let out = env.command(program).args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{program} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Unmounts the image a test mounted, however the test ends.
+struct Mounted<'a> {
+    env: &'a TestEnv,
+    point: PathBuf,
+}
+
+impl Drop for Mounted<'_> {
+    fn drop(&mut self) {
+        let mut cmd = if cfg!(target_os = "macos") {
+            let mut cmd = self.env.command("hdiutil");
+            cmd.args(["detach", "-force"]);
+            cmd
+        } else {
+            self.env.command("umount")
+        };
+        let _ = cmd.arg(&self.point).output();
+    }
+}
+
+/// Saves a scan of `mount`, then asks `top` about `asked`, another spelling
+/// of an entry under it: the saved scan answers, so `asked` resolved in it.
+fn saved_scan_answers(env: &TestEnv, mount: &Path, asked: &Path) {
+    let saved_scan = ok(&run(
+        env,
+        &["scan", mount.to_str().unwrap(), "--save", "--json"],
+    ));
+    let read = ok(&run(
+        env,
+        &["top", asked.to_str().unwrap(), "--json", "--files"],
+    ));
+    assert_eq!(
+        read["scan"]["id"],
+        saved_scan["scan"]["id"],
+        "{}",
+        asked.display()
+    );
+    assert_eq!(read["entries"].as_array().unwrap().len(), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts an exFAT image; DUSCOPE_TEST_PLATFORM=1, as root"]
+fn p2_qry_01_linux_an_exfat_image_folds_case() {
+    let env = TestEnv::new();
+    if !platform_tests() {
+        return;
+    }
+    let work = env.tmp_dir().join("exfat");
+    let mount = work.join("mnt");
+    fs::create_dir_all(&mount).unwrap();
+    let image = work.join("exfat.img");
+    system(&env, "truncate", &[&"-s", &"16M", &image]);
+    system(&env, "mkfs.exfat", &[&image]);
+    system(&env, "mount", &[&"-o", &"loop", &image, &mount]);
+    let _mounted = Mounted {
+        env: &env,
+        point: mount.clone(),
+    };
+    fs::create_dir_all(mount.join("Photos")).unwrap();
+    fs::write(mount.join("Photos/Beach.JPG"), vec![1u8; 9000]).unwrap();
+    saved_scan_answers(&env, &mount, &mount.join("PHOTOS"));
+}
+
+/// Attaches a 16 MiB image of `fs` at `mount`.
+#[cfg(target_os = "macos")]
+fn attach<'a>(env: &'a TestEnv, fs: &str, work: &Path, mount: &Path) -> Mounted<'a> {
+    let image = work.join("image.dmg");
+    system(
+        env,
+        "hdiutil",
+        &[
+            &"create",
+            &"-quiet",
+            &"-size",
+            &"16m",
+            &"-fs",
+            &fs,
+            &"-volname",
+            &"DUSCOPE",
+            &image,
+        ],
+    );
+    system(
+        env,
+        "hdiutil",
+        &[
+            &"attach",
+            &"-quiet",
+            &"-nobrowse",
+            &"-mountpoint",
+            &mount,
+            &image,
+        ],
+    );
+    Mounted {
+        env,
+        point: mount.to_owned(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
+fn p2_qry_01_macos_an_exfat_image_folds_case() {
+    let env = TestEnv::new();
+    if !platform_tests() {
+        return;
+    }
+    let work = env.tmp_dir().join("exfat");
+    let mount = work.join("mnt");
+    fs::create_dir_all(&mount).unwrap();
+    let _mounted = attach(&env, "ExFAT", &work, &mount);
+    fs::create_dir_all(mount.join("Photos")).unwrap();
+    fs::write(mount.join("Photos/Beach.JPG"), vec![1u8; 9000]).unwrap();
+    saved_scan_answers(&env, &mount, &mount.join("PHOTOS"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
+fn p2_qry_01_macos_an_apfs_image_folds_case_and_nfc() {
+    let env = TestEnv::new();
+    if !platform_tests() {
+        return;
+    }
+    let work = env.tmp_dir().join("apfs");
+    let mount = work.join("mnt");
+    fs::create_dir_all(&mount).unwrap();
+    // APFS, not Case-sensitive APFS: case-insensitive, and a name's
+    // composed and decomposed forms are one name.
+    let _mounted = attach(&env, "APFS", &work, &mount);
+    // Stored decomposed; asked composed, and in another case.
+    let stored = mount.join("Cafe\u{301}");
+    fs::create_dir_all(&stored).unwrap();
+    fs::write(stored.join("Menu.txt"), vec![1u8; 9000]).unwrap();
+    saved_scan_answers(&env, &mount, &mount.join("CAF\u{c9}"));
+}

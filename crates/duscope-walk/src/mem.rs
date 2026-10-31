@@ -29,6 +29,10 @@ pub struct MemProvider {
     /// Every entry by its full path's bytes, which hash much faster than a
     /// `Path`'s components in a deep tree.
     nodes: HashMap<Vec<u8>, Node>,
+    /// How the volume compares names: case-sensitively, and its
+    /// normalisation.
+    case_sensitive: bool,
+    normalization: Normalization,
 }
 
 #[derive(Debug)]
@@ -55,6 +59,8 @@ impl MemProvider {
         let mut tree = MemProvider {
             root: normal(root.as_ref()),
             nodes: HashMap::new(),
+            case_sensitive: true,
+            normalization: Normalization::None,
         };
         let root = tree.root.clone();
         tree.insert(root, Kind::Dir, 0);
@@ -65,6 +71,18 @@ impl MemProvider {
     #[must_use]
     pub fn root_path(&self) -> &Path {
         &self.root
+    }
+
+    /// Makes the volume compare names as APFS or exFAT does: without case
+    /// unless `case_sensitive`, and with `normalization`.
+    pub fn compares_names(
+        &mut self,
+        case_sensitive: bool,
+        normalization: Normalization,
+    ) -> &mut MemProvider {
+        self.case_sensitive = case_sensitive;
+        self.normalization = normalization;
+        self
     }
 
     /// Adds the directory at `path`.
@@ -292,8 +310,8 @@ impl Provider for MemProvider {
             fs_type: "mem".to_owned(),
             class: VolumeClass::Local,
             read_only: false,
-            case_sensitive: Some(true),
-            normalization: Normalization::None,
+            case_sensitive: Some(self.case_sensitive),
+            normalization: self.normalization,
             options: Vec::new(),
             total_bytes: 1 << 40,
             free_bytes: 1 << 39,
