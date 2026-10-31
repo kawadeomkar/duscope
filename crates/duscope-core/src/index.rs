@@ -1,0 +1,53 @@
+//! The on-disk index: one database file per scan, written once and never
+//! edited (`docs/index-format.md`).
+//!
+//! The DDL is `schemas/index/v2.sql`, copied byte for byte into
+//! `index/schema.sql` so the published crate carries it.
+
+/// The index version this build writes and reads: major.minor, apart from the
+/// envelope's `schema_version`. A reader opens every minor of its major.
+pub const INDEX_VERSION: &str = "2.0";
+
+/// The keys of `scan_meta`, every one present in an index; the DDL writes
+/// `index_version` and the writer the others.
+pub const SCAN_META_KEYS: [&str; 22] = [
+    "index_version",
+    "scan_id",
+    "root",
+    "root_as_given",
+    "started_at",
+    "finished_at",
+    "attrs",
+    "options",
+    "platform",
+    "scanning_uid",
+    "size_kind",
+    "volume_total",
+    "volume_free",
+    "unaccounted_bytes",
+    "error_count",
+    "vanished_count",
+    "n_entries",
+    "incremental",
+    "parent_scan_id",
+    "source",
+    "tool_version",
+    "sibling_order",
+];
+
+/// The DDL of the index: the tables, the `index_version` row, then the four
+/// indexes.
+pub const SCHEMA: &str = include_str!("index/schema.sql");
+
+/// The comment line of [`SCHEMA`] that the indexes follow.
+const INDEXES_FOLLOW: &str = "-- Indexes, created after the bulk insert.\n";
+
+/// [`SCHEMA`] in two parts: the tables with the `index_version` row, and the
+/// indexes, which a writer creates after its inserts, since building an index
+/// once costs less than keeping it up to date row by row.
+pub fn schema_parts() -> (&'static str, &'static str) {
+    SCHEMA.split_once(INDEXES_FOLLOW).unwrap_or((SCHEMA, ""))
+}
+
+#[cfg(test)]
+mod tests;

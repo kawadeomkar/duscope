@@ -56,6 +56,10 @@ cargo_metadata = "=0.23.1"
 jsonschema = { version = "=0.60.0", default-features = false }
 # Default features off but `std`: no forked or timed-out test cases.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+# The index DDL's test (P2-IDX-01) until the writer makes it a dependency of
+# duscope-core; `bundled` builds the SQLite the binary will ship. 0.40.2 is the
+# newest release the 1.88 toolchain builds: 0.41 needs 1.89.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 schemars = { version = "1.2.3", default-features = false, features = ["derive"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
