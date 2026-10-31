@@ -29,7 +29,10 @@ CREATE TABLE scan_volumes (
     normalization     TEXT    NOT NULL,
     fsevents_uuid     TEXT,
     fsevents_event_id INTEGER,
-    os_build          TEXT
+    os_build          TEXT,
+    total_bytes       INTEGER,
+    free_bytes        INTEGER,
+    options           TEXT
 );
 
 -- Directories, with their own sizes and their subtree totals.

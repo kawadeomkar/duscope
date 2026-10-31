@@ -313,8 +313,10 @@ fn p1_cli_02_a_root_given_as_a_link_is_read_where_it_leads() {
     let links = fs::canonicalize(env.fixtures().case_root("symlinks")).unwrap();
     let real_dir = links.join("real-dir");
     let json = |path: &Path| -> serde_json::Value {
+        // Each path scans: a saved scan of the directory would answer with
+        // the root as that scan was given (P2-IDX-03).
         let out = duscope(&env)
-            .args(["top", "--files", "--json"])
+            .args(["top", "--files", "--json", "--no-save"])
             .arg(path)
             .current_dir(&links)
             .output()

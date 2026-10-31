@@ -180,4 +180,9 @@ mod tests {
             assert_eq!(exit.code(), code, "{exit:?}");
         }
     }
+
+    #[test]
+    fn p2_idx_03_a_saved_scan_that_cannot_be_read_exits_5() {
+        assert_eq!(Exit::Index.code(), 5);
+    }
 }

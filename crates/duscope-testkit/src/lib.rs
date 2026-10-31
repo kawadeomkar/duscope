@@ -157,8 +157,9 @@ pub fn golden(name: &str, actual: &str) {
 
 /// `text`, a command's output, without what differs between runs, machines
 /// and releases, for a golden file: the root's path as `<root>`, the scan's
-/// times, the version, every `volumes` array (sizes and free space), and
-/// the scan's duration in a table's footer.
+/// id and times, the version, every `volumes` array (sizes and free space),
+/// and in a table's footer the scan's duration and the saved scan's id and
+/// time.
 ///
 /// # Panics
 ///
@@ -169,6 +170,7 @@ pub fn normalize(text: &str, root: &Path) -> String {
         .unwrap_or_else(|| panic!("duscope-testkit: {} is not UTF-8", root.display()));
     let mut text = text.replace(root, "<root>");
     for (key, placeholder) in [
+        ("\"id\":\"", "<id>"),
         ("\"started_at\":\"", "<time>"),
         ("\"finished_at\":\"", "<time>"),
         ("\"name\":\"duscope\",\"version\":\"", "<version>"),
@@ -195,11 +197,24 @@ pub fn normalize(text: &str, root: &Path) -> String {
         text.replace_range(start..end, "[\"<volumes>\"]");
         from = start;
     }
-    // A table's footer: `220.6 MiB allocated · … · 0.21 s, 4 threads`.
+    // A table's footer: `220.6 MiB allocated · … · 0.21 s, 4 threads`, with
+    // `, saved as 3f9a` after a scan a query saved, or `… · saved scan 3f9a
+    // from 2026-10-31 21:16` when it read one.
     if let Some(at) = text.find(" s, ")
         && let Some(dot) = text[..at].rfind(" · ")
     {
         text.replace_range(dot + " · ".len()..at, "<secs>");
+    }
+    for (marker, placeholder) in [
+        (", saved as ", ", saved as <id>"),
+        (" · saved scan ", " · saved scan <id> from <time>"),
+    ] {
+        let mut from = 0;
+        while let Some(at) = text[from..].find(marker).map(|n| from + n) {
+            let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+            text.replace_range(at..end, placeholder);
+            from = at + placeholder.len();
+        }
     }
     text
 }

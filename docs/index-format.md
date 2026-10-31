@@ -97,6 +97,9 @@ disks.
 | `fsevents_uuid` | TEXT | yes | macOS: the volume's FSEvents UUID, for incremental rescans; NULL on Linux, on the sealed System volume and where macOS gives none |
 | `fsevents_event_id` | INTEGER | yes | macOS: the volume's latest FSEvents event id when the scan started; NULL where `fsevents_uuid` is |
 | `os_build` | TEXT | yes | macOS: the build of the system the event id was read under, since event ids do not carry over an upgrade; NULL where `fsevents_uuid` is |
+| `total_bytes` | INTEGER | yes | the volume's size when the scan met it |
+| `free_bytes` | INTEGER | yes | the bytes free on it for an unprivileged user |
+| `options` | TEXT | yes | its mount options, comma-separated (`rw,noatime`), which tell whether access times are kept |
 
 ### `dirs`
 
@@ -218,7 +221,7 @@ prefers the range even where the index is thousands of times faster.
 ## Flags
 
 `dirs.flags` and `files.flags` hold these bits. A bit a platform cannot set
-stays 0.
+stays 0; bits 9 to 11 are set on directories only, and bit 12 on files only.
 
 | Bit | Value | Name | Set on | Meaning |
 | --- | --- | --- | --- | --- |
@@ -231,6 +234,10 @@ stays 0.
 | 6 | 64 | mount_root | Linux | the directory is the root of a mount |
 | 7 | 128 | subvolume | Linux | the directory is a btrfs subvolume or a ZFS dataset |
 | 8 | 256 | firmlink | macOS | the directory is a firmlink into the Data volume |
+| 9 | 512 | upper_bound | macOS | the directory's totals are an upper bound: a file under it may share blocks with another that no clone id names |
+| 10 | 1024 | excluded | macOS, Linux | the scan listed the directory but did not enter it, because an exclude pattern matched it |
+| 11 | 2048 | excluded_cache | macOS, Linux | the scan listed the directory but did not enter it, because a cache rule matched it (`--exclude-caches`) |
+| 12 | 4096 | later_link | macOS, Linux | a later link of a hard-linked file: its bytes, apparent ones too, count at its first link |
 
 ## Accounting
 
@@ -257,15 +264,17 @@ stays 0.
 | `started_at` | INTEGER | when the scan started |
 | `finished_at` | INTEGER | when it finished |
 | `attrs` | TEXT | `basic`, or `full` when the scan collected `atime`, `btime`, `mode`, `uid` and `gid` |
-| `options` | TEXT | the scan's options as JSON: `clones`, `one_file_system`, `include_network`, `follow_symlinks`, `excludes`, `exclude_files`, `ignore_files`, `threads`, `size_kind`; a rescan reuses them |
+| `options` | TEXT | the scan's options as JSON: `clones`, `one_file_system`, `include_network`, `follow_symlinks`, `excludes`, `exclude_files`, `ignore_files`, `exclude_caches`, `threads`, `size_kind`; a rescan reuses them |
 | `platform` | TEXT | the operating system and its kernel or Darwin version |
 | `scanning_uid` | INTEGER | the user id the scan ran as |
+| `thread_count` | INTEGER | the worker threads the walk ran |
 | `size_kind` | TEXT | the size output shows by default, `allocated` or `apparent`; both are stored |
 | `volume_total` | INTEGER | the size of the root's volume |
 | `volume_free` | INTEGER | the bytes free on it for an unprivileged user |
 | `unaccounted_bytes` | INTEGER | for a root that is a mount point, the volume's used bytes the scan did not find; NULL for any other root |
 | `error_count` | INTEGER | directories and entries the scan could not read |
 | `vanished_count` | INTEGER | entries that disappeared during the scan |
+| `excluded_count` | INTEGER | files left out and directories not entered because an exclude or cache rule matched them |
 | `n_entries` | INTEGER | rows in `dirs` and `files` together |
 | `incremental` | INTEGER | 1 when an incremental rescan wrote the file |
 | `parent_scan_id` | TEXT | the scan a rescan started from; NULL for a fresh scan |

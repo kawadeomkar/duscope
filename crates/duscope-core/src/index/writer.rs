@@ -21,7 +21,7 @@ use rusqlite::{Connection, Statement, Transaction, params};
 use super::scanid::ScanId;
 use super::schema_parts;
 use crate::CoreError;
-use crate::arena::{Arena, EntryIdx};
+use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::query::kind_name;
 use crate::rollup::RollUp;
 use crate::rules::ext;
@@ -30,6 +30,23 @@ use crate::rules::ext;
 /// volume (`boundary = firmlink`), beside the eight bits of `Flags`
 /// (DEV-64).
 pub const FIRMLINK: u32 = 1 << 8;
+
+/// Flag bit 9 of `dirs.flags`: the directory's totals are an upper bound,
+/// since a file under it may share blocks with another that no clone id
+/// names (DEV-68).
+pub const UPPER_BOUND: u32 = 1 << 9;
+
+/// Flag bit 10 of `dirs.flags`: the scan listed the directory but did not
+/// enter it, because an exclude pattern matched it (DEV-68).
+pub const EXCLUDED: u32 = 1 << 10;
+
+/// Flag bit 11 of `dirs.flags`: the scan listed the directory but did not
+/// enter it, because a cache rule matched it (`--exclude-caches`; DEV-68).
+pub const EXCLUDED_CACHE: u32 = 1 << 11;
+
+/// Flag bit 12 of `files.flags`: a later link of a hard-linked inode, whose
+/// bytes, apparent ones included, count at its first link (DEV-68).
+pub const LATER_LINK: u32 = 1 << 12;
 
 /// What `scan_meta` records that the arena does not hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +67,8 @@ pub struct ScanMeta {
     pub platform: String,
     /// The user id the scan ran as.
     pub scanning_uid: u32,
+    /// The worker threads the walk ran.
+    pub thread_count: u64,
     /// The size output shows by default: `allocated` or `apparent`.
     pub size_kind: &'static str,
     /// The size of the root's volume.
@@ -63,6 +82,8 @@ pub struct ScanMeta {
     pub error_count: u64,
     /// Entries that disappeared during the scan.
     pub vanished_count: u64,
+    /// Files left out and directories not entered by the excludes.
+    pub excluded_count: u64,
     /// Whether an incremental rescan wrote the file.
     pub incremental: bool,
     /// The scan a rescan started from.
@@ -226,6 +247,7 @@ fn meta_rows(
     row.execute(params!["options", meta.options])?;
     row.execute(params!["platform", meta.platform])?;
     row.execute(params!["scanning_uid", meta.scanning_uid])?;
+    row.execute(params!["thread_count", signed(meta.thread_count)])?;
     row.execute(params!["size_kind", meta.size_kind])?;
     row.execute(params!["volume_total", signed(meta.volume_total)])?;
     row.execute(params!["volume_free", signed(meta.volume_free)])?;
@@ -235,6 +257,7 @@ fn meta_rows(
     ])?;
     row.execute(params!["error_count", signed(meta.error_count)])?;
     row.execute(params!["vanished_count", signed(meta.vanished_count)])?;
+    row.execute(params!["excluded_count", signed(meta.excluded_count)])?;
     row.execute(params!["n_entries", count(rollup.len())])?;
     row.execute(params!["incremental", meta.incremental])?;
     row.execute(params!["parent_scan_id", meta.parent_scan_id])?;
@@ -247,7 +270,8 @@ fn meta_rows(
 /// `scan_volumes`: every volume the walk met.
 fn volume_rows(tx: &Transaction<'_>, arena: &Arena) -> rusqlite::Result<()> {
     let mut row = tx.prepare(
-        "INSERT INTO scan_volumes VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL)",
+        "INSERT INTO scan_volumes VALUES \
+         (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL, ?10, ?11, ?12)",
     )?;
     for v in arena.volumes() {
         row.execute(params![
@@ -260,6 +284,9 @@ fn volume_rows(tx: &Transaction<'_>, arena: &Arena) -> rusqlite::Result<()> {
             v.reason.map(Skip::as_str),
             v.case_sensitive,
             v.normalization.as_str(),
+            signed(v.total_bytes),
+            signed(v.free_bytes),
+            v.options.join(","),
         ])?;
     }
     Ok(())
@@ -313,10 +340,8 @@ fn entry_rows(
                 |&(dev, _)| dev,
             );
             devs.insert(dir, dev);
-            let mut flags = view.flags.bits();
-            if crossing.is_some_and(|&(_, b)| b == Boundary::Firmlink) {
-                flags |= FIRMLINK;
-            }
+            let firmlink = crossing.is_some_and(|&(_, b)| b == Boundary::Firmlink);
+            let flags = dir_flags(arena, dir, view.flags.bits(), firmlink);
             let rec = arena.dir(dir);
             let name = if id == 0 { &meta.root[..] } else { view.name };
             insert_dir(
@@ -347,10 +372,11 @@ fn entry_rows(
         }
         let full = arena.full(idx);
         let is_charged = charges.charged(idx);
+        let later_link = charges.linked_away(idx);
         let suffix = ext(view.name);
         // Counted as the totals count: a hard link once, a clone's bytes on
         // disk once and its apparent bytes at every member.
-        if !charges.linked_away(idx) {
+        if !later_link {
             let tally = types.entry(suffix.clone()).or_default();
             tally.n += 1;
             tally.apparent += view.apparent;
@@ -374,11 +400,30 @@ fn entry_rows(
             full.map(|f| f.gid),
             view.nlink,
             kind_name(view.kind),
-            view.flags.bits(),
+            view.flags.bits() | if later_link { LATER_LINK } else { 0 },
             suffix,
         ])?;
     }
     type_rows(tx, &types)
+}
+
+/// A directory's `flags`: its storage flags (`own`), then the bits the
+/// index adds: a firmlink, totals that are an upper bound, and an exclude
+/// that kept the scan out.
+fn dir_flags(arena: &Arena, dir: DirId, own: u32, firmlink: bool) -> u32 {
+    let mut flags = own;
+    if firmlink {
+        flags |= FIRMLINK;
+    }
+    if arena.dir(dir).flags & DirRec::UPPER_BOUND != 0 {
+        flags |= UPPER_BOUND;
+    }
+    match arena.skipped().get(&dir) {
+        Some(Skip::Excluded) => flags |= EXCLUDED,
+        Some(Skip::ExcludedCache) => flags |= EXCLUDED_CACHE,
+        _ => {}
+    }
+    flags
 }
 
 /// `type_stats`: each extension's tally.

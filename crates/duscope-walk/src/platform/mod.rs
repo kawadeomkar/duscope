@@ -143,6 +143,19 @@ pub(crate) fn effective_uid() -> u32 {
     0
 }
 
+/// Whether the process `pid` is running.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn process_alive(pid: u32) -> bool {
+    posix::system::process_alive(pid)
+}
+
+/// Whether the process `pid` is running: taken to be, on this platform, so
+/// only an age decides.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn process_alive(_pid: u32) -> bool {
+    true
+}
+
 /// The user's cache directory under `home` when `XDG_CACHE_HOME` is unset:
 /// macOS's `~/Library/Caches`.
 #[cfg(target_os = "macos")]

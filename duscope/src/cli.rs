@@ -108,7 +108,7 @@ impl GlobalArgs {
     }
 }
 
-/// The verbs of phase 1.
+/// The verbs and utilities.
 #[derive(Debug, Subcommand)]
 pub enum Verb {
     /// Scan a tree and show where its space goes
@@ -121,10 +121,54 @@ pub enum Verb {
     ByType(ByTypeArgs),
     /// Large files not modified (or accessed) since a date
     Stale(StaleArgs),
+    /// List, prune or check the saved scans
+    Scans(ScansArgs),
     /// Print the manual page, in roff, to stdout
     Man,
     /// Print the completion script for a shell to stdout
     Completions(CompletionsArgs),
+}
+
+/// `scans`' arguments.
+#[derive(Debug, Clone, Args)]
+pub struct ScansArgs {
+    /// Remove saved scans past keeping, and stray temporary files
+    ///
+    /// Keeps the five newest scans of each root and any under seven days old
+    #[arg(long, conflicts_with = "check")]
+    pub prune: bool,
+
+    /// Check a saved scan's file for damage
+    #[arg(long, value_name = "SCAN")]
+    pub check: Option<String>,
+
+    /// The instant "now" is, for tests
+    // test-only
+    #[arg(long, hide = true, value_name = "RFC3339")]
+    pub test_now: Option<String>,
+}
+
+/// Which saved scan a query verb reads, and whether it may scan instead.
+#[derive(Debug, Clone, Default, Args)]
+#[command(next_help_heading = "Saved scans")]
+pub struct IndexArgs {
+    /// The saved scan to read: latest, an id prefix, or an index file
+    ///
+    /// Default: the newest saved scan that holds the path, else a new scan
+    #[arg(long, value_name = "SCAN")]
+    pub scan: Option<String>,
+
+    /// Don't save the scan run when no saved scan holds the path
+    #[arg(long)]
+    pub no_save: bool,
+
+    /// Don't scan when no saved scan holds the path; fail instead
+    #[arg(long, conflicts_with = "no_save")]
+    pub no_scan: bool,
+
+    /// How old a saved scan may be before a warning (h, d, w, y; default 7d)
+    #[arg(long, value_name = "AGE")]
+    pub max_age: Option<String>,
 }
 
 /// `completions`' arguments.
@@ -372,6 +416,8 @@ pub struct TopArgs {
     pub walk: WalkArgs,
     #[command(flatten)]
     pub query: QueryArgs,
+    #[command(flatten)]
+    pub index: IndexArgs,
 
     /// List files instead of directories
     #[arg(long, help_heading = "Top")]
@@ -389,6 +435,8 @@ pub struct TreeArgs {
     pub walk: WalkArgs,
     #[command(flatten)]
     pub query: QueryArgs,
+    #[command(flatten)]
+    pub index: IndexArgs,
 
     /// Leave out rows below this share of their parent, in percent
     #[arg(long, value_name = "PCT", help_heading = "Tree")]
@@ -402,6 +450,8 @@ pub struct ByTypeArgs {
     pub walk: WalkArgs,
     #[command(flatten)]
     pub query: QueryArgs,
+    #[command(flatten)]
+    pub index: IndexArgs,
 
     /// A classes table merged over the built-in one
     #[arg(long, value_name = "FILE", help_heading = "By type")]
@@ -419,6 +469,8 @@ pub struct StaleArgs {
     pub walk: WalkArgs,
     #[command(flatten)]
     pub query: QueryArgs,
+    #[command(flatten)]
+    pub index: IndexArgs,
 
     /// Also require the access time to be older (needs --attrs full)
     #[arg(long, help_heading = "Stale")]
@@ -583,11 +635,14 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         walk.caches_extra.clone_from(&config.caches_extra);
         Ok(())
     };
-    let query_defaults = |query: &mut QueryArgs| {
+    let query_defaults = |query: &mut QueryArgs, index: &mut IndexArgs| {
         if query.limit.is_none()
             && let Some(limit) = &d.limit
         {
             query.limit = Some(usize::try_from(limit.value).unwrap_or(usize::MAX));
+        }
+        if index.max_age.is_none() {
+            index.max_age = d.max_age.as_ref().map(|age| age.value.clone());
         }
     };
     let scan_defaults = |scan: &mut ScanArgs| -> Result<(), Failure> {
@@ -609,24 +664,24 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         Some(Verb::Scan(args)) => scan_defaults(args)?,
         Some(Verb::Top(args)) => {
             walk_defaults(&mut args.walk)?;
-            query_defaults(&mut args.query);
+            query_defaults(&mut args.query, &mut args.index);
         }
         Some(Verb::Tree(args)) => {
             walk_defaults(&mut args.walk)?;
-            query_defaults(&mut args.query);
+            query_defaults(&mut args.query, &mut args.index);
         }
         Some(Verb::ByType(args)) => {
             walk_defaults(&mut args.walk)?;
-            query_defaults(&mut args.query);
+            query_defaults(&mut args.query, &mut args.index);
             if args.classes.is_none() {
                 args.classes.clone_from(&config.classes_extra);
             }
         }
         Some(Verb::Stale(args)) => {
             walk_defaults(&mut args.walk)?;
-            query_defaults(&mut args.query);
+            query_defaults(&mut args.query, &mut args.index);
         }
-        Some(Verb::Man | Verb::Completions(_)) => {}
+        Some(Verb::Scans(_) | Verb::Man | Verb::Completions(_)) => {}
     }
     Ok(())
 }

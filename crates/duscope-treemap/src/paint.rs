@@ -212,7 +212,7 @@ enum Item {
 impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
     /// Lays out `dir`'s children in `area` (units) and paints each; `depth`
     /// is `dir`'s, `folder` the index of the top-level folder above.
-    fn block(&mut self, dir: &Node<'_>, area: Rect, depth: u32, folder: Option<usize>) {
+    fn block(&mut self, dir: &Node, area: Rect, depth: u32, folder: Option<usize>) {
         if area.w == 0 || area.h == 0 {
             return;
         }
@@ -273,14 +273,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
     /// Paints directory `node` in `rect`: a box, a gutter group or a leaf,
     /// by its size in cells. A folder that does not `open` (at the
     /// `--depth` cap) keeps its box, filled as a leaf, or is a leaf.
-    fn folder(
-        &mut self,
-        node: &Node<'_>,
-        rect: Rect,
-        folder: Option<usize>,
-        tint: bool,
-        open: bool,
-    ) {
+    fn folder(&mut self, node: &Node, rect: Rect, folder: Option<usize>, tint: bool, open: bool) {
         let (top, rows) = cell_rows(rect);
         let cols = rect.w;
         let depth = node.depth;
@@ -338,7 +331,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
     /// folder too small to open or at the `--depth` cap.
     fn leaf(
         &mut self,
-        node: &Node<'_>,
+        node: &Node,
         rect: Rect,
         depth: u32,
         order: usize,
@@ -358,7 +351,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
             ColorBy::Age => pack.age[age_step(self.opts.now, node.max_mtime_ns)],
             ColorBy::LsColors(_) if node.is_dir() => pack.class(class),
             ColorBy::LsColors(table) => table
-                .of(node.name, node.mode)
+                .of(&self.view.name(node.id), node.mode)
                 .unwrap_or_else(|| pack.class(class)),
         };
         let color = self.tinted(base, order % 2 == 1);
@@ -366,7 +359,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         if !labelled {
             return;
         }
-        let mut name = String::from_utf8_lossy(node.name).into_owned();
+        let mut name = String::from_utf8_lossy(&self.view.name(node.id)).into_owned();
         if node.is_dir() {
             name.push('/');
         }
@@ -461,8 +454,8 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
     /// The title of a depth-1 box: ` name · size ` on its top border, bold
     /// on the base colour, the name alone (then truncated with `…`) when
     /// the whole title does not fit in the width less 6.
-    fn title(&mut self, node: &Node<'_>, x: u16, top: u16, cols: u16) {
-        let name = String::from_utf8_lossy(node.name).into_owned();
+    fn title(&mut self, node: &Node, x: u16, top: u16, cols: u16) {
+        let name = String::from_utf8_lossy(&self.view.name(node.id)).into_owned();
         let room = usize::from(cols.saturating_sub(6));
         let dot = match self.opts.glyphs {
             Glyphs::Unicode => "·",

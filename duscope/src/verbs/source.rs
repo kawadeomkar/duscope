@@ -1,0 +1,386 @@
+//! Where a list verb's rows come from: the newest saved scan that holds
+//! the path, read at it, or a scan run for the verb and saved once its
+//! output is out (P2-IDX-03).
+//!
+//! A saved scan is used only when it was taken with the options the verb
+//! would scan with (excludes, `-x`, clones, links, and `--attrs full` when
+//! asked): one taken otherwise holds another tree. `--scan` names a scan
+//! outright, `--no-scan` fails where no saved scan answers, and `--no-save`
+//! keeps a scan the verb runs from being saved.
+
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
+use duscope_core::CoreError;
+use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
+use duscope_core::index::{Index, ScanId};
+use duscope_core::query::{
+    ScanQuery, ScanSelector, SizeKind, Subtree, TreeView, resolve_scan, short_id, timegrammar,
+};
+use duscope_core::resolve::resolve_path;
+use duscope_walk::Attrs;
+
+use super::scan::{self, Scanned};
+use super::{Exit, Failure};
+use crate::cli::{AttrsArg, IndexArgs, WalkArgs};
+use crate::out::{Output, iso8601, thousands};
+
+/// `--max-age` when neither the flag nor the configuration sets it.
+const DEFAULT_MAX_AGE: &str = "7d";
+
+/// Where a verb's rows come from.
+#[derive(Debug)]
+pub enum Source {
+    /// A scan run for the verb, and the id and index directory it is saved
+    /// under once the output is out (`None` under `--no-save`, without an
+    /// index directory, or when the caller saves it itself).
+    Fresh {
+        /// The scan.
+        scanned: Box<Scanned>,
+        /// Its id and the index directory, when it will be saved.
+        save: Option<(ScanId, PathBuf)>,
+    },
+    /// A saved scan, read at the entry the verb is about.
+    Saved {
+        /// The scan.
+        index: Box<Index>,
+        /// The entry the verb is about.
+        base: u32,
+        /// `stale_index`, when the scan is older than `--max-age`.
+        stale: Option<Warning>,
+    },
+}
+
+/// The source `walk`'s path and `index_args` ask for, from the saved scans
+/// under `index_dir` (or the default directory).
+pub fn source(
+    walk: &WalkArgs,
+    index_args: &IndexArgs,
+    index_dir: Option<&Path>,
+) -> Result<Source, Failure> {
+    let max_age = index_args.max_age.as_deref().unwrap_or(DEFAULT_MAX_AGE);
+    let max_age_ns = timegrammar::parse_age(max_age)
+        .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--max-age {e}")))?;
+    let selector = match &index_args.scan {
+        Some(text) => ScanSelector::parse(text).map_err(core_failure)?,
+        None => ScanSelector::Latest,
+    };
+    let dir = index_dir
+        .map(Path::to_owned)
+        .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)));
+    let now = scan::now(walk)?;
+    let cwd = std::env::current_dir().map_err(|e| {
+        Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!("cannot read the working directory: {e}"),
+        )
+    })?;
+    let path = walk.path.as_ref().map(|p| resolve_path(&cwd, p).real);
+    if let Some(dir) = &dir {
+        let q = ScanQuery {
+            index_dir: dir,
+            path: path.as_deref(),
+            cwd: &cwd,
+            max_age_ns,
+            now,
+        };
+        let resolved =
+            resolve_scan(&selector, &q, |index| usable(walk, index)).map_err(core_failure)?;
+        if let Some(r) = resolved {
+            let stale = r.stale.then(|| stale_index(&r.index, max_age));
+            return Ok(Source::Saved {
+                index: Box::new(r.index),
+                base: r.base,
+                stale,
+            });
+        }
+    }
+    if index_args.no_scan {
+        let shown = path.as_deref().unwrap_or(&cwd).display().to_string();
+        return Err(Failure::new(
+            Exit::NotFound,
+            "scan_not_found",
+            format!("no saved scan holds {shown}, and --no-scan forbids scanning it"),
+        )
+        .hint(format!(
+            "Run duscope scan --save {shown}, or drop --no-scan"
+        )));
+    }
+    let scanned = scan::scan(walk, &[])?;
+    let save = match (dir, index_args.no_save) {
+        (Some(dir), false) => Some((scan::scan_id(&scanned)?, dir)),
+        _ => None,
+    };
+    Ok(Source::Fresh {
+        scanned: Box::new(scanned),
+        save,
+    })
+}
+
+/// Whether `index` holds the tree a scan with `walk`'s options would: the
+/// same excludes, filesystems, clone and link handling, and the attributes
+/// the verb may ask for.
+fn usable(walk: &WalkArgs, index: &Index) -> bool {
+    let content = |options: &str| {
+        let mut value: serde_json::Value = serde_json::from_str(options).unwrap_or_default();
+        if let Some(map) = value.as_object_mut() {
+            map.remove("threads");
+            map.remove("size_kind");
+        }
+        value
+    };
+    let attrs = walk.attrs == AttrsArg::Basic || index.attrs() == Attrs::Full;
+    attrs && content(&scan::saved_options(walk, &[])) == content(&index.meta().options)
+}
+
+/// `stale_index`: the saved scan finished longer ago than `--max-age`.
+fn stale_index(index: &Index, max_age: &str) -> Warning {
+    let meta = index.meta();
+    Warning {
+        code: "stale_index",
+        message: format!(
+            "the saved scan {} finished {}, longer ago than --max-age {max_age}",
+            meta.scan_id,
+            iso8601(meta.finished_at)
+        ),
+        count: None,
+        hint: Some(format!(
+            "Run duscope scan --save {} to measure the tree again",
+            index.root_path().display()
+        )),
+    }
+}
+
+impl Source {
+    /// The rows' view: the arena, or the saved scan at the path.
+    pub fn view(&self) -> Box<dyn TreeView + '_> {
+        match self {
+            Source::Fresh { scanned, .. } => Box::new(scanned.view()),
+            Source::Saved { index, base, .. } => Box::new(Subtree::new(index.as_ref(), *base)),
+        }
+    }
+
+    /// Directories the scan could not read.
+    pub fn unreadable_dirs(&self) -> u64 {
+        match self {
+            Source::Fresh { scanned, .. } => scanned.summary.unreadable_dirs,
+            Source::Saved { index, .. } => index.unreadable_dirs(),
+        }
+    }
+
+    /// When the scan finished, Unix nanoseconds.
+    pub fn finished_ns(&self) -> i64 {
+        match self {
+            Source::Fresh { scanned, .. } => scanned.finished_ns,
+            Source::Saved { index, .. } => index.meta().finished_at,
+        }
+    }
+
+    /// The scan block: the scan's root, options, times and totals, and its
+    /// volumes; a saved scan's id, or the id a fresh one is saved under.
+    pub fn scan_block(&self, walk: &WalkArgs, size: SizeKind) -> ScanBlock {
+        match self {
+            Source::Fresh { scanned, save } => {
+                let mut block = scan::scan_block(scanned, walk, size);
+                block.id = save.as_ref().map(|(id, _)| id.to_string());
+                block
+            }
+            Source::Saved { index, .. } => saved_block(index, size),
+        }
+    }
+
+    /// The one line for people: the total under the path, its counts, and
+    /// how the scan was had: run now (and the id it is saved as), or read
+    /// from a saved scan.
+    pub fn footer(&self, block: &ScanBlock, output: &Output) -> String {
+        match self {
+            Source::Fresh { scanned, save } => {
+                let footer = scan::footer(block, scanned, output);
+                match save {
+                    Some((id, dir)) => format!("{footer}, saved as {}", short_id(dir, id.as_str())),
+                    None => footer,
+                }
+            }
+            Source::Saved { index, .. } => {
+                let root = self.view().node(0);
+                let total = if block.size_kind == "apparent" {
+                    root.apparent
+                } else {
+                    root.allocated
+                };
+                let dir = index.file().parent().and_then(Path::parent);
+                let id = index.meta().scan_id.as_str();
+                let finished = iso8601(index.meta().finished_at);
+                format!(
+                    "{} {} · {} files · {} dirs · saved scan {} from {}",
+                    output.units.size(total),
+                    block.size_kind,
+                    thousands(root.file_count),
+                    thousands(root.dir_count),
+                    dir.map_or_else(|| id.to_owned(), |dir| short_id(dir, id)),
+                    finished.get(..16).unwrap_or(&finished).replace('T', " "),
+                )
+            }
+        }
+    }
+
+    /// The scan's warnings, the path's for `upper_bound`; and
+    /// `stale_index`.
+    pub fn warnings(&self) -> Vec<Warning> {
+        match self {
+            Source::Fresh { scanned, .. } => scan::warnings(scanned),
+            Source::Saved { index, stale, .. } => {
+                let volumes = index.volumes();
+                let mounts_excluded = volumes.iter().filter(|v| !v.entered).count() as u64;
+                let mut warnings = scan::quality_warnings(
+                    index.unreadable_dirs(),
+                    mounts_excluded,
+                    index.meta().vanished_count,
+                );
+                warnings.extend(scan::upper_bound(self.view().node(0).upper_bound));
+                warnings.extend(stale.clone());
+                warnings
+            }
+        }
+    }
+
+    /// `atime_unreliable`, for `stale --atime`.
+    pub fn atime_unreliable(&self) -> Option<Warning> {
+        match self {
+            Source::Fresh { scanned, .. } => {
+                super::query::atime_unreliable(scanned.arena.volumes())
+            }
+            Source::Saved { index, .. } => super::query::lagging_atime(
+                index
+                    .volumes()
+                    .iter()
+                    .filter(|v| v.entered)
+                    .map(|v| (lossy(&v.mount_point), v.options.clone())),
+            ),
+        }
+    }
+
+    /// Once the output is out: a fresh scan's index, under the index
+    /// directory. The save was not asked for, so its id is in the summary
+    /// line rather than a line of its own, and a failure is one line on
+    /// stderr while the verb still succeeds.
+    pub fn finish(&self, walk: &WalkArgs, output: &Output) {
+        if let Source::Fresh {
+            scanned,
+            save: Some((id, dir)),
+        } = self
+            && let Err(failure) = scan::save(scanned, walk, &[], id, Some(dir), output, false)
+        {
+            crate::out::to_stderr(&failure);
+        }
+    }
+}
+
+/// The scan block of a saved scan.
+fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
+    let meta = index.meta();
+    let root = index.node(0);
+    let options: serde_json::Value = serde_json::from_str(&meta.options).unwrap_or_default();
+    let volumes = index.volumes();
+    let root_path = index.root_path();
+    let mut excluded: Vec<(Vec<u8>, &'static str)> = index
+        .excluded()
+        .into_iter()
+        .map(|(id, reason)| {
+            let mut path = root_path.as_os_str().as_bytes().to_vec();
+            path.push(b'/');
+            path.extend_from_slice(&index.path(id));
+            (path, reason)
+        })
+        .collect();
+    excluded.sort();
+    ScanBlock {
+        id: Some(meta.scan_id.to_string()),
+        root: root_path.to_string_lossy().into_owned(),
+        root_as_given: lossy(&meta.root_as_given),
+        started_at: iso8601(meta.started_at),
+        finished_at: iso8601(meta.finished_at),
+        size_kind: size.as_str(),
+        attrs: match index.attrs() {
+            Attrs::Basic => "basic",
+            Attrs::Full => "full",
+        },
+        thread_count: meta.thread_count,
+        fs_type: volumes.first().map(|v| v.fs_type.clone()),
+        device_confined: options["one_file_system"].as_bool().unwrap_or(false),
+        total_allocated_bytes: root.allocated,
+        total_apparent_bytes: root.apparent,
+        file_count: root.file_count,
+        dir_count: root.dir_count,
+        error_count: meta.error_count,
+        vanished_count: meta.vanished_count,
+        incremental: meta.incremental,
+        volumes: volumes
+            .iter()
+            .map(|v| VolumeEntry {
+                mount_point: lossy(&v.mount_point),
+                fs_type: v.fs_type.clone(),
+                entered: v.entered,
+                reason: v.reason.as_deref().and_then(reason_name),
+                read_only: v.read_only,
+                total_bytes: v.total_bytes.unwrap_or(0),
+                free_bytes: v.free_bytes.unwrap_or(0),
+            })
+            .collect(),
+        excluded_count: meta.excluded_count,
+        excluded: excluded
+            .into_iter()
+            .map(|(path, reason)| ExcludedEntry {
+                path: lossy(&path),
+                reason,
+            })
+            .collect(),
+    }
+}
+
+/// A volume's skip reason as the envelope spells it.
+fn reason_name(reason: &str) -> Option<&'static str> {
+    use duscope_walk::Skip;
+    [
+        Skip::Firmlinked,
+        Skip::Kernel,
+        Skip::Network,
+        Skip::OneFileSystem,
+        Skip::BindCycle,
+        Skip::Excluded,
+        Skip::ExcludedCache,
+    ]
+    .into_iter()
+    .map(Skip::as_str)
+    .find(|name| *name == reason)
+}
+
+fn lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// The failure an engine error is.
+pub fn core_failure(error: CoreError) -> Failure {
+    match error {
+        CoreError::AttrsNotCollected(_) => {
+            Failure::new(Exit::Runtime, "attrs_not_collected", error.to_string())
+                .hint("Rerun the command with --attrs full")
+        }
+        CoreError::IndexCorrupt { .. } => {
+            Failure::new(Exit::Index, "index_corrupt", error.to_string())
+                .hint("Run duscope scan --save to measure the tree again")
+        }
+        CoreError::IndexVersion { .. } => {
+            Failure::new(Exit::Index, "index_version_mismatch", error.to_string())
+                .hint("Run duscope scan --save to write the index this duscope reads")
+        }
+        CoreError::ScanNotFound(_) => {
+            Failure::new(Exit::NotFound, "scan_not_found", error.to_string())
+                .hint("Run duscope scans to list the saved scans")
+        }
+        CoreError::Selector(_) => Failure::new(Exit::Usage, "usage", error.to_string())
+            .hint("Run duscope scans to list the saved scans"),
+        other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
+    }
+}

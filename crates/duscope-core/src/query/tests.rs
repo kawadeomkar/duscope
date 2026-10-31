@@ -858,9 +858,9 @@ fn p1_cli_03_globs_refuse_empty_patterns_and_anchor_dot_slash() {
     assert!(globs(["x"]).unwrap().is_match("y/x"));
 }
 
-/// A view whose nodes carry no names, as the index's will not: names,
-/// paths and subdirectories reach the queries through `name`, `path` and
-/// `child_dirs` alone.
+/// A view that answers names, paths and subdirectories with owned values
+/// from methods of its own, as the index does: the queries reach them
+/// through `name`, `path` and `child_dirs` alone.
 struct NamelessNodes<'a>(ArenaView<'a>);
 
 impl TreeView for NamelessNodes<'_> {
@@ -868,11 +868,8 @@ impl TreeView for NamelessNodes<'_> {
         self.0.len()
     }
 
-    fn node(&self, id: u32) -> Node<'_> {
-        Node {
-            name: &[],
-            ..self.0.node(id)
-        }
+    fn node(&self, id: u32) -> Node {
+        self.0.node(id)
     }
 
     fn root_path(&self) -> &Path {
@@ -884,7 +881,7 @@ impl TreeView for NamelessNodes<'_> {
     }
 
     fn name(&self, id: u32) -> Cow<'_, [u8]> {
-        Cow::Owned(self.0.node(id).name.to_vec())
+        Cow::Owned(self.0.name(id).into_owned())
     }
 
     fn path(&self, id: u32) -> Vec<u8> {
@@ -902,11 +899,7 @@ fn p1_cli_03_queries_read_names_and_paths_through_the_view() {
     let (arena, rollup) = scan(&fixture);
     let view = view(&arena, &rollup, &fixture);
     // The defaults, on the arena.
-    let id_of = |name: &[u8]| {
-        (0..view.len())
-            .find(|&id| view.node(id).name == name)
-            .unwrap()
-    };
+    let id_of = |name: &[u8]| (0..view.len()).find(|&id| &*view.name(id) == name).unwrap();
     let app = id_of(b"app");
     assert_eq!(view.path(app), b"Library/Containers/app");
     assert_eq!(&*view.name(app), b"app");

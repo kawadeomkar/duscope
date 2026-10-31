@@ -378,6 +378,15 @@ pub enum NdjsonLine<'a, T> {
         /// What was asked.
         query: &'a QueryBlock,
     },
+    /// The first line of a listing of saved scans, which has no scan.
+    Listing {
+        /// [`SCHEMA_VERSION`].
+        schema_version: &'static str,
+        /// The program.
+        tool: Tool,
+        /// What was asked.
+        query: &'a ListingQuery,
+    },
     /// A row.
     Entry(&'a T),
     /// The last line.
@@ -425,6 +434,107 @@ pub fn base64(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// What `scans` prints under `--json`: the fields of a list, without a scan
+/// block (it lists the saved scans, not the rows of one), and the index
+/// directory it read.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Listing<T> {
+    /// Whether the command succeeded.
+    pub ok: bool,
+    /// [`SCHEMA_VERSION`].
+    pub schema_version: &'static str,
+    /// The program.
+    pub tool: Tool,
+    /// What was asked.
+    pub query: ListingQuery,
+    /// The rows.
+    pub entries: Vec<T>,
+    /// Rows in `entries`.
+    pub returned_count: u64,
+    /// Rows before any limit.
+    pub total_count: u64,
+    /// Whether a limit left rows out.
+    pub truncated: bool,
+    /// Where the next page starts; null on the last page.
+    pub next_cursor: Option<String>,
+    /// Warnings, with their codes.
+    pub warnings: Vec<Warning>,
+    /// Up to three runnable commands, most useful first.
+    pub next: Vec<String>,
+}
+
+/// What `scans` was asked.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ListingQuery {
+    /// `scans`, `scans --prune` or `scans --check`.
+    pub command: &'static str,
+    /// The index directory, absolute.
+    pub index_dir: String,
+}
+
+/// A saved scan, as `scans` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SavedScanEntry {
+    /// The scan's id.
+    pub id: String,
+    /// Its root.
+    pub root: String,
+    /// When it started.
+    pub started_at: String,
+    /// When it finished.
+    pub finished_at: String,
+    /// The attributes it collected: `basic` or `full`.
+    pub attrs: &'static str,
+    /// Entries in it, the root included.
+    pub entry_count: u64,
+    /// Bytes on disk under the root.
+    pub allocated_bytes: u64,
+    /// Apparent bytes under the root.
+    pub apparent_bytes: u64,
+    /// Non-directories.
+    pub file_count: u64,
+    /// Directories, the root included.
+    pub dir_count: u64,
+    /// The scan a rescan started from; null for a fresh scan.
+    pub parent_scan_id: Option<String>,
+    /// `scan`, or `import:<format>`.
+    pub source: String,
+    /// The index version of its file.
+    pub index_version: String,
+    /// The size of its file.
+    pub index_bytes: u64,
+    /// Its file.
+    pub index_path: String,
+    /// The shortest prefix of the id, at least four digits, that no other
+    /// listed scan shares: what people see.
+    #[serde(skip)]
+    pub short_id: String,
+}
+
+/// A file `scans --prune` removed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PrunedEntry {
+    /// The file.
+    pub path: String,
+    /// `index`, `temporary` (a write that never finished) or `spill`.
+    pub kind: &'static str,
+    /// The scan whose index it was; null for the others.
+    pub id: Option<String>,
+    /// Its size.
+    pub bytes: u64,
+}
+
+/// A saved scan `scans --check` found sound.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CheckedEntry {
+    /// The scan's id.
+    pub id: String,
+    /// Its file.
+    pub index_path: String,
+    /// What `PRAGMA quick_check` said: `ok`.
+    pub quick_check: &'static str,
 }
 
 #[cfg(test)]

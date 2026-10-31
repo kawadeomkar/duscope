@@ -15,7 +15,8 @@ use std::borrow::Cow;
 use std::io::{IsTerminal, Write as _};
 
 use duscope_core::envelope::{
-    ByTypeEntry, Envelope, ErrorEnvelope, StaleEntry, TopEntry, TreeEntry, Warning,
+    ByTypeEntry, CheckedEntry, Envelope, ErrorEnvelope, Listing, PrunedEntry, SavedScanEntry,
+    StaleEntry, TopEntry, TreeEntry, Warning,
 };
 use serde::Serialize;
 
@@ -376,7 +377,115 @@ impl Row for StaleEntry {
     }
 }
 
+impl Row for SavedScanEntry {
+    const FIELDS: &'static [&'static str] = &[
+        "id",
+        "finished_at",
+        "entry_count",
+        "allocated_bytes",
+        "apparent_bytes",
+        "root",
+    ];
+    const COLUMNS: &'static [&'static str] = &["Id", "Finished", "Entries", "Size", "Root"];
+
+    fn plain(&self) -> Vec<Cow<'_, [u8]>> {
+        let number = |n: u64| Cow::Owned(n.to_string().into_bytes());
+        vec![
+            Cow::Borrowed(self.id.as_bytes()),
+            Cow::Borrowed(self.finished_at.as_bytes()),
+            number(self.entry_count),
+            number(self.allocated_bytes),
+            number(self.apparent_bytes),
+            Cow::Borrowed(self.root.as_bytes()),
+        ]
+    }
+
+    fn cells(&self, units: Units, size_kind: &str) -> Vec<String> {
+        let size = if size_kind == "apparent" {
+            self.apparent_bytes
+        } else {
+            self.allocated_bytes
+        };
+        vec![
+            self.short_id.clone(),
+            self.finished_at
+                .get(..16)
+                .unwrap_or(&self.finished_at)
+                .replace('T', " "),
+            thousands(self.entry_count),
+            units.size(size),
+            printable(&self.root).into_owned(),
+        ]
+    }
+}
+
+impl Row for PrunedEntry {
+    const FIELDS: &'static [&'static str] = &["kind", "bytes", "path"];
+    const COLUMNS: &'static [&'static str] = &["Kind", "Size", "Path"];
+
+    fn plain(&self) -> Vec<Cow<'_, [u8]>> {
+        vec![
+            Cow::Borrowed(self.kind.as_bytes()),
+            Cow::Owned(self.bytes.to_string().into_bytes()),
+            Cow::Borrowed(self.path.as_bytes()),
+        ]
+    }
+
+    fn cells(&self, units: Units, _size_kind: &str) -> Vec<String> {
+        vec![
+            self.kind.to_owned(),
+            units.size(self.bytes),
+            printable(&self.path).into_owned(),
+        ]
+    }
+}
+
+impl Row for CheckedEntry {
+    const FIELDS: &'static [&'static str] = &["id", "quick_check", "index_path"];
+    const COLUMNS: &'static [&'static str] = &["Id", "Check", "Path"];
+
+    fn plain(&self) -> Vec<Cow<'_, [u8]>> {
+        vec![
+            Cow::Borrowed(self.id.as_bytes()),
+            Cow::Borrowed(self.quick_check.as_bytes()),
+            Cow::Borrowed(self.index_path.as_bytes()),
+        ]
+    }
+
+    fn cells(&self, _units: Units, _size_kind: &str) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            self.quick_check.to_owned(),
+            printable(&self.index_path).into_owned(),
+        ]
+    }
+}
+
 impl Output {
+    /// Writes a listing of saved scans (`scans`) in the decided format,
+    /// as [`Output::list`] writes a list verb's.
+    pub fn listing<T: Row>(&self, listing: &Listing<T>, footer: &str) -> Result<(), Failure> {
+        let written = match self.format {
+            Format::Json => emit(|out| format::json(out, listing)),
+            Format::Ndjson => emit(|out| format::ndjson_listing(out, listing)),
+            Format::Plain => emit(|out| {
+                let rows = listing.entries.iter().map(Row::plain);
+                format::plain(out, T::FIELDS, rows, self.null, self.header)
+            }),
+            Format::Table | Format::Treemap => {
+                let table = table::table(&listing.entries, self.units, "allocated", self.color);
+                emit(|out| writeln!(out, "{table}{footer}"))
+            }
+        };
+        if self.is_machine() {
+            stderr_line(footer);
+        }
+        if !self.is_json() && !self.quiet {
+            warn(&listing.warnings);
+        }
+        written
+    }
+
     /// Writes a list verb's result in the decided format. `footer` is the
     /// one line for people: after the table, or on stderr in the machine
     /// formats. Warnings go in the envelope under JSON, on stderr otherwise.

@@ -4,6 +4,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -576,8 +577,8 @@ impl TreeView for MockupView {
         u32::try_from(self.entries.len()).unwrap()
     }
 
-    fn node(&self, id: u32) -> Node<'_> {
-        let (name, dir, size) = &self.entries[id as usize];
+    fn node(&self, id: u32) -> Node {
+        let (_, dir, size) = &self.entries[id as usize];
         let last = self.len() - 1;
         // The root (0), the tiles' directories (odd) and their files (even).
         let (parent, depth, last_id) = match id {
@@ -589,7 +590,6 @@ impl TreeView for MockupView {
             id,
             parent,
             depth,
-            name,
             kind: if *dir { Kind::Dir } else { Kind::File },
             allocated: *size,
             apparent: *size,
@@ -618,6 +618,10 @@ impl TreeView for MockupView {
 
     fn full_attrs(&self) -> bool {
         false
+    }
+
+    fn name(&self, id: u32) -> Cow<'_, [u8]> {
+        Cow::Borrowed(&self.entries[id as usize].0)
     }
 }
 
