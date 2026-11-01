@@ -271,8 +271,8 @@
           "description": "Its name.",
           "type": "string"
         },
-        "rows": {
-          "description": "Its rows in the saved scan; null when none was read.",
+        "row_count": {
+          "description": "Its rows in the saved scan; null when none was read, or its file\nhas no such table.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -284,7 +284,7 @@
       "required": [
         "name",
         "columns",
-        "rows"
+        "row_count"
       ],
       "type": "object"
     },

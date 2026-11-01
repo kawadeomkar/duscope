@@ -6,16 +6,16 @@ use rusqlite::Connection;
 
 use super::{Index, SCHEMA};
 use crate::CoreError;
-use crate::envelope::{ColumnEntry, TableEntry};
+use crate::envelope::{ColumnEntry, TableEntry, values};
 
 /// Both platforms.
-const BOTH: &[&str] = &["macos", "linux"];
+const BOTH: &[&str] = &values::PLATFORMS;
 
 /// macOS alone.
-const MACOS: &[&str] = &["macos"];
+const MACOS: &[&str] = &[values::PLATFORMS[0]];
 
 /// The columns only macOS fills, by table; `*` for every column: the
-/// FSEvents state of a volume, and the clone groups, which only APFS
+/// `FSEvents` state of a volume, and the clone groups, which only APFS
 /// reports at scan time (docs/index-format.md).
 const MACOS_ONLY: [(&str, &str); 5] = [
     ("scan_volumes", "fsevents_uuid"),
@@ -58,25 +58,26 @@ pub fn tables(index: Option<&Index>) -> Result<Vec<TableEntry>, CoreError> {
                     let column: String = row.get(0)?;
                     let not_null: bool = row.get(2)?;
                     let key: i64 = row.get(3)?;
+                    let declared: String = row.get(1)?;
                     Ok(ColumnEntry {
                         platforms: platforms(&name, &column).to_vec(),
-                        r#type: row.get(1)?,
                         // An INTEGER PRIMARY KEY is the rowid: never null.
-                        nullable: !not_null && key == 0,
+                        nullable: !(not_null || (key > 0 && declared == "INTEGER")),
+                        r#type: declared,
                         name: column,
                     })
                 })
                 .and_then(Iterator::collect)
             })
             .map_err(layout)?;
-        let rows = match index {
-            Some(index) => Some(index.rows(&name)?),
+        let row_count = match index {
+            Some(index) => index.rows(&name)?,
             None => None,
         };
         tables.push(TableEntry {
             name,
             columns,
-            rows,
+            row_count,
         });
     }
     Ok(tables)
@@ -132,6 +133,6 @@ mod tests {
         assert!(!id.nullable && id.r#type == "INTEGER");
         let errors = dirs.columns.iter().find(|c| c.name == "errors").unwrap();
         assert!(errors.nullable);
-        assert!(layout.iter().all(|t| t.rows.is_none()));
+        assert!(layout.iter().all(|t| t.row_count.is_none()));
     }
 }

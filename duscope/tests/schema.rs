@@ -62,7 +62,7 @@ fn rows(answer: &Value, table: &str) -> Value {
         .unwrap()
         .iter()
         .find(|t| t["name"] == table)
-        .unwrap()["rows"]
+        .unwrap()["row_count"]
         .clone()
 }
 
@@ -104,6 +104,19 @@ fn p2_qry_08_golden_of_the_layout_with_a_saved_scans_rows() {
         ]
     );
     assert!(answer["scan"]["id"].is_string());
+    // dirs and files read from the root's counts: what counting finds.
+    for table in ["dirs", "files", "hardlinks"] {
+        let sql = format!("SELECT count(*) FROM {table}");
+        let counted = ok(&run(
+            &env,
+            &["query", root.to_str().unwrap(), "--sql", &sql, "--json"],
+        ));
+        assert_eq!(
+            counted["result"]["rows"][0][0],
+            rows(&answer, table),
+            "{table}"
+        );
+    }
 }
 
 #[test]
@@ -138,6 +151,24 @@ fn p2_qry_08_people_read_the_ddl_with_each_tables_rows() {
             .any(|l| l.starts_with("scan_volumes\tfsevents_uuid\tTEXT\ttrue\tmacos\t")),
         "{text}"
     );
+    // -0 and --header, as every verb's --plain.
+    let out = run(
+        &env,
+        &[
+            "schema",
+            root.to_str().unwrap(),
+            "--plain",
+            "-0",
+            "--header",
+        ],
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let mut records = text.split('\0');
+    assert_eq!(
+        records.next(),
+        Some("table\tcolumn\ttype\tnullable\tplatforms\trow_count")
+    );
+    assert!(records.any(|r| r == "files\tid\tINTEGER\tfalse\tmacos,linux\t4"));
 }
 
 #[test]
@@ -150,6 +181,20 @@ fn p2_qry_08_without_a_saved_scan_the_rows_are_null() {
     // schema never scans.
     let scans = ok(&run(&env, &["scans", "--json"]));
     assert_eq!(scans["entries"], serde_json::json!([]));
+    // A path that is not there, and a scan no index directory can hold.
+    let out = run(&env, &["schema", "/no/such/path", "--json"]);
+    assert_eq!(out.status.code(), Some(3));
+    let out = env
+        .cmd()
+        .env_remove("DUSCOPE_INDEX_DIR")
+        .env_remove("HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .args(["schema", root.to_str().unwrap(), "--scan", "3f9a", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "scan_not_found");
 }
 
 #[test]
