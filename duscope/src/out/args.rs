@@ -3,6 +3,8 @@
 // Help text is plain text, and a flag struct is a set of switches.
 #![allow(clippy::doc_markdown, clippy::struct_excessive_bools)]
 
+use std::path::PathBuf;
+
 use clap::{Args, ValueEnum};
 
 /// How a command writes its result.
@@ -44,6 +46,24 @@ pub struct OutputArgs {
     /// Start --plain output with a line of field names
     #[arg(long, global = true)]
     pub header: bool,
+
+    /// The fields of each row, comma-separated, in that order (help lists them)
+    #[arg(long, global = true, value_name = "FIELDS", conflicts_with = "detail")]
+    pub fields: Option<String>,
+
+    /// Every field of each row
+    #[arg(long, global = true)]
+    pub detail: bool,
+
+    /// Write the output to FILE, with no --limit cap and no --max-chars
+    #[arg(short = 'o', long = "output", global = true, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// Put a JSON envelope over N characters in a file; print its first rows
+    ///
+    /// Kept a week in the index directory's out/; default 24000, 0 never
+    #[arg(long, global = true, value_name = "N")]
+    pub max_chars: Option<usize>,
 
     /// The configuration file's `format`, which decides only when no flag,
     /// `DUSCOPE_FORMAT`, agent variable or `CI` does.

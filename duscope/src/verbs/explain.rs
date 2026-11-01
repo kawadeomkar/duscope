@@ -103,6 +103,9 @@ impl Lookup {
 pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     let lookup = Lookup::new(args, index_dir)?;
     if let Some(selector) = &args.errors {
+        if output.fields_first::<ScanErrorEntry>("explain --errors")? {
+            return Ok(());
+        }
         let selector = ScanSelector::parse(selector).map_err(core_failure)?;
         let Some(resolved) = lookup.resolve(&selector, None)? else {
             return Err(Failure::new(

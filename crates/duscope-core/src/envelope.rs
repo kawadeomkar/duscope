@@ -729,6 +729,167 @@ pub struct CheckedEntry {
     pub quick_check: &'static str,
 }
 
+/// The fields of a row as `--fields` names them, in the order the row
+/// writes them.
+pub trait Fields {
+    /// Every field the row writes; `name_raw` is among them, though a row
+    /// carries it only for a name that is not UTF-8.
+    const NAMES: &'static [&'static str];
+}
+
+impl Fields for TopEntry {
+    const NAMES: &'static [&'static str] = &[
+        "path",
+        "name",
+        "name_raw",
+        "kind",
+        "depth",
+        "allocated_bytes",
+        "apparent_bytes",
+        "pct_of_root",
+        "file_count",
+        "dir_count",
+        "max_mtime",
+        "via",
+        "flags",
+    ];
+}
+
+impl Fields for TreeEntry {
+    const NAMES: &'static [&'static str] = &[
+        "path",
+        "name",
+        "name_raw",
+        "kind",
+        "depth",
+        "allocated_bytes",
+        "apparent_bytes",
+        "pct_of_root",
+        "pct_of_parent",
+        "file_count",
+        "dir_count",
+        "max_mtime",
+        "flags",
+    ];
+}
+
+impl Fields for ByTypeEntry {
+    const NAMES: &'static [&'static str] = &[
+        "class",
+        "allocated_bytes",
+        "apparent_bytes",
+        "pct_of_root",
+        "file_count",
+        "largest",
+    ];
+}
+
+impl Fields for StaleEntry {
+    const NAMES: &'static [&'static str] = &[
+        "path",
+        "name",
+        "name_raw",
+        "kind",
+        "allocated_bytes",
+        "apparent_bytes",
+        "mtime",
+        "ctime",
+        "atime",
+        "nlink",
+        "flags",
+    ];
+}
+
+impl Fields for CacheEntry {
+    const NAMES: &'static [&'static str] = &[
+        "path",
+        "name",
+        "name_raw",
+        "rule",
+        "regenerable_by",
+        "project_root",
+        "confirmed",
+        "cachedir_tag",
+        "allocated_bytes",
+        "apparent_bytes",
+        "pct_of_root",
+        "file_count",
+        "max_mtime",
+    ];
+}
+
+impl Fields for ProjectEntry {
+    const NAMES: &'static [&'static str] = &[
+        "project_root",
+        "allocated_bytes",
+        "apparent_bytes",
+        "cache_count",
+        "max_mtime",
+        "caches",
+    ];
+}
+
+impl Fields for SavedScanEntry {
+    const NAMES: &'static [&'static str] = &[
+        "id",
+        "root",
+        "started_at",
+        "finished_at",
+        "attrs",
+        "entry_count",
+        "allocated_bytes",
+        "apparent_bytes",
+        "file_count",
+        "dir_count",
+        "parent_scan_id",
+        "source",
+        "index_version",
+        "index_bytes",
+        "index_path",
+    ];
+}
+
+impl Fields for PrunedEntry {
+    const NAMES: &'static [&'static str] = &["path", "kind", "id", "bytes"];
+}
+
+impl Fields for CheckedEntry {
+    const NAMES: &'static [&'static str] = &["id", "index_path", "quick_check"];
+}
+
+impl Fields for ScanErrorEntry {
+    const NAMES: &'static [&'static str] = &["path", "kind", "errno", "message"];
+}
+
+/// What stdout gets in place of an envelope longer than `--max-chars`: the
+/// file the whole envelope went to, and its first rows.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SpilledEnvelope<T> {
+    /// Whether the command succeeded.
+    pub ok: bool,
+    /// [`SCHEMA_VERSION`].
+    pub schema_version: &'static str,
+    /// The program.
+    pub tool: Tool,
+    /// Where the envelope went.
+    pub spilled: Spill,
+    /// The envelope's first rows, at most five.
+    pub preview: Vec<T>,
+    /// The envelope's warnings, and `spilled`.
+    pub warnings: Vec<Warning>,
+}
+
+/// An envelope written to a file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Spill {
+    /// The file, absolute.
+    pub path: String,
+    /// The envelope's rows (`returned_count`).
+    pub rows: u64,
+    /// The file's size.
+    pub bytes: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{base64, name_fields};
@@ -755,5 +916,149 @@ mod tests {
         let (name, raw) = name_fields(b"caf\xe9.txt");
         assert_eq!(name, "caf\u{fffd}.txt");
         assert_eq!(raw.as_deref(), Some("Y2Fm6S50eHQ="));
+    }
+
+    /// A row's fields as it writes them, in order, against its
+    /// [`super::Fields::NAMES`].
+    fn assert_names<T: serde::Serialize + super::Fields>(row: &T) {
+        let text = serde_json::to_string(row).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mut keys: Vec<&String> = value.as_object().unwrap().keys().collect();
+        let mut names: Vec<&str> = T::NAMES.to_vec();
+        keys.sort();
+        names.sort_unstable();
+        assert_eq!(keys, names, "{text}");
+        let at: Vec<usize> = T::NAMES
+            .iter()
+            .map(|name| text.find(&format!("\"{name}\":")).unwrap())
+            .collect();
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "out of order: {text}");
+    }
+
+    #[test]
+    // One sample of each row, every field spelled.
+    #[allow(clippy::too_many_lines)]
+    fn p2_qry_02_every_row_names_its_fields_in_order() {
+        use super::{
+            ByTypeEntry, CacheEntry, CheckedEntry, ProjectEntry, PrunedEntry, SavedScanEntry,
+            ScanErrorEntry, StaleEntry, TopEntry, TreeEntry,
+        };
+        let raw = || Some("bmFtZQ==".to_owned());
+        assert_names(&TopEntry {
+            path: "/a".into(),
+            path_bytes: Vec::new(),
+            name: "a".into(),
+            name_raw: raw(),
+            kind: "dir",
+            depth: 1,
+            allocated_bytes: 1,
+            apparent_bytes: 1,
+            pct_of_root: 1.0,
+            file_count: 1,
+            dir_count: 1,
+            max_mtime: "t".into(),
+            via: Vec::new(),
+            flags: Vec::new(),
+        });
+        assert_names(&TreeEntry {
+            path: "/a".into(),
+            path_bytes: Vec::new(),
+            name: "a".into(),
+            name_raw: raw(),
+            kind: "dir",
+            depth: 1,
+            allocated_bytes: 1,
+            apparent_bytes: 1,
+            pct_of_root: 1.0,
+            pct_of_parent: 1.0,
+            file_count: 1,
+            dir_count: 1,
+            max_mtime: "t".into(),
+            flags: Vec::new(),
+        });
+        assert_names(&ByTypeEntry {
+            class: "code",
+            allocated_bytes: 1,
+            apparent_bytes: 1,
+            pct_of_root: 1.0,
+            file_count: 1,
+            largest: Vec::new(),
+        });
+        assert_names(&StaleEntry {
+            path: "/a".into(),
+            path_bytes: Vec::new(),
+            name: "a".into(),
+            name_raw: raw(),
+            kind: "file",
+            allocated_bytes: 1,
+            apparent_bytes: 1,
+            mtime: "t".into(),
+            ctime: "t".into(),
+            atime: Some("t".into()),
+            nlink: 1,
+            flags: Vec::new(),
+        });
+        assert_names(&CacheEntry {
+            path: "/a".into(),
+            path_bytes: Vec::new(),
+            name: "a".into(),
+            name_raw: raw(),
+            rule: "node_modules".into(),
+            regenerable_by: "npm install",
+            project_root: Some("/".into()),
+            project_bytes: Vec::new(),
+            confirmed: true,
+            cachedir_tag: false,
+            allocated_bytes: 1,
+            apparent_bytes: 1,
+            pct_of_root: 1.0,
+            file_count: 1,
+            max_mtime: "t".into(),
+        });
+        assert_names(&ProjectEntry {
+            project_root: Some("/".into()),
+            path_bytes: Vec::new(),
+            allocated_bytes: 1,
+            apparent_bytes: 1,
+            cache_count: 1,
+            max_mtime: "t".into(),
+            caches: Vec::new(),
+        });
+        assert_names(&SavedScanEntry {
+            id: "i".into(),
+            root: "/".into(),
+            started_at: "t".into(),
+            finished_at: "t".into(),
+            attrs: "basic",
+            entry_count: 1,
+            allocated_bytes: 1,
+            apparent_bytes: 1,
+            file_count: 1,
+            dir_count: 1,
+            parent_scan_id: None,
+            source: "scan".into(),
+            index_version: "2.0".into(),
+            index_bytes: 1,
+            index_path: "/i.db".into(),
+            short_id: "i".into(),
+        });
+        assert_names(&PrunedEntry {
+            path: "/p".into(),
+            kind: "spill",
+            id: None,
+            bytes: 1,
+        });
+        assert_names(&CheckedEntry {
+            id: "i".into(),
+            index_path: "/i.db".into(),
+            quick_check: "ok",
+        });
+        assert_names(&ScanErrorEntry {
+            path: "/e".into(),
+            path_bytes: Vec::new(),
+            kind: "directory",
+            errno: 13,
+            message: "denied".into(),
+        });
     }
 }

@@ -1006,13 +1006,17 @@ mod tests {
             null: false,
             header: false,
             quiet: false,
+            fields: None,
+            file: None,
+            max_chars: 0,
+            spill_dir: None,
         };
         let fresh = super::super::source::Source::Fresh {
             scanned: Box::new(scanned),
             save: None,
         };
         let (envelope, _, _) =
-            top_envelope(fresh, &args.walk, None, "scan", true, true, &output).unwrap();
+            top_envelope(fresh, &args.walk, None, "scan", true, true, None, &output).unwrap();
         assert_eq!(envelope.scan.vanished_count, 1);
         assert_eq!(envelope.scan.error_count, 0);
         let warning = envelope
