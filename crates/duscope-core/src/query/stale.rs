@@ -6,8 +6,8 @@ use crate::CoreError;
 use crate::envelope::{StaleEntry, name_fields};
 
 use super::{
-    Filters, Page, SizeKind, SortKey, TreeView, abs_path, attrs_not_collected, flag_names,
-    kind_name, ranked, timegrammar::iso8601,
+    Cut, Filters, Page, SizeKind, SortKey, TreeView, abs_path, attrs_not_collected, flag_names,
+    kind_name, ranked as ranked_ids, ranked_files, timegrammar::iso8601,
 };
 
 /// `stale`'s default `--min-size`: 10 MiB.
@@ -57,6 +57,23 @@ pub fn stale(
     }
     let cutoff = q.now.saturating_sub(q.older_than);
     let root = view.node(0);
+    // Without a filter, from the view's own ranking where it has one (the
+    // index's plans): the same cut, the same order.
+    let ranked = (root.is_dir()
+        && !q.atime
+        && q.filters.is_empty()
+        && q.sort == SortKey::Size
+        && !q.reverse
+        && q.size == SizeKind::Allocated)
+        .then_some(q.limit)
+        .flatten()
+        .and_then(|limit| {
+            let cut = Cut {
+                before: cutoff,
+                min_allocated: q.min_size,
+            };
+            ranked_files(view, 0, limit, Some(cut))
+        });
     let candidates = (0..=root.last_id).filter(|&id| {
         let node = view.node(id);
         !node.is_dir()
@@ -66,7 +83,10 @@ pub fn stale(
             && node.size(q.size) >= q.min_size
             && q.filters.keeps(view, &node, q.size)
     });
-    let (ids, total_count) = ranked(view, candidates, q.sort, q.size, q.reverse, q.limit);
+    let (ids, total_count) = match ranked {
+        Some(r) => (r.ids, r.total_count),
+        None => ranked_ids(view, candidates, q.sort, q.size, q.reverse, q.limit),
+    };
     let entries = ids
         .into_iter()
         .map(|id| {

@@ -34,6 +34,7 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::CoreError;
 use crate::arena::{Arena, DirRec, EntryIdx};
+use crate::index::Index;
 use crate::rollup::RollUp;
 
 pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
@@ -186,6 +187,13 @@ pub trait TreeView {
             next = last.checked_add(1);
         }
         dirs
+    }
+
+    /// The saved scan the view reads, and the id in it of the view's root:
+    /// what a query reads by SQL where that is faster than a walk; `None`
+    /// for the arena.
+    fn as_index(&self) -> Option<(&Index, u32)> {
+        None
     }
 }
 
@@ -367,6 +375,38 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
             .map(|(id, last)| (id.saturating_sub(self.base), last.saturating_sub(self.base)))
             .collect()
     }
+
+    fn as_index(&self) -> Option<(&Index, u32)> {
+        let (index, base) = self.view.as_index()?;
+        Some((index, base + self.base))
+    }
+}
+
+/// The largest non-directories under `dir` of `view` in allocated bytes,
+/// ties by path, at most `limit`, those past `cut` when given, and how many
+/// matched, where the view reads a saved scan ([`Index::largest_files`]);
+/// `None` for the arena, or when the read failed, which the index records.
+pub fn ranked_files(
+    view: &(impl TreeView + ?Sized),
+    dir: u32,
+    limit: usize,
+    cut: Option<Cut>,
+) -> Option<Ranked> {
+    let (index, base) = view.as_index()?;
+    match index.largest_files(dir + base, limit, cut, None) {
+        Ok(ranked) => Some(Ranked {
+            ids: ranked
+                .ids
+                .into_iter()
+                .map(|id| id.saturating_sub(base))
+                .collect(),
+            total_count: ranked.total_count,
+        }),
+        Err(e) => {
+            index.record(&e);
+            None
+        }
+    }
 }
 
 /// The size the rows are ranked and shown by.
@@ -537,6 +577,20 @@ pub struct Filters {
 }
 
 impl Filters {
+    /// Whether no filter is set: every row is kept.
+    pub fn is_empty(&self) -> bool {
+        self.glob.is_none()
+            && self.regex.is_none()
+            && self.exclude.is_none()
+            && self.kinds.is_empty()
+            && self.min_size.is_none()
+            && self.max_size.is_none()
+            && self.min_depth.is_none()
+            && self.max_depth.is_none()
+            && self.before.is_none()
+            && self.after.is_none()
+    }
+
     /// Whether a time filter asks for a time `--attrs basic` does not
     /// collect.
     pub fn needs_full(&self) -> bool {
