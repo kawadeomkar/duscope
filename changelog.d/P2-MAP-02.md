@@ -1,2 +1,2 @@
 ### Added
-- `render --format png` (or `-o FILE.png`) draws the treemap as a PNG, at most 64 Mi pixels: each tile shaded pixel for pixel by GrandPerspective's gradient, labels in a bundled subset of the Inter font (SIL Open Font License 1.1). duscope rasterises and encodes it itself, with no graphics library.
+- `render --format png` (or `-o FILE.png`) draws the treemap as a PNG, at most 64 Mi pixels: each tile shaded pixel for pixel by GrandPerspective's gradient, labels in a bundled subset of the Inter font (SIL Open Font License 1.1) that holds ASCII and Latin-1, so other characters show as boxes in a PNG (the SVG uses the browser's fonts). duscope rasterises and encodes it itself, with no graphics library.
