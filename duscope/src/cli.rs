@@ -670,6 +670,10 @@ pub struct RenderArgs {
     /// The picture's height in pixels, 16 to 16384 (default 800)
     #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u16).range(16..=16_384), help_heading = "Render")]
     pub height: Option<u16>,
+
+    /// The configuration file's `theme`, a default below `DUSCOPE_THEME`.
+    #[arg(skip)]
+    pub configured_theme: Option<OsString>,
 }
 
 /// `--layout`.
@@ -971,8 +975,7 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         Some(
             Verb::Summary(SummaryArgs { walk, index })
             | Verb::Query(SqlArgs { walk, index, .. })
-            | Verb::Export(ExportArgs { walk, index })
-            | Verb::Render(RenderArgs { walk, index, .. }),
+            | Verb::Export(ExportArgs { walk, index }),
         ) => {
             walk_defaults(walk)?;
             index_defaults(index);
@@ -982,6 +985,16 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
                 && matches.value_source("attrs") != Some(ValueSource::CommandLine)
             {
                 walk.attrs = AttrsArg::Full;
+            }
+        }
+        Some(Verb::Render(args)) => {
+            walk_defaults(&mut args.walk)?;
+            index_defaults(&mut args.index);
+            args.configured_theme = d.theme.as_ref().map(|theme| OsString::from(&theme.value));
+            if args.color_by.is_none()
+                && let Some(by) = &d.color_by
+            {
+                args.color_by = Some(choice(config, "color_by", by)?);
             }
         }
         Some(Verb::Diff(args)) => {

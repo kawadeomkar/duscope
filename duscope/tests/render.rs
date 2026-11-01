@@ -101,9 +101,11 @@ fn p2_map_01_a_full_picture_is_well_formed_with_its_gradients() {
         .collect();
     assert!(!used.is_empty());
     assert_eq!(used, defined);
-    // The largest files are labelled with their sizes; the legend and
-    // the totals are under the map.
-    assert!(svg.contains(">holiday-2035.mov</text>"), "no label");
+    // The largest files are labelled with their sizes, a name cut to its
+    // tile (whose size differs between the platforms' layouts); the legend
+    // and the totals are under the map.
+    assert!(svg.contains(">holiday-"), "no label");
+    assert!(svg.contains(".0M</text>"), "no size");
     assert!(svg.contains("%</text>") && svg.contains(" files · "));
     // xmllint reads it as XML.
     match Command::new("xmllint").arg("--noout").arg(&file).output() {
@@ -153,4 +155,68 @@ fn p2_map_01_render_wants_svg_and_a_pack_with_colours() {
         .unwrap();
     let svg = String::from_utf8(ok(&out)).unwrap();
     assert!(svg.contains("fill=\"#1e1e2e\""), "Mocha's base");
+    // The configuration file's theme, beneath DUSCOPE_THEME.
+    let dir = env.xdg_config_home().join("duscope");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("config.toml"), "[defaults]\ntheme = \"dracula\"\n").unwrap();
+    let svg = String::from_utf8(ok(&run(&env, &["render", &root, "--depth", "1"]))).unwrap();
+    assert!(svg.contains("fill=\"#282a36\""), "Dracula's base");
+    let out = env
+        .cmd()
+        .env("DUSCOPE_THEME", "gruvbox")
+        .args(["render", &root, "--depth", "1"])
+        .output()
+        .unwrap();
+    let svg = String::from_utf8(ok(&out)).unwrap();
+    assert!(!svg.contains("fill=\"#282a36\""), "the variable wins");
+}
+
+/// A tree of exact sizes, through `import`: an empty directory that weighs
+/// its own blocks, a directory with a file, and two files of no bytes.
+const TREE: &str = r#"[1,2,{"progname":"ncdu","timestamp":2114380800},
+[{"name":"/r","asize":0,"dsize":0},
+{"name":"z1","asize":0,"dsize":0},
+{"name":"z2","asize":0,"dsize":0},
+[{"name":"empty","asize":400000,"dsize":400000}],
+[{"name":"big","asize":0,"dsize":0},
+{"name":"a.bin","asize":500000,"dsize":500000}]]]
+"#;
+
+#[test]
+fn p2_map_01_every_tile_is_painted_and_labels_keep_to_their_tiles() {
+    let env = TestEnv::new();
+    fs::create_dir_all(env.tmp_dir()).unwrap();
+    let file = env.tmp_dir().join("tree.json");
+    fs::write(&file, TREE).unwrap();
+    let imported: serde_json::Value = serde_json::from_slice(&ok(&run(
+        &env,
+        &["import", file.to_str().unwrap(), "--json"],
+    )))
+    .unwrap();
+    let id = imported["scan"]["id"].as_str().unwrap().to_owned();
+    for layout in ["squarify", "gp"] {
+        let out = run(
+            &env,
+            &[
+                "render", "/r", "--scan", &id, "--layout", layout, "--width", "640", "--height",
+                "400",
+            ],
+        );
+        let svg = String::from_utf8(ok(&out)).unwrap();
+        // The empty directory is a leaf of its own, and the files of no
+        // bytes are pooled, in both layouts: three tiles.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("svg, 3 tiles"), "{layout}: {stderr}");
+        assert!(svg.contains(">empty/</text>"), "{layout}");
+        assert!(svg.contains(">a.bin</text>"), "{layout}");
+        // Each label is clipped to its tile.
+        let labels = svg.matches("<g clip-path=").count();
+        assert_eq!(labels, svg.matches("<clipPath id=").count());
+        assert!(labels >= 2, "{layout}");
+    }
+    // A picture is the output: --json and --plain describe none.
+    for flag in ["--json", "--plain"] {
+        let out = run(&env, &["render", "/r", "--scan", &id, flag]);
+        assert_eq!(out.status.code(), Some(2), "{flag}");
+    }
 }

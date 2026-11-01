@@ -126,20 +126,26 @@ fn decide(theme_arg: Option<&OsString>, color: bool, env: &MapEnv) -> Result<Sty
     })
 }
 
-/// The colours of a picture (`render`): the pack `--theme` names; else
-/// `DUSCOPE_THEME`'s where it names one with colours, or Mocha, a picture
-/// having no terminal behind it to suit; and `LS_COLORS`, for `--color-by
-/// lscolors`. A pack `--theme` names without colours of its own
-/// (`terminal-native`, `no-color`) is refused.
-pub(super) fn picture(theme_arg: Option<&OsString>) -> Result<(Pack, LsColors), Failure> {
+/// The colours of a picture (`render`): the pack `--theme` names; else the
+/// first of `DUSCOPE_THEME`'s and the configuration file's (`configured`)
+/// that names one with colours, or Mocha, a picture having no terminal
+/// behind it to suit; and `LS_COLORS`, for `--color-by lscolors`. A pack
+/// `--theme` names without colours of its own (`terminal-native`,
+/// `no-color`) is refused.
+pub(super) fn picture(
+    theme_arg: Option<&OsString>,
+    configured: Option<&OsString>,
+) -> Result<(Pack, LsColors), Failure> {
     let env = MapEnv::read(|name| std::env::var_os(name));
     let colourless = |pack: &Pack| pack.shades || pack.name == "terminal-native";
     let pack = match theme_arg {
         Some(_) => theme(theme_arg, &env)?,
         None => std::env::var_os("DUSCOPE_THEME")
             .filter(|v| !v.is_empty())
-            .and_then(|v| theme(Some(&v), &env).ok())
-            .filter(|pack| !colourless(pack))
+            .into_iter()
+            .chain(configured.cloned())
+            .filter_map(|name| theme(Some(&name), &env).ok())
+            .find(|pack| !colourless(pack))
             .unwrap_or_else(|| named("mocha")),
     };
     if colourless(&pack) {
