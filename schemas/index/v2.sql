@@ -134,3 +134,5 @@ CREATE INDEX dirs_parent_name ON dirs (parent_id, name);
 CREATE INDEX dirs_cum_allocated ON dirs (cum_allocated DESC);
 CREATE INDEX files_allocated ON files (allocated DESC);
 CREATE INDEX files_mtime ON files (mtime);
+CREATE INDEX dirs_errors ON dirs (id) WHERE errors IS NOT NULL;
+CREATE INDEX dirs_excluded ON dirs (id) WHERE flags & 3072 != 0;

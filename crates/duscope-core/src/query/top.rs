@@ -15,7 +15,7 @@ use crate::envelope::{TopEntry, name_fields};
 
 use super::{
     Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, kind_name, pct, ranked,
-    timegrammar::iso8601,
+    ranked_files, timegrammar::iso8601,
 };
 
 /// A child holding at least this share of its directory replaces it.
@@ -55,7 +55,21 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
     let root = view.node(0);
     // The ids each row was cut through, for the rows that were.
     let mut vias: HashMap<u32, Vec<u32>> = HashMap::new();
-    let (ids, total_count) = if q.files {
+    // The largest files as the whole view's are, without a filter: from
+    // the view's own ranking where it has one (the index's plans).
+    let from_view = (q.files
+        && root.is_dir()
+        && q.depth.is_none()
+        && q.filters.is_empty()
+        && q.sort == SortKey::Size
+        && !q.reverse
+        && q.size == SizeKind::Allocated)
+        .then_some(q.limit)
+        .flatten()
+        .and_then(|limit| ranked_files(view, 0, limit, None));
+    let (ids, total_count) = if let Some(from_view) = from_view {
+        (from_view.ids, from_view.total_count)
+    } else if q.files {
         // A root that is a file is its own one row. The files are ranked
         // as they are found, so only the rows --limit can keep are held.
         let max = q.depth.unwrap_or(u32::MAX);

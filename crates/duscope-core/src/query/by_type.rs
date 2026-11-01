@@ -17,7 +17,9 @@ use std::borrow::Cow;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use crate::CoreError;
 use crate::envelope::{ByTypeEntry, Example, name_fields};
+use crate::index::writer::LATER_LINK;
 use crate::rules::{Class, Classes, ext};
 
 use super::{Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, pct};
@@ -42,7 +44,7 @@ pub struct ByTypeQuery<'c> {
 }
 
 /// What one class adds up to.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Tally {
     allocated: u64,
     apparent: u64,
@@ -62,7 +64,7 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
         };
     }
     let root = view.node(0);
-    let tallies = tally(view, q);
+    let tallies = from_index(view, q).unwrap_or_else(|| tally(view, q));
     let root_total = root.size(q.size);
     let mut classes: Vec<Class> = Class::ALL
         .into_iter()
@@ -233,7 +235,179 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
     tallies
 }
 
+/// The tallies of a whole saved scan read without a filter, from its own
+/// tables: `type_stats` for each extension's files; the outermost
+/// directories a directory rule matches, read from `dirs` in pre-order as
+/// [`classify`] reads them, their files' tallies moved to the rule's class;
+/// and each class's largest files from one pass down `files_allocated`,
+/// whose order (allocated bytes down, ids up among equals) is the walk's.
+/// `None` where the walk is needed: a subtree, a filter, a scan with modes
+/// (an extensionless file's class reads its execute bit), `--sort mtime`
+/// (the newest file is not in the tables), apparent sizes, or a class whose
+/// examples would include a file that counts no bytes.
+fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Vec<Tally>> {
+    let (saved, base) = view.as_index()?;
+    if base != 0
+        || !q.filters.is_empty()
+        || view.full_attrs()
+        || q.sort == SortKey::Mtime
+        || q.size != SizeKind::Allocated
+    {
+        return None;
+    }
+    let read = || -> rusqlite::Result<Option<Vec<Tally>>> {
+        let db = saved.db();
+        let class_of_ext = |suffix: &str| {
+            if suffix.is_empty() {
+                Class::Other
+            } else {
+                q.classes.of_ext(suffix).unwrap_or(Class::Other)
+            }
+        };
+        // The outermost directories a rule matches, as (first id, last id,
+        // class), in id order; a rule above the root covers everything.
+        let (above_root, above) = root_dirs(q.classes, view.root_path());
+        let mut ranges: Vec<(u32, u32, Class)> = Vec::new();
+        if let Some(class) = above {
+            ranges.push((0, view.node(0).last_id, class));
+        } else {
+            let mut components: Vec<Vec<u8>> = above_root.iter().map(|c| c.to_vec()).collect();
+            let mut open: Vec<u32> = Vec::new();
+            let mut stmt = db.prepare("SELECT id, last_id, name FROM dirs ORDER BY id")?;
+            let mut rows = stmt.query([])?;
+            let mut inside: Option<u32> = None;
+            while let Some(row) = rows.next()? {
+                let id: u32 = row.get(0)?;
+                let last: u32 = row.get(1)?;
+                while open.last().is_some_and(|&l| id > l) {
+                    open.pop();
+                    components.pop();
+                }
+                if inside.is_some_and(|l| id > l) {
+                    inside = None;
+                }
+                // The root's row holds its whole path; the rules read its
+                // last component, as the walk names it.
+                let name = if id == 0 {
+                    view.name(0).into_owned()
+                } else {
+                    row.get(2)?
+                };
+                components.push(name);
+                open.push(last);
+                if inside.is_none()
+                    && let Some(class) = q.classes.of_dir(&components)
+                {
+                    ranges.push((id, last, class));
+                    inside = Some(last);
+                }
+            }
+        }
+        let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
+        let mut add = |class: Class, files: i64, allocated: i64, apparent: i64, sign: i64| {
+            let tally = &mut tallies[index(class)];
+            let apply = |total: &mut u64, n: i64| {
+                *total = total.saturating_add_signed(sign.saturating_mul(n));
+            };
+            apply(&mut tally.files, files);
+            apply(&mut tally.allocated, allocated);
+            apply(&mut tally.apparent, apparent);
+        };
+        if above.is_none() {
+            let mut stmt = db.prepare("SELECT ext, n, allocated, apparent FROM type_stats")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let suffix: String = row.get(0)?;
+                add(
+                    class_of_ext(&suffix),
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    1,
+                );
+            }
+        }
+        // Counted as `type_stats` counts: a later link not at all, a
+        // clone's bytes on disk at the member charged with them.
+        let mut stmt = db.prepare(&format!(
+            "SELECT ext, SUM(flags & {LATER_LINK} = 0), \
+             SUM(CASE WHEN flags & {LATER_LINK} = 0 AND charged THEN allocated ELSE 0 END), \
+             SUM(CASE WHEN flags & {LATER_LINK} = 0 THEN apparent ELSE 0 END) \
+             FROM files WHERE id BETWEEN ?1 AND ?2 GROUP BY ext"
+        ))?;
+        for &(first, last, class) in &ranges {
+            let mut rows = stmt.query([first, last])?;
+            while let Some(row) = rows.next()? {
+                let suffix: String = row.get(0)?;
+                let (files, allocated, apparent): (i64, i64, i64) =
+                    (row.get(1)?, row.get(2)?, row.get(3)?);
+                if above.is_none() {
+                    add(class_of_ext(&suffix), files, allocated, apparent, -1);
+                }
+                add(class, files, allocated, apparent, 1);
+            }
+        }
+        if q.examples == 0 {
+            return Ok(Some(tallies));
+        }
+        let class_at = |id: u32, suffix: &str| {
+            let at = ranges.partition_point(|&(first, _, _)| first <= id);
+            match at.checked_sub(1).map(|i| ranges[i]) {
+                Some((_, last, class)) if id <= last => class,
+                _ => class_of_ext(suffix),
+            }
+        };
+        let wanted = tallies.iter().filter(|t| t.files > 0).count();
+        let mut full = 0;
+        let mut stmt = db.prepare(&format!(
+            "SELECT id, allocated, ext FROM files INDEXED BY files_allocated \
+             WHERE charged AND flags & {LATER_LINK} = 0 ORDER BY allocated DESC, id"
+        ))?;
+        let mut rows = stmt.query([])?;
+        while full < wanted
+            && let Some(row) = rows.next()?
+        {
+            let id: u32 = row.get(0)?;
+            let size = unsigned(row.get(1)?);
+            let suffix: String = row.get(2)?;
+            let tally = &mut tallies[index(class_at(id, &suffix))];
+            // A class is full at its examples, or at its every file.
+            let target = u64::try_from(q.examples).map_or(tally.files, |n| n.min(tally.files));
+            if (tally.largest.len() as u64) < target {
+                tally.largest.push((size, id));
+                if tally.largest.len() as u64 == target {
+                    full += 1;
+                }
+            }
+        }
+        // A class is settled when it lists every one of its files, or its
+        // examples all count bytes: a file that counts none (an uncharged
+        // clone member, an empty file) ranks by id among the others, which
+        // the walk decides.
+        let settled = tallies.iter().all(|t| {
+            t.largest.len() as u64 == t.files
+                || (t.largest.len() == q.examples && t.largest.last().is_some_and(|l| l.0 > 0))
+        });
+        Ok(settled.then_some(tallies))
+    };
+    read().unwrap_or_else(|e| {
+        saved.record(&CoreError::IndexCorrupt {
+            file: saved.file().display().to_string(),
+            message: e.to_string(),
+        });
+        None
+    })
+}
+
+/// A count or size read from a signed column.
+fn unsigned(n: i64) -> u64 {
+    u64::try_from(n).unwrap_or(0)
+}
+
 /// A class's place in [`Class::ALL`].
 fn index(class: Class) -> usize {
     Class::ALL.iter().position(|&c| c == class).unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests;
