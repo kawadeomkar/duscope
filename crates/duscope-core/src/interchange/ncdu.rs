@@ -5,14 +5,18 @@
 //! - **Sizes** are each entry's own (`asize` apparent, `dsize` on disk), a
 //!   directory's too, as ncdu writes them; ncdu adds them up on import.
 //! - **A hard-linked file** carries `ino`, `hlnkc` and `nlink`, and its full
-//!   sizes at every link: ncdu counts each inode once.
+//!   sizes at every link: ncdu counts each inode once. A file with links
+//!   the scan did not group (on an overlay volume, whose inode numbers do
+//!   not identify a file) has none of the three, so ncdu counts each link,
+//!   as duscope does.
 //! - **Names** are written as the filesystem gave them, as ncdu writes
 //!   them: quotes, backslashes and control characters escaped, other bytes
 //!   as they are, so a name that is not UTF-8 survives the round trip
 //!   (strict JSON readers need UTF-8 names).
 //! - **A directory the scan did not enter** is an info object with
-//!   `excluded` (`pattern`, `otherfs`, `kernfs`, `frmlink`); one it could
-//!   not read has `read_error`.
+//!   `excluded`: `pattern`, `otherfs`, `kernfs`, or `frmlink` for the
+//!   volume a macOS scan reaches through its firmlinks; one it could not
+//!   read has `read_error`.
 //! - **`dev`** is on the root and on each directory whose device differs
 //!   from its parent's; `mtime` (whole seconds) on every entry, and `uid`,
 //!   `gid` and `mode` where the scan collected them.
@@ -20,7 +24,8 @@
 use std::fmt::Write as _;
 use std::io::Write;
 
-use super::{ExportError, Row, RowKind, seconds, walk};
+use super::{Row, RowKind, seconds, walk};
+use crate::CoreError;
 use crate::index::Index;
 
 /// What the metadata object says.
@@ -42,7 +47,7 @@ pub fn write(
     base: u32,
     opts: &NcduOpts,
     out: &mut dyn Write,
-) -> Result<(), ExportError> {
+) -> Result<(), CoreError> {
     writeln!(
         out,
         "[1,2,{{\"progname\":\"duscope\",\"progver\":\"{}\",\"timestamp\":{}}},",
@@ -63,7 +68,9 @@ pub fn write(
         let parent_dev = open.last().map(|&(_, dev)| dev);
         let info = info(row, parent_dev);
         match row.dir {
-            Some(dir) if row.excluded.is_none() => {
+            // An excluded directory has nothing under it in the index;
+            // one that had would still open its array.
+            Some(dir) if row.excluded.is_none() || dir.last_id > row.id => {
                 out.write_all(b"[")?;
                 out.write_all(&info)?;
                 open.push((dir.last_id, dir.dev));
@@ -95,11 +102,14 @@ fn info(row: &Row, parent_dev: Option<u64>) -> Vec<u8> {
     {
         let _ = write!(fields, ",\"dev\":{}", dir.dev);
     }
-    if row.nlink > 1 {
-        if let Some((_, ino)) = row.inode {
-            let _ = write!(fields, ",\"ino\":{ino}");
-        }
-        let _ = write!(fields, ",\"hlnkc\":true,\"nlink\":{}", row.nlink);
+    if row.nlink > 1
+        && let Some((_, ino)) = row.inode
+    {
+        let _ = write!(
+            fields,
+            ",\"ino\":{ino},\"hlnkc\":true,\"nlink\":{}",
+            row.nlink
+        );
     }
     if matches!(row.kind, RowKind::Symlink | RowKind::Other) {
         fields.push_str(",\"notreg\":true");

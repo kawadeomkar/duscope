@@ -438,9 +438,11 @@ impl Drop for Scratch {
 
 impl Source {
     /// The source as an index (see [`Indexed`]); `walk` and `excludes`
-    /// are the fresh scan's, for its saved options.
+    /// are the fresh scan's, for its saved options, and `verb` names the
+    /// directory of an index not kept.
     pub fn indexed(
         self,
+        verb: &str,
         walk: &WalkArgs,
         excludes: &[String],
         output: &Output,
@@ -463,7 +465,7 @@ impl Source {
                     (id, dir, label, Scratch(None))
                 } else {
                     let id = scan::scan_id(&scanned)?;
-                    let dir = scratch_dir()?;
+                    let dir = scratch_dir(verb)?;
                     (id, dir.clone(), "not saved".to_owned(), Scratch(Some(dir)))
                 };
                 // On a failure below, `scratch` goes, and its directory.
@@ -481,11 +483,12 @@ impl Source {
 }
 
 /// A new directory, the owner's only, for the index of a scan not to be
-/// kept (`--no-save`, or no index directory).
-fn scratch_dir() -> Result<PathBuf, Failure> {
+/// kept (`--no-save`, or no index directory): `duscope-<verb>-…` under the
+/// temporary directory.
+fn scratch_dir(verb: &str) -> Result<PathBuf, Failure> {
     let mut n = 0;
     loop {
-        let dir = std::env::temp_dir().join(format!("duscope-index-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("duscope-{verb}-{}-{n}", std::process::id()));
         match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => n += 1,

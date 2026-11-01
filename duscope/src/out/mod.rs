@@ -1057,7 +1057,7 @@ impl Output {
 }
 
 /// Warnings for people, on stderr.
-fn warn(warnings: &[Warning]) {
+pub fn warn(warnings: &[Warning]) {
     for warning in warnings {
         stderr_line(&format!("warning: {}", warning.message));
         if let Some(hint) = &warning.hint {

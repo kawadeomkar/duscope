@@ -25,7 +25,7 @@ XML), which the application opens with *File › Open Scan Data…*.
    files are where duscope's `top --files` puts them; the hard-linked files of
    the tree appear once (physical sizes).
 4. Repeat with `--size apparent`: the file opens with the logical size measure,
-   and each link of a hard-linked file appears.
+   and the hard-linked files still appear once.
 5. Record the GrandPerspective version (*GrandPerspective › About*), the date
    and the result in the table.
 

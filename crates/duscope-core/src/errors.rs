@@ -83,4 +83,7 @@ pub enum CoreError {
     /// `query --sql` was given a statement `SQLite` cannot prepare.
     #[error("{0}")]
     SqlInvalid(String),
+    /// An export's output could not be written.
+    #[error("cannot write the export: {0}")]
+    ExportWrite(#[from] std::io::Error),
 }

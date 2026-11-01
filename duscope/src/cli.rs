@@ -20,7 +20,7 @@ use duscope_core::config::{Config, Setting};
 use duscope_core::query::timegrammar;
 
 use crate::log::Verbosity;
-use crate::out::OutputArgs;
+use crate::out::{FormatArg, OutputArgs};
 use crate::verbs::{Exit, Failure};
 
 /// Fast, queryable disk-usage analyzer.
@@ -800,7 +800,15 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
     let d = &config.defaults;
     let refused = |key: &str, line: usize, why: &str| refused(config, key, line, why);
     if let Some(format) = &d.format {
-        cli.output.configured = Some(choice(config, "format", format)?);
+        let configured: FormatArg = choice(config, "format", format)?;
+        if configured.exports_only() {
+            return Err(refused(
+                "format",
+                format.line,
+                "export's formats are for one export, named with --format",
+            ));
+        }
+        cli.output.configured = Some(configured);
     }
     cli.output.quiet = cli.global.quiet;
     if cli.global.index_dir.is_none() {
@@ -887,6 +895,13 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         ) => {
             walk_defaults(walk)?;
             index_defaults(index);
+            // QDirStat's file holds owners and modes: a scan run for it
+            // collects them, and a saved one without them is passed over.
+            if cli.output.format == Some(FormatArg::Qdirstat)
+                && matches.value_source("attrs") != Some(ValueSource::CommandLine)
+            {
+                walk.attrs = AttrsArg::Full;
+            }
         }
         Some(Verb::Diff(args)) => {
             size_default(config, &mut args.size)?;

@@ -2,9 +2,11 @@
 //! `GrandPerspectiveScanDump` → `ScanInfo` → nested `Folder` and `File`.
 //!
 //! - **The measure** is `physical` (bytes on disk) or `logical` (apparent
-//!   bytes), as GrandPerspective names them; under `physical` a later link
-//!   of a hard-linked file is left out, its bytes counting at the first, as
-//!   GrandPerspective's own scan does.
+//!   bytes), as GrandPerspective names them. A file whose bytes count at
+//!   another entry is left out, so the files add up to duscope's folder
+//!   totals: under both, a later link of a hard-linked file, which
+//!   GrandPerspective's own scan counts once too; under `physical`, also a
+//!   clone whose shared blocks are charged to another member.
 //! - **Zero-size entries are left out**, a file of no bytes and a folder
 //!   with none under it, as GrandPerspective drops them; a folder's files
 //!   come before its folders, the order the index already has.
@@ -27,7 +29,8 @@ use std::io::Write;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
-use super::{ExportError, Row, walk};
+use super::{Row, walk};
+use crate::CoreError;
 use crate::index::Index;
 use crate::query::timegrammar::iso8601;
 
@@ -61,7 +64,7 @@ pub fn write(
     base: u32,
     opts: &GpscanOpts,
     out: &mut dyn Write,
-) -> Result<(), ExportError> {
+) -> Result<(), CoreError> {
     let mut gz = GzEncoder::new(out, Compression::default());
     write!(
         gz,
@@ -110,7 +113,12 @@ pub fn write(
             open.push(dir.last_id);
             return Ok(());
         }
-        if size(row) == 0 || (!opts.apparent && row.later_link) {
+        let elsewhere = if opts.apparent {
+            row.later_link
+        } else {
+            !row.charged
+        };
+        if size(row) == 0 || elsewhere {
             return Ok(());
         }
         write!(

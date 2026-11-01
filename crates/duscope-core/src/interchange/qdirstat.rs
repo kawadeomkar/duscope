@@ -25,7 +25,7 @@ use std::io::Write;
 
 use duscope_walk::Attrs;
 
-use super::{ExportError, Paths, Row, RowKind, seconds, walk};
+use super::{Paths, Row, RowKind, seconds, walk};
 use crate::CoreError;
 use crate::index::Index;
 
@@ -40,9 +40,9 @@ pub fn write(
     base: u32,
     version: &str,
     out: &mut dyn Write,
-) -> Result<(), ExportError> {
+) -> Result<(), CoreError> {
     if index.attrs() != Attrs::Full {
-        return Err(CoreError::AttrsNotCollected("export --format qdirstat").into());
+        return Err(CoreError::AttrsNotCollected("export --format qdirstat"));
     }
     write!(
         out,
