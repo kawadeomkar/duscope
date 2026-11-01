@@ -124,7 +124,17 @@ fn p2_cli_03_an_ncdu_export_imports_to_the_scans_totals() {
     let root = tree(&env);
     let file = env.tmp_dir().join("tree.json");
     let scan_id = scan_and_export(&env, &root, "ncdu", &file);
-    let imported = json(&run(&env, &["import", file.to_str().unwrap(), "--json"]));
+    // --format names the file's format, --json the output's.
+    let imported = json(&run(
+        &env,
+        &[
+            "import",
+            file.to_str().unwrap(),
+            "--format",
+            "ncdu",
+            "--json",
+        ],
+    ));
     assert_eq!(imported["query"]["command"], "import");
     assert_eq!(imported["scan"]["root"], root.to_str().unwrap());
     let import_id = imported["scan"]["id"].as_str().unwrap();
@@ -144,6 +154,7 @@ fn p2_cli_03_an_ncdu_export_imports_to_the_scans_totals() {
         .args(["import", "-", "--json"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let gz = flate(&fs::read(&file).unwrap());
@@ -262,6 +273,12 @@ fn p2_cli_03_an_import_is_read_where_scan_names_it() {
     let fresh_id = fresh["scan"]["id"].as_str().unwrap();
     let diff = json(&run(&env, &["diff", &import_id, fresh_id, "--json"]));
     assert_eq!(diff["query"]["command"], "diff");
+    // latest names the newest scan, never an import.
+    let diff = json(&run(
+        &env,
+        &["diff", &import_id, "latest", "--under", path, "--json"],
+    ));
+    assert_eq!(diff["diff"]["new_scan"], fresh_id);
     // An import has no scan options to scan with again.
     let out = run(&env, &["rescan", "--scan", &import_id, "--json"]);
     assert_eq!(out.status.code(), Some(2));
@@ -295,7 +312,15 @@ fn p2_cli_03_what_cannot_be_imported() {
     for format in ["csv", "json", "qdirstat"] {
         let out = run(&env, &["import", path, "--format", format, "--json"]);
         assert_eq!(out.status.code(), Some(2), "{format}");
+        let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            error["error"]["message"],
+            "import reads --format ncdu, gdu or gpscan"
+        );
     }
+    // Elsewhere --format names the output, as --json does: not both.
+    let out = run(&env, &["top", path, "--format", "plain", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
     // gdu is import's alone.
     let out = run(&env, &["top", path, "--format", "gdu"]);
     assert_eq!(out.status.code(), Some(2));

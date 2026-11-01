@@ -65,32 +65,7 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         })?;
     let started = Instant::now();
     let shown = args.file.display().to_string();
-    let cannot = |e: io::Error| {
-        Failure::new(
-            Exit::Runtime,
-            "io_error",
-            format!("cannot read {shown}: {e}"),
-        )
-    };
-    let input: Box<dyn Read> = if args.file.as_os_str() == "-" {
-        Box::new(io::stdin().lock())
-    } else {
-        Box::new(File::open(&args.file).map_err(cannot)?)
-    };
-    let mut imported = import::import(input, format).map_err(|e| match e {
-        CoreError::ImportInvalid(why) => {
-            core_failure(CoreError::ImportInvalid(format!("{shown}: {why}")))
-        }
-        CoreError::ImportRead(e) => cannot(e),
-        e => core_failure(e),
-    })?;
-    // A root the file gives relative is taken from here.
-    let root = PathBuf::from(OsString::from_vec(std::mem::take(&mut imported.root)));
-    let root = if root.is_absolute() {
-        root
-    } else {
-        std::env::current_dir().map_err(cannot)?.join(root)
-    };
+    let (imported, root) = read(&args.file, &shown, format)?;
     let started_ns = imported.scanned_at.unwrap_or_else(clock::now);
     let mut arena = imported.arena;
     let rollup = roll_up(&mut arena);
@@ -100,6 +75,8 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         unreadable_dirs: imported.unreadable_dirs,
         entry_errors: imported.entry_errors,
         skipped_dirs: imported.skipped_dirs,
+        excluded: imported.excluded,
+        mounts_excluded: imported.mounts_excluded,
         ..WalkSummary::default()
     };
     let walk = walk(&root);
@@ -135,6 +112,41 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         return Ok(());
     };
     scan::save(&scanned, &walk, &[], &id, Some(&dir), output, true)
+}
+
+/// The tree in `file` (`-` for stdin), and its root, absolute: one the
+/// file gives relative is taken from the working directory.
+fn read(
+    file: &Path,
+    shown: &str,
+    format: Option<ImportFormat>,
+) -> Result<(import::Imported, PathBuf), Failure> {
+    let cannot = |e: io::Error| {
+        Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!("cannot read {shown}: {e}"),
+        )
+    };
+    let input: Box<dyn Read> = if file.as_os_str() == "-" {
+        Box::new(io::stdin().lock())
+    } else {
+        Box::new(File::open(file).map_err(cannot)?)
+    };
+    let mut imported = import::import(input, format).map_err(|e| match e {
+        CoreError::ImportInvalid(why) => {
+            core_failure(CoreError::ImportInvalid(format!("{shown}: {why}")))
+        }
+        CoreError::ImportRead(e) => cannot(e),
+        e => core_failure(e),
+    })?;
+    let root = PathBuf::from(OsString::from_vec(std::mem::take(&mut imported.root)));
+    let root = if root.is_absolute() {
+        root
+    } else {
+        std::env::current_dir().map_err(cannot)?.join(root)
+    };
+    Ok((imported, root))
 }
 
 /// The options an import is saved with: a plain scan's of `root`, which

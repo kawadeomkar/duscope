@@ -141,12 +141,18 @@ pub fn source(
     })
 }
 
+/// Whether `index` is a scan, which `latest` may name, rather than a tree
+/// `import` read from another tool's file, which describes another machine
+/// or another time and is read only where `--scan` names it.
+pub fn scanned(index: &Index) -> bool {
+    index.meta().source == "scan"
+}
+
 /// Whether `index` holds the tree a scan with `walk`'s options would: the
 /// same excludes, filesystems, clone and link handling, and the attributes
-/// the verb may ask for. An imported tree, which another tool read, is
-/// read only when `--scan` names it.
+/// the verb may ask for; a scan, never an import.
 fn usable(walk: &WalkArgs, index: &Index) -> bool {
-    if index.meta().source != "scan" {
+    if !scanned(index) {
         return false;
     }
     let content = |options: &str| {

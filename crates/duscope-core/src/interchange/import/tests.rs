@@ -45,6 +45,8 @@ const NCDU: &[u8] = br#"[1,2,{"progname":"ncdu","progver":"2.9.2","timestamp":18
 {"name":"rawFF","notreg":true},
 {"name":"gone","read_error":true},
 {"name":"proc","excluded":"kernfs"},
+{"name":"big.iso","excluded":"pattern"},
+{"name":"cachedir","excluded":"pattern","mode":16877},
 [{"name":"sub","asize":4096,"dsize":4096,"read_error":true}],
 [{"name":"other","asize":10,"dsize":4096,"dev":67},
 {"name":"x","asize":1,"dsize":4096,"ino":7,"hlnkc":true}]]]
@@ -68,31 +70,30 @@ fn p2_cli_03_ncdu_reads_into_the_events_of_a_walk() {
         (
             imported.unreadable_dirs,
             imported.entry_errors,
-            imported.skipped_dirs
+            imported.skipped_dirs,
+            imported.excluded,
+            imported.mounts_excluded,
         ),
-        (1, 1, 1)
+        (1, 1, 2, 2, 1)
     );
     let names = names(&imported);
     assert_eq!(names[0], b"a");
     assert!(names.contains(&"café \"q\" 😀 \x01".as_bytes().to_vec()));
     assert!(names.contains(&b"raw\xff".to_vec()));
-    // The file that could not be read is an error, not an entry.
+    // The file that could not be read is an error, not an entry; what a
+    // pattern excluded is counted, and listed only as a directory.
     assert!(!names.contains(&b"gone".to_vec()));
+    assert!(!names.contains(&b"big.iso".to_vec()));
     let kinds: Vec<Kind> = imported.arena.entries().map(|e| e.kind).collect();
-    assert_eq!(kinds.iter().filter(|k| **k == Kind::Dir).count(), 4);
+    assert_eq!(kinds.iter().filter(|k| **k == Kind::Dir).count(), 5);
     assert!(kinds.contains(&Kind::Unknown));
-    assert!(
-        imported
-            .arena
-            .skipped()
-            .values()
-            .any(|s| *s == Skip::Kernel)
-    );
+    let skipped: Vec<Skip> = imported.arena.skipped().values().copied().collect();
+    assert!(skipped.contains(&Skip::Kernel) && skipped.contains(&Skip::Excluded));
     // `one` and `two` share inode 7 on device 66 and count once; `x`, on
     // device 67, is inode 7 of another device.
     let (apparent, allocated, files, dirs) = totals(&mut imported);
     assert_eq!(files, 5);
-    assert_eq!(dirs, 3);
+    assert_eq!(dirs, 4);
     assert_eq!(apparent, 4096 + 100 + 5 + 4096 + 10 + 1);
     assert_eq!(allocated, 4096 + 4096 + 4096 + 4096 + 4096);
 }
@@ -228,4 +229,41 @@ fn p2_cli_03_what_is_not_a_tree_is_refused() {
     let (apparent, _, files, dirs) = totals(&mut imported);
     assert_eq!((apparent, files), (1, 1));
     assert_eq!(dirs as usize, depth - 1);
+}
+
+/// A reader that gives a byte at a time.
+struct Trickle<'a>(&'a [u8]);
+
+impl std::io::Read for Trickle<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some((&first, rest)) = self.0.split_first() else {
+            return Ok(0);
+        };
+        buf[0] = first;
+        self.0 = rest;
+        Ok(1)
+    }
+}
+
+#[test]
+fn p2_cli_03_names_decode_and_short_reads_still_show_the_format() {
+    // A high surrogate without its low half is U+FFFD, and what follows it
+    // is read on its own.
+    let json = br#"[1,0,{},[{"name":"/"},{"name":"a\ud800\u0041"},{"name":"b\ud800\n"},{"name":"c\udc00"}]]"#;
+    let imported = import(&json[..], None).unwrap();
+    let names = names(&imported);
+    for want in ["a\u{fffd}A", "b\u{fffd}\n", "c\u{fffd}"] {
+        assert!(
+            names.contains(&want.as_bytes().to_vec()),
+            "{want:?}: {names:?}"
+        );
+    }
+    // A byte-order mark, the format named or not.
+    let bom = [&b"\xef\xbb\xbf"[..], &ncdu()].concat();
+    for format in [None, Some(ImportFormat::Ncdu)] {
+        assert!(import(&bom[..], format).is_ok(), "{format:?}");
+    }
+    // A reader that gives a byte at a time: gzip and the mark still show.
+    let mut imported = import(Trickle(&gzip(&bom)), None).unwrap();
+    assert_eq!(totals(&mut imported).2, 5);
 }

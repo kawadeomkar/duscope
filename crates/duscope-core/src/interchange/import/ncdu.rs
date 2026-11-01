@@ -25,7 +25,7 @@ const SKIP_DEPTH_MAX: usize = 1 << 12;
 /// Reads the tree; `format` is gdu's or ncdu's, or else the metadata's
 /// `progname` tells.
 pub(super) fn read(
-    input: impl BufRead,
+    input: &mut dyn BufRead,
     format: Option<ImportFormat>,
 ) -> Result<Imported, CoreError> {
     let mut p = Parser { input, pos: 0 };
@@ -119,19 +119,31 @@ impl Info {
     /// The entry the object describes; `array` for a directory's array.
     fn item(self, format: ImportFormat, array: bool) -> Result<Item, CoreError> {
         let name = self.name.ok_or_else(|| invalid("an entry has no name"))?;
+        let skipped = self.excluded.map(|why| match why.as_slice() {
+            b"otherfs" | b"othfs" => Skip::OneFileSystem,
+            b"kernfs" => Skip::Kernel,
+            b"frmlink" => Skip::Firmlinked,
+            _ => Skip::Excluded,
+        });
         let kind = if array {
             Kind::Dir
         } else if let Some(mode) = self.mode {
             kind_of_mode(mode)
-        } else if self.excluded.is_some() {
-            // ncdu names no kind for what it left out: a directory not
-            // entered, as the mounts it leaves out are.
+        } else if skipped.is_some() {
+            // The mounts ncdu leaves out are directories; what a pattern
+            // excludes it never stats, and that is left out below.
             Kind::Dir
         } else if self.notreg {
             Kind::Unknown
         } else {
             Kind::File
         };
+        // A walk leaves out an excluded file and lists an excluded directory
+        // it did not enter: ncdu's pattern-excluded entry is a directory
+        // only where its mode says so.
+        let left_out = !array
+            && skipped == Some(Skip::Excluded)
+            && self.mode.is_none_or(|mode| kind_of_mode(mode) != Kind::Dir);
         // gdu's directory sizes hold everything under it: the roll-up adds
         // the totals up again from the entries.
         let (apparent, allocated) = if format == ImportFormat::Gdu && kind == Kind::Dir {
@@ -149,12 +161,6 @@ impl Info {
             (Some(_), None) if self.hlnkc => 2,
             _ => 1,
         };
-        let skipped = self.excluded.map(|why| match why.as_slice() {
-            b"otherfs" | b"othfs" => Skip::OneFileSystem,
-            b"kernfs" => Skip::Kernel,
-            b"frmlink" => Skip::Firmlinked,
-            _ => Skip::Excluded,
-        });
         Ok(Item {
             name,
             kind,
@@ -165,7 +171,8 @@ impl Info {
             ino: self.ino.filter(|_| nlink > 1),
             nlink,
             unreadable: self.read_error,
-            skipped,
+            skipped: skipped.filter(|_| kind == Kind::Dir),
+            left_out,
         })
     }
 }
@@ -317,35 +324,23 @@ impl<R: BufRead> Parser<R> {
         }
         self.bump();
         let mut out = Vec::new();
-        let mut utf8 = [0u8; 4];
         loop {
-            let b = self.next()?;
-            let decoded: &[u8] = match b {
+            match self.next()? {
                 b'"' => return Ok(out),
                 b'\\' => match self.next()? {
-                    b'"' => b"\"",
-                    b'\\' => b"\\",
-                    b'/' => b"/",
-                    b'b' => b"\x08",
-                    b'f' => b"\x0c",
-                    b'n' => b"\n",
-                    b'r' => b"\r",
-                    b't' => b"\t",
-                    b'u' => {
-                        let c = self.unicode()?;
-                        c.encode_utf8(&mut utf8).as_bytes()
-                    }
+                    b'u' => self.unicode(&mut out, keep)?,
                     other => {
-                        return Err(self.invalid(&format!(
-                            "\\{} is not an escape",
-                            char::from(other).escape_default()
-                        )));
+                        let decoded = self.escape(other)?;
+                        if keep {
+                            out.extend_from_slice(decoded);
+                        }
                     }
                 },
-                _ => std::slice::from_ref(&b),
-            };
-            if keep {
-                out.extend_from_slice(decoded);
+                b => {
+                    if keep {
+                        out.push(b);
+                    }
+                }
             }
             if out.len() > STRING_MAX {
                 return Err(self.invalid("a string is longer than 1 MiB"));
@@ -353,26 +348,67 @@ impl<R: BufRead> Parser<R> {
         }
     }
 
-    /// The character a `\u` escape names, its surrogate pair included; a
-    /// lone surrogate is U+FFFD.
-    fn unicode(&mut self) -> Result<char, CoreError> {
-        let high = self.hex4()?;
-        if !(0xd800..0xdc00).contains(&high) {
-            return Ok(char::from_u32(high).unwrap_or(char::REPLACEMENT_CHARACTER));
+    /// The bytes a one-letter escape stands for.
+    fn escape(&self, letter: u8) -> Result<&'static [u8], CoreError> {
+        Ok(match letter {
+            b'"' => b"\"",
+            b'\\' => b"\\",
+            b'/' => b"/",
+            b'b' => b"\x08",
+            b'f' => b"\x0c",
+            b'n' => b"\n",
+            b'r' => b"\r",
+            b't' => b"\t",
+            other => {
+                return Err(self.invalid(&format!(
+                    "\\{} is not an escape",
+                    char::from(other).escape_default()
+                )));
+            }
+        })
+    }
+
+    /// Appends the character of the `\u` escape just begun to `out`, with
+    /// the low surrogate's escape that follows a high one. A surrogate
+    /// without its other half is U+FFFD, and an escape after a lone high
+    /// surrogate is read on its own.
+    fn unicode(&mut self, out: &mut Vec<u8>, keep: bool) -> Result<(), CoreError> {
+        let mut push = |c: char| {
+            if keep {
+                let mut utf8 = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
+            }
+        };
+        let mut unit = self.hex4()?;
+        loop {
+            if !(0xd800..0xdc00).contains(&unit) {
+                push(char::from_u32(unit).unwrap_or(char::REPLACEMENT_CHARACTER));
+                return Ok(());
+            }
+            // A high surrogate: its low half follows as another escape.
+            if self.peek()? != Some(b'\\') {
+                push(char::REPLACEMENT_CHARACTER);
+                return Ok(());
+            }
+            self.bump();
+            let letter = self.next()?;
+            if letter != b'u' {
+                push(char::REPLACEMENT_CHARACTER);
+                let decoded = self.escape(letter)?;
+                if keep {
+                    out.extend_from_slice(decoded);
+                }
+                return Ok(());
+            }
+            let low = self.hex4()?;
+            if (0xdc00..0xe000).contains(&low) {
+                let c = 0x10000 + ((unit - 0xd800) << 10) + (low - 0xdc00);
+                push(char::from_u32(c).unwrap_or(char::REPLACEMENT_CHARACTER));
+                return Ok(());
+            }
+            push(char::REPLACEMENT_CHARACTER);
+            unit = low;
         }
-        // A high surrogate: its low half follows as another escape.
-        let rest = self.input.fill_buf().map_err(|e| read_error(&e))?;
-        if !rest.starts_with(b"\\u") {
-            return Ok(char::REPLACEMENT_CHARACTER);
-        }
-        self.bump();
-        self.bump();
-        let low = self.hex4()?;
-        if !(0xdc00..0xe000).contains(&low) {
-            return Ok(char::REPLACEMENT_CHARACTER);
-        }
-        let c = 0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00);
-        Ok(char::from_u32(c).unwrap_or(char::REPLACEMENT_CHARACTER))
     }
 
     fn hex4(&mut self) -> Result<u32, CoreError> {

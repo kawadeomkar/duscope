@@ -24,7 +24,7 @@ use duscope_core::query::{
 use duscope_walk::Attrs;
 
 use super::next::Hints;
-use super::source::core_failure;
+use super::source::{core_failure, scanned};
 use super::{Exit, Failure};
 use crate::cli::ScansArgs;
 use crate::out::{Output, iso8601, thousands};
@@ -299,7 +299,7 @@ fn check(dir: &Path, selector: &str, now: i64, output: &Output) -> Result<(), Fa
         max_age_ns: i64::MAX,
         now,
     };
-    let Some(resolved) = resolve_scan(&selector, &q, |_| true).map_err(core_failure)? else {
+    let Some(resolved) = resolve_scan(&selector, &q, scanned).map_err(core_failure)? else {
         return Err(Failure::new(
             Exit::NotFound,
             "scan_not_found",

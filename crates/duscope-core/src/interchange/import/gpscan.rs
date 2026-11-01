@@ -24,7 +24,7 @@ use super::{Builder, ImportFormat, Imported, Item, invalid, read_error};
 use crate::CoreError;
 
 /// Reads the tree.
-pub(super) fn read(input: impl BufRead) -> Result<Imported, CoreError> {
+pub(super) fn read(input: &mut dyn BufRead) -> Result<Imported, CoreError> {
     let mut reader = Reader::from_reader(input);
     let mut buf = Vec::new();
     let mut tree = Builder::new();

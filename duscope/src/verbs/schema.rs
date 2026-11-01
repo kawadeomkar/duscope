@@ -13,7 +13,7 @@ use duscope_core::index::{INDEX_VERSION, Index, SCHEMA, layout};
 use duscope_core::query::{ScanQuery, ScanSelector, SizeKind, clock, resolve_scan};
 use duscope_core::resolve::resolve_path;
 
-use super::source::{core_failure, saved_block};
+use super::source::{core_failure, saved_block, scanned};
 use super::{Exit, Failure};
 use crate::cli::SchemaArgs;
 use crate::out::{Output, thousands};
@@ -191,7 +191,7 @@ fn saved(
         max_age_ns: i64::MAX,
         now: clock::now(),
     };
-    let resolved = resolve_scan(&selector, &q, |_| true).map_err(core_failure)?;
+    let resolved = resolve_scan(&selector, &q, scanned).map_err(core_failure)?;
     Ok(resolved.map(|r| r.index))
 }
 
