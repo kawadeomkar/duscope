@@ -22,7 +22,7 @@ use crate::envelope::{ByTypeEntry, Example, name_fields};
 use crate::index::writer::LATER_LINK;
 use crate::rules::{Class, Classes, ext};
 
-use super::{Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, pct};
+use super::{Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, pct, remain};
 
 /// What `by-type` was asked.
 #[derive(Debug, Clone)]
@@ -62,6 +62,7 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
             entries: Vec::new(),
             total_count: 0,
             next: None,
+            truncated: false,
         };
     }
     let root = view.node(0);
@@ -102,7 +103,7 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
     if let Some(limit) = q.limit {
         classes.truncate(limit);
     }
-    let entries = classes
+    let entries: Vec<_> = classes
         .into_iter()
         .map(|class| {
             let tally = &tallies[index(class)];
@@ -131,6 +132,7 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
         })
         .collect();
     Page {
+        truncated: remain(0, entries.len(), total_count),
         entries,
         total_count,
         next: None,
@@ -334,22 +336,46 @@ fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Ve
     })
 }
 
-/// Each class's `examples` largest files, from one pass down
-/// `files_allocated` that stops once every class is full: at its examples,
-/// or at its every file. `class_at` gives a file's class from its id and
-/// extension. Whether every class is settled: it lists every one of its
-/// files, or its examples all count bytes (a file that counts none, an
-/// uncharged clone member or an empty file, ranks by id among the others,
-/// which the walk decides).
+/// Each class's `examples` largest files, ranked as the walk ranks them:
+/// bytes counted, down, then ids, up. The files charged with their bytes
+/// come from one pass down `files_allocated` that stops once every class
+/// is full; the files that count no bytes though they count (an uncharged
+/// clone member, a file of `shared_members`) rank after them, by id among
+/// the empty files the pass found. `class_at` gives a file's class from
+/// its id and extension. `false` when the pass did not find what the
+/// tallies count (the walk decides).
 fn largest_by_class(
     saved: &crate::index::Index,
     examples: usize,
     tallies: &mut [Tally],
     class_at: impl Fn(u32, &str) -> Class,
 ) -> rusqlite::Result<bool> {
-    let wanted = tallies.iter().filter(|t| t.files > 0).count();
+    let db = saved.db();
+    // Each class's uncharged files, by id.
+    let mut uncharged: Vec<Vec<u32>> = vec![Vec::new(); tallies.len()];
+    let mut stmt = db.prepare(&format!(
+        "SELECT f.id, f.ext FROM shared_members AS s JOIN files AS f ON f.id = s.id \
+         WHERE NOT f.charged AND f.flags & {LATER_LINK} = 0 ORDER BY f.id"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: u32 = row.get(0)?;
+        let suffix: String = row.get(1)?;
+        uncharged[index(class_at(id, &suffix))].push(id);
+    }
+    // A class is full at its examples, or at its every charged file.
+    let target = |t: &Tally, uncharged: &[u32]| {
+        let charged = t.files.saturating_sub(uncharged.len() as u64);
+        u64::try_from(examples).map_or(charged, |n| n.min(charged))
+    };
+    let targets: Vec<u64> = tallies
+        .iter()
+        .zip(&uncharged)
+        .map(|(t, u)| target(t, u))
+        .collect();
+    let wanted = targets.iter().filter(|&&n| n > 0).count();
     let mut full = 0;
-    let mut stmt = saved.db().prepare(&format!(
+    let mut stmt = db.prepare(&format!(
         "SELECT id, allocated, ext FROM files INDEXED BY files_allocated \
          WHERE charged AND flags & {LATER_LINK} = 0 ORDER BY allocated DESC, id"
     ))?;
@@ -360,19 +386,38 @@ fn largest_by_class(
         let id: u32 = row.get(0)?;
         let size = unsigned(row.get(1)?);
         let suffix: String = row.get(2)?;
-        let tally = &mut tallies[index(class_at(id, &suffix))];
-        let target = u64::try_from(examples).map_or(tally.files, |n| n.min(tally.files));
-        if (tally.largest.len() as u64) < target {
-            tally.largest.push((size, id));
-            if tally.largest.len() as u64 == target {
+        let at = index(class_at(id, &suffix));
+        let largest = &mut tallies[at].largest;
+        if (largest.len() as u64) < targets[at] {
+            largest.push((size, id));
+            if largest.len() as u64 == targets[at] {
                 full += 1;
             }
         }
     }
-    Ok(tallies.iter().all(|t| {
-        t.largest.len() as u64 == t.files
-            || (t.largest.len() == examples && t.largest.last().is_some_and(|l| l.0 > 0))
-    }))
+    if full < wanted {
+        return Ok(false);
+    }
+    for (tally, uncharged) in tallies.iter_mut().zip(uncharged) {
+        if tally.largest.len() >= examples || uncharged.is_empty() {
+            continue;
+        }
+        // The empty files the pass kept, and the uncharged ones, by id.
+        let mut empty: Vec<u32> = tally
+            .largest
+            .iter()
+            .filter(|&&(size, _)| size == 0)
+            .map(|&(_, id)| id)
+            .chain(uncharged)
+            .collect();
+        empty.sort_unstable();
+        tally.largest.retain(|&(size, _)| size > 0);
+        let room = examples - tally.largest.len();
+        tally
+            .largest
+            .extend(empty.into_iter().take(room).map(|id| (0, id)));
+    }
+    Ok(true)
 }
 
 /// The outermost directories of a whole saved scan that a directory rule

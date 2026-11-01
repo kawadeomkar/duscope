@@ -854,6 +854,14 @@ pub struct Page<T> {
     pub total_count: u64,
     /// Where the next page starts, when rows remain and the verb pages.
     pub next: Option<After>,
+    /// Whether rows remain after this page: after `--limit`, or after a
+    /// cursor's page.
+    pub truncated: bool,
+}
+
+/// Whether rows remain past `returned` rows after `seen`, of `total`.
+pub fn remain(seen: u64, returned: usize, total: u64) -> bool {
+    seen.saturating_add(returned as u64) < total
 }
 
 /// [`ranked_by`] for the page after `after`: the first `limit` candidates
@@ -906,7 +914,7 @@ pub fn next_after(
     seen: u64,
     total: u64,
 ) -> Option<After> {
-    let seen = seen + ids.len() as u64;
+    let seen = seen.saturating_add(ids.len() as u64);
     let last = *ids.last()?;
     (seen < total).then(|| After::of(&view.node(last), key, size, seen))
 }
