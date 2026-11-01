@@ -44,6 +44,27 @@ const BLOCK: u32 = 256;
 /// Blocks kept, the one used last first.
 const BLOCKS: usize = 32;
 
+/// Entries read one at a time and kept, beside the blocks; the whole set is
+/// dropped when it fills.
+const SINGLES: usize = 16_384;
+
+/// Entries of one block read one at a time before the block is read whole,
+/// however far apart: a walk that strides reaches it, scattered reads (a
+/// directory's subdirectories, a path's ancestors, the rows a plan returns)
+/// seldom do.
+const MISSES: u8 = 8;
+
+/// The columns of a directory's node and name, as [`dir_from_row`] reads
+/// them.
+const DIR_COLUMNS: &str = "id, last_id, files_end, parent_id, depth, cum_apparent, \
+     cum_allocated, n_files, n_dirs, mtime, ctime, max_mtime, flags, errors IS NOT NULL, name, \
+     atime, btime, mode";
+
+/// The columns of a file's node and name, as [`file_from_row`] reads them,
+/// from `files AS f` joined to its parent `dirs AS d`.
+const FILE_COLUMNS: &str = "f.id, f.parent_id, f.apparent, f.allocated, f.charged, f.mtime, \
+     f.ctime, f.atime, f.btime, f.mode, f.nlink, f.kind, f.flags, d.depth, f.name";
+
 /// Consecutive entries, from `start`: each one's node and name.
 #[derive(Debug)]
 struct Block {
@@ -88,6 +109,13 @@ pub struct Index {
     root: PathBuf,
     /// The blocks read last, the latest first.
     blocks: RefCell<Vec<Block>>,
+    /// Entries read one at a time, until their block has been missed
+    /// [`MISSES`] times.
+    singles: RefCell<HashMap<u32, (Node, Vec<u8>)>>,
+    /// Each block's entries read one at a time, by the block's first id.
+    misses: RefCell<HashMap<u32, u8>>,
+    /// The entry read alone last: the next one beside it is a walk.
+    last_miss: std::cell::Cell<Option<u32>>,
     /// The first read that failed after the file opened.
     failed: RefCell<Option<String>>,
 }
@@ -188,6 +216,9 @@ impl Index {
             attrs,
             len,
             blocks: RefCell::new(Vec::new()),
+            singles: RefCell::new(HashMap::new()),
+            misses: RefCell::new(HashMap::new()),
+            last_miss: std::cell::Cell::new(None),
             failed: RefCell::new(None),
         })
     }
@@ -257,11 +288,17 @@ impl Index {
     /// The directories the excludes kept the scan out of: each one's id and
     /// why (`excluded` or `excluded_cache`), in id order.
     pub fn excluded(&self) -> Vec<(u32, &'static str)> {
+        if self.meta.excluded_count == 0 {
+            return Vec::new();
+        }
         let read = || -> rusqlite::Result<Vec<(u32, &'static str)>> {
+            // The mask as the partial index `dirs_excluded` spells it, so
+            // the database reads that index rather than every row.
+            const _: () = assert!(EXCLUDED | EXCLUDED_CACHE == 3072);
             let mut stmt = self
                 .db
-                .prepare("SELECT id, flags FROM dirs WHERE flags & ?1 != 0 ORDER BY id")?;
-            let rows = stmt.query_map([EXCLUDED | EXCLUDED_CACHE], |row| {
+                .prepare("SELECT id, flags FROM dirs WHERE flags & 3072 != 0 ORDER BY id")?;
+            let rows = stmt.query_map([], |row| {
                 let flags: u32 = row.get(1)?;
                 let reason = if flags & EXCLUDED_CACHE != 0 {
                     "excluded_cache"
@@ -281,6 +318,9 @@ impl Index {
     /// The directories with ids from `first` to `last` that could not be
     /// read: the whole scan's, or a subtree's.
     pub fn unreadable_dirs(&self, first: u32, last: u32) -> u64 {
+        if self.meta.error_count == 0 {
+            return 0;
+        }
         self.db
             .query_row(
                 "SELECT COUNT(*) FROM dirs WHERE errors IS NOT NULL AND id BETWEEN ?1 AND ?2",
@@ -515,6 +555,14 @@ impl Index {
             .any(|v| !v.entered && v.mount_point == path)
     }
 
+    /// Keeps a failed query's error as the first failed read, when it is.
+    pub(crate) fn record(&self, e: &CoreError) {
+        let mut failed = self.failed.borrow_mut();
+        if failed.is_none() {
+            *failed = Some(e.to_string());
+        }
+    }
+
     /// Keeps the first failed read.
     fn fail(&self, e: &rusqlite::Error) {
         let mut failed = self.failed.borrow_mut();
@@ -530,8 +578,10 @@ impl Index {
         }
     }
 
-    /// Entry `id`'s node and name, from its block: read and kept first if
-    /// it is not kept already.
+    /// Entry `id`'s node and name: from a block kept, or an entry read
+    /// alone; read alone unless the entry read alone before it is its
+    /// neighbour (a walk) or its block has been missed [`MISSES`] times;
+    /// else from its block, read and kept first.
     fn entry<T>(&self, id: u32, f: impl FnOnce(&(Node, Vec<u8>)) -> T) -> Option<T> {
         if id >= self.len {
             self.fail(&rusqlite::Error::QueryReturnedNoRows);
@@ -539,25 +589,76 @@ impl Index {
         }
         let start = id - id % BLOCK;
         let mut blocks = self.blocks.borrow_mut();
-        let at = if let Some(at) = blocks.iter().position(|b| b.start == start) {
-            at
-        } else {
-            let block = match self.read_block(start) {
-                Ok(block) => block,
+        if let Some(at) = blocks.iter().position(|b| b.start == start) {
+            let block = blocks.remove(at);
+            let found = block.entries.get((id - start) as usize).map(f);
+            blocks.insert(0, block);
+            return found;
+        }
+        if let Some(entry) = self.singles.borrow().get(&id) {
+            return Some(f(entry));
+        }
+        let walk = self
+            .last_miss
+            .replace(Some(id))
+            .is_some_and(|last| last.abs_diff(id) == 1);
+        let alone = !walk && {
+            let mut misses = self.misses.borrow_mut();
+            if misses.len() >= SINGLES {
+                misses.clear();
+            }
+            let missed = misses.entry(start).or_insert(0);
+            *missed = missed.saturating_add(1);
+            *missed < MISSES
+        };
+        if alone {
+            drop(blocks);
+            match self.read_one(id) {
+                Ok(entry) => {
+                    let found = f(&entry);
+                    let mut singles = self.singles.borrow_mut();
+                    if singles.len() >= SINGLES {
+                        singles.clear();
+                    }
+                    singles.insert(id, entry);
+                    return Some(found);
+                }
                 Err(e) => {
-                    drop(blocks);
                     self.fail(&e);
                     return None;
                 }
-            };
-            blocks.truncate(BLOCKS - 1);
-            blocks.push(block);
-            blocks.len() - 1
+            }
+        }
+        let block = match self.read_block(start) {
+            Ok(block) => block,
+            Err(e) => {
+                drop(blocks);
+                self.fail(&e);
+                return None;
+            }
         };
-        let block = blocks.remove(at);
+        blocks.truncate(BLOCKS - 1);
         let found = block.entries.get((id - start) as usize).map(f);
         blocks.insert(0, block);
         found
+    }
+
+    /// Entry `id` alone, from whichever table holds it.
+    fn read_one(&self, id: u32) -> rusqlite::Result<(Node, Vec<u8>)> {
+        let dir = self
+            .db
+            .prepare(&format!("SELECT {DIR_COLUMNS} FROM dirs WHERE id = ?1"))?
+            .query_row([id], |row| Ok((dir_from_row(id, row)?, row.get(14)?)))
+            .optional()?;
+        if let Some(entry) = dir {
+            return Ok(entry);
+        }
+        self.db
+            .prepare(&format!(
+                "SELECT {FILE_COLUMNS} FROM files AS f LEFT JOIN dirs AS d ON d.id = f.parent_id \
+                 WHERE f.id = ?1"
+            ))?
+            .query_row([id], |row| Ok((file_from_row(id, row)?, row.get(14)?)))
     }
 
     /// The block of ids from `start`, every id in it found in one table or
@@ -573,22 +674,18 @@ impl Index {
                 *slot = Some(entry);
             }
         };
-        let mut dirs = self.db.prepare(
-            "SELECT id, last_id, files_end, parent_id, depth, cum_apparent, cum_allocated, \
-             n_files, n_dirs, mtime, ctime, max_mtime, flags, errors IS NOT NULL, name, \
-             atime, btime, mode FROM dirs WHERE id >= ?1 AND id < ?2",
-        )?;
+        let mut dirs = self.db.prepare(&format!(
+            "SELECT {DIR_COLUMNS} FROM dirs WHERE id >= ?1 AND id < ?2"
+        ))?;
         let mut rows = dirs.query([start, end])?;
         while let Some(row) = rows.next()? {
             let id: u32 = row.get(0)?;
             put(id, (dir_from_row(id, row)?, row.get(14)?));
         }
-        let mut files = self.db.prepare(
-            "SELECT f.id, f.parent_id, f.apparent, f.allocated, f.charged, f.mtime, f.ctime, \
-             f.atime, f.btime, f.mode, f.nlink, f.kind, f.flags, d.depth, f.name \
-             FROM files AS f LEFT JOIN dirs AS d ON d.id = f.parent_id \
-             WHERE f.id >= ?1 AND f.id < ?2",
-        )?;
+        let mut files = self.db.prepare(&format!(
+            "SELECT {FILE_COLUMNS} FROM files AS f LEFT JOIN dirs AS d ON d.id = f.parent_id \
+             WHERE f.id >= ?1 AND f.id < ?2"
+        ))?;
         let mut rows = files.query([start, end])?;
         while let Some(row) = rows.next()? {
             let id: u32 = row.get(0)?;
@@ -631,6 +728,27 @@ impl TreeView for Index {
         }
         self.entry(id, |(_, name)| Cow::Owned(name.clone()))
             .unwrap_or(Cow::Borrowed(&[]))
+    }
+
+    fn as_index(&self) -> Option<(&Index, u32)> {
+        Some((self, 0))
+    }
+
+    /// From `dirs_parent_name`: a directory's subdirectories are rows that
+    /// name it their parent, where the default hops from sibling to sibling
+    /// through blocks far apart.
+    fn child_dirs(&self, dir: u32) -> Vec<(u32, u32)> {
+        let read = || -> rusqlite::Result<Vec<(u32, u32)>> {
+            let mut stmt = self
+                .db
+                .prepare("SELECT id, last_id FROM dirs WHERE parent_id = ?1 ORDER BY id")?;
+            stmt.query_map([dir], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+        };
+        read().unwrap_or_else(|e| {
+            self.fail(&e);
+            Vec::new()
+        })
     }
 }
 
