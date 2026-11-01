@@ -183,10 +183,19 @@ fn p2_cli_01_every_published_minor_is_a_subset_of_the_current_schema() {
     let history = envelope_dir().join("history");
     let mut problems = Vec::new();
     let mut checked = 0;
-    for minor in std::fs::read_dir(&history).unwrap() {
-        let minor = minor.unwrap().path();
-        for file in std::fs::read_dir(&minor).unwrap() {
-            let file = file.unwrap().path();
+    // Each minor's directory, and in it the schema files: nothing else a
+    // file manager may leave there.
+    let entries = |dir: &Path| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect()
+    };
+    for minor in entries(&history).into_iter().filter(|p| p.is_dir()) {
+        let schemas = entries(&minor)
+            .into_iter()
+            .filter(|p| p.to_string_lossy().ends_with(".schema.json"));
+        for file in schemas {
             let name = file.file_name().unwrap().to_string_lossy().into_owned();
             let old: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();

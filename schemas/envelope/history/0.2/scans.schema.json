@@ -45,12 +45,6 @@
     "PrunedEntry": {
       "description": "A file `scans --prune` removed.",
       "properties": {
-        "bytes": {
-          "description": "Its size.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "id": {
           "description": "The scan whose index it was; null for the others.",
           "type": [
@@ -59,24 +53,37 @@
           ]
         },
         "kind": {
-          "description": "`index`, `temporary` (a write that never finished) or `spill`.",
-          "enum": [
-            "index",
-            "temporary",
-            "spill"
+          "anyOf": [
+            {
+              "enum": [
+                "index",
+                "temporary",
+                "spill"
+              ]
+            },
+            {
+              "type": "string"
+            }
           ],
+          "description": "`index`, `temporary` (a write that never finished) or `spill`.",
           "type": "string"
         },
         "path": {
           "description": "The file.",
           "type": "string"
+        },
+        "size_bytes": {
+          "description": "Its size.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
         "path",
         "kind",
         "id",
-        "bytes"
+        "size_bytes"
       ],
       "type": "object"
     },
@@ -220,24 +227,31 @@
       "description": "A warning.",
       "properties": {
         "code": {
-          "description": "One of the conventions' warning codes.",
-          "enum": [
-            "partial_read",
-            "mounts_excluded",
-            "stale_index",
-            "scan_age",
-            "atime_unreliable",
-            "attrs_not_collected",
-            "dataless_present",
-            "full_disk_access_missing",
-            "clones_unavailable",
-            "upper_bound",
-            "vanished",
-            "index_untouched",
-            "spilled",
-            "deprecated_flag",
-            "tz_unavailable"
+          "anyOf": [
+            {
+              "enum": [
+                "partial_read",
+                "mounts_excluded",
+                "stale_index",
+                "scan_age",
+                "atime_unreliable",
+                "attrs_not_collected",
+                "dataless_present",
+                "full_disk_access_missing",
+                "clones_unavailable",
+                "upper_bound",
+                "vanished",
+                "index_untouched",
+                "spilled",
+                "deprecated_flag",
+                "tz_unavailable"
+              ]
+            },
+            {
+              "type": "string"
+            }
           ],
+          "description": "One of the conventions' warning codes.",
           "type": "string"
         },
         "count": {

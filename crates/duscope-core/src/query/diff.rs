@@ -107,7 +107,7 @@ pub fn diff(
                 kind: kind_name(node.kind),
                 old_bytes: c.old_bytes,
                 new_bytes: c.new_bytes,
-                bytes_delta: i64::try_from(c.delta()).unwrap_or(i64::MAX),
+                delta_bytes: i64::try_from(c.delta()).unwrap_or(i64::MAX),
                 collapsed_count: c.collapsed,
             }
         })

@@ -458,7 +458,7 @@ impl Row for CacheEntry {
 impl Row for DiffEntry {
     const FIELDS: &'static [&'static str] = &[
         "change",
-        "bytes_delta",
+        "delta_bytes",
         "old_bytes",
         "new_bytes",
         "collapsed_count",
@@ -472,7 +472,7 @@ impl Row for DiffEntry {
             |n: Option<u64>| Cow::Owned(n.map(|n| n.to_string()).unwrap_or_default().into_bytes());
         vec![
             Cow::Borrowed(self.change.as_bytes()),
-            Cow::Owned(self.bytes_delta.to_string().into_bytes()),
+            Cow::Owned(self.delta_bytes.to_string().into_bytes()),
             number(self.old_bytes),
             number(self.new_bytes),
             number(self.collapsed_count),
@@ -482,14 +482,14 @@ impl Row for DiffEntry {
     }
 
     fn cells(&self, units: Units, _size_kind: &str) -> Vec<String> {
-        let sign = if self.bytes_delta < 0 { "-" } else { "+" };
+        let sign = if self.delta_bytes < 0 { "-" } else { "+" };
         let path = match self.collapsed_count {
             Some(n) => format!("{} ({} entries)", printable(&self.path), thousands(n)),
             None => printable(&self.path).into_owned(),
         };
         vec![
             self.change.to_owned(),
-            format!("{sign}{}", units.size(self.bytes_delta.unsigned_abs())),
+            format!("{sign}{}", units.size(self.delta_bytes.unsigned_abs())),
             path,
         ]
     }
@@ -583,13 +583,13 @@ impl Row for SavedScanEntry {
 }
 
 impl Row for PrunedEntry {
-    const FIELDS: &'static [&'static str] = &["kind", "bytes", "path"];
+    const FIELDS: &'static [&'static str] = &["kind", "size_bytes", "path"];
     const COLUMNS: &'static [&'static str] = &["Kind", "Size", "Path"];
 
     fn plain(&self) -> Vec<Cow<'_, [u8]>> {
         vec![
             Cow::Borrowed(self.kind.as_bytes()),
-            Cow::Owned(self.bytes.to_string().into_bytes()),
+            Cow::Owned(self.size_bytes.to_string().into_bytes()),
             Cow::Borrowed(self.path.as_bytes()),
         ]
     }
@@ -597,7 +597,7 @@ impl Row for PrunedEntry {
     fn cells(&self, units: Units, _size_kind: &str) -> Vec<String> {
         vec![
             self.kind.to_owned(),
-            units.size(self.bytes),
+            units.size(self.size_bytes),
             printable(&self.path).into_owned(),
         ]
     }

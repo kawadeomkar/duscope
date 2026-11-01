@@ -94,7 +94,13 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         let (mut envelope, footer, fresh) =
             top_envelope(fresh, &args.walk, None, "scan", false, true, None, output)?;
         envelope.scan.id = id.as_ref().map(ToString::to_string);
-        envelope.next = next::list(&envelope);
+        let file = id.as_ref().and_then(|id| {
+            index_dir
+                .map(Path::to_owned)
+                .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)))
+                .map(|dir| duscope_core::index::index_path(&dir, id))
+        });
+        envelope.next = next::list(&envelope, file.as_deref(), args.walk.path.as_deref());
         output.list(&envelope, &footer)?;
         match fresh {
             Source::Fresh { scanned, .. } => *scanned,
@@ -842,7 +848,11 @@ fn envelope<T: Hinted>(
         warnings,
         next: Vec::new(),
     };
-    envelope.next = next::list(&envelope);
+    envelope.next = next::list(
+        &envelope,
+        source.index_file().as_deref(),
+        walk.path.as_deref(),
+    );
     (envelope, footer, source)
 }
 

@@ -113,7 +113,7 @@ fn p2_qry_06_golden_for_a_scripted_change_set() {
         .iter()
         .find(|e| e["path"].as_str().unwrap().ends_with("docs/b2.bin"))
         .unwrap();
-    assert_eq!(link["bytes_delta"], 0);
+    assert_eq!(link["delta_bytes"], 0);
     let old = listed["entries"]
         .as_array()
         .unwrap()
@@ -129,7 +129,7 @@ fn p2_qry_06_golden_for_a_scripted_change_set() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|e| e["bytes_delta"].as_i64().unwrap().unsigned_abs())
+        .map(|e| e["delta_bytes"].as_i64().unwrap().unsigned_abs())
         .collect();
     assert!(deltas.windows(2).all(|w| w[0] >= w[1]), "{deltas:?}");
 }
