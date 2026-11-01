@@ -188,7 +188,7 @@ impl Source {
     /// filesystem's.
     pub fn holds_file(&self, dir: &Path, name: &str) -> bool {
         match self {
-            Source::Fresh { .. } => dir.join(name).is_file(),
+            Source::Fresh { .. } => query::fs_holds_file(dir, name),
             Source::Saved { index, .. } => query::holds_file(index, dir, name),
         }
     }

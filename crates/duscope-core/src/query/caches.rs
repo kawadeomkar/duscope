@@ -11,6 +11,12 @@
 //! directory above it are known, and whether it holds a `CACHEDIR.TAG`.
 //! Markers above the root are asked of the caller; a tag's signature is
 //! read from the filesystem.
+//!
+//! Under `loose`, a name without its marker is a row, but the pass goes on
+//! inside it: a confirmed cache inside it shows the name was not a cache
+//! (a `build` directory of tools, one of them with its `node_modules`), and
+//! the row gives way to what is inside. Otherwise what is inside is part of
+//! it.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -18,9 +24,9 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use super::{
-    Filters, Page, SizeKind, SortKey, TreeView, abs_path, pct, ranked, timegrammar::iso8601,
-};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
+use super::{Filters, Page, SizeKind, SortKey, TreeView, pct, ranked, timegrammar::iso8601};
 use crate::envelope::{CacheEntry, ProjectEntry, name_fields};
 use crate::rules::{Caches, Confirm};
 
@@ -32,6 +38,10 @@ const TAG: &[u8] = b"CACHEDIR.TAG";
 
 /// The label of the rule a valid `CACHEDIR.TAG` confirms.
 const TAG_RULE: &str = "CACHEDIR.TAG";
+
+/// The caches a `--by-project` row names, largest first; `cache_count`
+/// counts them all.
+pub const PROJECT_CACHES: usize = 10;
 
 /// What `caches` was asked.
 pub struct CachesQuery<'a> {
@@ -65,15 +75,30 @@ impl std::fmt::Debug for CachesQuery<'_> {
     }
 }
 
-/// A cache found: its id, the rule that names it, and its project.
+/// A cache found: the rule that names it, and its project.
 #[derive(Debug, Clone)]
 struct Found {
     id: u32,
+    /// Its absolute path.
+    path: Vec<u8>,
     rule: String,
     regenerable_by: &'static str,
-    project: Option<Vec<u8>>,
+    project: Option<Project>,
     confirmed: bool,
     cachedir_tag: bool,
+    /// The nearest unconfirmed row above it, under `loose`.
+    loose_parent: Option<usize>,
+    /// An unconfirmed row with a confirmed cache inside it.
+    dropped: bool,
+}
+
+/// The directory holding a cache's marker.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Project {
+    /// Its absolute path.
+    path: Vec<u8>,
+    /// Its id, when the view holds it.
+    id: Option<u32>,
 }
 
 /// The cache directories under the root of `view`, largest first.
@@ -92,23 +117,22 @@ pub fn caches(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Cach
     };
     let entries = ids
         .into_iter()
-        .filter_map(|id| Some((id, *by_id.get(&id)?)))
-        .map(|(id, f)| {
-            let node = view.node(id);
-            let path_bytes = abs_path(view, id);
-            let (name, name_raw) = name_fields(&view.name(id));
+        .filter_map(|id| by_id.get(&id).copied())
+        .map(|f| {
+            let node = view.node(f.id);
+            let (name, name_raw) = name_fields(&view.name(f.id));
+            let project = f.project.as_ref().map(|p| p.path.clone());
             CacheEntry {
-                path: String::from_utf8_lossy(&path_bytes).into_owned(),
-                path_bytes,
+                path: String::from_utf8_lossy(&f.path).into_owned(),
+                path_bytes: f.path.clone(),
                 name,
                 name_raw,
                 rule: f.rule.clone(),
                 regenerable_by: f.regenerable_by,
-                project_root: f
-                    .project
+                project_root: project
                     .as_ref()
                     .map(|p| String::from_utf8_lossy(p).into_owned()),
-                project_bytes: f.project.clone().unwrap_or_default(),
+                project_bytes: project.unwrap_or_default(),
                 confirmed: f.confirmed,
                 cachedir_tag: f.cachedir_tag,
                 allocated_bytes: node.allocated,
@@ -139,13 +163,13 @@ struct Group {
 /// group of their own, whose `project_root` is null.
 pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<ProjectEntry> {
     let found = find(view, q);
-    let mut groups: BTreeMap<Option<Vec<u8>>, Group> = BTreeMap::new();
-    for f in &found {
+    let mut groups: BTreeMap<Option<Project>, Group> = BTreeMap::new();
+    for f in found {
         let node = view.node(f.id);
         if !q.filters.keeps(view, &node, q.size) {
             continue;
         }
-        let group = groups.entry(f.project.clone()).or_insert(Group {
+        let group = groups.entry(f.project).or_insert(Group {
             allocated: 0,
             apparent: 0,
             newest_ns: i64::MIN,
@@ -154,9 +178,8 @@ pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Pr
         group.allocated += node.allocated;
         group.apparent += node.apparent;
         group.newest_ns = group.newest_ns.max(node.max_mtime_ns);
-        group.caches.push((node.size(q.size), abs_path(view, f.id)));
+        group.caches.push((node.size(q.size), f.path));
     }
-    let root = view.root_path().as_os_str().as_bytes();
     let size = |g: &Group| match q.size {
         SizeKind::Allocated => g.allocated,
         SizeKind::Apparent => g.apparent,
@@ -166,13 +189,13 @@ pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Pr
         .map(|(project, mut group)| {
             // The project's newest time is recursive over the project
             // where the view holds it, else over its caches.
-            if let Some(id) = project.as_deref().and_then(|p| dir_id(view, root, p)) {
+            if let Some(id) = project.as_ref().and_then(|p| p.id) {
                 group.newest_ns = group.newest_ns.max(view.node(id).max_mtime_ns);
             }
             group
                 .caches
                 .sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-            (project, group)
+            (project.map(|p| p.path), group)
         })
         .filter(|(_, group)| size(group) >= q.min_size)
         .collect();
@@ -203,6 +226,7 @@ pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Pr
             caches: group
                 .caches
                 .into_iter()
+                .take(PROJECT_CACHES)
                 .map(|(_, p)| String::from_utf8_lossy(&p).into_owned())
                 .collect(),
         })
@@ -213,69 +237,90 @@ pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Pr
     }
 }
 
-/// The id of the directory at `path` (absolute) in `view`, whose root is at
-/// `root`; `None` when the view does not hold it.
-fn dir_id(view: &(impl TreeView + ?Sized), root: &[u8], path: &[u8]) -> Option<u32> {
-    let rel = path.strip_prefix(root)?;
-    if !(rel.is_empty() || rel.starts_with(b"/") || root.ends_with(b"/")) {
-        return None;
-    }
-    let mut at = 0;
-    for name in rel.split(|&b| b == b'/').filter(|n| !n.is_empty()) {
-        at = view
-            .child_dirs(at)
-            .into_iter()
-            .map(|(id, _)| id)
-            .find(|&id| *view.name(id) == *name)?;
-    }
-    Some(at)
-}
-
 /// A directory open above the entry being read.
 struct Open {
     id: u32,
     files_end: u32,
     last: u32,
-    /// Its absolute path.
-    path: Vec<u8>,
-    /// The marker names among its own files.
-    markers: Vec<Vec<u8>>,
+    /// Its path's length in the pass's path buffer.
+    len: usize,
+    /// The markers among its own files, by their index in the pass's list.
+    markers: Vec<usize>,
     /// Whether its own files include a `CACHEDIR.TAG`.
     tag: bool,
     judged: bool,
+    /// The unconfirmed row it is, or the nearest one above it.
+    loose: Option<usize>,
+}
+
+/// What every directory of the pass is judged with.
+struct Judge<'a> {
+    q: &'a CachesQuery<'a>,
+    /// The rules' names: a directory none matches is judged only for a
+    /// `CACHEDIR.TAG`.
+    names: Option<GlobSet>,
+    /// The marker names of the rules.
+    markers: Vec<&'a str>,
+    above: Above<'a>,
 }
 
 /// Every cache under the root, outermost only, in pre-order.
 fn find(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Vec<Found> {
-    let mut found = Vec::new();
+    let mut found: Vec<Found> = Vec::new();
     if view.is_empty() || !view.node(0).is_dir() {
         return found;
     }
-    let marker_names: Vec<&[u8]> = q
-        .caches
-        .rules()
-        .iter()
-        .filter_map(|r| match &r.confirm {
-            Confirm::Markers(markers) => Some(markers.iter().map(String::as_bytes)),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-    let mut above = Above::new(view.root_path(), q.above);
+    let mut markers: Vec<&str> = Vec::new();
+    let mut names = GlobSetBuilder::new();
+    for rule in q.caches.rules() {
+        if let Confirm::Markers(ms) = &rule.confirm {
+            for m in ms {
+                if !markers.contains(&m.as_str()) {
+                    markers.push(m);
+                }
+            }
+        }
+        if let Some(glob) = rule.name.as_deref().and_then(|n| Glob::new(n).ok()) {
+            names.add(glob);
+        }
+    }
+    let mut judge = Judge {
+        q,
+        // Without the set, every directory is judged.
+        names: names.build().ok(),
+        markers,
+        above: Above::new(view.root_path(), q.above),
+    };
     let last = view.node(0).last_id;
+    let mut path: Vec<u8> = view.root_path().as_os_str().as_bytes().to_vec();
     let mut open: Vec<Open> = Vec::new();
     let mut id = 0u32;
     loop {
         // Settle the directories `id` is past: judge each once its own
-        // files are read, close each once its subtree is.
+        // files are read, close each once its subtree is. An unjudged
+        // directory is the innermost one open, and the path buffer holds
+        // its path.
         while let Some((top, outer)) = open.split_last_mut() {
             if !top.judged && id > top.files_end {
                 top.judged = true;
-                if let Some(cache) = judge(top, outer, q, &mut above) {
+                path.truncate(top.len);
+                let Some(cache) = judge.judge(view, top, outer, &path) else {
+                    continue;
+                };
+                if cache.confirmed {
+                    // A confirmed cache: the unconfirmed rows above it were
+                    // not caches, and what is inside it is part of it.
+                    let mut at = top.loose;
+                    while let Some(i) = at {
+                        found[i].dropped = true;
+                        at = found[i].loose_parent;
+                    }
                     found.push(cache);
-                    // A cache inside it is part of it.
                     id = id.max(top.last.saturating_add(1));
                     open.pop();
+                } else {
+                    top.loose = Some(found.len());
+                    found.push(cache);
                 }
             } else if id > top.last {
                 open.pop();
@@ -289,37 +334,60 @@ fn find(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Vec<Found> {
         let node = view.node(id);
         let name = view.name(id);
         if node.is_dir() {
-            let path = match open.last() {
-                Some(parent) => {
-                    let mut path = parent.path.clone();
-                    if path.last() != Some(&b'/') {
-                        path.push(b'/');
-                    }
-                    path.extend_from_slice(&name);
-                    path
+            if let Some(parent) = open.last() {
+                path.truncate(parent.len);
+                if path.last() != Some(&b'/') {
+                    path.push(b'/');
                 }
-                None => view.root_path().as_os_str().as_bytes().to_vec(),
-            };
+                path.extend_from_slice(&name);
+            }
             open.push(Open {
                 id,
                 files_end: node.files_end,
                 last: node.last_id,
-                path,
+                len: path.len(),
                 markers: Vec::new(),
                 tag: false,
                 judged: false,
+                loose: open.last().and_then(|o| o.loose),
             });
         } else if let Some(parent) = open.last_mut() {
             if *name == *TAG {
                 parent.tag = true;
             }
-            if marker_names.contains(&&*name) && !parent.markers.iter().any(|m| *m == *name) {
-                parent.markers.push(name.into_owned());
+            if let Some(i) = judge.markers.iter().position(|m| m.as_bytes() == &*name)
+                && !parent.markers.contains(&i)
+            {
+                parent.markers.push(i);
             }
         }
         id += 1;
     }
+    standing(found)
+}
+
+/// The rows that stand: every confirmed cache, and each unconfirmed row
+/// that no confirmed cache inside it set aside, unless it is inside
+/// another such row, of which it is part.
+fn standing(found: Vec<Found>) -> Vec<Found> {
+    let stands = |f: &Found| f.confirmed || !f.dropped;
+    let kept: Vec<bool> = found
+        .iter()
+        .map(|f| {
+            let mut at = f.loose_parent;
+            let mut inside = false;
+            while let Some(p) = at {
+                inside |= stands(&found[p]);
+                at = found[p].loose_parent;
+            }
+            stands(f) && (f.confirmed || !inside)
+        })
+        .collect();
     found
+        .into_iter()
+        .zip(kept)
+        .filter_map(|(f, keep)| keep.then_some(f))
+        .collect()
 }
 
 /// The directories above the root, and which markers each holds, asked
@@ -355,54 +423,81 @@ impl<'a> Above<'a> {
     }
 }
 
-/// The cache `dir` is, if any, given the directories `outer` open above
-/// it: the first rule that takes it; or, under `loose`, the first rule its
-/// name matches.
-fn judge(dir: &Open, outer: &[Open], q: &CachesQuery<'_>, above: &mut Above<'_>) -> Option<Found> {
-    let components: Vec<&[u8]> = dir
-        .path
-        .split(|&b| b == b'/')
-        .filter(|c| !c.is_empty())
-        .collect();
-    let holds_tag = dir.tag && duscope_walk::cachedir_tag(Path::new(OsStr::from_bytes(&dir.path)));
-    // An ancestor with k components is open when k reaches the root's.
-    let root_len = above.dirs.len();
-    let holds = |k: usize, marker: &str| match k.checked_sub(root_len) {
-        Some(j) => outer
-            .get(j)
-            .is_some_and(|o| o.markers.iter().any(|m| m == marker.as_bytes())),
-        None => above.holds(k, marker),
-    };
-    if let Some((rule, at)) = q.caches.taking(&components, holds, holds_tag) {
-        let project = at.map(|k| match k.checked_sub(root_len) {
-            Some(j) => outer.get(j).map_or_else(Vec::new, |o| o.path.clone()),
-            None => above
-                .dirs
-                .get(k)
-                .map_or_else(Vec::new, |d| d.as_os_str().as_bytes().to_vec()),
-        });
-        return Some(Found {
+impl Judge<'_> {
+    /// The cache `dir` is, if any, given the directories `outer` open above
+    /// it and its path: the rule that takes it; or, under `loose` and
+    /// outside another unconfirmed row's judging, the first rule its name
+    /// matches.
+    fn judge(
+        &mut self,
+        view: &(impl TreeView + ?Sized),
+        dir: &Open,
+        outer: &[Open],
+        path: &[u8],
+    ) -> Option<Found> {
+        let name = view.name(dir.id);
+        let named = self
+            .names
+            .as_ref()
+            .is_none_or(|set| set.is_match(String::from_utf8_lossy(&name).as_ref()));
+        if !named && !dir.tag {
+            return None;
+        }
+        let holds_tag = dir.tag && duscope_walk::cachedir_tag(Path::new(OsStr::from_bytes(path)));
+        let components: Vec<&[u8]> = path
+            .split(|&b| b == b'/')
+            .filter(|c| !c.is_empty())
+            .collect();
+        // An ancestor with k components is open when k reaches the root's.
+        let root_len = self.above.dirs.len();
+        let markers = &self.markers;
+        let above = &mut self.above;
+        let holds = |k: usize, marker: &str| match k.checked_sub(root_len) {
+            Some(j) => outer
+                .get(j)
+                .is_some_and(|o| o.markers.iter().any(|&i| markers.get(i) == Some(&marker))),
+            None => above.holds(k, marker),
+        };
+        let found = |rule: &crate::rules::CacheRule, project, confirmed| Found {
             id: dir.id,
+            path: path.to_vec(),
             rule: rule.name.clone().unwrap_or_else(|| TAG_RULE.to_owned()),
             regenerable_by: rule.regenerable_by.as_str(),
             project,
-            confirmed: true,
+            confirmed,
             cachedir_tag: holds_tag,
-        });
+            loose_parent: outer.last().and_then(|o| o.loose),
+            dropped: false,
+        };
+        if let Some((rule, at)) = self.q.caches.taking(&components, holds, holds_tag) {
+            let project = at.map(|k| match k.checked_sub(root_len) {
+                Some(j) => Project {
+                    path: outer
+                        .get(j)
+                        .map_or_else(Vec::new, |o| path[..o.len].to_vec()),
+                    id: outer.get(j).map(|o| o.id),
+                },
+                None => Project {
+                    path: self
+                        .above
+                        .dirs
+                        .get(k)
+                        .map_or_else(Vec::new, |d| d.as_os_str().as_bytes().to_vec()),
+                    id: None,
+                },
+            });
+            return Some(found(rule, project, true));
+        }
+        if !self.q.loose || !named {
+            return None;
+        }
+        let rule = self
+            .q
+            .caches
+            .named(components.last().copied().unwrap_or_default())
+            .next()?;
+        Some(found(rule, None, false))
     }
-    if !q.loose {
-        return None;
-    }
-    let name = components.last().copied().unwrap_or_default();
-    let rule = q.caches.named(name).next()?;
-    Some(Found {
-        id: dir.id,
-        rule: rule.name.clone().unwrap_or_default(),
-        regenerable_by: rule.regenerable_by.as_str(),
-        project: None,
-        confirmed: false,
-        cachedir_tag: holds_tag,
-    })
 }
 
 #[cfg(test)]
