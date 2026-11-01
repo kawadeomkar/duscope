@@ -14,6 +14,7 @@ pub mod envelope;
 mod errors;
 pub mod git;
 pub mod index;
+pub mod interchange;
 pub mod query;
 pub mod rescan;
 pub mod resolve;

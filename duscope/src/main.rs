@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
-use clap::{ArgMatches, CommandFactory, FromArgMatches};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, ValueEnum};
 use duscope_core::CoreError;
 use duscope_core::config::{Config, ConfigSource};
 
@@ -68,6 +68,23 @@ fn main() -> ExitCode {
             return ExitCode::from(failure.exit.code());
         }
     };
+    if let Some(format) = cli.output.format.filter(|f| f.exports_only())
+        && !matches!(cli.verb, Some(Verb::Export(_)))
+    {
+        let failure = Failure::new(
+            Exit::Usage,
+            "usage",
+            format!(
+                "--format {} is one of export's formats",
+                format
+                    .to_possible_value()
+                    .map_or_else(String::new, |v| v.get_name().to_owned())
+            ),
+        )
+        .hint("Run duscope export --format to write a saved scan in it");
+        output.failure(&failure);
+        return ExitCode::from(failure.exit.code());
+    }
     if all_as_json {
         let failure = Failure::new(
             Exit::Usage,

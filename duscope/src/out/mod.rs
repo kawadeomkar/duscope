@@ -82,6 +82,10 @@ impl From<FormatArg> for Format {
             FormatArg::Plain => Format::Plain,
             FormatArg::Json => Format::Json,
             FormatArg::Ndjson => Format::Ndjson,
+            // export's own: a machine format, its payload alone on stdout.
+            FormatArg::Ncdu | FormatArg::Gpscan | FormatArg::Qdirstat | FormatArg::Csv => {
+                Format::Plain
+            }
         }
     }
 }
@@ -997,8 +1001,9 @@ impl Output {
         self.sink(|out| format::json(out, &stub))
     }
 
-    /// Writes to the `-o` file, created or emptied first, or to stdout.
-    fn sink(
+    /// Writes to the `-o` file, created or emptied first, or to stdout; a
+    /// closed pipe on stdout ends the output quietly.
+    pub fn sink(
         &self,
         write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
     ) -> Result<(), Failure> {

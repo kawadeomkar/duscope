@@ -155,13 +155,14 @@ jobs:
         run: |
           brew install bash fish
           "$(brew --prefix)/bin/bash" --version
-      - name: Install zsh, fish and mandoc
+      - name: Install zsh, fish, mandoc and ncdu
         # P1-CLI-04's tests load the completions in zsh and fish and lint the man
-        # page with mandoc; in CI a missing one fails them.
+        # page with mandoc, and P2-CLI-02's reads an export back with ncdu; in CI
+        # a missing one fails them.
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zsh fish mandoc
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zsh fish mandoc ncdu
       - name: just test
         if: matrix.leg == 'default'
         run: just test
@@ -367,11 +368,11 @@ jobs:
         with:
           key: ${{ matrix.toolchain }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install zsh, fish and mandoc
-        # As in the test job: P1-CLI-04's tests need them in CI.
+      - name: Install zsh, fish, mandoc and ncdu
+        # As in the test job: P1-CLI-04's and P2-CLI-02's tests need them in CI.
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zsh fish mandoc
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zsh fish mandoc ncdu
       - name: Build
         run: cargo build --workspace --all-targets --locked
       - run: just test

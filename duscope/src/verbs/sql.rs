@@ -3,17 +3,15 @@
 //! one that holds the path, or one run for the verb; `:root_id` and
 //! `:root_last` name the path's entry and the last id below it.
 
-use std::fs::{self, DirBuilder};
-use std::os::unix::fs::DirBuilderExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use duscope_core::envelope::{ObjectEnvelope, SCHEMA_VERSION, SqlQueryBlock, SqlResult, Tool};
-use duscope_core::index::{Index, index_path};
-use duscope_core::query::{self, SqlQuery, abs_path, short_id, sql};
+use duscope_core::index::Index;
+use duscope_core::query::{self, SqlQuery, abs_path, sql};
 
-use super::source::{self, Source, core_failure};
-use super::{Exit, Failure, scan};
+use super::source::{self, core_failure};
+use super::{Failure, scan};
 use crate::cli::SqlArgs;
 use crate::out::{Output, thousands};
 
@@ -31,37 +29,8 @@ pub fn run(args: &SqlArgs, index_dir: Option<&Path>, output: &Output) -> Result<
     let warnings = source.warnings(&args.walk);
     // A statement reads an index file: a scan run for the verb is saved
     // first, where it is kept, or to a directory removed afterwards.
-    let opened: Index;
-    let mut scratch = None;
-    let (index, root_id, scan_label) = match &source {
-        Source::Saved { index, base, .. } => {
-            let dir = index.file().parent().and_then(Path::parent);
-            let id = index.meta().scan_id.as_str();
-            let short = dir.map_or_else(|| id.to_owned(), |dir| short_id(dir, id));
-            (&**index, *base, format!("saved scan {short}"))
-        }
-        Source::Fresh { scanned, save } => {
-            let (id, dir, label) = if let Some((id, dir)) = save {
-                let label = format!("saved as {}", short_id(dir, id.as_str()));
-                (id.clone(), dir.clone(), label)
-            } else {
-                let id = scan::scan_id(scanned)?;
-                let dir = scratch_dir()?;
-                scratch = Some(dir.clone());
-                (id, dir, "not saved".to_owned())
-            };
-            let saved = scan::save(scanned, &args.walk, &[], &id, Some(&dir), output, false)
-                .and_then(|()| Index::open(&index_path(&dir, &id)).map_err(core_failure));
-            opened = match saved {
-                Ok(index) => index,
-                Err(failure) => {
-                    remove(scratch.as_deref());
-                    return Err(failure);
-                }
-            };
-            (&opened, 0, label)
-        }
-    };
+    let indexed = source.indexed(&args.walk, &[], output)?;
+    let (index, root_id) = (&*indexed.index, indexed.base);
     let q = SqlQuery {
         sql: &args.sql,
         max_rows,
@@ -71,10 +40,9 @@ pub fn run(args: &SqlArgs, index_dir: Option<&Path>, output: &Output) -> Result<
     let answer = query::sql(index, &q);
     let path = String::from_utf8_lossy(&abs_path(index, root_id)).into_owned();
     let checked = check(index);
-    remove(scratch.as_deref());
     let result = answer.map_err(core_failure)?;
     checked?;
-    let footer = footer(&result, max_rows, &scan_label);
+    let footer = footer(&result, max_rows, &indexed.label);
     let envelope = ObjectEnvelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
@@ -103,36 +71,6 @@ fn check(index: &Index) -> Result<(), Failure> {
             message,
         })),
         None => Ok(()),
-    }
-}
-
-/// A new directory, the owner's only, for the index of a scan not to be
-/// kept (`--no-save`, or no index directory).
-fn scratch_dir() -> Result<PathBuf, Failure> {
-    let mut n = 0;
-    loop {
-        let dir = std::env::temp_dir().join(format!("duscope-query-{}-{n}", std::process::id()));
-        match DirBuilder::new().mode(0o700).create(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => n += 1,
-            Err(e) => {
-                return Err(Failure::new(
-                    Exit::Runtime,
-                    "io_error",
-                    format!("cannot make a directory for the scan's index: {e}"),
-                )
-                .hint("Rerun duscope query without --no-save, or with --index-dir"));
-            }
-        }
-    }
-}
-
-/// Removes the scratch directory, if there is one.
-fn remove(scratch: Option<&Path>) {
-    if let Some(dir) = scratch
-        && let Err(e) = fs::remove_dir_all(dir)
-    {
-        log::warn!("cannot remove {}: {e}", dir.display());
     }
 }
 
