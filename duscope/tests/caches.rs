@@ -121,6 +121,8 @@ fn p2_qry_05_a_target_without_cargo_toml_is_absent_unless_loose() {
         root.to_str().unwrap(),
         "--min-size",
         "0",
+        "--threads",
+        "4",
         "--no-save",
         "--json",
     ];
