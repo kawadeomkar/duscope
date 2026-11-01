@@ -127,9 +127,6 @@ fn config_failure(error: &CoreError) -> Failure {
     failure.hint("Fix the configuration file, or run duscope with --config none")
 }
 
-/// The command line and the matches of its verb (the top level's without
-/// one). Without a verb, `scan`'s flags and path come first; with one, only
-/// the global flags may come before it.
 /// A `--format` the verb does not take: beside `--json` or `--plain`,
 /// which name the output as it does (import's, which names its input, was
 /// moved out already), or one only another verb takes.
@@ -174,6 +171,9 @@ fn format_refused(cli: &Cli) -> Option<Failure> {
     )
 }
 
+/// The command line and the matches of its verb (the top level's without
+/// one). Without a verb, `scan`'s flags and path come first; with one, only
+/// the global flags may come before it.
 fn parse() -> Result<(Cli, ArgMatches), clap::Error> {
     let mut command = Cli::command();
     let matches = command.try_get_matches_from_mut(std::env::args_os())?;

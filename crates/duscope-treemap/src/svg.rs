@@ -23,7 +23,7 @@
 //!   the picture's smaller side over 50 (10 to 16 px); a leaf at least 5
 //!   cells wide and 1 tall shows its name, one at least 8 by 2 its size
 //!   below, cut with `…`, in the static map's label colour for the fill
-//!   behind it. Control characters show as escapes.
+//!   behind it, clipped to its tile. Control characters show as escapes.
 //! - **Under the map**, where the picture is at least 40 by 12 cells: the
 //!   legend (each class's share) and the totals.
 
@@ -102,6 +102,7 @@ pub fn write_svg(view: &dyn TreeView, opts: &SvgOpts<'_>, out: &mut dyn Write) -
         cell_h,
         font,
         tiles: 0,
+        clips: 0,
     };
     if !view.is_empty() {
         let root = view.node(0);
@@ -151,6 +152,8 @@ struct Picture<'v, 'o, 'w> {
     cell_h: u32,
     font: u32,
     tiles: u64,
+    /// The label clips so far, which number the next.
+    clips: usize,
 }
 
 /// A tile to place: an entry, or a directory's files under `--pool-files`.
@@ -212,7 +215,9 @@ impl Picture<'_, '_, '_> {
         let files_n = files.len();
         let file_weight: u64 = files.iter().map(|&(_, w)| w).sum();
         let dir_weight: u64 = dirs.iter().map(|&(_, w)| w).sum();
-        if self.opts.algorithm == Algorithm::Gp && !files.is_empty() && !dirs.is_empty() {
+        // A half that weighs nothing is not cut off: laid out with the
+        // rest, its entries go to the pool.
+        if self.opts.algorithm == Algorithm::Gp && file_weight > 0 && dir_weight > 0 {
             let whole = u128::from(file_weight) + u128::from(dir_weight);
             let (files_area, dirs_area) = cut(area, u128::from(file_weight), whole);
             self.lay(&files, files_area, &|i| rank(i))?;
@@ -247,7 +252,10 @@ impl Picture<'_, '_, '_> {
                 Item::Entry(id) => {
                     let node = self.view.node(id);
                     let folder = folder(tile.id);
-                    let open = paint.depth.is_none_or(|cap| node.depth < cap.max(1));
+                    // A directory with nothing under it (empty, or unread)
+                    // is a leaf, whatever it weighs.
+                    let open = paint.depth.is_none_or(|cap| node.depth < cap.max(1))
+                        && node.last_id > node.id;
                     if node.is_dir() && open && tile.rect.w >= 2 && tile.rect.h >= 2 {
                         self.block(&node, tile.rect, node.depth, folder)?;
                     } else {
@@ -306,8 +314,8 @@ impl Picture<'_, '_, '_> {
     /// Queues `rect`'s label: the name at 5 cells by 1 and more, the size
     /// below it at 8 by 2.
     fn label(&mut self, rect: Rect, rgb: (u8, u8, u8), name: &str, size: Option<u64>) {
-        let (w, h) = (u32::from(rect.w), u32::from(rect.h));
-        if w < 5 * self.cell_w || h < self.cell_h {
+        let (width, height) = (u32::from(rect.w), u32::from(rect.h));
+        if width < 5 * self.cell_w || height < self.cell_h {
             return;
         }
         // The label sits where the gradient is light, near the top left.
@@ -316,26 +324,36 @@ impl Picture<'_, '_, '_> {
             Color::Rgb(light.0, light.1, light.2),
             self.opts.paint.pack,
         ));
-        let room = usize::try_from(w / self.cell_w)
+        let room = usize::try_from(width / self.cell_w)
             .unwrap_or(0)
             .saturating_sub(3);
-        let x = u32::from(rect.x) + self.cell_w;
-        let mut y = u32::from(rect.y) + self.cell_h.midpoint(self.font);
+        let left = u32::from(rect.x) + self.cell_w;
+        let mut baseline = u32::from(rect.y) + self.cell_h.midpoint(self.font);
         let mut lines = vec![truncate(&shown(name), room, Glyphs::Unicode)];
         if let Some(size) = size
-            && w >= 8 * self.cell_w
-            && h >= 2 * self.cell_h
+            && width >= 8 * self.cell_w
+            && height >= 2 * self.cell_h
         {
             lines.push(compact(size));
         }
+        // The cut counts terminal columns at 0.6 em; a proportional font's
+        // wide letters can run past it, so the tile clips its label.
+        let n = self.clips;
+        self.clips += 1;
+        let _ = write!(
+            self.labels,
+            "<clipPath id=\"c{n}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath><g clip-path=\"url(#c{n})\">",
+            rect.x, rect.y, rect.w, rect.h
+        );
         for line in lines {
-            let _ = writeln!(
+            let _ = write!(
                 self.labels,
-                "<text x=\"{x}\" y=\"{y}\" fill=\"{ink}\">{}</text>",
+                "<text x=\"{left}\" y=\"{baseline}\" fill=\"{ink}\">{}</text>",
                 xml(&line)
             );
-            y += self.cell_h;
+            baseline += self.cell_h;
         }
+        self.labels.push_str("</g>\n");
     }
 }
 
