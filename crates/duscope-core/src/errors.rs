@@ -70,4 +70,7 @@ pub enum CoreError {
     /// A query needs attributes the scan did not collect.
     #[error("{0} needs --attrs full, which this scan did not collect")]
     AttrsNotCollected(&'static str),
+    /// `--cursor` is not a cursor, or not one of this scan and query.
+    #[error("{0}")]
+    InvalidCursor(String),
 }

@@ -193,6 +193,15 @@ impl Source {
         }
     }
 
+    /// The id of the saved scan the rows come from, or of the one a scan
+    /// run for the verb is saved as; `None` when it is not saved.
+    pub fn scan_id(&self) -> Option<String> {
+        match self {
+            Source::Fresh { save, .. } => save.as_ref().map(|(id, _)| id.to_string()),
+            Source::Saved { index, .. } => Some(index.meta().scan_id.to_string()),
+        }
+    }
+
     /// Directories under the path the scan could not read.
     pub fn unreadable_dirs(&self) -> u64 {
         match self {
@@ -446,6 +455,10 @@ pub fn core_failure(error: CoreError) -> Failure {
         }
         CoreError::Selector(_) => Failure::new(Exit::Usage, "usage", error.to_string())
             .hint("Run duscope scans to list the saved scans"),
+        CoreError::InvalidCursor(_) => {
+            Failure::new(Exit::Usage, "invalid_cursor", error.to_string())
+                .hint("Rerun the command without --cursor for the first page")
+        }
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
     }
 }

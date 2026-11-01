@@ -375,9 +375,8 @@ pub struct QueryArgs {
     #[arg(long, value_name = "GLOB")]
     pub exclude: Vec<String>,
 
-    /// Where the next page starts
-    // Pages arrive with the index (phase 2).
-    #[arg(long, value_name = "CURSOR", hide = true)]
+    /// Where the next page starts: an envelope's next_cursor (top, stale, caches)
+    #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
 
     /// Treat unreadable directories as a failure (exit 4)

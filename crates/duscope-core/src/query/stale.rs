@@ -6,8 +6,8 @@ use crate::CoreError;
 use crate::envelope::{StaleEntry, name_fields};
 
 use super::{
-    Cut, Filters, Page, SizeKind, SortKey, TreeView, abs_path, attrs_not_collected, flag_names,
-    kind_name, ranked as ranked_ids, ranked_files, timegrammar::iso8601,
+    After, Cut, Filters, Page, SizeKind, SortKey, TreeView, abs_path, attrs_not_collected,
+    flag_names, kind_name, next_after, page_of, ranked_after, ranked_files, timegrammar::iso8601,
 };
 
 /// `stale`'s default `--min-size`: 10 MiB.
@@ -34,6 +34,8 @@ pub struct StaleQuery {
     pub limit: Option<usize>,
     /// The size rows are ranked and shown by.
     pub size: SizeKind,
+    /// `--cursor`: the page after this row.
+    pub after: Option<After>,
 }
 
 /// The stale files under the root of `view`.
@@ -53,10 +55,13 @@ pub fn stale(
         return Ok(Page {
             entries: Vec::new(),
             total_count: 0,
+            next: None,
         });
     }
     let cutoff = q.now.saturating_sub(q.older_than);
     let root = view.node(0);
+    let after = q.after.as_ref();
+    let seen = after.map_or(0, |a| a.seen);
     // Without a filter, from the view's own ranking where it has one (the
     // index's plans): the same cut, the same order.
     let ranked = (root.is_dir()
@@ -72,7 +77,8 @@ pub fn stale(
                 before: cutoff,
                 min_allocated: q.min_size,
             };
-            ranked_files(view, 0, limit, Some(cut))
+            let first = usize::try_from(seen).ok()?.checked_add(limit)?;
+            page_of(ranked_files(view, 0, first, Some(cut))?, after)
         });
     let candidates = (0..=root.last_id).filter(|&id| {
         let node = view.node(id);
@@ -85,8 +91,17 @@ pub fn stale(
     });
     let (ids, total_count) = match ranked {
         Some(r) => (r.ids, r.total_count),
-        None => ranked_ids(view, candidates, q.sort, q.size, q.reverse, q.limit),
+        None => ranked_after(
+            view,
+            candidates,
+            q.sort,
+            q.reverse,
+            q.limit,
+            |node: &super::Node| node.size(q.size),
+            after,
+        ),
     };
+    let next = next_after(view, &ids, q.sort, q.size, seen, total_count);
     let entries = ids
         .into_iter()
         .map(|id| {
@@ -112,5 +127,6 @@ pub fn stale(
     Ok(Page {
         entries,
         total_count,
+        next,
     })
 }

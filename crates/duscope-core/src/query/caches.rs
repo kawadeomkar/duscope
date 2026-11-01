@@ -26,7 +26,10 @@ use std::path::Path;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use super::{Filters, Page, SizeKind, SortKey, TreeView, pct, ranked, timegrammar::iso8601};
+use super::{
+    After, Filters, Page, SizeKind, SortKey, TreeView, next_after, pct, ranked_after,
+    timegrammar::iso8601,
+};
 use crate::envelope::{CacheEntry, ProjectEntry, name_fields};
 use crate::rules::{Caches, Confirm};
 
@@ -64,6 +67,8 @@ pub struct CachesQuery<'a> {
     pub limit: Option<usize>,
     /// The size rows are ranked and shown by.
     pub size: SizeKind,
+    /// `--cursor`: the page after this cache (each cache, not by project).
+    pub after: Option<After>,
 }
 
 impl std::fmt::Debug for CachesQuery<'_> {
@@ -109,7 +114,12 @@ pub fn caches(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Cach
         let node = view.node(id);
         node.size(q.size) >= q.min_size && q.filters.keeps(view, &node, q.size)
     });
-    let (ids, total_count) = ranked(view, candidates, q.sort, q.size, q.reverse, q.limit);
+    let after = q.after.as_ref();
+    let seen = after.map_or(0, |a| a.seen);
+    let size_of = |node: &super::Node| node.size(q.size);
+    let (ids, total_count) =
+        ranked_after(view, candidates, q.sort, q.reverse, q.limit, size_of, after);
+    let next = next_after(view, &ids, q.sort, q.size, seen, total_count);
     let root_total = if view.is_empty() {
         0
     } else {
@@ -146,6 +156,7 @@ pub fn caches(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Cach
     Page {
         entries,
         total_count,
+        next,
     }
 }
 
@@ -234,6 +245,7 @@ pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Pr
     Page {
         entries,
         total_count,
+        next: None,
     }
 }
 
