@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use duscope_core::query::Regex;
-use duscope_testkit::{TestEnv, golden, golden_dir, normalize};
+use duscope_testkit::{TestEnv, UPDATE_GOLDEN, golden, golden_dir, normalize};
 
 fn run(env: &TestEnv, args: &[&str]) -> Output {
     env.cmd().args(args).output().unwrap()
@@ -275,14 +275,17 @@ fn decode(png: &[u8]) -> (usize, usize, Vec<u8>) {
 /// by averaging, each bit whether a cell is lighter than the one on its
 /// right; as hex.
 fn dhash(width: usize, height: usize, pixels: &[u8]) -> String {
-    let mut cells = [[0.0f64; 17]; 16];
+    let mut cells = [[(0.0f64, 0u32); 17]; 16];
     for (y, row) in pixels.chunks_exact(3 * width).enumerate() {
         for (x, rgb) in row.chunks_exact(3).enumerate() {
             let grey =
                 0.299 * f64::from(rgb[0]) + 0.587 * f64::from(rgb[1]) + 0.114 * f64::from(rgb[2]);
-            cells[y * 16 / height][x * 17 / width] += grey;
+            let cell = &mut cells[y * 16 / height][x * 17 / width];
+            cell.0 += grey;
+            cell.1 += 1;
         }
     }
+    let cells = cells.map(|row| row.map(|(sum, count)| sum / f64::from(count.max(1))));
     let mut hex = String::new();
     for row in cells {
         let mut bits = 0u32;
@@ -297,7 +300,7 @@ fn dhash(width: usize, height: usize, pixels: &[u8]) -> String {
 /// Compares `hash` with the golden `name`, within 16 bits of 256.
 fn hash_golden(name: &str, hash: &str) {
     let path = golden_dir().join(name);
-    if std::env::var_os("DUSCOPE_TEST_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
+    if std::env::var_os(UPDATE_GOLDEN).is_some_and(|v| v == "1") {
         fs::write(&path, format!("{hash}\n")).unwrap();
         return;
     }

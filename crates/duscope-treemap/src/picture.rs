@@ -1,5 +1,5 @@
 //! `render`'s picture of the treemap, at any size in pixels: the layout
-//! walked once and drawn on a [`Canvas`], the SVG writer's
+//! walked once and drawn on a `Canvas`, the SVG writer's
 //! ([`crate::svg`]) or the PNG rasteriser's ([`crate::png`]).
 //!
 //! - **Layout:** the static map's tiles, in pixels: a directory's children
@@ -12,7 +12,7 @@
 //!   in `GrandPerspective`, directories are not outlined and only leaves
 //!   are painted. What lays out below a pixel is pooled into `+N small`.
 //! - **Shading** (`GradientRectangleDrawer.m`): each colour's 256-step
-//!   table ([`shade`]), lightest at a tile's top-left corner and darkest
+//!   table (`shade`), lightest at a tile's top-left corner and darkest
 //!   along its bottom and right edges, with L-shaped contours; tiles under
 //!   3 px each way are flat.
 //! - **Labels:** a cell is 0.6 em wide and 1.3 em tall at a font size of
