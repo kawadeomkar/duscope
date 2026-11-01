@@ -112,6 +112,51 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
 A patch release (`vX.Y.Z` with Z > 0) follows steps 2 to 4 and 6 to 7. In place of step 1, the
 latest nightly result on `main` is at most 72 hours old; the gate is not re-judged.
 
+### Security releases
+
+A vulnerability reported through [SECURITY.md](../SECURITY.md) is fixed in private, then ships
+as a patch release of the latest minor, the only one supported before 1.0. In order:
+
+1. **The advisory.** Accept the private report: it becomes the draft GitHub security advisory
+   (GHSA). Set the affected versions (`< X.Y.Z`, the coming patch release) and the severity
+   there, and keep the discussion in it.
+2. **The CVE.** Request one from the advisory page ("Request CVE"). GitHub assigns it, usually
+   within a few days, and it shows on the advisory.
+3. **The fix.** Open the advisory's temporary private fork ("Start a temporary private fork"),
+   and invite the reporter to it when they want to review. The fix, its tests and a fragment
+   `changelog.d/GHSA-xxxx-xxxx-xxxx.md` go there, on a branch from `main`. The fragment holds
+   only a `### Security` heading and one line naming the advisory and the CVE. CI does not run
+   in the private fork, so run `just check-full` on both platforms before merging. Then merge
+   the fix from the advisory page into `main`.
+4. **The release.** Follow [Patch releases](#patch-releases) at once. Its changelog section is
+   the `Security` section alone. `scripts/changelog.py assemble` takes every fragment, so any
+   other fragment waiting on `main` is moved aside for the assemble and put back before the
+   release commit, for the next release:
+
+   ```sh
+   held=$(mktemp -d)
+   git ls-files 'changelog.d/*.md' ':!changelog.d/README.md' ':!changelog.d/GHSA-*.md' |
+     xargs -I{} mv {} "$held"/
+   scripts/changelog.py assemble X.Y.Z
+   for f in "$held"/*.md; do [ -e "$f" ] && mv "$f" changelog.d/; done
+   ```
+
+   A tag must be on `main`, so the patch also carries whatever else `main` holds. Merge the fix
+   before anything that should wait for the next minor, or hold that back until the release.
+5. **Disclosure.** Publish the advisory once the release's assets and crates are live, and no
+   later than 90 days after the report. Publishing it adds it, with the CVE, to the GitHub
+   Advisory Database, from which Dependabot alerts the crates' dependents.
+6. **RUSTSEC.** When a library crate is affected (`duscope-core`, `duscope-walk`,
+   `duscope-treemap`, `duscope-tui` or `duscope-mcp`), open a pull request in
+   [rustsec/advisory-db](https://github.com/rustsec/advisory-db) that adds
+   `crates/<crate>/RUSTSEC-0000-0000.md` (the database assigns the number), with the crate,
+   the date, the advisory's URL, the GHSA and CVE ids as `aliases`, and the fixed version
+   under `patched`. `cargo audit` and `cargo deny` then report the vulnerable versions to the
+   crate's dependents.
+7. **The affected versions.** A version too dangerous to leave installable is pulled as
+   [Pulling a release](#pulling-a-release) says. Otherwise it stays, and the advisory names
+   the fix.
+
 ## Secrets
 
 Every secret the release and benchmark pipelines read, and the one key outside GitHub.

@@ -56,9 +56,21 @@ lists them,
 .B scans \-\-prune
 removes the old ones, and
 .B \-\-scan
-names one. Its tables are described in
+names one; an index file outside the directory is read only when
+.B \-\-trust
+names it. The directory and its
+.I scans
+are mode 0700; duscope warns when they or an index file are open to
+other users. Its tables are described in
 .I docs/index-format.md
 in the source distribution.
+.TP
+.I $XDG_CACHE_HOME/duscope/handle.key
+The key that signs
+.BR "explain \-\-json" 's
+handles: 32 random bytes, mode 0600, made on first use. A key that is a
+symbolic link, another user's, or readable by others signs nothing;
+deleting it invalidates every handle given out.
 .TP
 .I theme.toml
 A theme for

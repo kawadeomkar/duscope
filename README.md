@@ -198,7 +198,8 @@ cargo build --release
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): setup, the tools, the `just` recipes and
   the pull-request workflow.
-- [SECURITY.md](SECURITY.md): how to report a vulnerability.
+- [SECURITY.md](SECURITY.md): the threat model (what duscope treats as untrusted and
+  the rule for each), how to report a vulnerability, and the supported versions.
 - [CHANGELOG.md](CHANGELOG.md): what changed in each release.
 - [docs/](docs/README.md): the rest of the documentation.
 

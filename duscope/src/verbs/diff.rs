@@ -153,6 +153,7 @@ fn open(text: &str, dir: &Path, cwd: &Path, under: Option<&Path>) -> Result<Inde
         // Old scans are what diff compares: none is stale to it.
         max_age_ns: i64::MAX,
         now: clock::now(),
+        trust: super::trusted(),
     };
     let resolved = resolve_scan(&selector, &q, scanned)
         .map_err(core_failure)?
