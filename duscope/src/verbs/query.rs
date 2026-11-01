@@ -1,17 +1,18 @@
-//! The list verbs: `top`, `tree`, `by-type`, `stale`, and the rows `scan`
-//! prints. Each turns its flags into a query of `duscope_core::query`, runs
-//! it on its source (a saved scan, or a scan run for it), and writes the
-//! envelope.
+//! The list verbs: `top`, `tree`, `by-type`, `stale`, `caches`, and the
+//! rows `scan` prints. Each turns its flags into a query of
+//! `duscope_core::query`, runs it on its source (a saved scan, or a scan
+//! run for it), and writes the envelope.
 
 use std::path::Path;
 
 use duscope_core::CoreError;
 use duscope_core::envelope::{
-    ByTypeEntry, Envelope, QueryBlock, SCHEMA_VERSION, StaleEntry, Tool, TopEntry, Warning,
+    ByTypeEntry, CacheEntry, Envelope, ProjectEntry, QueryBlock, SCHEMA_VERSION, StaleEntry, Tool,
+    TopEntry, Warning,
 };
 use duscope_core::query::{
-    self, ByTypeQuery, DEFAULT_MIN_SIZE, Filters, Page, Regex, SizeKind, StaleQuery, TimeField,
-    TopQuery, TreeQuery, timegrammar,
+    self, ByTypeQuery, CachesQuery, DEFAULT_MIN_SIZE, Filters, Page, Regex, SizeKind, StaleQuery,
+    TimeField, TopQuery, TreeQuery, timegrammar,
 };
 use duscope_core::rules::Classes;
 use duscope_walk::VolumeInfo;
@@ -20,10 +21,10 @@ use super::scan;
 use super::source::{self, Source, core_failure};
 use super::{Exit, Failure};
 use crate::cli::{
-    ByTypeArgs, KindArg, QueryArgs, ScanArgs, SortKey, StaleArgs, TimeField as TimeArg, TopArgs,
-    TreeArgs, WalkArgs,
+    ByTypeArgs, CachesArgs, KindArg, QueryArgs, ScanArgs, SortKey, StaleArgs, TimeField as TimeArg,
+    TopArgs, TreeArgs, WalkArgs,
 };
-use crate::out::{Format, Output};
+use crate::out::{Format, Output, Row};
 
 /// `--limit`'s default, and its cap without `--format ndjson` (which
 /// streams every row).
@@ -44,6 +45,15 @@ struct Prepared {
     reverse: bool,
     /// Warnings the flags themselves raise (`tz_unavailable`).
     warnings: Vec<Warning>,
+}
+
+/// The shared flags a verb reads itself, not as filters.
+#[derive(Debug, Clone, Copy, Default)]
+struct Owns {
+    /// `--min-size` (`stale`, `caches`).
+    min_size: bool,
+    /// `--older-than` (`stale`).
+    older_than: bool,
 }
 
 /// How a verb reads `--depth`.
@@ -129,7 +139,14 @@ pub(super) fn top_envelope(
     cut_through: bool,
     output: &Output,
 ) -> Result<(Envelope<TopEntry>, String, Source), Failure> {
-    let prepared = prepare(source, walk, query, output, DepthUse::Lists, false)?;
+    let prepared = prepare(
+        source,
+        walk,
+        query,
+        output,
+        DepthUse::Lists,
+        Owns::default(),
+    )?;
     let depth = query.and_then(|q| q.depth);
     let q = TopQuery {
         depth,
@@ -169,7 +186,7 @@ pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         Some(&args.query),
         output,
         DepthUse::Lists,
-        false,
+        Owns::default(),
     )?;
     let q = TreeQuery {
         depth: args.query.depth,
@@ -235,7 +252,7 @@ pub fn by_type(
         Some(&args.query),
         output,
         DepthUse::Filters,
-        false,
+        Owns::default(),
     )?;
     let q = ByTypeQuery {
         classes: &classes,
@@ -278,7 +295,10 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
         Some(&args.query),
         output,
         DepthUse::Filters,
-        true,
+        Owns {
+            min_size: true,
+            older_than: true,
+        },
     )?;
     prepared
         .filters
@@ -329,6 +349,87 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
     source.finish(&args.walk, output)
 }
 
+/// `caches`: each cache by default, each project's with `--by-project`.
+pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    // A scan that leaves the caches out holds none of their bytes.
+    if args.walk.exclude_caches {
+        return Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            "caches lists the directories --exclude-caches leaves out, so the two do not go together",
+        )
+        .hint("Run duscope caches without --exclude-caches"));
+    }
+    let rules = scan::cache_rules(args.walk.caches_extra.as_deref())?;
+    limit(Some(&args.query), output)?;
+    let source = source::source(&args.walk, &args.index, index_dir)?;
+    let mut prepared = prepare(
+        source,
+        &args.walk,
+        Some(&args.query),
+        output,
+        DepthUse::Filters,
+        Owns {
+            min_size: true,
+            older_than: false,
+        },
+    )?;
+    // --min-size is the query's own, with its default; by project, it is a
+    // project's total.
+    let min_size = args
+        .query
+        .min_size
+        .unwrap_or(query::caches::DEFAULT_MIN_SIZE);
+    let given = &mut prepared.filters.given;
+    given.insert(0, format!("--min-size={min_size}"));
+    if args.loose {
+        given.push("--loose".to_owned());
+    }
+    let source = &prepared.source;
+    let holds = |dir: &Path, name: &str| source.holds_file(dir, name);
+    let q = CachesQuery {
+        caches: &rules,
+        above: &holds,
+        loose: args.loose,
+        min_size,
+        filters: prepared.filters.clone(),
+        sort: prepared.sort,
+        reverse: prepared.reverse,
+        limit: prepared.limit,
+        size: prepared.size,
+    };
+    if args.by_project {
+        let page: Page<ProjectEntry> = query::projects(&*source.view(), &q);
+        write(
+            prepared,
+            &args.walk,
+            "caches --by-project",
+            &args.query,
+            page,
+            output,
+        )
+    } else {
+        let page: Page<CacheEntry> = query::caches(&*source.view(), &q);
+        write(prepared, &args.walk, "caches", &args.query, page, output)
+    }
+}
+
+/// Writes a verb's page as its envelope, and saves a scan run for it.
+fn write<T: Row>(
+    prepared: Prepared,
+    walk: &WalkArgs,
+    verb: &'static str,
+    query: &QueryArgs,
+    page: Page<T>,
+    output: &Output,
+) -> Result<(), Failure> {
+    let (envelope, footer, source) =
+        envelope(prepared, walk, verb, query.depth, page, Vec::new(), output);
+    source.check()?;
+    output.list(&envelope, &footer)?;
+    source.finish(walk, output)
+}
+
 /// Scans' common preparation: the size kind, now, the filters, the limit
 /// and the sort; `--strict` turns unreadable directories into exit 4.
 fn prepare(
@@ -337,7 +438,7 @@ fn prepare(
     args: Option<&QueryArgs>,
     output: &Output,
     depth: DepthUse,
-    stale: bool,
+    owns: Owns,
 ) -> Result<Prepared, Failure> {
     let unreadable = source.unreadable_dirs();
     if args.is_some_and(|a| a.strict) && unreadable > 0 {
@@ -352,7 +453,7 @@ fn prepare(
     }
     let now = scan::now(walk)?;
     let (filters, tz_unavailable) = match args {
-        Some(args) => filters(args, now, depth, stale)?,
+        Some(args) => filters(args, now, depth, owns)?,
         None => (Filters::default(), false),
     };
     if filters.needs_full() && !source.view().full_attrs() {
@@ -412,7 +513,7 @@ fn filters(
     args: &QueryArgs,
     now: i64,
     depth: DepthUse,
-    stale: bool,
+    owns: Owns,
 ) -> Result<(Filters, bool), Failure> {
     let usage = |flag: &str, e: String| Failure::new(Exit::Usage, "usage", format!("{flag} {e}"));
     let mut f = Filters::default();
@@ -452,7 +553,9 @@ fn filters(
             .collect();
         f.given.push(format!("--type={}", f.kinds.join(",")));
     }
-    if !stale && let Some(min) = args.min_size {
+    if !owns.min_size
+        && let Some(min) = args.min_size
+    {
         f.min_size = Some(min);
         f.given.push(format!("--min-size={min}"));
     }
@@ -477,7 +580,9 @@ fn filters(
         TimeArg::Btime => TimeField::Btime,
     };
     let mut tz_unavailable = false;
-    if !stale && let Some(age) = &args.older_than {
+    if !owns.older_than
+        && let Some(age) = &args.older_than
+    {
         let ns = timegrammar::parse_age(age).map_err(|e| usage("--older-than", e))?;
         f.before = Some(now.saturating_sub(ns));
         f.given.push(format!("--older-than={age}"));
