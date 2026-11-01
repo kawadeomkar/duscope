@@ -137,6 +137,8 @@ pub enum Verb {
     Stale(StaleArgs),
     /// Regenerable caches (node_modules, target, .venv, …) and their projects
     Caches(CachesArgs),
+    /// A scan's totals: per volume, as du counts them, and what it left unfound
+    Summary(SummaryArgs),
     /// Facts about one path: links, clones, what deleting it frees, caches, git
     Explain(ExplainArgs),
     /// List, prune or check the saved scans
@@ -549,6 +551,15 @@ pub struct CachesArgs {
     pub loose: bool,
 }
 
+/// `summary`'s flags.
+#[derive(Debug, Clone, Args)]
+pub struct SummaryArgs {
+    #[command(flatten)]
+    pub walk: WalkArgs,
+    #[command(flatten)]
+    pub index: IndexArgs,
+}
+
 /// `--size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SizeKind {
@@ -707,15 +718,27 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         walk.caches_extra.clone_from(&config.caches_extra);
         Ok(())
     };
+    let max_age_default = |max_age: &mut Option<String>| {
+        if max_age.is_none() {
+            *max_age = d.max_age.as_ref().map(|age| age.value.clone());
+        }
+    };
+    let index_defaults = |index: &mut IndexArgs| max_age_default(&mut index.max_age);
     let query_defaults = |query: &mut QueryArgs, index: &mut IndexArgs| {
         if query.limit.is_none()
             && let Some(limit) = &d.limit
         {
             query.limit = Some(usize::try_from(limit.value).unwrap_or(usize::MAX));
         }
-        if index.max_age.is_none() {
-            index.max_age = d.max_age.as_ref().map(|age| age.value.clone());
-        }
+        index_defaults(index);
+    };
+    let list_defaults = |walk: &mut WalkArgs,
+                         query: &mut QueryArgs,
+                         index: &mut IndexArgs|
+     -> Result<(), Failure> {
+        walk_defaults(walk)?;
+        query_defaults(query, index);
+        Ok(())
     };
     let scan_defaults = |scan: &mut ScanArgs| -> Result<(), Failure> {
         walk_defaults(&mut scan.walk)?;
@@ -734,33 +757,22 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
     match &mut cli.verb {
         None => scan_defaults(&mut cli.scan)?,
         Some(Verb::Scan(args)) => scan_defaults(args)?,
-        Some(Verb::Top(args)) => {
-            walk_defaults(&mut args.walk)?;
-            query_defaults(&mut args.query, &mut args.index);
-        }
-        Some(Verb::Tree(args)) => {
-            walk_defaults(&mut args.walk)?;
-            query_defaults(&mut args.query, &mut args.index);
-        }
-        Some(Verb::ByType(args)) => {
-            walk_defaults(&mut args.walk)?;
-            query_defaults(&mut args.query, &mut args.index);
-            if args.classes.is_none() {
-                args.classes.clone_from(&config.classes_extra);
+        Some(Verb::Top(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
+        Some(Verb::Tree(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
+        Some(Verb::ByType(a)) => {
+            list_defaults(&mut a.walk, &mut a.query, &mut a.index)?;
+            if a.classes.is_none() {
+                a.classes.clone_from(&config.classes_extra);
             }
         }
-        Some(Verb::Stale(args)) => {
-            walk_defaults(&mut args.walk)?;
-            query_defaults(&mut args.query, &mut args.index);
-        }
-        Some(Verb::Caches(args)) => {
-            walk_defaults(&mut args.walk)?;
-            query_defaults(&mut args.query, &mut args.index);
+        Some(Verb::Stale(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
+        Some(Verb::Caches(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
+        Some(Verb::Summary(a)) => {
+            walk_defaults(&mut a.walk)?;
+            index_defaults(&mut a.index);
         }
         Some(Verb::Explain(args)) => {
-            if args.max_age.is_none() {
-                args.max_age = d.max_age.as_ref().map(|age| age.value.clone());
-            }
+            max_age_default(&mut args.max_age);
             args.caches_extra.clone_from(&config.caches_extra);
         }
         Some(Verb::Scans(_) | Verb::Man | Verb::Completions(_)) => {}

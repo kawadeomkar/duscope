@@ -202,6 +202,45 @@ impl Source {
         }
     }
 
+    /// The devices of the volumes the scan met, in the order the scan
+    /// block lists the volumes.
+    pub fn volume_devs(&self) -> Vec<u64> {
+        match self {
+            Source::Fresh { scanned, .. } => {
+                scanned.arena.volumes().iter().map(|v| v.dev).collect()
+            }
+            Source::Saved { index, .. } => index.volumes().iter().map(|v| v.dev).collect(),
+        }
+    }
+
+    /// When the scan started, Unix nanoseconds.
+    pub fn started_ns(&self) -> i64 {
+        match self {
+            Source::Fresh { scanned, .. } => scanned.started_ns,
+            Source::Saved { index, .. } => index.meta().started_at,
+        }
+    }
+
+    /// The scan an incremental scan updated.
+    pub fn parent_scan_id(&self) -> Option<String> {
+        match self {
+            Source::Fresh { .. } => None,
+            Source::Saved { index, .. } => index
+                .meta()
+                .parent_scan_id
+                .as_ref()
+                .map(ToString::to_string),
+        }
+    }
+
+    /// Whether the rows' root is the scan's own root.
+    pub fn at_root(&self) -> bool {
+        match self {
+            Source::Fresh { .. } => true,
+            Source::Saved { base, .. } => *base == 0,
+        }
+    }
+
     /// Directories under the path the scan could not read.
     pub fn unreadable_dirs(&self) -> u64 {
         match self {
