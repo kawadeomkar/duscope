@@ -95,11 +95,18 @@
           "type": "string"
         },
         "reason": {
-          "description": "`excluded` (a glob or ignore pattern) or `excluded_cache`.",
-          "enum": [
-            "excluded",
-            "excluded_cache"
+          "anyOf": [
+            {
+              "enum": [
+                "excluded",
+                "excluded_cache"
+              ]
+            },
+            {
+              "type": "string"
+            }
           ],
+          "description": "`excluded` (a glob or ignore pattern) or `excluded_cache`.",
           "type": "string"
         }
       },
@@ -351,17 +358,24 @@
           "type": "boolean"
         },
         "reason": {
-          "description": "Why not (`one_file_system`, `network`, …); null when it did.",
-          "enum": [
-            "firmlinked",
-            "kernel",
-            "network",
-            "one_file_system",
-            "bind_cycle",
-            "excluded",
-            "excluded_cache",
-            null
+          "anyOf": [
+            {
+              "enum": [
+                "firmlinked",
+                "kernel",
+                "network",
+                "one_file_system",
+                "bind_cycle",
+                "excluded",
+                "excluded_cache",
+                null
+              ]
+            },
+            {
+              "type": "string"
+            }
           ],
+          "description": "Why not (`one_file_system`, `network`, …); null when it did.",
           "type": [
             "string",
             "null"
@@ -389,24 +403,31 @@
       "description": "A warning.",
       "properties": {
         "code": {
-          "description": "One of the conventions' warning codes.",
-          "enum": [
-            "partial_read",
-            "mounts_excluded",
-            "stale_index",
-            "scan_age",
-            "atime_unreliable",
-            "attrs_not_collected",
-            "dataless_present",
-            "full_disk_access_missing",
-            "clones_unavailable",
-            "upper_bound",
-            "vanished",
-            "index_untouched",
-            "spilled",
-            "deprecated_flag",
-            "tz_unavailable"
+          "anyOf": [
+            {
+              "enum": [
+                "partial_read",
+                "mounts_excluded",
+                "stale_index",
+                "scan_age",
+                "atime_unreliable",
+                "attrs_not_collected",
+                "dataless_present",
+                "full_disk_access_missing",
+                "clones_unavailable",
+                "upper_bound",
+                "vanished",
+                "index_untouched",
+                "spilled",
+                "deprecated_flag",
+                "tz_unavailable"
+              ]
+            },
+            {
+              "type": "string"
+            }
           ],
+          "description": "One of the conventions' warning codes.",
           "type": "string"
         },
         "count": {

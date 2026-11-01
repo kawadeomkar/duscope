@@ -27,17 +27,23 @@ Every `.json` file here:
 ## The envelope's version
 
 `schema_version` is `0.2`, frozen by P2-CLI-01. From there the envelope changes
-additively only (a new field, a new verb, a new value of an enumerated field),
-each change a deviation entry in the specification, its fields marked
+additively only (a new field, a new verb, a new value of a field whose values
+grow), each change a deviation entry in the specification, its fields marked
 `x-since` with the minor that adds them. `history/<minor>/` keeps each minor as
 published; `history/0.2/` is the minor in progress until v0.2.0 is tagged, so a
 package before then that adds to the envelope updates it as well.
 
-The schemas list the values of the enumerated fields: the warning codes and the
-error codes of the conventions (`WARNING_CODES` and `ERROR_CODES` in
-`crates/duscope-core/src/envelope.rs`), an entry's `kind`, its `flags`, and the
-rest under `envelope::values`. A field only one platform fills is marked
-`x-platforms`.
+The schemas list the values of the enumerated fields, from `WARNING_CODES`,
+`ERROR_CODES` and `envelope::values` in `crates/duscope-core/src/envelope.rs`:
+
+- a field whose values are fixed (`kind`, `size_kind`, `attrs`, `change`,
+  `confidence`, `freeable_kind`, `fixable_by`) is a closed `enum`;
+- a field whose values grow (the warning codes, the error codes, `flags`, the
+  skip and exclude reasons, `regenerable_by`, what `scans --prune` removed) is
+  `anyOf` its known values or any string, so a reader of one minor accepts the
+  next one's output.
+
+A field only one platform fills is marked `x-platforms`.
 
 ## Checks
 

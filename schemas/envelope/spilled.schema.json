@@ -50,24 +50,31 @@
       "description": "A warning.",
       "properties": {
         "code": {
-          "description": "One of the conventions' warning codes.",
-          "enum": [
-            "partial_read",
-            "mounts_excluded",
-            "stale_index",
-            "scan_age",
-            "atime_unreliable",
-            "attrs_not_collected",
-            "dataless_present",
-            "full_disk_access_missing",
-            "clones_unavailable",
-            "upper_bound",
-            "vanished",
-            "index_untouched",
-            "spilled",
-            "deprecated_flag",
-            "tz_unavailable"
+          "anyOf": [
+            {
+              "enum": [
+                "partial_read",
+                "mounts_excluded",
+                "stale_index",
+                "scan_age",
+                "atime_unreliable",
+                "attrs_not_collected",
+                "dataless_present",
+                "full_disk_access_missing",
+                "clones_unavailable",
+                "upper_bound",
+                "vanished",
+                "index_untouched",
+                "spilled",
+                "deprecated_flag",
+                "tz_unavailable"
+              ]
+            },
+            {
+              "type": "string"
+            }
           ],
+          "description": "One of the conventions' warning codes.",
           "type": "string"
         },
         "count": {
