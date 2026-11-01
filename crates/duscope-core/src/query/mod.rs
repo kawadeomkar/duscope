@@ -14,6 +14,7 @@ pub mod explain;
 pub mod plan;
 pub mod resolve;
 mod stale;
+pub mod summary;
 pub mod timegrammar;
 mod top;
 mod tree;
@@ -49,6 +50,7 @@ pub use resolve::{
     Resolved, ScanQuery, ScanSelector, index_files, resolve_scan, short_id, shortest_prefix, under,
 };
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
+pub use summary::{SummaryBytes, VolumeBytes, VolumeRoot, summary};
 pub use top::{TopQuery, top};
 pub use tree::{TreeQuery, tree};
 
@@ -197,6 +199,32 @@ pub trait TreeView {
     fn as_index(&self) -> Option<(&Index, u32)> {
         None
     }
+
+    /// The directories under `dir` (itself first) where a volume starts,
+    /// in id order, with their totals. A view that knows no volumes has
+    /// one, starting at `dir`, whose device is 0 and whose bytes as `du`
+    /// counts them are its allocated ones.
+    fn volume_roots(&self, dir: u32) -> Vec<VolumeRoot> {
+        let node = self.node(dir);
+        vec![VolumeRoot {
+            id: dir,
+            last: node.last_id,
+            dev: 0,
+            allocated: node.allocated,
+            apparent: node.apparent,
+            du_compatible: node.allocated,
+        }]
+    }
+
+    /// The logical size of the dataless files under `dir`.
+    fn dataless_bytes(&self, dir: u32) -> u64 {
+        let last = self.node(dir).last_id;
+        (dir..=last)
+            .map(|id| self.node(id))
+            .filter(|node| !node.is_dir() && node.flags.contains(Flags::DATALESS))
+            .map(|node| node.apparent)
+            .sum()
+    }
 }
 
 /// The arena and its roll-up, as a [`TreeView`].
@@ -290,6 +318,49 @@ impl TreeView for ArenaView<'_> {
     fn name(&self, id: u32) -> Cow<'_, [u8]> {
         Cow::Borrowed(self.arena.entry(self.rollup.entry_at(id)).name)
     }
+
+    /// From the arena's crossings: where the walk met another device.
+    fn volume_roots(&self, dir: u32) -> Vec<VolumeRoot> {
+        let last = self.node(dir).last_id;
+        let charges = self.rollup.charges();
+        let root = |id: u32, dev: u64| {
+            let rec = self
+                .arena
+                .entry(self.rollup.entry_at(id))
+                .dir
+                .map(|d| (self.arena.dir(d), d));
+            rec.map(|(rec, d)| VolumeRoot {
+                id,
+                last: rec.last_id,
+                dev,
+                allocated: rec.cum_allocated,
+                apparent: rec.cum_apparent,
+                du_compatible: charges.du_compatible(self.arena, d),
+            })
+        };
+        let mut crossings: Vec<(u32, u64)> = self
+            .arena
+            .crossings()
+            .iter()
+            .map(|c| (self.rollup.id_of(c.entry), c.dev))
+            .collect();
+        crossings.sort_unstable();
+        // The device of `dir` itself: that of the innermost crossing at or
+        // above it, else the root's.
+        let dev = crossings
+            .iter()
+            .filter(|&&(id, _)| id <= dir && self.node(id).last_id >= dir)
+            .max_by_key(|&&(id, _)| id)
+            .map_or(self.arena.root_volume().0, |&(_, dev)| dev);
+        let mut roots: Vec<VolumeRoot> = root(dir, dev).into_iter().collect();
+        roots.extend(
+            crossings
+                .into_iter()
+                .filter(|&(id, _)| id > dir && id <= last)
+                .filter_map(|(id, dev)| root(id, dev)),
+        );
+        roots
+    }
 }
 
 /// The subtree of a view at one of its directories, as a view of its own:
@@ -381,6 +452,22 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
     fn as_index(&self) -> Option<(&Index, u32)> {
         let (index, base) = self.view.as_index()?;
         Some((index, base + self.base))
+    }
+
+    fn volume_roots(&self, dir: u32) -> Vec<VolumeRoot> {
+        self.view
+            .volume_roots(dir + self.base)
+            .into_iter()
+            .map(|r| VolumeRoot {
+                id: r.id.saturating_sub(self.base),
+                last: r.last.saturating_sub(self.base),
+                ..r
+            })
+            .collect()
+    }
+
+    fn dataless_bytes(&self, dir: u32) -> u64 {
+        self.view.dataless_bytes(dir + self.base)
     }
 }
 
