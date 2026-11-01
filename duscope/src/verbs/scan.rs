@@ -15,6 +15,7 @@ use duscope_core::arena::Arena;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
 use duscope_core::index::{IndexWriter, ScanId, ScanMeta, index_path, random_bytes};
 use duscope_core::query::{self, ArenaView, SizeKind, TreeView, clock, timegrammar};
+use duscope_core::rescan::ScanOptions;
 use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::{RollUp, roll_up};
 use duscope_core::rules::Caches;
@@ -292,29 +293,46 @@ pub fn save(
     Ok(())
 }
 
-/// The scan's options as `scan_meta.options` records them, for a rescan:
-/// `excludes` holds `--exclude`'s patterns and the configuration's,
-/// `exclude_files` and `ignore_files` the files `--exclude-from` and
-/// `--ignore-from` named.
+/// The scan's options as `scan_meta.options` records them, for a rescan
+/// and for telling which saved scans hold the tree a scan would: `excludes`
+/// holds `--exclude`'s patterns and the configuration's, `exclude_files`
+/// and `ignore_files` the files `--exclude-from` and `--ignore-from` named
+/// (absolute, so that a rescan from elsewhere reads them), `caches_extra`
+/// the configuration's cache rules under `--exclude-caches`.
 pub(super) fn saved_options(walk: &WalkArgs, excludes: &[String]) -> String {
-    let excludes: Vec<&str> = excludes
-        .iter()
-        .chain(&walk.config_excludes)
-        .map(String::as_str)
-        .collect();
-    serde_json::json!({
-        "clones": !walk.no_clones,
-        "one_file_system": walk.one_file_system,
-        "include_network": walk.include_network,
-        "follow_symlinks": walk.follow_symlinks,
-        "excludes": excludes,
-        "exclude_files": walk.exclude_from,
-        "ignore_files": walk.ignore_from,
-        "exclude_caches": walk.exclude_caches,
-        "threads": walk.threads.unwrap_or(0),
-        "size_kind": size_kind(walk).as_str(),
-    })
-    .to_string()
+    scan_options(walk, excludes).to_json()
+}
+
+/// [`saved_options`], as the options themselves.
+pub(super) fn scan_options(walk: &WalkArgs, excludes: &[String]) -> ScanOptions {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let absolute = |files: &[PathBuf]| -> Vec<String> {
+        files
+            .iter()
+            .map(|file| cwd.join(file).to_string_lossy().into_owned())
+            .collect()
+    };
+    ScanOptions {
+        clones: !walk.no_clones,
+        one_file_system: walk.one_file_system,
+        include_network: walk.include_network,
+        follow_symlinks: walk.follow_symlinks,
+        excludes: excludes
+            .iter()
+            .chain(&walk.config_excludes)
+            .cloned()
+            .collect(),
+        exclude_files: absolute(&walk.exclude_from),
+        ignore_files: absolute(&walk.ignore_from),
+        exclude_caches: walk.exclude_caches,
+        caches_extra: walk
+            .caches_extra
+            .as_ref()
+            .filter(|_| walk.exclude_caches)
+            .map(|file| cwd.join(file).to_string_lossy().into_owned()),
+        threads: walk.threads.unwrap_or(0),
+        size_kind: size_kind(walk).as_str().to_owned(),
+    }
 }
 
 /// The scan's warnings.
