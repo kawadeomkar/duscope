@@ -339,6 +339,29 @@ impl Index {
             )
     }
 
+    /// The directories with ids from `first` to `last` that could not be
+    /// read, and the entries they listed but could not examine.
+    pub fn errors_under(&self, first: u32, last: u32) -> u64 {
+        if self.meta.error_count == 0 {
+            return 0;
+        }
+        let entries = self
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM scan_errors WHERE dir_id BETWEEN ?1 AND ?2",
+                [first, last],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_or_else(
+                |e| {
+                    self.fail(&e);
+                    0
+                },
+                unsigned,
+            );
+        self.unreadable_dirs(first, last) + entries
+    }
+
     /// What the scan could not read: each unreadable directory (its id, no
     /// name, and the error number), and each entry a directory listed but
     /// could not examine (the directory's id, the entry's name, the error
@@ -764,14 +787,18 @@ impl TreeView for Index {
         })
     }
 
+    /// Through the partial index `files_dataless`, whose condition the query
+    /// spells as it is; a later link of a dataless file counts once.
     fn dataless_bytes(&self, dir: u32) -> u64 {
+        const _: () = assert!(Flags::DATALESS.bits() == 4);
         let last = self.node(dir).last_id;
-        let dataless = i64::from(Flags::DATALESS.bits());
         self.db
             .query_row(
-                "SELECT COALESCE(SUM(apparent), 0) FROM files \
-                 WHERE id BETWEEN ?1 AND ?2 AND flags & ?3 != 0",
-                rusqlite::params![dir, last, dataless],
+                &format!(
+                    "SELECT COALESCE(SUM(apparent), 0) FROM files \
+                     WHERE id BETWEEN ?1 AND ?2 AND flags & 4 != 0 AND flags & {LATER_LINK} = 0"
+                ),
+                rusqlite::params![dir, last],
                 |row| row.get::<_, i64>(0),
             )
             .map_or_else(

@@ -184,9 +184,9 @@ fn p2_idx_01_the_indexes_follow_the_tables() {
     // The proposal's eight, and shared_members (DEV-68).
     assert_eq!(tables.matches("CREATE TABLE").count(), 9);
     let statements: Vec<&str> = indexes.lines().filter(|l| !l.trim().is_empty()).collect();
-    // The proposal's four, and the partial `dirs_errors` and
-    // `dirs_excluded` (DEV-68).
-    assert_eq!(statements.len(), 6, "{statements:?}");
+    // The proposal's four, and the partial `dirs_errors`, `dirs_excluded`
+    // and `files_dataless` (DEV-68).
+    assert_eq!(statements.len(), 7, "{statements:?}");
     assert!(
         statements.iter().all(|s| s.starts_with("CREATE INDEX ")),
         "{statements:?}"

@@ -4,7 +4,11 @@
 //!
 //! A volume's share is what lies on it: the totals of each directory where
 //! the volume starts under the root (the root's own volume starts at the
-//! root), less those of the volumes that start below it.
+//! root), less those of the volumes that start below it. A mount point the
+//! scan did not enter starts nothing: its directory's own bytes stay in the
+//! volume around it.
+
+use std::path::Path;
 
 use super::TreeView;
 
@@ -54,8 +58,9 @@ pub struct SummaryBytes {
     pub volumes: Vec<VolumeBytes>,
 }
 
-/// The bytes under the root of `view`.
-pub fn summary(view: &(impl TreeView + ?Sized)) -> SummaryBytes {
+/// The bytes under the root of `view`; `unentered` names the devices of the
+/// mount points the scan did not enter.
+pub fn summary(view: &(impl TreeView + ?Sized), unentered: &[u64]) -> SummaryBytes {
     if view.is_empty() {
         return SummaryBytes {
             allocated: 0,
@@ -65,7 +70,26 @@ pub fn summary(view: &(impl TreeView + ?Sized)) -> SummaryBytes {
             volumes: Vec::new(),
         };
     }
+    let node = view.node(0);
     let roots = view.volume_roots(0);
+    SummaryBytes {
+        allocated: node.allocated,
+        apparent: node.apparent,
+        du_compatible: roots.first().map_or(node.allocated, |r| r.du_compatible),
+        dataless: view.dataless_bytes(0),
+        volumes: shares(&roots, unentered),
+    }
+}
+
+/// Each volume's share of `roots` (the root first), one per device; the
+/// roots on an `unentered` device start nothing.
+pub fn shares(roots: &[VolumeRoot], unentered: &[u64]) -> Vec<VolumeBytes> {
+    let roots: Vec<&VolumeRoot> = roots
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| *i == 0 || !unentered.contains(&r.dev))
+        .map(|(_, r)| r)
+        .collect();
     let mut volumes: Vec<VolumeBytes> = Vec::new();
     // The roots in id order, each less the roots directly below it.
     let mut open: Vec<(VolumeRoot, VolumeBytes)> = Vec::new();
@@ -81,7 +105,7 @@ pub fn summary(view: &(impl TreeView + ?Sized)) -> SummaryBytes {
             }
         }
     };
-    for root in &roots {
+    for root in roots {
         while open.last().is_some_and(|(outer, _)| root.id > outer.last) {
             close(&mut open, &mut volumes);
         }
@@ -103,15 +127,60 @@ pub fn summary(view: &(impl TreeView + ?Sized)) -> SummaryBytes {
     while !open.is_empty() {
         close(&mut open, &mut volumes);
     }
-    let top = roots.first();
-    let node = view.node(0);
-    SummaryBytes {
-        allocated: node.allocated,
-        apparent: node.apparent,
-        du_compatible: top.map_or(node.allocated, |r| r.du_compatible),
-        dataless: view.dataless_bytes(0),
-        volumes,
+    volumes
+}
+
+/// A volume as [`unaccounted`] weighs it.
+#[derive(Debug, Clone, Copy)]
+pub struct VolumeUse<'a> {
+    /// Where it is mounted.
+    pub mount_point: &'a Path,
+    /// Its filesystem.
+    pub fs_type: &'a str,
+    /// Its size, as `statfs` reported it.
+    pub total: Option<u64>,
+    /// Its free space.
+    pub free: Option<u64>,
+    /// Whether the scan entered it.
+    pub entered: bool,
+    /// Its mount options.
+    pub options: &'a [String],
+    /// The bytes the scan found on it.
+    pub found: u64,
+}
+
+/// What the volume mounted at `root` uses that the scan did not find: its
+/// size less its free space, less the bytes found on it and on every
+/// volume that reports the same filesystem (the volumes of one APFS
+/// container, or bind mounts of one filesystem, report its size and free
+/// space alike). `None` where `root` is no entered volume's mount point,
+/// the sizes are unknown, or the mount is a btrfs subvolume's, whose size
+/// and free space are the whole filesystem's.
+pub fn unaccounted(root: &Path, volumes: &[VolumeUse<'_>]) -> Option<u64> {
+    let mount = volumes
+        .iter()
+        .find(|v| v.entered && v.mount_point == root)?;
+    let subvolume = mount
+        .options
+        .iter()
+        .filter_map(|o| o.strip_prefix("subvol="))
+        .any(|s| s != "/");
+    if subvolume {
+        return None;
     }
+    let (total, free) = (mount.total?, mount.free?);
+    let used = total.checked_sub(free)?;
+    let found: u64 = volumes
+        .iter()
+        .filter(|v| {
+            v.entered
+                && v.fs_type == mount.fs_type
+                && v.total == mount.total
+                && v.free == mount.free
+        })
+        .map(|v| v.found)
+        .sum();
+    Some(used.saturating_sub(found))
 }
 
 #[cfg(test)]
@@ -183,7 +252,7 @@ mod tests {
                 root(7, 9, 3, 50),
             ],
         };
-        let bytes = summary(&roots);
+        let bytes = summary(&roots, &[]);
         let shares: Vec<(u64, u64)> = bytes.volumes.iter().map(|v| (v.dev, v.allocated)).collect();
         // 1: 400 at the root, 10 in the bind mount; 2: 600 - 100 - 50;
         // 3: 90 and 50.
@@ -192,5 +261,52 @@ mod tests {
             bytes.volumes.iter().map(|v| v.allocated).sum::<u64>(),
             1_000
         );
+    }
+}
+
+#[cfg(test)]
+mod unaccounted_tests {
+    use std::path::Path;
+
+    use super::{VolumeUse, unaccounted};
+
+    fn volume<'a>(
+        at: &'a str,
+        total: u64,
+        free: u64,
+        found: u64,
+        options: &'a [String],
+    ) -> VolumeUse<'a> {
+        VolumeUse {
+            mount_point: Path::new(at),
+            fs_type: "apfs",
+            total: Some(total),
+            free: Some(free),
+            entered: true,
+            options,
+            found,
+        }
+    }
+
+    #[test]
+    fn p2_qry_03_the_volumes_of_one_container_are_found_together() {
+        // / and its Data volume share a container: 100 used, 90 found
+        // across the two.
+        let both = [
+            volume("/", 200, 100, 20, &[]),
+            volume("/System/Volumes/Data", 200, 100, 70, &[]),
+        ];
+        assert_eq!(unaccounted(Path::new("/"), &both), Some(10));
+        // Another filesystem mounted below counts on its own.
+        let other = [
+            volume("/", 200, 100, 90, &[]),
+            volume("/Volumes/USB", 64, 32, 30, &[]),
+        ];
+        assert_eq!(unaccounted(Path::new("/"), &other), Some(10));
+        // Not a mount point; a btrfs subvolume.
+        assert_eq!(unaccounted(Path::new("/home"), &both), None);
+        let subvol = ["rw".to_owned(), "subvol=/@home".to_owned()];
+        let home = [volume("/home", 200, 100, 40, &subvol)];
+        assert_eq!(unaccounted(Path::new("/home"), &home), None);
     }
 }

@@ -50,7 +50,7 @@ pub use resolve::{
     Resolved, ScanQuery, ScanSelector, index_files, resolve_scan, short_id, shortest_prefix, under,
 };
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
-pub use summary::{SummaryBytes, VolumeBytes, VolumeRoot, summary};
+pub use summary::{SummaryBytes, VolumeBytes, VolumeRoot, VolumeUse, shares, summary, unaccounted};
 pub use top::{TopQuery, top};
 pub use tree::{TreeQuery, tree};
 
