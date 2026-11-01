@@ -19,8 +19,8 @@ use std::path::PathBuf;
 
 use duscope_core::envelope::{
     ByTypeEntry, CacheEntry, CheckedEntry, DiffEntry, DiffTotals, Envelope, ErrorEnvelope, Listing,
-    ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry, ScanErrorEntry, StaleEntry,
-    TopEntry, TreeEntry, Warning,
+    ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry, ScanErrorEntry, SqlQueryBlock,
+    SqlResult, SqlValue, StaleEntry, TopEntry, TreeEntry, Warning,
 };
 use serde::Serialize;
 
@@ -673,6 +673,77 @@ impl Output {
                 })
             }
         };
+        if !self.is_json() && !self.quiet {
+            warn(&envelope.warnings);
+        }
+        written
+    }
+
+    /// Writes `query`'s answer: the envelope under `--json` and `--format
+    /// ndjson` (spilled past `--max-chars` like a list's), tab-separated
+    /// values with a heading line under `--plain`, a table under the table
+    /// format. `footer` is the one line for people, after the table or on
+    /// stderr in the machine formats.
+    pub fn sql(
+        &self,
+        envelope: &ObjectEnvelope<SqlResult, SqlQueryBlock>,
+        footer: &str,
+    ) -> Result<(), Failure> {
+        let result = &envelope.result;
+        let written = match self.format {
+            Format::Json | Format::Ndjson => self.json(
+                envelope,
+                &result.rows,
+                &envelope.warnings,
+                envelope.scan.as_ref().and_then(|scan| scan.id.as_deref()),
+                "query",
+            ),
+            Format::Plain => self.sink(|out| {
+                let columns: Vec<&str> = result.columns.iter().map(String::as_str).collect();
+                let records = result.rows.iter().map(|row| {
+                    row.iter()
+                        .map(|value| match value {
+                            SqlValue::Null => Cow::Borrowed(&b""[..]),
+                            SqlValue::Integer(n) => Cow::Owned(n.to_string().into_bytes()),
+                            SqlValue::Real(x) => Cow::Owned(x.to_string().into_bytes()),
+                            SqlValue::Text(text) => Cow::Borrowed(text.as_bytes()),
+                            SqlValue::Bytes(bytes) => Cow::Borrowed(bytes.as_slice()),
+                        })
+                        .collect()
+                });
+                format::plain(out, &columns, records, self.null, true)
+            }),
+            Format::Table | Format::Treemap => {
+                let columns: Vec<String> = result
+                    .columns
+                    .iter()
+                    .map(|c| printable(c).into_owned())
+                    .collect();
+                let columns: Vec<&str> = columns.iter().map(String::as_str).collect();
+                let cells: Vec<Vec<String>> = result
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|value| match value {
+                                SqlValue::Null => String::new(),
+                                SqlValue::Integer(n) => n.to_string(),
+                                SqlValue::Real(x) => x.to_string(),
+                                SqlValue::Text(text) => printable(text).into_owned(),
+                                SqlValue::Bytes(bytes) => {
+                                    printable(&String::from_utf8_lossy(bytes)).into_owned()
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let grid = table::grid(&columns, &cells, self.color);
+                self.sink(|out| writeln!(out, "{grid}{footer}"))
+            }
+        };
+        if self.is_machine() {
+            stderr_line(footer);
+        }
         if !self.is_json() && !self.quiet {
             warn(&envelope.warnings);
         }

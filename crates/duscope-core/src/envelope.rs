@@ -514,11 +514,12 @@ pub struct ProjectEntry {
     pub caches: Vec<String>,
 }
 
-/// What a verb that answers with one object (`explain`; `summary` and
-/// `schema` to come) prints under `--json`: the shared fields, the scan it
-/// read (null when none was), and the object as `result`.
+/// What a verb that answers with one object (`explain`, `summary`,
+/// `query`; `schema` to come) prints under `--json`: the shared fields, the
+/// scan it read (null when none was), and the object as `result`. `query`
+/// says what it was asked in a block of its own.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct ObjectEnvelope<T> {
+pub struct ObjectEnvelope<T, Q = ObjectQuery> {
     /// Whether the command succeeded.
     pub ok: bool,
     /// [`SCHEMA_VERSION`].
@@ -528,7 +529,7 @@ pub struct ObjectEnvelope<T> {
     /// The saved scan the answer comes from; null when none holds the path.
     pub scan: Option<ScanBlock>,
     /// What was asked.
-    pub query: ObjectQuery,
+    pub query: Q,
     /// The answer.
     pub result: T,
     /// Warnings, with their codes.
@@ -866,6 +867,73 @@ pub struct DiffTotals {
     /// Files in both whose own size differs, and entries in both whose
     /// kind differs (beneath a directory `--depth` compares whole too).
     pub entries_changed: u64,
+}
+
+/// What `query` was asked.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SqlQueryBlock {
+    /// The verb, `query`.
+    pub command: &'static str,
+    /// The entry `:root_id` names, absolute.
+    pub path: String,
+    /// The statement, as given.
+    pub sql: String,
+    /// The most rows the answer holds: 25 (or `max_rows`, if lower) for a
+    /// statement without a `LIMIT` of its own, `max_rows` for one with.
+    pub limit: u64,
+    /// `--max-rows`.
+    pub max_rows: u64,
+    /// `--timeout`, in milliseconds.
+    pub timeout_ms: u64,
+}
+
+/// What `query --sql` answers: the statement's columns, and its rows up to
+/// the limit.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SqlResult {
+    /// The columns' names, in order.
+    pub columns: Vec<String>,
+    /// The rows, a value per column.
+    pub rows: Vec<Vec<SqlValue>>,
+    /// The rows returned.
+    pub row_count: u64,
+    /// Whether the statement had rows past the limit.
+    pub truncated: bool,
+}
+
+/// A value of a row `query --sql` returns: JSON's own for a null, a
+/// number or a string; `{"$bytes": "<base64>"}` for a BLOB, or text that
+/// is not UTF-8. Names are BLOBs in the index: `CAST(name AS TEXT)` or
+/// `path(id)` reads them as text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SqlValue {
+    /// NULL.
+    Null,
+    /// An integer.
+    Integer(i64),
+    /// A floating-point number; a non-finite one is written as null.
+    Real(f64),
+    /// UTF-8 text.
+    Text(String),
+    /// A BLOB, or text that is not UTF-8.
+    Bytes(Vec<u8>),
+}
+
+impl serde::Serialize for SqlValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            SqlValue::Integer(n) => serializer.serialize_i64(*n),
+            SqlValue::Real(x) if x.is_finite() => serializer.serialize_f64(*x),
+            SqlValue::Null | SqlValue::Real(_) => serializer.serialize_none(),
+            SqlValue::Text(text) => serializer.serialize_str(text),
+            SqlValue::Bytes(bytes) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("$bytes", &base64(bytes))?;
+                map.end()
+            }
+        }
+    }
 }
 
 /// The fields of a row as `--fields` names them, in the order the row

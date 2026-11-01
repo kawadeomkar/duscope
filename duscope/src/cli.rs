@@ -151,6 +151,8 @@ pub enum Verb {
     Diff(DiffArgs),
     /// Facts about one path: links, clones, what deleting it frees, caches, git
     Explain(ExplainArgs),
+    /// One read-only SQL statement over a saved scan's tables
+    Query(SqlArgs),
     /// List, prune or check the saved scans
     Scans(ScansArgs),
     /// Print the manual page, in roff, to stdout
@@ -597,6 +599,27 @@ pub struct DiffArgs {
     pub size: Option<SizeKind>,
 }
 
+/// `query`'s flags.
+#[derive(Debug, Clone, Args)]
+pub struct SqlArgs {
+    /// One SELECT over the scan's tables; without a LIMIT, 25 rows at most
+    #[arg(long, value_name = "SQL")]
+    pub sql: String,
+
+    /// The most rows a LIMIT may return (default and ceiling 10000)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=10_000), value_name = "N")]
+    pub max_rows: Option<u64>,
+
+    /// Stop the statement after this many seconds (default 5, at most 60)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=60), value_name = "SECONDS")]
+    pub timeout: Option<u64>,
+
+    #[command(flatten)]
+    pub walk: WalkArgs,
+    #[command(flatten)]
+    pub index: IndexArgs,
+}
+
 /// `summary`'s flags.
 #[derive(Debug, Clone, Args)]
 pub struct SummaryArgs {
@@ -806,9 +829,11 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         }
         Some(Verb::Stale(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
         Some(Verb::Caches(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
-        Some(Verb::Summary(a)) => {
-            walk_defaults(&mut a.walk)?;
-            index_defaults(&mut a.index);
+        Some(
+            Verb::Summary(SummaryArgs { walk, index }) | Verb::Query(SqlArgs { walk, index, .. }),
+        ) => {
+            walk_defaults(walk)?;
+            index_defaults(index);
         }
         Some(Verb::Diff(args)) => {
             size_default(config, &mut args.size)?;
