@@ -177,6 +177,8 @@ pub fn normalize(text: &str, root: &Path) -> String {
         ("\"started_at\":\"", "<time>"),
         ("\"finished_at\":\"", "<time>"),
         ("\"name\":\"duscope\",\"version\":\"", "<version>"),
+        // Signed with the environment's own key.
+        ("\"handle\":\"", "<handle>"),
     ] {
         replace_values(&mut text, key, '"', placeholder);
     }
