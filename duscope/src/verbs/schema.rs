@@ -4,6 +4,7 @@
 //! verb's envelope, as `schemas/envelope/` holds it. `schema` never scans:
 //! without a saved scan the rows are null.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -17,9 +18,9 @@ use super::{Exit, Failure};
 use crate::cli::SchemaArgs;
 use crate::out::{Output, thousands};
 
-/// Each envelope's JSON Schema, by the name `--envelope` takes: copies of
-/// `schemas/envelope/<name>.schema.json`, which the published crate does
-/// not carry (a test holds them equal).
+/// Each envelope's JSON Schema, by the name `--envelope` takes: compact
+/// copies of `schemas/envelope/<name>.schema.json`, which the published
+/// crate does not carry (a test holds them equal).
 const ENVELOPES: [(&str, &str); 14] = [
     ("scan", include_str!("schema/scan.schema.json")),
     ("top", include_str!("schema/top.schema.json")),
@@ -53,8 +54,30 @@ pub fn run(args: &SchemaArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         .path
         .as_deref()
         .map_or_else(|| cwd.clone(), |p| resolve_path(&cwd, p).real);
-    let index = saved(args, index_dir, &cwd, &path)?;
+    if path.symlink_metadata().is_err() {
+        return Err(Failure::new(
+            Exit::NotFound,
+            "scan_not_found",
+            format!("{} does not exist", path.display()),
+        )
+        .hint("Check the path, or run duscope schema without one"));
+    }
+    // The list of envelopes reads no scan.
+    let index = if args.envelope.is_some() {
+        None
+    } else {
+        saved(args, index_dir, &cwd, &path)?
+    };
     let tables = layout::tables(index.as_ref()).map_err(core_failure)?;
+    let scan = index.as_ref().map(|i| saved_block(i, SizeKind::Allocated));
+    if let Some(index) = &index
+        && let Some(message) = index.failure()
+    {
+        return Err(core_failure(duscope_core::CoreError::IndexCorrupt {
+            file: index.file().display().to_string(),
+            message,
+        }));
+    }
     let result = SchemaInfo {
         index_version: INDEX_VERSION,
         tables,
@@ -64,7 +87,7 @@ pub fn run(args: &SchemaArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         ok: true,
         schema_version: SCHEMA_VERSION,
         tool: Tool::CURRENT,
-        scan: index.as_ref().map(|i| saved_block(i, SizeKind::Allocated)),
+        scan,
         query: ObjectQuery {
             command: if args.envelope.is_some() {
                 "schema --envelope"
@@ -80,18 +103,22 @@ pub fn run(args: &SchemaArgs, index_dir: Option<&Path>, output: &Output) -> Resu
     if output.is_json() {
         return output.object(&envelope, &[], &[]);
     }
-    let text = if args.envelope.is_some() {
-        envelope.result.envelopes.join("\n") + "\n"
-    } else if output.is_machine() {
-        plain(&envelope.result)
-    } else {
-        people(&envelope)
-    };
-    output.bytes(text.as_bytes())
+    if args.envelope.is_some() {
+        let names = envelope
+            .result
+            .envelopes
+            .iter()
+            .map(|name| vec![Cow::Borrowed(name.as_bytes())]);
+        return output.records(&["envelope"], names);
+    }
+    if output.is_machine() {
+        return output.records(&PLAIN, plain(&envelope.result));
+    }
+    output.bytes(people(&envelope).as_bytes())
 }
 
-/// `--envelope <name>`: the schema, compact for machines, as the file has
-/// it for people.
+/// `--envelope <name>`: the schema, compact for machines, laid out as the
+/// file is for people.
 fn envelope(name: &str, output: &Output) -> Result<(), Failure> {
     let Some(&(_, text)) = ENVELOPES.iter().find(|(n, _)| *n == name) else {
         let names: Vec<&str> = ENVELOPES.iter().map(|&(n, _)| n).collect();
@@ -105,17 +132,24 @@ fn envelope(name: &str, output: &Output) -> Result<(), Failure> {
         )
         .hint("Run duscope schema --envelope to list the envelopes"));
     };
-    if !output.is_machine() {
+    if output.is_machine() {
         return output.bytes(text.as_bytes());
     }
-    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| {
-        Failure::new(
-            Exit::Runtime,
-            "io_error",
-            format!("the {name} schema is not JSON: {e}"),
-        )
-    })?;
-    output.bytes(format!("{value}\n").as_bytes())
+    output.bytes(pretty(text)?.as_bytes())
+}
+
+/// `text`, a compact schema, laid out as `schemas/envelope/` has it.
+fn pretty(text: &str) -> Result<String, Failure> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .and_then(|value| serde_json::to_string_pretty(&value))
+        .map(|pretty| pretty + "\n")
+        .map_err(|e| {
+            Failure::new(
+                Exit::Runtime,
+                "io_error",
+                format!("a schema is not JSON: {e}"),
+            )
+        })
 }
 
 /// The saved scan whose rows `schema` counts: the one `--scan` names, or
@@ -137,7 +171,15 @@ fn saved(
     let dir = match (dir, &selector) {
         (Some(dir), _) => dir,
         (None, ScanSelector::File(_)) => cwd.to_owned(),
-        (None, _) => return Ok(None),
+        (None, ScanSelector::Prefix(_)) => {
+            return Err(Failure::new(
+                Exit::NotFound,
+                "scan_not_found",
+                "no index directory to look for the scan in: neither HOME nor XDG_CACHE_HOME is set",
+            )
+            .hint("Run duscope schema with --index-dir naming the directory the scans are in"));
+        }
+        (None, ScanSelector::Latest) => return Ok(None),
     };
     let q = ScanQuery {
         index_dir: &dir,
@@ -151,25 +193,31 @@ fn saved(
     Ok(resolved.map(|r| r.index))
 }
 
-/// `--plain`: a record per column, `table column type nullable platforms
-/// rows`.
-fn plain(schema: &SchemaInfo) -> String {
-    let mut out = String::new();
-    for table in &schema.tables {
-        let rows = table.rows.map(|n| n.to_string()).unwrap_or_default();
-        for column in &table.columns {
-            let _ = writeln!(
-                out,
-                "{}\t{}\t{}\t{}\t{}\t{rows}",
-                table.name,
-                column.name,
-                column.r#type,
-                column.nullable,
-                column.platforms.join(",")
-            );
-        }
-    }
-    out
+/// `--plain`'s fields: a record per column.
+const PLAIN: [&str; 6] = [
+    "table",
+    "column",
+    "type",
+    "nullable",
+    "platforms",
+    "row_count",
+];
+
+/// `--plain`'s records: a column of a table each, with the table's rows.
+fn plain(schema: &SchemaInfo) -> impl Iterator<Item = Vec<Cow<'_, [u8]>>> {
+    schema.tables.iter().flat_map(|table| {
+        let rows = table.row_count.map(|n| n.to_string()).unwrap_or_default();
+        table.columns.iter().map(move |column| {
+            vec![
+                Cow::Borrowed(table.name.as_bytes()),
+                Cow::Borrowed(column.name.as_bytes()),
+                Cow::Borrowed(column.r#type.as_bytes()),
+                Cow::Owned(column.nullable.to_string().into_bytes()),
+                Cow::Owned(column.platforms.join(",").into_bytes()),
+                Cow::Owned(rows.clone().into_bytes()),
+            ]
+        })
+    })
 }
 
 /// For people: the DDL, each table followed by its rows in the saved scan.
@@ -180,7 +228,7 @@ fn people(envelope: &ObjectEnvelope<SchemaInfo>) -> String {
             .tables
             .iter()
             .find(|t| t.name == name)
-            .and_then(|t| t.rows)
+            .and_then(|t| t.row_count)
     };
     let scan = envelope.scan.as_ref().and_then(|s| s.id.as_deref());
     let mut out = String::new();
@@ -230,10 +278,14 @@ mod tests {
         assert_eq!(names, files, "every schemas/envelope file, and no other");
         for (name, text) in ENVELOPES {
             let file = fs::read_to_string(dir.join(format!("{name}.schema.json"))).unwrap();
+            // The copy, laid out, is the file byte for byte.
             assert_eq!(
-                text, file,
-                "duscope/src/verbs/schema/{name}.schema.json differs from schemas/envelope/: copy it"
+                super::pretty(text).unwrap(),
+                file,
+                "duscope/src/verbs/schema/{name}.schema.json differs from schemas/envelope/: \
+                 copy it compact"
             );
+            assert_eq!(text.lines().count(), 1, "{name}: the copy is compact");
         }
     }
 }

@@ -235,19 +235,38 @@ impl Index {
         &self.path
     }
 
-    /// The rows of `table`, one of the layout's.
-    pub fn rows(&self, table: &str) -> Result<u64, CoreError> {
+    /// The rows of `table`, one of the layout's; `None` when the file has
+    /// no such table (an index of another minor). `dirs` and `files` are
+    /// the root's counts, which walking either table would only repeat.
+    pub fn rows(&self, table: &str) -> Result<Option<u64>, CoreError> {
+        let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
+            file: self.path.display().to_string(),
+            message: e.to_string(),
+        };
+        let present: bool = self
+            .db
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(corrupt)?;
+        if !present {
+            return Ok(None);
+        }
+        match table {
+            "dirs" => return Ok(Some(self.node(0).dir_count)),
+            "files" => return Ok(Some(self.node(0).file_count)),
+            _ => {}
+        }
         // The name comes from the built-in layout, never from a user.
         let count: i64 = self
             .db
             .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |row| {
                 row.get(0)
             })
-            .map_err(|e| CoreError::IndexCorrupt {
-                file: self.path.display().to_string(),
-                message: e.to_string(),
-            })?;
-        Ok(unsigned(count))
+            .map_err(corrupt)?;
+        Ok(Some(unsigned(count)))
     }
 
     /// The connection, for the query plans.

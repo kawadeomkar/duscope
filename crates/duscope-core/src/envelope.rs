@@ -123,6 +123,8 @@ pub mod values {
     ];
     /// What `scans --prune` removed.
     pub const PRUNED_KINDS: [&str; 3] = ["index", "temporary", "spill"];
+    /// The platforms a column of the index is filled on, macOS first.
+    pub const PLATFORMS: [&str; 2] = ["macos", "linux"];
 }
 
 /// `values` with null, for a nullable field's values.
@@ -1086,8 +1088,9 @@ pub struct TableEntry {
     pub name: String,
     /// Its columns, in order.
     pub columns: Vec<ColumnEntry>,
-    /// Its rows in the saved scan; null when none was read.
-    pub rows: Option<u64>,
+    /// Its rows in the saved scan; null when none was read, or its file
+    /// has no such table.
+    pub row_count: Option<u64>,
 }
 
 /// A column of a table.
@@ -1101,7 +1104,7 @@ pub struct ColumnEntry {
     /// Whether it may be null.
     pub nullable: bool,
     /// The platforms that fill it: `macos`, `linux`.
-    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "enum": ["macos", "linux"]})))]
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "enum": values::PLATFORMS})))]
     pub platforms: Vec<&'static str>,
 }
 
