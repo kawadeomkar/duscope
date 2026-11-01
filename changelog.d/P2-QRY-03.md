@@ -1,0 +1,2 @@
+### Added
+- `summary [path]` gives a scan's totals under a path: bytes on disk, apparent bytes and bytes as `du` counts them (clones each time), each volume's share with its size and free space at the scan's start, the logical size of dataless placeholders, the counts of files, directories, errors and vanished entries, and when and how the scan ran. Where the path is a mount point, `unaccounted_bytes` says what the volume uses that the scan did not find.

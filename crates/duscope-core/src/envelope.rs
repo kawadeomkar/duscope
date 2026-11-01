@@ -738,6 +738,77 @@ pub struct CheckedEntry {
     pub quick_check: &'static str,
 }
 
+/// `summary`'s answer: a scan's totals under a path, each volume's share,
+/// and how the scan ran.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Summary {
+    /// The path, absolute.
+    pub path: String,
+    /// The path's bytes, for `--plain`.
+    #[serde(skip)]
+    pub path_bytes: Vec<u8>,
+    /// The volumes the scan met under the path.
+    pub volumes: Vec<SummaryVolume>,
+    /// Bytes on disk, hard links and clones counted once.
+    pub allocated_bytes: u64,
+    /// Apparent bytes.
+    pub apparent_bytes: u64,
+    /// Bytes on disk as `du` counts them: hard links once, clones each.
+    pub du_compatible_bytes: u64,
+    /// Where the path is a mount point, what the volume uses that the scan
+    /// did not find (its total less its free space, less its bytes found);
+    /// null elsewhere.
+    pub unaccounted_bytes: Option<u64>,
+    /// The logical size of the dataless files (iCloud and other
+    /// placeholders), which the allocated bytes leave out.
+    pub dataless_bytes: u64,
+    /// Non-directories.
+    pub file_count: u64,
+    /// Directories, the path included.
+    pub dir_count: u64,
+    /// Directories and entries the scan could not read.
+    pub error_count: u64,
+    /// Entries that disappeared during the scan.
+    pub vanished_count: u64,
+    /// `basic` or `full`.
+    pub attrs: &'static str,
+    /// Whether the scan updated an earlier one.
+    pub incremental: bool,
+    /// The scan it updated; null for a full scan.
+    pub parent_scan_id: Option<String>,
+    /// When the scan started.
+    pub started_at: String,
+    /// When it finished.
+    pub finished_at: String,
+    /// How long it took.
+    pub duration_ms: u64,
+    /// The worker threads it ran.
+    pub threads: u64,
+}
+
+/// A volume's share in `summary`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SummaryVolume {
+    /// Where it is mounted.
+    pub mount_point: String,
+    /// Its filesystem.
+    pub fs_type: String,
+    /// Its size, at the scan's start; null where unknown.
+    pub total_bytes: Option<u64>,
+    /// Its free space, at the scan's start; null where unknown.
+    pub free_bytes: Option<u64>,
+    /// Bytes on disk the scan found on it under the path.
+    pub allocated_bytes: u64,
+    /// Apparent bytes.
+    pub apparent_bytes: u64,
+    /// Bytes as `du` counts them.
+    pub du_compatible_bytes: u64,
+    /// Whether the scan entered it.
+    pub entered: bool,
+    /// Why not, when it did not.
+    pub reason: Option<&'static str>,
+}
+
 /// The fields of a row as `--fields` names them, in the order the row
 /// writes them.
 pub trait Fields {
