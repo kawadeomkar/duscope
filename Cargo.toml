@@ -85,8 +85,12 @@ unwrap_used = "deny"
 expect_used = "deny"
 print_stdout = "deny"
 
+# Thin LTO: a cold release build on arm64 macOS took 31.7 s against fat LTO's
+# 43.9 s, for a binary 3.8% larger, with scans of T1 and T2 and the index queries
+# as fast within noise (1,353 against 1,358 ms on T1, 3,640 against 3,614 ms on
+# T2); fat LTO had put the shared runners' cold builds past the spec's 90 s.
 [profile.release]
-lto = true
+lto = "thin"
 codegen-units = 1
 strip = true
 
