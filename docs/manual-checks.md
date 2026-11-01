@@ -9,6 +9,7 @@ row due again.
 | Check | Program and version | Platform | Package | Last done | Result |
 | --- | --- | --- | --- | --- | --- |
 | GrandPerspective opens `export --format gpscan` | GrandPerspective 3.8.1 | macOS | P2-CLI-02 | pending | due: the author's check |
+| Two browsers draw `render`'s SVG alike | Safari and Firefox, or Chrome | macOS | P2-MAP-01 | pending | due: the author's check |
 
 ## GrandPerspective opens a `.gpscan`
 
@@ -28,6 +29,21 @@ XML), which the application opens with *File › Open Scan Data…*.
    and the hard-linked files still appear once.
 5. Record the GrandPerspective version (*GrandPerspective › About*), the date
    and the result in the table.
+
+## Two browsers draw `render`'s SVG alike
+
+`render` writes the treemap as SVG: tiles shaded by two linear gradients
+each, labels in the system's sans-serif, and crisp edges.
+
+1. `duscope render target/fixtures.noindex/tree/home -o home.svg` (after a
+   saved scan of the tree, as above), and the same with `--layout gp
+   --color-by folder -o home-gp.svg`.
+2. Open each in two browsers (Safari and Firefox, or Chrome) side by side.
+3. Expected: the same tiles in the same places and colours; each shaded
+   from light at its top-left corner to dark along its bottom and right
+   edges, with no seam along the diagonal; the labels inside their tiles;
+   the legend and the totals under the map.
+4. Record the browsers' versions, the date and the result in the table.
 
 ncdu needs no row: `p2_cli_02_ncdu_reads_its_export_back` has `ncdu -f` read
 the JSON export and write it out again, and CI installs ncdu on its Linux
