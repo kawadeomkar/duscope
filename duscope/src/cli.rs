@@ -163,6 +163,8 @@ pub enum Verb {
     Export(ExportArgs),
     /// Save a tree that ncdu, gdu or GrandPerspective wrote as a scan
     Import(ImportArgs),
+    /// Draw the treemap as a picture: --format svg, at any size
+    Render(RenderArgs),
     /// Print the manual page, in roff, to stdout
     Man,
     /// Print the completion script for a shell to stdout
@@ -616,6 +618,69 @@ pub struct ExportArgs {
     pub index: IndexArgs,
 }
 
+/// `render`'s flags; the format is `--format svg`, or the `-o` file's.
+#[derive(Debug, Clone, Args)]
+pub struct RenderArgs {
+    #[command(flatten)]
+    pub walk: WalkArgs,
+
+    #[command(flatten)]
+    pub index: IndexArgs,
+
+    /// How the tiles are laid out: squarified, or GrandPerspective's bisection
+    #[arg(long, value_enum, value_name = "LAYOUT", help_heading = "Render")]
+    pub layout: Option<Layout>,
+
+    /// What colours the tiles
+    ///
+    /// lscolors takes LS_COLORS' *suffix= and ex= (with --attrs full) entries
+    #[arg(long, value_enum, value_name = "BY", help_heading = "Render")]
+    pub color_by: Option<ColorBy>,
+
+    /// The colours: a theme name or the path of a theme file
+    ///
+    /// mocha|tokyo-night|dracula|gruvbox|light, or a theme file; by default
+    /// DUSCOPE_THEME where it names a pack with colours, else mocha
+    #[arg(
+        long,
+        value_name = "THEME",
+        value_parser = ThemeName,
+        hide_possible_values = true,
+        help_heading = "Render"
+    )]
+    pub theme: Option<OsString>,
+
+    /// How deep the map opens folders (the scan reads the whole tree)
+    #[arg(
+        long,
+        visible_alias = "max-depth",
+        value_name = "N",
+        help_heading = "Render"
+    )]
+    pub depth: Option<u32>,
+
+    /// Pool files into their directory's tile
+    #[arg(long, help_heading = "Render")]
+    pub pool_files: bool,
+
+    /// The picture's width in pixels, 16 to 16384 (default 1200)
+    #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u16).range(16..=16_384), help_heading = "Render")]
+    pub width: Option<u16>,
+
+    /// The picture's height in pixels, 16 to 16384 (default 800)
+    #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u16).range(16..=16_384), help_heading = "Render")]
+    pub height: Option<u16>,
+}
+
+/// `--layout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Layout {
+    /// Squarified strips: near-square tiles that hold labels
+    Squarify,
+    /// GrandPerspective's bisection of a size-balanced tree
+    Gp,
+}
+
 /// `import`'s flags; `--format` names the file's format.
 #[derive(Debug, Clone, Args)]
 pub struct ImportArgs {
@@ -816,11 +881,11 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
     let refused = |key: &str, line: usize, why: &str| refused(config, key, line, why);
     if let Some(format) = &d.format {
         let configured: FormatArg = choice(config, "format", format)?;
-        if configured.interchange() {
+        if let Some(verbs) = configured.verbs() {
             return Err(refused(
                 "format",
                 format.line,
-                "another tool's format is for one export or import, named with --format",
+                &format!("that format is for {verbs} alone, named with --format"),
             ));
         }
         cli.output.configured = Some(configured);
@@ -906,7 +971,8 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         Some(
             Verb::Summary(SummaryArgs { walk, index })
             | Verb::Query(SqlArgs { walk, index, .. })
-            | Verb::Export(ExportArgs { walk, index }),
+            | Verb::Export(ExportArgs { walk, index })
+            | Verb::Render(RenderArgs { walk, index, .. }),
         ) => {
             walk_defaults(walk)?;
             index_defaults(index);

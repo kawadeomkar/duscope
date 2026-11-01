@@ -194,7 +194,7 @@ fn paint_into(
 
 /// Each entry's class by pre-order id, as `by-type` reads it
 /// ([`classify`]), so the tiles agree with the legend.
-fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Class> {
+pub(crate) fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Class> {
     let mut out = vec![Class::Other; view.len() as usize];
     classify(view, classes, |node, class| out[node.id as usize] = class);
     out
@@ -343,17 +343,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         } else {
             self.class_of[node.id as usize]
         };
-        let pack = self.opts.pack;
-        let base = match &self.opts.color_by {
-            ColorBy::Type => pack.class(class),
-            ColorBy::Folder => pack.cycle[folder.unwrap_or(0) % pack.cycle.len()],
-            ColorBy::Level => pack.cycle[depth as usize % pack.cycle.len()],
-            ColorBy::Age => pack.age[age_step(self.opts.now, node.max_mtime_ns)],
-            ColorBy::LsColors(_) if node.is_dir() => pack.class(class),
-            ColorBy::LsColors(table) => table
-                .of(&self.view.name(node.id), node.mode)
-                .unwrap_or_else(|| pack.class(class)),
-        };
+        let base = tile_color(self.view, self.opts, node, class, depth, folder);
         let color = self.tinted(base, order % 2 == 1);
         self.fill(rect, color, clamp_depth(depth));
         if !labelled {
@@ -370,31 +360,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
     /// The class holding most of the bytes under directory `id`; only its
     /// own files with `own_files`.
     fn dominant(&self, id: u32, own_files: bool) -> Class {
-        let dir = self.view.node(id);
-        let last = if own_files {
-            dir.files_end
-        } else {
-            dir.last_id
-        };
-        let mut bytes = [0u64; 7];
-        for child in id + 1..=last {
-            let node = self.view.node(child);
-            if !node.is_dir() {
-                let i = Class::ALL
-                    .iter()
-                    .position(|&c| c == self.class_of[child as usize])
-                    .unwrap_or(6);
-                bytes[i] += node.counted(self.opts.size);
-            }
-        }
-        let best = (0..7)
-            .max_by_key(|&i| (bytes[i], usize::MAX - i))
-            .unwrap_or(6);
-        if bytes[best] == 0 {
-            Class::Other
-        } else {
-            Class::ALL[best]
-        }
+        dominant(self.view, &self.class_of, self.opts.size, id, own_files)
     }
 
     /// `color`, mixed 20% toward the base for every second sibling.
@@ -589,6 +555,65 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
     }
 }
 
+/// The class holding most of the bytes under directory `id`, each entry's
+/// class in `class_of`; only its own files with `own_files`.
+pub(crate) fn dominant(
+    view: &(impl TreeView + ?Sized),
+    class_of: &[Class],
+    size: SizeKind,
+    id: u32,
+    own_files: bool,
+) -> Class {
+    let dir = view.node(id);
+    let last = if own_files {
+        dir.files_end
+    } else {
+        dir.last_id
+    };
+    let mut bytes = [0u64; 7];
+    for child in id + 1..=last {
+        let node = view.node(child);
+        if !node.is_dir() {
+            let i = Class::ALL
+                .iter()
+                .position(|&c| c == class_of[child as usize])
+                .unwrap_or(6);
+            bytes[i] += node.counted(size);
+        }
+    }
+    let best = (0..7)
+        .max_by_key(|&i| (bytes[i], usize::MAX - i))
+        .unwrap_or(6);
+    if bytes[best] == 0 {
+        Class::Other
+    } else {
+        Class::ALL[best]
+    }
+}
+
+/// The colour `--color-by` gives a tile: `node`, of `class`, at `depth`,
+/// under the top-level folder of index `folder`.
+pub(crate) fn tile_color(
+    view: &(impl TreeView + ?Sized),
+    opts: &PaintOpts<'_>,
+    node: &Node,
+    class: Class,
+    depth: u32,
+    folder: Option<usize>,
+) -> Color {
+    let pack = opts.pack;
+    match &opts.color_by {
+        ColorBy::Type => pack.class(class),
+        ColorBy::Folder => pack.cycle[folder.unwrap_or(0) % pack.cycle.len()],
+        ColorBy::Level => pack.cycle[depth as usize % pack.cycle.len()],
+        ColorBy::Age => pack.age[age_step(opts.now, node.max_mtime_ns)],
+        ColorBy::LsColors(_) if node.is_dir() => pack.class(class),
+        ColorBy::LsColors(table) => table
+            .of(&view.name(node.id), node.mode)
+            .unwrap_or_else(|| pack.class(class)),
+    }
+}
+
 /// The whole cell rows inside `rect`: the first, and how many.
 fn cell_rows(rect: Rect) -> (u16, u16) {
     let top = rect.y.div_ceil(2);
@@ -647,7 +672,7 @@ pub fn compact(bytes: u64) -> String {
 
 /// `text` cut to `room` columns, the last one `…` (`~` in ASCII) when
 /// cut.
-fn truncate(text: &str, room: usize, style: Glyphs) -> String {
+pub(crate) fn truncate(text: &str, room: usize, style: Glyphs) -> String {
     let ascii = style == Glyphs::Ascii;
     let glyphs = glyphs(text, ascii);
     if glyphs.iter().map(|g| g.columns()).sum::<usize>() <= room {
@@ -677,7 +702,7 @@ fn truncate(text: &str, room: usize, style: Glyphs) -> String {
 /// text, crust and base colours; on an ANSI colour, black or bright white,
 /// whichever reads better; the text colour on the terminal's own
 /// background.
-fn readable(fill: Color, pack: &Pack) -> Color {
+pub(crate) fn readable(fill: Color, pack: &Pack) -> Color {
     let (text, crust) = (pack.roles.text, pack.roles.crust);
     let candidates: Vec<Color> = match fill {
         Color::Rgb(..) => {
@@ -710,6 +735,13 @@ fn readable(fill: Color, pack: &Pack) -> Color {
 
 /// A colour's relative luminance, an ANSI colour's as xterm shows it.
 fn luminance(color: Color) -> Option<f64> {
+    let (r, g, b) = rgb(color)?;
+    Color::Rgb(r, g, b).luminance()
+}
+
+/// A colour's red, green and blue: an ANSI colour's as xterm shows it;
+/// `None` for the terminal's own.
+pub(crate) fn rgb(color: Color) -> Option<(u8, u8, u8)> {
     const XTERM: [(u8, u8, u8); 16] = [
         (0, 0, 0),
         (205, 0, 0),
@@ -729,11 +761,9 @@ fn luminance(color: Color) -> Option<f64> {
         (255, 255, 255),
     ];
     match color {
-        Color::Ansi(n) => {
-            let (r, g, b) = XTERM[usize::from(n % 16)];
-            Color::Rgb(r, g, b).luminance()
-        }
-        other => other.luminance(),
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Ansi(n) => Some(XTERM[usize::from(n % 16)]),
+        Color::Reset => None,
     }
 }
 

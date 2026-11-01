@@ -139,7 +139,7 @@ pub fn run(
 /// temporary file beside it, renamed over it once complete, so a failed
 /// export leaves the file as it was. Stdout, and an `-o` path that is not
 /// a regular file (a FIFO, `/dev/stdout`), are written as the rows come.
-fn whole(
+pub(super) fn whole(
     output: &Output,
     write: impl FnOnce(&mut dyn Write) -> io::Result<()>,
 ) -> Result<(), Failure> {
