@@ -14,7 +14,7 @@ use duscope_treemap::paint::{ColorBy, Footer, Glyphs, LsColors, PaintOpts, frame
 use super::scan::{self, Scanned};
 use super::{Exit, Failure};
 use crate::cli::{ColorBy as ColorByArg, MinTile, ScanArgs, TreemapWhen};
-use crate::out::{Output, emit_bytes, stderr_line};
+use crate::out::{Output, stderr_line};
 
 /// The size assumed when stdout is not a terminal (`--treemap always`).
 const DEFAULT_SIZE: (u16, u16) = (80, 24);
@@ -184,7 +184,7 @@ pub fn draw(
         next: next_line(root.as_deref(), dot, columns),
     };
     let buffer = frame(&view, &opts, &footer, columns, rows);
-    emit_bytes(buffer.to_ansi(*depth).as_bytes())?;
+    output.bytes(buffer.to_ansi(*depth).as_bytes())?;
     // The frame has room for one warning; the others follow on stderr, as
     // every other format writes them.
     for warning in warnings.iter().skip(1) {

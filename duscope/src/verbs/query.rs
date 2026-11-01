@@ -450,7 +450,15 @@ pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> R
     } else {
         "caches"
     };
-    let hash = page_hash(&prepared, verb, args.query.depth, &[]);
+    // The rules decide which directories are rows: a cursor of other
+    // rules pages another list.
+    let rules_file = args
+        .walk
+        .caches_extra
+        .as_ref()
+        .map(|file| file.display().to_string())
+        .unwrap_or_default();
+    let hash = page_hash(&prepared, verb, args.query.depth, &[&rules_file]);
     let after = cursor
         .as_ref()
         .map(|cursor| check_cursor(cursor, &prepared, &hash))
@@ -807,13 +815,7 @@ fn envelope<T>(
         ),
         _ => None,
     };
-    // Rows remain: after this page, for a verb that pages; past --limit,
-    // for one that does not.
-    let truncated = if hash.is_some() {
-        page.next.is_some()
-    } else {
-        returned_count < page.total_count
-    };
+    let truncated = page.truncated;
     // The path the rows are under: the scan's root, or the path inside a
     // saved scan's root.
     let path = source.view().root_path().to_string_lossy().into_owned();

@@ -31,12 +31,16 @@ impl Fields {
     pub fn from_flags(fields: Option<&str>, detail: bool) -> Option<Fields> {
         match fields.map(str::trim) {
             Some("help") => Some(Fields::Help),
-            Some(list) => Some(Fields::Named(
-                list.split(',')
-                    .map(|f| f.trim().to_owned())
-                    .filter(|f| !f.is_empty())
-                    .collect(),
-            )),
+            // Each name once, in the order first given.
+            Some(list) => Some(Fields::Named(list.split(',').map(str::trim).fold(
+                Vec::new(),
+                |mut names: Vec<String>, f| {
+                    if !f.is_empty() && !names.iter().any(|n| n == f) {
+                        names.push(f.to_owned());
+                    }
+                    names
+                },
+            ))),
             None => detail.then_some(Fields::Detail),
         }
     }
@@ -49,6 +53,13 @@ pub fn chosen<T: Row>(fields: &Fields, verb: &str) -> Result<Option<Vec<&'static
     match fields {
         Fields::Help => Ok(None),
         Fields::Detail => Ok(Some(T::NAMES.to_vec())),
+        Fields::Named(names) if names.is_empty() => {
+            Err(
+                Failure::new(Exit::Usage, "usage", "--fields names no field").hint(format!(
+                    "Run duscope {verb} --fields help to list the fields"
+                )),
+            )
+        }
         Fields::Named(names) => names
             .iter()
             .map(|name| {

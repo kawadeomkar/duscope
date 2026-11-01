@@ -413,10 +413,19 @@ pub fn name_fields(bytes: &[u8]) -> (String, Option<String>) {
     }
 }
 
-/// Standard base64 (RFC 4648, with padding), encoded in-tree: the one use
-/// does not need a crate.
+/// Standard base64 (RFC 4648, with padding), encoded in-tree: a name's
+/// bytes and a cursor need no crate.
 pub fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    encode64(
+        bytes,
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+        true,
+    )
+}
+
+/// `bytes` in base64 with `alphabet`, padded to a multiple of four with
+/// `=` when `pad`.
+pub(crate) fn encode64(bytes: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -427,8 +436,8 @@ pub fn base64(bytes: &[u8]) -> String {
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         for i in 0..4 {
             if i <= chunk.len() {
-                out.push(char::from(ALPHABET[(n >> (18 - 6 * i)) as usize & 63]));
-            } else {
+                out.push(char::from(alphabet[(n >> (18 - 6 * i)) as usize & 63]));
+            } else if pad {
                 out.push('=');
             }
         }

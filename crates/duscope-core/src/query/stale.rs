@@ -7,7 +7,8 @@ use crate::envelope::{StaleEntry, name_fields};
 
 use super::{
     After, Cut, Filters, Page, SizeKind, SortKey, TreeView, abs_path, attrs_not_collected,
-    flag_names, kind_name, next_after, page_of, ranked_after, ranked_files, timegrammar::iso8601,
+    flag_names, kind_name, next_after, page_of, ranked_after, ranked_files, remain,
+    timegrammar::iso8601,
 };
 
 /// `stale`'s default `--min-size`: 10 MiB.
@@ -56,6 +57,7 @@ pub fn stale(
             entries: Vec::new(),
             total_count: 0,
             next: None,
+            truncated: false,
         });
     }
     let cutoff = q.now.saturating_sub(q.older_than);
@@ -102,7 +104,7 @@ pub fn stale(
         ),
     };
     let next = next_after(view, &ids, q.sort, q.size, seen, total_count);
-    let entries = ids
+    let entries: Vec<_> = ids
         .into_iter()
         .map(|id| {
             let node = view.node(id);
@@ -125,6 +127,7 @@ pub fn stale(
         })
         .collect();
     Ok(Page {
+        truncated: remain(seen, entries.len(), total_count),
         entries,
         total_count,
         next,

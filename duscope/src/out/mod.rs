@@ -113,7 +113,8 @@ impl Output {
     /// verbs, whose terminal format is a table.
     pub fn decide(args: &OutputArgs, treemap: Option<TreemapWhen>) -> Result<Output, Failure> {
         let env = EnvVars::read(|name| std::env::var_os(name));
-        let tty = std::io::stdout().is_terminal();
+        // A file is no terminal: -o decides as a pipe does, without colour.
+        let tty = std::io::stdout().is_terminal() && args.output.is_none();
         Output::decide_with(args, treemap, &env, tty)
     }
 
@@ -647,7 +648,7 @@ impl Output {
                 let selected = fields::select_listing(listing, chosen);
                 self.json(
                     &selected,
-                    &listing.entries,
+                    &selected.entries,
                     &listing.warnings,
                     None,
                     listing.query.command,
@@ -692,13 +693,10 @@ impl Output {
         }
         let scan = envelope.scan.id.as_deref();
         let written = match (self.format, &chosen) {
-            (Format::Json, Some(chosen)) => self.json(
-                &fields::select(envelope, chosen),
-                &envelope.entries,
-                &envelope.warnings,
-                scan,
-                verb,
-            ),
+            (Format::Json, Some(chosen)) => {
+                let selected = fields::select(envelope, chosen);
+                self.json(&selected, &selected.entries, &envelope.warnings, scan, verb)
+            }
             (Format::Json, None) => {
                 self.json(envelope, &envelope.entries, &envelope.warnings, scan, verb)
             }
@@ -851,6 +849,12 @@ impl Output {
         let file = std::fs::File::create(path).map_err(failed)?;
         let mut out = std::io::BufWriter::new(file);
         write(&mut out).and_then(|()| out.flush()).map_err(failed)
+    }
+
+    /// Writes `bytes` as they are (the treemap's escapes and cells) to the
+    /// `-o` file or stdout.
+    pub fn bytes(&self, bytes: &[u8]) -> Result<(), Failure> {
+        self.sink(|out| out.write_all(bytes))
     }
 
     /// Reports a failure: the error envelope on stdout under JSON, two

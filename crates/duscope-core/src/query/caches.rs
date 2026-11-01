@@ -27,7 +27,7 @@ use std::path::Path;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::{
-    After, Filters, Page, SizeKind, SortKey, TreeView, next_after, pct, ranked_after,
+    After, Filters, Page, SizeKind, SortKey, TreeView, next_after, pct, ranked_after, remain,
     timegrammar::iso8601,
 };
 use crate::envelope::{CacheEntry, ProjectEntry, name_fields};
@@ -125,7 +125,7 @@ pub fn caches(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Cach
     } else {
         view.node(0).size(q.size)
     };
-    let entries = ids
+    let entries: Vec<_> = ids
         .into_iter()
         .filter_map(|id| by_id.get(&id).copied())
         .map(|f| {
@@ -154,6 +154,7 @@ pub fn caches(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Cach
         })
         .collect();
     Page {
+        truncated: remain(seen, entries.len(), total_count),
         entries,
         total_count,
         next,
@@ -223,7 +224,7 @@ pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Pr
     if let Some(limit) = q.limit {
         rows.truncate(limit);
     }
-    let entries = rows
+    let entries: Vec<_> = rows
         .into_iter()
         .map(|(project, group)| ProjectEntry {
             project_root: project
@@ -243,6 +244,7 @@ pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Pr
         })
         .collect();
     Page {
+        truncated: remain(0, entries.len(), total_count),
         entries,
         total_count,
         next: None,

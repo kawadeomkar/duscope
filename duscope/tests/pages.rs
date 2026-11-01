@@ -391,3 +391,87 @@ fn p2_qry_02_all_streams_every_row() {
     let out = run(&env, &["top", &home, "--files", "--all", "--json"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn p2_qry_02_what_the_review_found() {
+    let env = TestEnv::new();
+    let (home, _) = saved_home(&env);
+    // --limit 0: no row, and rows remain.
+    let none = json(&env, &["top", &home, "--files", "--limit", "0"]);
+    assert_eq!(none["returned_count"], 0);
+    assert_eq!(none["truncated"], true);
+    // A field named twice is written once; no field at all is refused.
+    let twice = json(
+        &env,
+        &["top", &home, "--limit", "1", "--fields", "path,path,name"],
+    );
+    let text = serde_json::to_string(&twice["entries"][0]).unwrap();
+    assert_eq!(text.matches("\"path\"").count(), 1, "{text}");
+    let out = run(&env, &["top", &home, "--fields", ",", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    // A spilled envelope's preview has the chosen fields only.
+    let stub = json(
+        &env,
+        &[
+            "top",
+            &home,
+            "--files",
+            "--limit",
+            "100",
+            "--fields",
+            "path",
+            "--max-chars",
+            "500",
+        ],
+    );
+    assert_eq!(stub["preview"][0].as_object().unwrap().len(), 1);
+    // A cursor whose count of rows seen was tampered with pages without
+    // a panic, and ends the list.
+    let page = json(&env, &["top", &home, "--files", "--limit", "2"]);
+    let cursor = page["next_cursor"].as_str().unwrap();
+    let text = decode(cursor);
+    let mut wire: Value = serde_json::from_slice(&text).unwrap();
+    wire["seen"] = u64::MAX.into();
+    let forged = encode(&serde_json::to_vec(&wire).unwrap());
+    let next = json(
+        &env,
+        &["top", &home, "--files", "--limit", "2", "--cursor", &forged],
+    );
+    assert_eq!(next["truncated"], false);
+    assert!(next["next_cursor"].is_null());
+}
+
+const URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// base64url without padding, as cursors are written.
+fn encode(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..=chunk.len() {
+            out.push(char::from(URL[(n >> (18 - 6 * i)) as usize & 63]));
+        }
+    }
+    out
+}
+
+/// The bytes of base64url `text`.
+fn decode(text: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0);
+    for byte in text.bytes() {
+        let value = URL.iter().position(|&a| a == byte).unwrap();
+        acc = (acc << 6) | u32::try_from(value).unwrap();
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(u8::try_from((acc >> bits) & 0xff).unwrap());
+        }
+    }
+    out
+}

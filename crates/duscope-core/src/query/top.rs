@@ -15,7 +15,7 @@ use crate::envelope::{TopEntry, name_fields};
 
 use super::{
     After, Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, kind_name,
-    next_after, page_of, pct, ranked_after, ranked_files, timegrammar::iso8601,
+    next_after, page_of, pct, ranked_after, ranked_files, remain, timegrammar::iso8601,
 };
 
 /// A child holding at least this share of its directory replaces it.
@@ -53,6 +53,7 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
             entries: Vec::new(),
             total_count: 0,
             next: None,
+            truncated: false,
         };
     }
     let root = view.node(0);
@@ -122,7 +123,7 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
     };
     let next = next_after(view, &ids, q.sort, q.size, seen, total_count);
     let root_total = root.size(q.size);
-    let entries = ids
+    let entries: Vec<_> = ids
         .into_iter()
         .map(|id| {
             let via = vias.get(&id).map(Vec::as_slice).unwrap_or_default();
@@ -130,6 +131,7 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
         })
         .collect();
     Page {
+        truncated: remain(seen, entries.len(), total_count),
         entries,
         total_count,
         next,
