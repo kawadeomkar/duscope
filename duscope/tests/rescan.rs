@@ -199,3 +199,67 @@ fn p2_idx_05_incremental_is_not_available_and_a_rescan_needs_a_saved_scan() {
     let out = run(&env, &["rescan", "--full", "--incremental", "--json"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn p2_idx_05_a_rescan_from_elsewhere_reads_the_scans_own_files() {
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("tree");
+    for (path, size) in [("keep.bin", 3000), ("drop.log", 2000), ("sub/drop.log", 10)] {
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, vec![b'x'; size]).unwrap();
+    }
+    let root = fs::canonicalize(root).unwrap();
+    // A relative --exclude-from, from the working directory.
+    fs::write(env.work_dir().join("excludes.txt"), "*.log\n").unwrap();
+    let saved = ok(&run(
+        &env,
+        &[
+            "scan",
+            root.to_str().unwrap(),
+            "--save",
+            "--json",
+            "--exclude-from",
+            "excludes.txt",
+        ],
+    ));
+    assert_eq!(saved["scan"]["file_count"], 1);
+    // From another directory, the rescan reads the same file.
+    let elsewhere = env.tmp_dir();
+    let out = env
+        .cmd()
+        .current_dir(&elsewhere)
+        .env(
+            "DUSCOPE_TEST_NOW",
+            timegrammar::iso8601(timegrammar::parse_date(env.test_now()).unwrap().ns + 1),
+        )
+        .args(["rescan", root.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    let rescanned = ok(&out);
+    assert_eq!(rescanned["scan"]["file_count"], 1);
+    // A named scan must hold the path given beside it.
+    let id = saved["scan"]["id"].as_str().unwrap();
+    let out = run(&env, &["rescan", "/", "--scan", id, "--json"]);
+    assert_eq!(out.status.code(), Some(3));
+    // A wrong --fields costs no scan.
+    let out = run(
+        &env,
+        &[
+            "rescan",
+            root.to_str().unwrap(),
+            "--fields",
+            "help",
+            "--json",
+        ],
+    );
+    assert!(out.status.success());
+    let listed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        listed["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "path")
+    );
+}
