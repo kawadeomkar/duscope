@@ -364,6 +364,36 @@ impl CacheRule {
             }
         }
     }
+
+    /// For a rule confirmed by markers, the nearest ancestor of the
+    /// directory whose path, as components, is `path` that holds one of
+    /// them, as its number of components: `holds(k, marker)` says whether
+    /// `path[..k]` holds a file `marker`. The search stops at an ancestor
+    /// the rule's name matches: a marker beyond it confirms that ancestor,
+    /// and the directory is inside it (a `target` under a cargo project's
+    /// `target` is not confirmed by the project's `Cargo.toml`).
+    pub fn marker_at(
+        &self,
+        path: &[&[u8]],
+        mut holds: impl FnMut(usize, &str) -> bool,
+    ) -> Option<usize> {
+        let Confirm::Markers(markers) = &self.confirm else {
+            return None;
+        };
+        let name = path.last()?;
+        if !self.name_matches(name) {
+            return None;
+        }
+        for k in (0..path.len()).rev() {
+            if markers.iter().any(|m| holds(k, m)) {
+                return Some(k);
+            }
+            if k > 0 && self.name_matches(path[k - 1]) {
+                return None;
+            }
+        }
+        None
+    }
 }
 
 /// The cache rules.
@@ -492,16 +522,48 @@ impl Caches {
     /// The first rule a directory matches: `path` is its path as
     /// components, `has_marker` says whether an ancestor of it holds a file
     /// of that name, and `cachedir_tag` whether it holds a valid
-    /// `CACHEDIR.TAG`.
+    /// `CACHEDIR.TAG` ([`Caches::taking`], every ancestor answering alike).
     pub fn matching(
         &self,
         path: &[&[u8]],
         mut has_marker: impl FnMut(&str) -> bool,
         cachedir_tag: bool,
     ) -> Option<&CacheRule> {
-        self.rules
-            .iter()
-            .find(|rule| rule.matches(path, |m| has_marker(m), cachedir_tag))
+        self.taking(path, |_, m| has_marker(m), cachedir_tag)
+            .map(|(rule, _)| rule)
+    }
+
+    /// The rule that takes a directory, and for a rule confirmed by markers
+    /// the ancestor holding the marker ([`CacheRule::marker_at`]): `path`
+    /// is the directory's path as components, `holds(k, marker)` says
+    /// whether `path[..k]` holds a file `marker`, and `cachedir_tag`
+    /// whether the directory holds a valid `CACHEDIR.TAG`.
+    ///
+    /// The rules are tried in order. Among the rules confirmed by markers,
+    /// the one whose marker is nearest wins, the earlier on a tie: a
+    /// `build` with `CMakeLists.txt` in its parent is cmake's, though a
+    /// `build.gradle` further up would confirm gradle's rule, listed first.
+    /// A rule confirmed otherwise wins only ahead of every marker rule that
+    /// takes the directory.
+    pub fn taking(
+        &self,
+        path: &[&[u8]],
+        mut holds: impl FnMut(usize, &str) -> bool,
+        cachedir_tag: bool,
+    ) -> Option<(&CacheRule, Option<usize>)> {
+        let mut nearest: Option<(&CacheRule, usize)> = None;
+        for rule in &self.rules {
+            if let Confirm::Markers(_) = rule.confirm {
+                if let Some(k) = rule.marker_at(path, &mut holds)
+                    && nearest.is_none_or(|(_, at)| k > at)
+                {
+                    nearest = Some((rule, k));
+                }
+            } else if nearest.is_none() && rule.matches(path, |_| false, cachedir_tag) {
+                return Some((rule, None));
+            }
+        }
+        nearest.map(|(rule, k)| (rule, Some(k)))
     }
 
     /// The rules as the scanner takes them for `--exclude-caches`: a name
