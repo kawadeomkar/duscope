@@ -46,8 +46,10 @@ Names are BLOBs: `CAST(name AS TEXT)` in SQLite, `decode(name)` in DuckDB
 and holds both integers and text; if DuckDB reports a type mismatch reading it,
 `SET sqlite_all_varchar = true` reads every column as text.
 
-`duscope query --sql` runs one read-only `SELECT` over these tables in a
-sandbox and prints the rows in the envelope (`{columns, rows, row_count,
+`duscope schema` prints these tables with their columns (type, nullability,
+the platforms that fill them) and their rows in the newest saved scan of the
+current directory. `duscope query --sql` runs one read-only `SELECT` over them
+in a sandbox and prints the rows in the envelope (`{columns, rows, row_count,
 truncated}`; a BLOB as `{"$bytes": "<base64>"}`):
 
 ```sh

@@ -1,0 +1,630 @@
+{
+  "$defs": {
+    "ExcludedEntry": {
+      "description": "A directory the scan listed but did not enter because of an exclude.",
+      "properties": {
+        "path": {
+          "description": "Its absolute path, as lossy UTF-8.",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "excluded",
+                "excluded_cache"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "`excluded` (a glob or ignore pattern) or `excluded_cache`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ObjectQuery": {
+      "description": "What a one-object verb was asked.",
+      "properties": {
+        "command": {
+          "description": "The verb.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The path it was asked about, absolute.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ScanBlock": {
+      "description": "The scan an envelope describes.",
+      "properties": {
+        "attrs": {
+          "description": "The attributes collected: `basic` or `full`.",
+          "enum": [
+            "basic",
+            "full"
+          ],
+          "type": "string"
+        },
+        "device_confined": {
+          "description": "Whether the scan stayed on the root's filesystem (`-x`).",
+          "type": "boolean"
+        },
+        "dir_count": {
+          "description": "Directories, the root included.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error_count": {
+          "description": "Directories that could not be read, and entries listed but not\nread.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "excluded": {
+          "description": "Each directory the excludes kept the scan out of, path bytewise.",
+          "items": {
+            "$ref": "#/$defs/ExcludedEntry"
+          },
+          "type": "array"
+        },
+        "excluded_count": {
+          "description": "Files left out and directories not entered by the excludes\n(`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file_count": {
+          "description": "Non-directories.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "finished_at": {
+          "description": "When it finished.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "fs_type": {
+          "description": "The root volume's filesystem type; null when the scan recorded no\nvolume.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The saved scan's id; null for a scan that was not saved.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "incremental": {
+          "description": "Whether the scan reused an earlier one (never before phase 5).",
+          "type": "boolean"
+        },
+        "root": {
+          "description": "The root, absolute, symbolic links resolved.",
+          "type": "string"
+        },
+        "root_as_given": {
+          "description": "The root as the command line gave it.",
+          "type": "string"
+        },
+        "size_kind": {
+          "description": "The size the rows are ranked and shown by: `allocated` or\n`apparent`.",
+          "enum": [
+            "allocated",
+            "apparent"
+          ],
+          "type": "string"
+        },
+        "started_at": {
+          "description": "When the scan started.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "thread_count": {
+          "description": "Worker threads.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_allocated_bytes": {
+          "description": "Bytes on disk, hard links and clones counted once.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_apparent_bytes": {
+          "description": "Apparent bytes, hard links counted once.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vanished_count": {
+          "description": "Entries that disappeared during the scan.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "volumes": {
+          "description": "Every volume the scan met, entered or not.",
+          "items": {
+            "$ref": "#/$defs/VolumeEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "root",
+        "root_as_given",
+        "started_at",
+        "finished_at",
+        "size_kind",
+        "attrs",
+        "thread_count",
+        "fs_type",
+        "device_confined",
+        "total_allocated_bytes",
+        "total_apparent_bytes",
+        "file_count",
+        "dir_count",
+        "error_count",
+        "vanished_count",
+        "incremental",
+        "volumes",
+        "excluded_count",
+        "excluded"
+      ],
+      "type": "object"
+    },
+    "Summary": {
+      "description": "`summary`'s answer: a scan's totals under a path, each volume's share,\nand how the scan ran.",
+      "properties": {
+        "allocated_bytes": {
+          "description": "Bytes on disk, hard links and clones counted once.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "apparent_bytes": {
+          "description": "Apparent bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "attrs": {
+          "description": "`basic` or `full`.",
+          "enum": [
+            "basic",
+            "full"
+          ],
+          "type": "string"
+        },
+        "dataless_bytes": {
+          "description": "The logical size of the dataless files (iCloud and other\nplaceholders), which the allocated bytes leave out.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dir_count": {
+          "description": "Directories, the path included.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "du_compatible_bytes": {
+          "description": "Bytes on disk as `du` counts them: hard links once, clones each.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "duration_ms": {
+          "description": "How long it took.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error_count": {
+          "description": "Directories and entries the scan could not read.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file_count": {
+          "description": "Non-directories.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "finished_at": {
+          "description": "When it finished.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "incremental": {
+          "description": "Whether the scan updated an earlier one.",
+          "type": "boolean"
+        },
+        "parent_scan_id": {
+          "description": "The scan it updated; null for a full scan.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The path, absolute.",
+          "type": "string"
+        },
+        "started_at": {
+          "description": "When the scan started.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "thread_count": {
+          "description": "The worker threads it ran.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unaccounted_bytes": {
+          "description": "Where the path is a mount point, what the volume uses that the scan\ndid not find (its total less its free space, less its bytes found);\nnull elsewhere.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "vanished_count": {
+          "description": "Entries that disappeared during the scan: the whole scan's, since\nthe index does not place them under a path.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "volumes": {
+          "description": "The volumes the scan met under the path.",
+          "items": {
+            "$ref": "#/$defs/SummaryVolume"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "path",
+        "volumes",
+        "allocated_bytes",
+        "apparent_bytes",
+        "du_compatible_bytes",
+        "unaccounted_bytes",
+        "dataless_bytes",
+        "file_count",
+        "dir_count",
+        "error_count",
+        "vanished_count",
+        "attrs",
+        "incremental",
+        "parent_scan_id",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+        "thread_count"
+      ],
+      "type": "object"
+    },
+    "SummaryVolume": {
+      "description": "A volume's share in `summary`.",
+      "properties": {
+        "allocated_bytes": {
+          "description": "Bytes on disk the scan found on it under the path.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "apparent_bytes": {
+          "description": "Apparent bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "du_compatible_bytes": {
+          "description": "Bytes as `du` counts them.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entered": {
+          "description": "Whether the scan entered it.",
+          "type": "boolean"
+        },
+        "free_bytes": {
+          "description": "Its free space, at the scan's start; null where unknown.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fs_type": {
+          "description": "Its filesystem.",
+          "type": "string"
+        },
+        "mount_point": {
+          "description": "Where it is mounted.",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "firmlinked",
+                "kernel",
+                "network",
+                "one_file_system",
+                "bind_cycle",
+                "excluded",
+                "excluded_cache",
+                null
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Why not, when it did not.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total_bytes": {
+          "description": "Its size, at the scan's start; null where unknown.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mount_point",
+        "fs_type",
+        "total_bytes",
+        "free_bytes",
+        "allocated_bytes",
+        "apparent_bytes",
+        "du_compatible_bytes",
+        "entered",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Tool": {
+      "description": "The program that wrote an envelope.",
+      "properties": {
+        "name": {
+          "const": "duscope",
+          "description": "Always `duscope`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The release, as `duscope --version` prints it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "VolumeEntry": {
+      "description": "A volume the scan met.",
+      "properties": {
+        "entered": {
+          "description": "Whether the scan entered it.",
+          "type": "boolean"
+        },
+        "free_bytes": {
+          "description": "Bytes an unprivileged user can still write.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fs_type": {
+          "description": "The filesystem type.",
+          "type": "string"
+        },
+        "mount_point": {
+          "description": "Where it is mounted.",
+          "type": "string"
+        },
+        "read_only": {
+          "description": "Mounted read-only.",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "firmlinked",
+                "kernel",
+                "network",
+                "one_file_system",
+                "bind_cycle",
+                "excluded",
+                "excluded_cache",
+                null
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Why not (`one_file_system`, `network`, …); null when it did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total_bytes": {
+          "description": "The volume's size.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mount_point",
+        "fs_type",
+        "entered",
+        "reason",
+        "read_only",
+        "total_bytes",
+        "free_bytes"
+      ],
+      "type": "object"
+    },
+    "Warning": {
+      "description": "A warning.",
+      "properties": {
+        "code": {
+          "anyOf": [
+            {
+              "enum": [
+                "partial_read",
+                "mounts_excluded",
+                "stale_index",
+                "scan_age",
+                "atime_unreliable",
+                "attrs_not_collected",
+                "dataless_present",
+                "full_disk_access_missing",
+                "clones_unavailable",
+                "upper_bound",
+                "vanished",
+                "index_untouched",
+                "spilled",
+                "deprecated_flag",
+                "tz_unavailable"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "One of the conventions' warning codes.",
+          "type": "string"
+        },
+        "count": {
+          "description": "How many things it is about, where that applies.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hint": {
+          "description": "One imperative sentence naming a command.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "One sentence.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "count",
+        "hint"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "summary.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What a verb that answers with one object (`explain`, `summary`,\n`query`; `schema` to come) prints under `--json`: the shared fields, the\nscan it read (null when none was), and the object as `result`. `query`\nsays what it was asked in a block of its own.",
+  "properties": {
+    "next": {
+      "description": "Up to three runnable commands, most useful first.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "description": "Whether the command succeeded.",
+      "type": "boolean"
+    },
+    "query": {
+      "$ref": "#/$defs/ObjectQuery",
+      "description": "What was asked."
+    },
+    "result": {
+      "$ref": "#/$defs/Summary",
+      "description": "The answer."
+    },
+    "scan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScanBlock"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The saved scan the answer comes from; null when none holds the path."
+    },
+    "schema_version": {
+      "description": "The version of the envelope's shape.",
+      "type": "string"
+    },
+    "tool": {
+      "$ref": "#/$defs/Tool",
+      "description": "The program."
+    },
+    "warnings": {
+      "description": "Warnings, with their codes.",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ok",
+    "schema_version",
+    "tool",
+    "scan",
+    "query",
+    "result",
+    "warnings",
+    "next"
+  ],
+  "title": "ObjectEnvelope",
+  "type": "object",
+  "x-since": "0.2"
+}
