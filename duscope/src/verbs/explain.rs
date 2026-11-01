@@ -16,7 +16,7 @@ use duscope_core::query::{
 use duscope_core::resolve::resolve_path;
 
 use super::next::Hints;
-use super::source::{core_failure, saved_block, stale_index};
+use super::source::{core_failure, saved_block, scanned, stale_index};
 use super::{Exit, Failure, scan};
 use crate::cli::ExplainArgs;
 use crate::out::{Output, thousands};
@@ -96,7 +96,7 @@ impl Lookup {
             max_age_ns: self.max_age_ns,
             now: self.now,
         };
-        resolve_scan(selector, &q, |_| true).map_err(core_failure)
+        resolve_scan(selector, &q, scanned).map_err(core_failure)
     }
 }
 

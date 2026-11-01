@@ -86,4 +86,11 @@ pub enum CoreError {
     /// An export's output could not be written.
     #[error("cannot write the export: {0}")]
     ExportWrite(#[from] std::io::Error),
+    /// A file to import is not what its format says, or decompresses past
+    /// the cap.
+    #[error("{0}")]
+    ImportInvalid(String),
+    /// A file to import could not be read.
+    #[error("cannot read the file to import: {0}")]
+    ImportRead(std::io::Error),
 }

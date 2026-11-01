@@ -219,7 +219,7 @@ pub fn list<T: Hinted>(e: &Envelope<T>, file: Option<&Path>, given: Option<&Path
         given,
     );
     match e.query.command {
-        "scan" | "rescan" => {
+        "scan" | "rescan" | "import" => {
             hints
                 .run("top", path, &[])
                 .run("by-type", path, &[])

@@ -13,7 +13,7 @@ use duscope_core::query::{
 use duscope_core::resolve::{resolve_in_index, resolve_path};
 
 use super::next::Hints;
-use super::source::{core_failure, saved_block};
+use super::source::{core_failure, saved_block, scanned};
 use super::{Exit, Failure};
 use crate::cli::{self, DiffArgs};
 use crate::out::{Format, Output, thousands};
@@ -154,7 +154,7 @@ fn open(text: &str, dir: &Path, cwd: &Path, under: Option<&Path>) -> Result<Inde
         max_age_ns: i64::MAX,
         now: clock::now(),
     };
-    let resolved = resolve_scan(&selector, &q, |_| true)
+    let resolved = resolve_scan(&selector, &q, scanned)
         .map_err(core_failure)?
         .ok_or_else(|| {
             Failure::new(
