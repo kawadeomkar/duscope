@@ -29,7 +29,7 @@ pub fn run(args: &SqlArgs, index_dir: Option<&Path>, output: &Output) -> Result<
     let warnings = source.warnings(&args.walk);
     // A statement reads an index file: a scan run for the verb is saved
     // first, where it is kept, or to a directory removed afterwards.
-    let indexed = source.indexed(&args.walk, &[], output)?;
+    let indexed = source.indexed("query", &args.walk, &[], output)?;
     let (index, root_id) = (&*indexed.index, indexed.base);
     let q = SqlQuery {
         sql: &args.sql,

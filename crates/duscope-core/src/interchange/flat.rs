@@ -14,7 +14,8 @@ use std::io::Write;
 
 use serde::Serialize;
 
-use super::{ExportError, Paths, Row, RowKind, walk};
+use super::{Paths, Row, RowKind, walk};
+use crate::CoreError;
 use crate::envelope::base64;
 use crate::index::Index;
 use crate::query::timegrammar::iso8601;
@@ -64,7 +65,7 @@ struct FlatRow {
 /// # Errors
 ///
 /// When the index cannot be read or `out` written.
-pub fn write(index: &Index, base: u32, flat: Flat, out: &mut dyn Write) -> Result<(), ExportError> {
+pub fn write(index: &Index, base: u32, flat: Flat, out: &mut dyn Write) -> Result<(), CoreError> {
     if flat == Flat::Csv {
         writeln!(out, "{}", FIELDS.join(","))?;
     }

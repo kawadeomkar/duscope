@@ -9,18 +9,21 @@
 // GrandPerspective and QDirStat are names, not code.
 #![allow(clippy::doc_markdown)]
 
-use std::io::IsTerminal;
+use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use clap::ValueEnum;
 
-use duscope_core::interchange::{ExportError, flat, gpscan, ncdu, qdirstat};
+use duscope_core::CoreError;
+use duscope_core::interchange::{flat, gpscan, ncdu, qdirstat};
 use duscope_core::query::{TreeView, clock};
+use duscope_walk::Attrs;
 
 use super::source::{self, core_failure};
 use super::{Exit, Failure};
 use crate::cli::ExportArgs;
-use crate::out::{FormatArg, Output, stderr_line, thousands};
+use crate::out::{self, FormatArg, Output, stderr_line, thousands};
 
 /// `export`.
 pub fn run(
@@ -44,6 +47,9 @@ pub fn run(
         )
         .hint("Rerun duscope export with --format ncdu, or another of the five"));
     };
+    let name = format
+        .to_possible_value()
+        .map_or_else(String::new, |v| v.get_name().to_owned());
     if format == FormatArg::Gpscan && output.file.is_none() && std::io::stdout().is_terminal() {
         return Err(Failure::new(
             Exit::Usage,
@@ -53,13 +59,36 @@ pub fn run(
         .hint("Rerun duscope export --format gpscan with -o FILE.gpscan"));
     }
     let source = source::source(&args.walk, &args.index, index_dir)?;
-    let indexed = source.indexed(&args.walk, &[], output)?;
+    let warnings = source.warnings(&args.walk);
+    let indexed = source.indexed("export", &args.walk, &[], output)?;
     let (index, base) = (&*indexed.index, indexed.base);
+    // ncdu, GrandPerspective and QDirStat open a directory's tree.
+    let tree = matches!(
+        format,
+        FormatArg::Ncdu | FormatArg::Gpscan | FormatArg::Qdirstat
+    );
+    if tree && !index.node(base).is_dir() {
+        return Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            format!(
+                "export --format {name} writes a directory's tree, and {} is a file",
+                String::from_utf8_lossy(&duscope_core::query::abs_path(index, base))
+            ),
+        )
+        .hint("Rerun duscope export with the directory that holds it, or --format ndjson"));
+    }
+    // Before any output, so an -o file is left as it was.
+    if format == FormatArg::Qdirstat && index.attrs() != Attrs::Full {
+        return Err(core_failure(CoreError::AttrsNotCollected(
+            "export --format qdirstat",
+        )));
+    }
     let version = env!("CARGO_PKG_VERSION");
-    // An index error is the export's failure; a write error is the sink's,
-    // which ends quietly on a closed pipe.
+    // An index error is the export's failure; a write error is the
+    // output's, which ends quietly on a closed pipe.
     let mut failed = None;
-    output.sink(|out| {
+    let written = whole(output, |out| {
         let written = match format {
             FormatArg::Ncdu => {
                 let opts = ncdu::NcduOpts {
@@ -78,26 +107,25 @@ pub fn run(
         };
         match written {
             Ok(()) => Ok(()),
-            Err(ExportError::Write(e)) => Err(e),
-            Err(ExportError::Index(e)) => {
+            Err(CoreError::ExportWrite(e)) => Err(e),
+            Err(e) => {
                 failed = Some(core_failure(e));
-                Ok(())
+                Err(io::Error::other("the index could not be read"))
             }
         }
-    })?;
+    });
     if let Some(failure) = failed {
         return Err(failure);
     }
+    written?;
     if !output.quiet {
+        out::warn(&warnings);
         let node = index.node(base);
         let entries = if node.is_dir() {
             node.file_count + node.dir_count
         } else {
             1
         };
-        let name = format
-            .to_possible_value()
-            .map_or_else(String::new, |v| v.get_name().to_owned());
         stderr_line(&format!(
             "exported {} entries as {name} · {}",
             thousands(entries),
@@ -105,6 +133,49 @@ pub fn run(
         ));
     }
     Ok(())
+}
+
+/// Writes the export to the `-o` file whole or not at all: into a
+/// temporary file beside it, renamed over it once complete, so a failed
+/// export leaves the file as it was. Stdout, and an `-o` path that is not
+/// a regular file (a FIFO, `/dev/stdout`), are written as the rows come.
+fn whole(
+    output: &Output,
+    write: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> Result<(), Failure> {
+    let regular = |path: &Path| fs::metadata(path).map_or(true, |m| m.is_file());
+    let Some((path, name)) = output
+        .file
+        .as_deref()
+        .filter(|path| regular(path))
+        .and_then(|path| Some((path, path.file_name()?)))
+    else {
+        return output.sink(write);
+    };
+    let part = path.with_file_name(format!(
+        ".{}.{}.part",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let written = fs::File::create(&part)
+        .and_then(|file| {
+            let mut out = io::BufWriter::new(file);
+            write(&mut out)?;
+            out.flush()
+        })
+        .and_then(|()| fs::rename(&part, path));
+    written.map_err(|e| {
+        if let Err(gone) = fs::remove_file(&part)
+            && gone.kind() != io::ErrorKind::NotFound
+        {
+            log::warn!("cannot remove {}: {gone}", part.display());
+        }
+        Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!("cannot write {}: {e}", path.display()),
+        )
+    })
 }
 
 /// What `ScanInfo` says: the exported entry's volume at the scan's start

@@ -205,10 +205,13 @@ fn p2_cli_02_the_gpscan_keeps_grandperspectives_rules() {
         physical.matches("<Folder ").count(),
         physical.matches("</Folder>").count()
     );
-    // Apparent bytes: both links.
+    // Apparent bytes: the hard-linked file once too, and the empty file
+    // still left out.
     let logical = gpscan(&["--size", "apparent"]);
     assert!(logical.contains("fileSizeMeasure=\"logical\""));
-    assert_eq!(logical.matches(" flags=\"2\"").count(), 2, "{logical}");
+    assert_eq!(logical.matches(" flags=\"2\"").count(), 1, "{logical}");
+    assert!(logical.contains("<File name=\"a-link.bin\" size=\"5000\""));
+    assert!(!logical.contains("name=\"empty\""), "{logical}");
     // A .gpscan on a terminal is refused; on a pipe it is gzip.
     let out = run(
         &env,
@@ -266,32 +269,71 @@ fn p2_cli_02_export_wants_one_of_its_formats() {
     for args in [
         vec!["export", path],
         vec!["export", path, "--format", "json"],
+        // With --json the format would not reach stdout.
+        vec!["export", path, "--format", "csv", "--json"],
     ] {
         let out = run(&env, &args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
     }
-    // Another verb refuses export's formats.
+    // Another verb refuses export's formats, from the flag or the
+    // configuration file.
     let out = run(&env, &["top", path, "--format", "ncdu"]);
     assert_eq!(out.status.code(), Some(2));
-    // QDirStat needs the owner and permissions, which a basic scan lacks.
+    let dir = env.xdg_config_home().join("duscope");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("config.toml"), "[defaults]\nformat = \"csv\"\n").unwrap();
+    let out = run(&env, &["top", path]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("format"), "{stderr}");
+    fs::remove_file(dir.join("config.toml")).unwrap();
+    // The tree formats need a directory; the flat ones take a file.
+    let file = root.join("a.bin");
+    let file = file.to_str().unwrap();
+    let out = run(&env, &["export", file, "--format", "ncdu"]);
+    assert_eq!(out.status.code(), Some(2));
+    let rows = ok(&run(&env, &["export", file, "--format", "csv"]));
+    assert_eq!(String::from_utf8(rows).unwrap().lines().count(), 2);
+}
+
+#[test]
+fn p2_cli_02_qdirstat_collects_the_owners_it_needs() {
+    let env = TestEnv::new();
     let basic = env.tmp_dir().join("basic");
     fs::create_dir_all(&basic).unwrap();
     fs::write(basic.join("f"), b"x").unwrap();
-    ok(&run(
-        &env,
-        &["scan", basic.to_str().unwrap(), "--save", "--json"],
-    ));
-    // stdout is the format's, so the error is for people, on stderr.
+    let path = basic.to_str().unwrap();
+    let scanned: serde_json::Value =
+        serde_json::from_slice(&ok(&run(&env, &["scan", path, "--save", "--json"]))).unwrap();
+    let id = scanned["scan"]["id"].as_str().unwrap().to_owned();
+    // A scan without owners is passed over, and one with them run.
+    let out = run(&env, &["export", path, "--format", "qdirstat"]);
+    let cache = String::from_utf8(ok(&out)).unwrap();
+    assert!(cache.starts_with("[qdirstat 2.0 cache file]"), "{cache}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("saved as"), "{stderr}");
+    // Named, the scan without them is attrs_not_collected,
+    // on stderr (stdout is the format's), and the -o file as it was.
+    let file = env.tmp_dir().join("old.cache");
+    fs::write(&file, b"before").unwrap();
     let out = run(
         &env,
-        &["export", basic.to_str().unwrap(), "--format", "qdirstat"],
+        &[
+            "export",
+            path,
+            "--format",
+            "qdirstat",
+            "--attrs",
+            "basic",
+            "--scan",
+            &id,
+            "-o",
+            file.to_str().unwrap(),
+        ],
     );
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("needs --attrs full"), "{stderr}");
-    // With --json the format would not reach stdout: the two exclude each
-    // other.
-    let out = run(&env, &["export", path, "--format", "csv", "--json"]);
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(fs::read(&file).unwrap(), b"before");
 }
