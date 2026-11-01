@@ -111,6 +111,12 @@ pub struct GlobalArgs {
         value_name = "DIR"
     )]
     pub index_dir: Option<PathBuf>,
+
+    /// Read this index file although it is outside the index directory (repeatable)
+    ///
+    /// --scan FILE reads only index files in the index directory unless --trust names them: an index file may come from anyone
+    #[arg(long, global = true, value_name = "FILE")]
+    pub trust: Vec<PathBuf>,
 }
 
 impl GlobalArgs {

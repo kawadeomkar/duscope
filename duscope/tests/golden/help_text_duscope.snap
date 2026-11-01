@@ -217,3 +217,8 @@ Output:
           Default: $XDG_CACHE_HOME/duscope, else in the platform's cache directory
           
           [env: DUSCOPE_INDEX_DIR]
+
+      --trust <FILE>
+          Read this index file although it is outside the index directory (repeatable)
+          
+          --scan FILE reads only index files in the index directory unless --trust names them: an index file may come from anyone

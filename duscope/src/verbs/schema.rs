@@ -190,6 +190,7 @@ fn saved(
         // The layout does not age: no saved scan is stale to it.
         max_age_ns: i64::MAX,
         now: clock::now(),
+        trust: super::trusted(),
     };
     let resolved = resolve_scan(&selector, &q, scanned).map_err(core_failure)?;
     Ok(resolved.map(|r| r.index))
