@@ -33,7 +33,8 @@ use crate::index::Index;
 pub struct NcduOpts {
     /// The writing program's version.
     pub progver: &'static str,
-    /// When the export was written, Unix seconds.
+    /// When the tree was read, Unix seconds: the scan's start, as ncdu
+    /// records its own scan's.
     pub timestamp: i64,
 }
 
