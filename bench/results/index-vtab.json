@@ -1,0 +1,29 @@
+{
+  "package": "P2-IDX-04",
+  "date": "2026-11-01",
+  "rule": "Load the index's rows by INSERT ... SELECT from a virtual table over the arena (rusqlite's vtab), against the prepared-statement writer, on T2; keep whichever is faster by more than 10%. Without such a winner the prepared-statement writer stands and the gate checklist records undecided, default kept.",
+  "method": "One warm scan of T2 into an arena and its roll-up, then per run: (a) the files table's rows inserted by one prepared INSERT, executed per row, in one transaction; (b) the same rows inserted by INSERT INTO files SELECT * FROM an eponymous virtual table whose cursor reads them; (c) IndexWriter::write whole, for reference. The rows are built once beforehand, so (a) and (b) differ in the insertion alone. Both on one connection setup as the writer's (journal_mode OFF, synchronous OFF, exclusive locking, a 64 MiB cache), the bundled SQLite at -O1 with the repository's LIBSQLITE3_FLAGS, release build with LTO. Median of 7 runs per measurement, the measurement taken three times.",
+  "measurements": [
+    {
+      "platform": "macos",
+      "arch": "arm64",
+      "machine": "Apple M5 Pro, APFS, macOS 26.7",
+      "tree": "T2",
+      "entries": 1000001,
+      "file_rows": 875000,
+      "runs": 7,
+      "repeats": [
+        { "prepared_s": 0.3166, "vtab_s": 0.2775, "writer_s": 1.0997 },
+        { "prepared_s": 0.3169, "vtab_s": 0.2858, "writer_s": 1.1003 },
+        { "prepared_s": 0.3151, "vtab_s": 0.2793, "writer_s": 1.0983 }
+      ],
+      "prepared_us_per_row": 0.361,
+      "vtab_us_per_row": 0.321,
+      "insert_gain_pct": 11.1,
+      "write_gain_pct": 3.4
+    }
+  ],
+  "decision": "undecided, default kept: the prepared-statement writer stands",
+  "why": "The virtual table inserts the files table's rows about 11% faster (0.32 against 0.36 us per row), but the insertion is a third of the index write: its 37 ms (and some 5 ms on the dirs table's 125,001 rows) are under 4% of the 1.10 s the writer takes, far from the 10% the rule asks of a winner. A virtual table also needs unsafe impls of rusqlite's VTab and VTabCursor (repr(C) structs over SQLite's own), which duscope-core's forbid(unsafe_code) rules out: keeping it would take a deviation for a 4% gain.",
+  "code": "The experiment ran out of the tree and is not kept; crates/duscope-core/src/index/vtab.rs was never added."
+}
