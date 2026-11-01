@@ -16,6 +16,7 @@ flate2.workspace = true
 gix-ignore.workspace = true
 globset.workspace = true
 jiff.workspace = true
+quick-xml.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

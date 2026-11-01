@@ -161,6 +161,8 @@ pub enum Verb {
     Rescan(RescanArgs),
     /// Write a saved scan for other tools, in the format --format names
     Export(ExportArgs),
+    /// Save a tree that ncdu, gdu or GrandPerspective wrote as a scan
+    Import(ImportArgs),
     /// Print the manual page, in roff, to stdout
     Man,
     /// Print the completion script for a shell to stdout
@@ -614,6 +616,19 @@ pub struct ExportArgs {
     pub index: IndexArgs,
 }
 
+/// `import`'s flags; `--format` names the file's format.
+#[derive(Debug, Clone, Args)]
+pub struct ImportArgs {
+    /// The file the other tool wrote, gzipped or not; - reads stdin
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+
+    /// The file's format: `--format`, which `main` moves here from the
+    /// output's flags, or else the file's own.
+    #[arg(skip)]
+    pub format: Option<FormatArg>,
+}
+
 /// `rescan`'s flags.
 #[derive(Debug, Clone, Args)]
 pub struct RescanArgs {
@@ -801,11 +816,11 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
     let refused = |key: &str, line: usize, why: &str| refused(config, key, line, why);
     if let Some(format) = &d.format {
         let configured: FormatArg = choice(config, "format", format)?;
-        if configured.exports_only() {
+        if configured.interchange() {
             return Err(refused(
                 "format",
                 format.line,
-                "export's formats are for one export, named with --format",
+                "another tool's format is for one export or import, named with --format",
             ));
         }
         cli.output.configured = Some(configured);
@@ -912,8 +927,14 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             args.caches_extra.clone_from(&config.caches_extra);
         }
         // A rescan takes the saved scan's options, not the file's.
+        // An import reads a file: no scan options apply.
         Some(
-            Verb::Scans(_) | Verb::Rescan(_) | Verb::Schema(_) | Verb::Man | Verb::Completions(_),
+            Verb::Scans(_)
+            | Verb::Rescan(_)
+            | Verb::Import(_)
+            | Verb::Schema(_)
+            | Verb::Man
+            | Verb::Completions(_),
         ) => {}
     }
     Ok(())

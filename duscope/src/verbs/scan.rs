@@ -54,6 +54,9 @@ pub struct Scanned {
     /// The saved scan this one scans again (`rescan`); `None` for a fresh
     /// scan.
     pub parent: Option<ScanId>,
+    /// Where the tree came from, as `scan_meta.source` says: `scan`, or
+    /// `import:<format>` for a tree another tool wrote.
+    pub source: &'static str,
 }
 
 /// What the volume mounted at the root uses that the scan did not find,
@@ -270,7 +273,7 @@ pub fn save(
         clones_unavailable: scanned.summary.clones_unavailable,
         incremental: false,
         parent_scan_id: scanned.parent.as_ref().map(ToString::to_string),
-        source: "scan".to_owned(),
+        source: scanned.source.to_owned(),
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let started = Instant::now();
@@ -424,21 +427,26 @@ pub fn upper_bound(upper_bound: bool) -> Option<Warning> {
     })
 }
 
-/// The one line for people: the root's total, counts, and time.
+/// The one line for people: the root's total, counts, and time, and the
+/// threads a walk ran (an import ran none).
 pub fn footer(scan: &ScanBlock, scanned: &Scanned, output: &Output) -> String {
     let total = if scan.size_kind == "apparent" {
         scan.total_apparent_bytes
     } else {
         scan.total_allocated_bytes
     };
+    let threads = if scan.thread_count > 0 {
+        format!(", {} threads", scan.thread_count)
+    } else {
+        String::new()
+    };
     format!(
-        "{} {} · {} files · {} dirs · {:.1} s, {} threads",
+        "{} {} · {} files · {} dirs · {:.1} s{threads}",
         output.units.size(total),
         scan.size_kind,
         thousands(scan.file_count),
         thousands(scan.dir_count),
         scanned.elapsed.as_secs_f64(),
-        scan.thread_count,
     )
 }
 
@@ -542,6 +550,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         started_ns,
         finished_ns: now(walk_args)?,
         parent: None,
+        source: "scan",
     };
     phases(&scanned, walk_time, rollup_time);
     Ok(scanned)
@@ -994,6 +1003,7 @@ mod tests {
             started_ns: 0,
             finished_ns: 0,
             parent: None,
+            source: "scan",
         }
     }
 
@@ -1052,6 +1062,7 @@ mod tests {
             started_ns: 0,
             finished_ns: 0,
             parent: None,
+            source: "scan",
         };
         let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
         else {

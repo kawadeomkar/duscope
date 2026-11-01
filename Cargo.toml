@@ -47,6 +47,9 @@ libc = "=0.2.191"
 log = "=0.4.34"
 # The allocator of the musl builds only (P1-BENCH-03); no default features.
 mimalloc = { version = "=0.1.52", default-features = false }
+# The XML of `import`'s .gpscan files (P2-CLI-03): a streaming reader, no
+# default features.
+quick-xml = { version = "=0.42.0", default-features = false }
 # The index (P2-IDX-02): `bundled` compiles the SQLite the binary ships, with
 # the features duscope does not use left out (.cargo/config.toml); `functions`,
 # `hooks` and `limits` for the `query --sql` sandbox (P2-QRY-07). 0.40.2 is
