@@ -205,3 +205,22 @@ fn p2_qry_06_t2_against_itself_under_two_seconds() {
     eprintln!("diff of T2 against itself: {secs:.2} s");
     assert!(secs < 2.0, "{secs:.2} s");
 }
+
+#[test]
+fn p2_qry_06_a_link_that_takes_the_charge_leaves_its_original_unchanged() {
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("tree");
+    tree(&root);
+    let root = fs::canonicalize(&root).unwrap();
+    let before = save(&env, &root);
+    // a0.bin sorts before b.bin, so the new link is charged with the bytes.
+    fs::hard_link(root.join("docs/b.bin"), root.join("docs/a0.bin")).unwrap();
+    let after = save(&env, &root);
+    let listed = ok(&run(&env, &["diff", &before, &after, "--json"]));
+    let rows = listed["entries"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0]["path"].as_str().unwrap().ends_with("docs/a0.bin"));
+    assert_eq!(rows[0]["change"], "added");
+    assert_eq!(listed["diff"]["net_bytes"], 0);
+    assert_eq!(listed["diff"]["entries_changed"], 0);
+}

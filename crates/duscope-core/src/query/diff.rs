@@ -5,12 +5,14 @@
 //! scans number them. A name in one scan only is `added` or `removed`, one
 //! entry however large its subtree (`collapsed_count` says how many entries
 //! it holds); a name in both whose kind differs is `kind_changed`; a file
-//! whose bytes changed by at least `--min-delta` is `grown` or `shrunk`.
-//! With `--depth`, a directory at that depth is compared whole, and the
-//! changes beneath it are its own. Bytes are counted as the totals count
-//! them (a later hard link, an uncharged clone counts nothing), so two scans
-//! of an unchanged tree differ nowhere. There is no rename detection: a
-//! renamed directory is one `removed` and one `added` entry.
+//! whose own size changed by at least `--min-delta` is `grown` or
+//! `shrunk`. With `--depth`, a directory at that depth is compared whole,
+//! and the changes beneath it are its own row's; the totals still count
+//! every one. An entry added or removed counts its bytes as the totals do
+//! (a later hard link, an uncharged clone counts nothing), so two scans of
+//! an unchanged tree differ nowhere, and a hard link that takes the charge
+//! from its original leaves the original unchanged. There is no rename
+//! detection: a renamed directory is one `removed` and one `added` entry.
 
 use std::cmp::Ordering;
 
@@ -67,7 +69,7 @@ pub fn diff(
 ) -> (Page<DiffEntry>, DiffTotals) {
     let mut found = Found::default();
     if !old.is_empty() && !new.is_empty() {
-        compare(old, new, 0, 0, q, &mut found);
+        walk(old, new, q, &mut found);
     }
     let mut totals = found.totals;
     totals.net_bytes = signed(size_of(new, 0, q.size)) - signed(size_of(old, 0, q.size));
@@ -167,46 +169,52 @@ fn children(view: &(impl TreeView + ?Sized), dir: u32) -> (Named, Named) {
 }
 
 impl Found {
-    /// `id` of `old`, removed.
-    fn removed(&mut self, old: &(impl TreeView + ?Sized), id: u32, q: &DiffQuery) {
+    /// `id` of `old`, removed; a row when `report`.
+    fn removed(&mut self, old: &(impl TreeView + ?Sized), id: u32, q: &DiffQuery, report: bool) {
         let node = old.node(id);
         let bytes = size_of(old, id, q.size);
         self.totals.entries_removed += entries(&node);
         self.totals.removed_bytes += bytes;
-        self.changes.push(Change {
-            what: "removed",
-            side: Side::Old,
-            id,
-            old_bytes: Some(bytes),
-            new_bytes: None,
-            collapsed: node.is_dir().then(|| entries(&node)),
-        });
+        if report {
+            self.changes.push(Change {
+                what: "removed",
+                side: Side::Old,
+                id,
+                old_bytes: Some(bytes),
+                new_bytes: None,
+                collapsed: node.is_dir().then(|| entries(&node)),
+            });
+        }
     }
 
-    /// `id` of `new`, added.
-    fn added(&mut self, new: &(impl TreeView + ?Sized), id: u32, q: &DiffQuery) {
+    /// `id` of `new`, added; a row when `report`.
+    fn added(&mut self, new: &(impl TreeView + ?Sized), id: u32, q: &DiffQuery, report: bool) {
         let node = new.node(id);
         let bytes = size_of(new, id, q.size);
         self.totals.entries_added += entries(&node);
         self.totals.added_bytes += bytes;
-        self.changes.push(Change {
-            what: "added",
-            side: Side::New,
-            id,
-            old_bytes: None,
-            new_bytes: Some(bytes),
-            collapsed: node.is_dir().then(|| entries(&node)),
-        });
+        if report {
+            self.changes.push(Change {
+                what: "added",
+                side: Side::New,
+                id,
+                old_bytes: None,
+                new_bytes: Some(bytes),
+                collapsed: node.is_dir().then(|| entries(&node)),
+            });
+        }
     }
 
-    /// `was` of `old` and `is` of `new`, one name of another kind. A file
-    /// become a directory (or the reverse) is an entry removed and one
-    /// added, in the totals; another kind of file, an entry changed.
+    /// `was` of `old` and `is` of `new`, one name of another kind; a row
+    /// when `report`. A file become a directory (or the reverse) is an
+    /// entry removed and one added, in the totals; another kind of file,
+    /// an entry changed.
     fn kind_changed(
         &mut self,
         (old, was): (&(impl TreeView + ?Sized), u32),
         (new, is): (&(impl TreeView + ?Sized), u32),
         q: &DiffQuery,
+        report: bool,
     ) {
         let (old_bytes, new_bytes) = (size_of(old, was, q.size), size_of(new, is, q.size));
         let (was_node, is_node) = (old.node(was), new.node(is));
@@ -218,49 +226,63 @@ impl Found {
             self.totals.removed_bytes += old_bytes;
             self.totals.added_bytes += new_bytes;
         }
-        self.changes.push(Change {
-            what: "kind_changed",
-            side: Side::New,
-            id: is,
-            old_bytes: Some(old_bytes),
-            new_bytes: Some(new_bytes),
-            collapsed: None,
-        });
+        if report {
+            self.changes.push(Change {
+                what: "kind_changed",
+                side: Side::New,
+                id: is,
+                old_bytes: Some(old_bytes),
+                new_bytes: Some(new_bytes),
+                collapsed: None,
+            });
+        }
+    }
+
+    /// A change of size of `is`, from `old_bytes` to `new_bytes`: `grown`
+    /// or `shrunk` when it reaches `--min-delta`.
+    fn resized(&mut self, is: u32, old_bytes: u64, new_bytes: u64, q: &DiffQuery) {
+        if old_bytes.abs_diff(new_bytes) >= q.min_delta {
+            self.changes.push(Change {
+                what: if new_bytes > old_bytes {
+                    "grown"
+                } else {
+                    "shrunk"
+                },
+                side: Side::New,
+                id: is,
+                old_bytes: Some(old_bytes),
+                new_bytes: Some(new_bytes),
+                collapsed: None,
+            });
+        }
     }
 }
 
-/// The names in one scan only (`only_old`, `only_new`): those removed,
-/// those added, and the names both have as a file in one and a directory
-/// in the other.
-fn unmatched(
-    old: &(impl TreeView + ?Sized),
-    new: &(impl TreeView + ?Sized),
-    mut only_old: Vec<u32>,
-    mut only_new: Vec<u32>,
-) -> (Vec<u32>, Vec<u32>, Vec<(u32, u32)>) {
-    let old_name = |id: u32| old.name(id).into_owned();
-    let new_name = |id: u32| new.name(id).into_owned();
-    only_old.sort_by_key(|&id| old_name(id));
-    only_new.sort_by_key(|&id| new_name(id));
+/// The names in one scan only (`only_old`, `only_new`, with their names):
+/// those removed, those added, and the names both have as a file in one
+/// and a directory in the other.
+fn unmatched(mut only_old: Named, mut only_new: Named) -> (Vec<u32>, Vec<u32>, Vec<(u32, u32)>) {
+    only_old.sort_by(|a, b| a.1.cmp(&b.1));
+    only_new.sort_by(|a, b| a.1.cmp(&b.1));
     let (mut removed, mut added, mut kinds) = (Vec::new(), Vec::new(), Vec::new());
     let (mut at_old, mut at_new) = (0, 0);
     while at_old < only_old.len() || at_new < only_new.len() {
         let order = match (only_old.get(at_old), only_new.get(at_new)) {
-            (Some(&gone), Some(&came)) => old_name(gone).cmp(&new_name(came)),
+            (Some(gone), Some(came)) => gone.1.cmp(&came.1),
             (Some(_), None) => Ordering::Less,
             _ => Ordering::Greater,
         };
         match order {
             Ordering::Less => {
-                removed.push(only_old[at_old]);
+                removed.push(only_old[at_old].0);
                 at_old += 1;
             }
             Ordering::Greater => {
-                added.push(only_new[at_new]);
+                added.push(only_new[at_new].0);
                 at_new += 1;
             }
             Ordering::Equal => {
-                kinds.push((only_old[at_old], only_new[at_new]));
+                kinds.push((only_old[at_old].0, only_new[at_new].0));
                 at_old += 1;
                 at_new += 1;
             }
@@ -269,101 +291,130 @@ fn unmatched(
     (removed, added, kinds)
 }
 
-/// Compares directory `old_dir` of `old` with `new_dir` of `new`, pushing
-/// what changed beneath them.
-fn compare(
+/// A directory of each scan at one path, still to compare: how deep, and
+/// whether its changes are rows (not beneath a directory compared whole).
+struct Open {
+    was: u32,
+    is: u32,
+    depth: u32,
+    report: bool,
+}
+
+/// Walks both trees from their roots.
+fn walk(
     old: &(impl TreeView + ?Sized),
     new: &(impl TreeView + ?Sized),
-    old_dir: u32,
-    new_dir: u32,
     q: &DiffQuery,
     found: &mut Found,
 ) {
-    // The directories still to compare, and the depth of their children.
-    let mut stack: Vec<(u32, u32, u32)> = vec![(old_dir, new_dir, 1)];
-    while let Some((old_at, new_at, depth)) = stack.pop() {
-        let (old_files, old_dirs) = children(old, old_at);
-        let (new_files, new_dirs) = children(new, new_at);
+    let mut stack: Vec<Open> = Vec::new();
+    pair(old, new, (0, 0), 0, true, q, found, &mut stack);
+    while let Some(Open {
+        was,
+        is,
+        depth,
+        report,
+    }) = stack.pop()
+    {
+        let (old_files, old_dirs) = children(old, was);
+        let (new_files, new_dirs) = children(new, is);
         // Files against files, directories against directories; a name
         // that is a file in one and a directory in the other is found as
         // one of each, and matched after.
-        let mut only_old: Vec<u32> = Vec::new();
-        let mut only_new: Vec<u32> = Vec::new();
+        let mut only_old: Named = Vec::new();
+        let mut only_new: Named = Vec::new();
         let mut pairs: Vec<(u32, u32)> = Vec::new();
-        for (olds, news) in [(&old_files, &new_files), (&old_dirs, &new_dirs)] {
+        for (olds, news) in [(old_files, new_files), (old_dirs, new_dirs)] {
             merge(olds, news, &mut only_old, &mut only_new, &mut pairs);
         }
-        let (removed, added, kinds) = unmatched(old, new, only_old, only_new);
-        for (was, is) in kinds {
-            found.kind_changed((old, was), (new, is), q);
+        let (removed, added, kinds) = unmatched(only_old, only_new);
+        for (gone, came) in kinds {
+            found.kind_changed((old, gone), (new, came), q, report);
         }
         for id in removed {
-            found.removed(old, id, q);
+            found.removed(old, id, q, report);
         }
         for id in added {
-            found.added(new, id, q);
+            found.added(new, id, q, report);
         }
-        for (was, is) in pairs {
-            let is_node = new.node(is);
-            if old.node(was).kind != is_node.kind {
-                found.kind_changed((old, was), (new, is), q);
-                continue;
-            }
-            // A directory above the depth is looked into; one at it is
-            // compared whole, as a file is.
-            if is_node.is_dir() && q.depth.is_none_or(|d| depth < d) {
-                stack.push((was, is, depth + 1));
-                continue;
-            }
-            let (ob, nb) = (size_of(old, was, q.size), size_of(new, is, q.size));
-            if ob == nb {
-                continue;
-            }
-            found.totals.entries_changed += 1;
-            if ob.abs_diff(nb) < q.min_delta {
-                continue;
-            }
-            found.changes.push(Change {
-                what: if nb > ob { "grown" } else { "shrunk" },
-                side: Side::New,
-                id: is,
-                old_bytes: Some(ob),
-                new_bytes: Some(nb),
-                collapsed: None,
-            });
+        for ids in pairs {
+            pair(old, new, ids, depth + 1, report, q, found, &mut stack);
         }
     }
 }
 
+/// Compares `was` of `old` with `is` of `new`, at one path and `depth`: a
+/// change of kind; a directory to walk (compared whole as well when it is
+/// at `--depth`); a file whose own size changed.
+// The walk's state, each piece its own.
+#[allow(clippy::too_many_arguments)]
+fn pair(
+    old: &(impl TreeView + ?Sized),
+    new: &(impl TreeView + ?Sized),
+    (was, is): (u32, u32),
+    depth: u32,
+    report: bool,
+    q: &DiffQuery,
+    found: &mut Found,
+    stack: &mut Vec<Open>,
+) {
+    let (was_node, is_node) = (old.node(was), new.node(is));
+    if was_node.kind != is_node.kind {
+        found.kind_changed((old, was), (new, is), q, report);
+        return;
+    }
+    if is_node.is_dir() {
+        // At the depth asked, the directory's row holds what changed
+        // beneath it, which the walk below still counts.
+        let whole = q.depth.is_some_and(|d| depth >= d);
+        if whole && report {
+            let (ob, nb) = (size_of(old, was, q.size), size_of(new, is, q.size));
+            found.resized(is, ob, nb, q);
+        }
+        stack.push(Open {
+            was,
+            is,
+            depth,
+            report: report && !whole,
+        });
+        return;
+    }
+    // A file by its own size: a charge moved to another link is no change.
+    let (ob, nb) = (was_node.size(q.size), is_node.size(q.size));
+    if ob == nb {
+        return;
+    }
+    found.totals.entries_changed += 1;
+    if report {
+        found.resized(is, ob, nb, q);
+    }
+}
+
 /// Merges two lists of children sorted by name: the names in `olds` only,
-/// in `news` only, and the pairs.
+/// in `news` only (with their names), and the pairs.
 fn merge(
-    olds: &[(u32, Vec<u8>)],
-    news: &[(u32, Vec<u8>)],
-    only_old: &mut Vec<u32>,
-    only_new: &mut Vec<u32>,
+    olds: Named,
+    news: Named,
+    only_old: &mut Named,
+    only_new: &mut Named,
     pairs: &mut Vec<(u32, u32)>,
 ) {
-    let (mut at_old, mut at_new) = (0, 0);
-    while at_old < olds.len() || at_new < news.len() {
-        let order = match (olds.get(at_old), news.get(at_new)) {
+    let mut olds = olds.into_iter().peekable();
+    let mut news = news.into_iter().peekable();
+    loop {
+        let order = match (olds.peek(), news.peek()) {
             (Some(was), Some(is)) => was.1.cmp(&is.1),
             (Some(_), None) => Ordering::Less,
-            _ => Ordering::Greater,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => break,
         };
         match order {
-            Ordering::Less => {
-                only_old.push(olds[at_old].0);
-                at_old += 1;
-            }
-            Ordering::Greater => {
-                only_new.push(news[at_new].0);
-                at_new += 1;
-            }
+            Ordering::Less => only_old.extend(olds.next()),
+            Ordering::Greater => only_new.extend(news.next()),
             Ordering::Equal => {
-                pairs.push((olds[at_old].0, news[at_new].0));
-                at_old += 1;
-                at_new += 1;
+                if let (Some(was), Some(is)) = (olds.next(), news.next()) {
+                    pairs.push((was.0, is.0));
+                }
             }
         }
     }

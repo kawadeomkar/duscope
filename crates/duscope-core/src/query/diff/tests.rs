@@ -5,7 +5,7 @@ use duscope_walk::{Attrs, MemProvider, WalkOptions, walk_with};
 use super::{DEFAULT_MIN_DELTA, DiffQuery, diff};
 use crate::arena::Arena;
 use crate::envelope::{DiffEntry, DiffTotals};
-use crate::query::{ArenaView, Page, SizeKind};
+use crate::query::{ArenaView, Page, SizeKind, Subtree};
 use crate::rollup::{RollUp, roll_up};
 
 const MIB: u64 = 1 << 20;
@@ -134,6 +134,17 @@ fn p2_qry_06_depth_attributes_deeper_changes_to_the_directory_at_it() {
             ("docs".to_owned(), "grown", 2 * DELTA_MIB),
         ]
     );
+    // The totals still count what was added beneath.
+    let (_, totals) = run(&old, &new, &q);
+    assert_eq!(totals.entries_added, 3);
+    assert_eq!(totals.added_bytes, 5 * MIB);
+    // --depth 0: the root, whole.
+    let root = DiffQuery {
+        depth: Some(0),
+        ..query()
+    };
+    let (page, _) = run(&old, &new, &root);
+    assert_eq!(rows(&page), [("/r".to_owned(), "grown", 5 * DELTA_MIB)]);
     // Without --depth, the files themselves.
     let (page, _) = run(&old, &new, &query());
     assert_eq!(
@@ -167,4 +178,23 @@ fn p2_qry_06_limit_keeps_the_largest_and_counts_all() {
     );
     assert_eq!(page.total_count, 3);
     assert!(page.truncated);
+}
+
+#[test]
+fn p2_qry_06_roots_that_are_files_compare_as_files() {
+    let mut old = MemProvider::new("/r");
+    old.file("big.iso", MIB);
+    let (oa, or) = scan(&old);
+    let mut new = MemProvider::new("/r");
+    new.file("big.iso", 3 * MIB);
+    let (na, nr) = scan(&new);
+    let ov = ArenaView::new(&oa, &or, "/r".into());
+    let nv = ArenaView::new(&na, &nr, "/r".into());
+    // big.iso, alone, as --under would read it.
+    let old_file = Subtree::new(&ov, 1);
+    let new_file = Subtree::new(&nv, 1);
+    let (page, _) = diff(&old_file, &new_file, &query());
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].change, "grown");
+    assert_eq!(page.entries[0].bytes_delta, 2 * DELTA_MIB);
 }

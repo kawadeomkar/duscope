@@ -863,8 +863,8 @@ pub struct DiffTotals {
     pub entries_added: u64,
     /// Entries in the old scan only.
     pub entries_removed: u64,
-    /// Entries in both whose bytes or kind differ (a directory at
-    /// `--depth` counted once).
+    /// Files in both whose own size differs, and entries in both whose
+    /// kind differs (beneath a directory `--depth` compares whole too).
     pub entries_changed: u64,
 }
 
