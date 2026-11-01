@@ -111,6 +111,33 @@ fn p2_qry_03_a_path_inside_a_saved_scan_is_its_subtree() {
     assert_eq!(result["file_count"], row["file_count"]);
 }
 
+#[test]
+fn p2_qry_03_errors_under_a_path_count_its_entries_too() {
+    let env = TestEnv::new();
+    let fixtures = env.fixtures();
+    if !fixtures.unreadable_effective() {
+        return duscope_testkit::skip("root reads the unreadable directories");
+    }
+    let root = fs::canonicalize(fixtures.root()).unwrap();
+    let saved = ok(&run(
+        &env,
+        &["scan", root.to_str().unwrap(), "--save", "--json"],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap();
+    // What explain --errors lists under cases/, directories and entries.
+    let errors = ok(&run(&env, &["explain", "--errors", id, "--json"]));
+    let cases = root.join("cases");
+    let under = errors["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| Path::new(e["path"].as_str().unwrap()).starts_with(&cases))
+        .count() as u64;
+    assert!(under > 0);
+    let facts = summary(&env, &cases, &["--no-scan"]);
+    assert_eq!(facts["result"]["error_count"], under);
+}
+
 /// Whether the platform tests run (`DUSCOPE_TEST_PLATFORM=1`).
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 fn platform_tests() -> bool {
@@ -168,6 +195,31 @@ fn unaccounted_on_a_mount(env: &TestEnv, mount: &Path) {
         used.saturating_sub(volume["allocated_bytes"].as_u64().unwrap())
     );
     assert!(result["allocated_bytes"].as_u64().unwrap() >= 1 << 20);
+    // A saved scan of the mount point keeps the figure in its index.
+    let saved = ok(&run(
+        env,
+        &["scan", mount.to_str().unwrap(), "--save", "--json"],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap();
+    let listed = ok(&run(env, &["scans", "--json"]));
+    let file = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id)
+        .unwrap()["index_path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let db = rusqlite::Connection::open(file).unwrap();
+    let stored: Option<i64> = db
+        .query_row(
+            "SELECT value FROM scan_meta WHERE key = 'unaccounted_bytes'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(stored.is_some());
 }
 
 #[cfg(target_os = "linux")]

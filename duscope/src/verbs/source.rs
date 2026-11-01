@@ -202,17 +202,6 @@ impl Source {
         }
     }
 
-    /// The devices of the volumes the scan met, in the order the scan
-    /// block lists the volumes.
-    pub fn volume_devs(&self) -> Vec<u64> {
-        match self {
-            Source::Fresh { scanned, .. } => {
-                scanned.arena.volumes().iter().map(|v| v.dev).collect()
-            }
-            Source::Saved { index, .. } => index.volumes().iter().map(|v| v.dev).collect(),
-        }
-    }
-
     /// When the scan started, Unix nanoseconds.
     pub fn started_ns(&self) -> i64 {
         match self {
@@ -230,6 +219,19 @@ impl Source {
                 .parent_scan_id
                 .as_ref()
                 .map(ToString::to_string),
+        }
+    }
+
+    /// The directories under the path the scan could not read, and the
+    /// entries they listed but could not examine.
+    pub fn errors_under(&self) -> u64 {
+        match self {
+            Source::Fresh { scanned, .. } => {
+                scanned.summary.unreadable_dirs + scanned.summary.entry_errors
+            }
+            Source::Saved { index, base, .. } => {
+                index.errors_under(*base, index.node(*base).last_id)
+            }
         }
     }
 
@@ -439,6 +441,8 @@ pub(super) fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
                 read_only: v.read_only,
                 total_bytes: v.total_bytes.unwrap_or(0),
                 free_bytes: v.free_bytes.unwrap_or(0),
+                dev: v.dev,
+                options: v.options.clone(),
             })
             .collect(),
         excluded_count: meta.excluded_count,

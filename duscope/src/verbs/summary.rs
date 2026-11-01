@@ -3,6 +3,7 @@
 //! mount point's volume uses that the scan did not find, and how the scan
 //! ran. The CLI twin of the `duscope_summary` tool.
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use duscope_core::envelope::{
@@ -21,44 +22,57 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
     let source = source::source(&args.walk, &args.index, index_dir)?;
     let size = scan::size_kind(&args.walk);
     let block = source.scan_block(&args.walk, size);
-    let view = source.view();
-    let bytes = query::summary(&*view);
-    let root = view.node(0);
-    let path_bytes = std::os::unix::ffi::OsStrExt::as_bytes(view.root_path().as_os_str()).to_vec();
-    let path = view.root_path().to_string_lossy().into_owned();
-    drop(view);
-    // Each volume's share, by its device; a device met twice (a bind
-    // mount) has its bytes at the first.
-    let devs = source.volume_devs();
-    let mut shared: Vec<u64> = Vec::new();
-    let volumes: Vec<SummaryVolume> = block
+    // A mount point the scan did not enter starts nothing.
+    let unentered: Vec<u64> = block
         .volumes
         .iter()
-        .zip(devs.iter().copied().chain(std::iter::repeat(u64::MAX)))
-        .filter(|(v, dev)| {
+        .filter(|v| !v.entered)
+        .map(|v| v.dev)
+        .collect();
+    let view = source.view();
+    let bytes = query::summary(&*view, &unentered);
+    let root = view.node(0);
+    let root_path = view.root_path().to_owned();
+    drop(view);
+    let path_bytes = root_path.as_os_str().as_bytes().to_vec();
+    let path = root_path.to_string_lossy().into_owned();
+    // Each volume's share, by its device; a device met twice (a bind
+    // mount) has its bytes at the first.
+    let mut shared: Vec<u64> = Vec::new();
+    let mut found = |dev: u64| {
+        let share = bytes
+            .volumes
+            .iter()
+            .find(|b| b.dev == dev && !shared.contains(&dev))
+            .copied()
+            .unwrap_or_default();
+        shared.push(dev);
+        share
+    };
+    let listed: Vec<(&VolumeEntry, query::VolumeBytes)> = block
+        .volumes
+        .iter()
+        .filter(|v| {
             source.at_root()
-                || bytes.volumes.iter().any(|b| b.dev == *dev)
-                || Path::new(&v.mount_point).starts_with(&path)
+                || bytes.volumes.iter().any(|b| b.dev == v.dev)
+                || Path::new(&v.mount_point).starts_with(&root_path)
         })
-        .map(|(v, dev)| {
-            let share = bytes
-                .volumes
-                .iter()
-                .find(|b| b.dev == dev && !shared.contains(&dev))
-                .copied()
-                .unwrap_or_default();
-            shared.push(dev);
-            volume(v, share)
+        .map(|v| (v, found(v.dev)))
+        .collect();
+    let uses: Vec<query::VolumeUse<'_>> = listed
+        .iter()
+        .map(|(v, share)| query::VolumeUse {
+            mount_point: Path::new(&v.mount_point),
+            fs_type: &v.fs_type,
+            total: (v.total_bytes > 0).then_some(v.total_bytes),
+            free: (v.total_bytes > 0).then_some(v.free_bytes),
+            entered: v.entered,
+            options: &v.options,
+            found: share.allocated,
         })
         .collect();
-    // A mount point: what its volume uses less what the scan found there.
-    let unaccounted = volumes
-        .iter()
-        .find(|v| v.entered && v.mount_point == path)
-        .and_then(|v| {
-            let used = v.total_bytes?.checked_sub(v.free_bytes?)?;
-            Some(used.saturating_sub(v.allocated_bytes))
-        });
+    let unaccounted = query::unaccounted(&root_path, &uses);
+    let volumes: Vec<SummaryVolume> = listed.iter().map(|(v, share)| volume(v, *share)).collect();
     let result = Summary {
         path,
         path_bytes,
@@ -73,7 +87,7 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
         error_count: if source.at_root() {
             block.error_count
         } else {
-            source.unreadable_dirs()
+            source.errors_under()
         },
         vanished_count: block.vanished_count,
         attrs: block.attrs,
