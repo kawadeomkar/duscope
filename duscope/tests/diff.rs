@@ -144,7 +144,7 @@ fn p2_qry_06_an_unchanged_tree_diffs_to_nothing() {
     let listed = ok(&run(&env, &["diff", &first, &second, "--json"]));
     assert_eq!(listed["entries"], serde_json::json!([]));
     assert_eq!(listed["diff"]["net_bytes"], 0);
-    assert_eq!(listed["diff"]["entries_changed"], 0);
+    assert_eq!(listed["diff"]["changed_count"], 0);
 }
 
 #[test]
@@ -222,5 +222,5 @@ fn p2_qry_06_a_link_that_takes_the_charge_leaves_its_original_unchanged() {
     assert!(rows[0]["path"].as_str().unwrap().ends_with("docs/a0.bin"));
     assert_eq!(rows[0]["change"], "added");
     assert_eq!(listed["diff"]["net_bytes"], 0);
-    assert_eq!(listed["diff"]["entries_changed"], 0);
+    assert_eq!(listed["diff"]["changed_count"], 0);
 }

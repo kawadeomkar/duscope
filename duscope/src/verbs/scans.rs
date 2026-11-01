@@ -23,6 +23,7 @@ use duscope_core::query::{
 };
 use duscope_walk::Attrs;
 
+use super::next::Hints;
 use super::source::core_failure;
 use super::{Exit, Failure};
 use crate::cli::ScansArgs;
@@ -153,7 +154,19 @@ fn list(dir: &Path, output: &Output) -> Result<(), Failure> {
         output.units.size(bytes),
         dir.display()
     );
-    output.listing(&listing("scans", dir, entries), &footer)
+    let mut listed = listing("scans", dir, entries);
+    // The newest scan, at the top.
+    if let Some(newest) = listed.entries.first()
+        && let Some(mut hints) = Hints::new(Some(&newest.id))
+    {
+        let root = Some(newest.root.as_str());
+        listed.next = hints
+            .run("summary", root, &[])
+            .run("top", root, &[])
+            .run("caches", root, &[])
+            .done();
+    }
+    output.listing(&listed, &footer)
 }
 
 /// `--prune`.

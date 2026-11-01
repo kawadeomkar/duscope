@@ -5,8 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use duscope_core::envelope::{
-    Envelope, Explain, ObjectEnvelope, ObjectQuery, QueryBlock, SCHEMA_VERSION, ScanErrorEntry,
-    Tool,
+    Envelope, Explain, ObjectEnvelope, ObjectQuery, QueryBlock, SCHEMA_VERSION, ScanBlock,
+    ScanErrorEntry, Tool,
 };
 use duscope_core::index::Index;
 use duscope_core::query::{
@@ -15,6 +15,7 @@ use duscope_core::query::{
 };
 use duscope_core::resolve::resolve_path;
 
+use super::next::Hints;
 use super::source::{core_failure, saved_block, stale_index};
 use super::{Exit, Failure, scan};
 use crate::cli::ExplainArgs;
@@ -149,6 +150,8 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
             Vec::new(),
         ),
     };
+    let path = path.to_string_lossy().into_owned();
+    let next = next(scan.as_ref(), &path, result.kind);
     let envelope = ObjectEnvelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
@@ -156,14 +159,31 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
         scan,
         query: ObjectQuery {
             command: "explain",
-            path: path.to_string_lossy().into_owned(),
+            path,
         },
         result,
         warnings,
-        next: Vec::new(),
+        next,
     };
     let lines = people(&envelope.result, output);
     output.object(&envelope, &plain(&envelope.result), &lines)
+}
+
+/// `explain`'s hints: what the scan could not read, when it could not
+/// read something, and a directory's largest entries and caches.
+fn next(scan: Option<&ScanBlock>, path: &str, kind: &str) -> Vec<String> {
+    let Some(mut hints) = Hints::new(scan.and_then(|s| s.id.as_deref())) else {
+        return Vec::new();
+    };
+    if scan.is_some_and(|s| s.error_count > 0) {
+        hints.errors();
+    }
+    if kind == "dir" {
+        hints
+            .run("top", Some(path), &[])
+            .run("caches", Some(path), &[]);
+    }
+    hints.done()
 }
 
 /// `given`, absolute, with every symbolic link above its last component

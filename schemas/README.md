@@ -5,7 +5,7 @@ against, and the DDL of the index.
 
 | Path | Contents | Added by |
 | --- | --- | --- |
-| `envelope/<verb>.schema.json` | the `--json` envelope of each verb | P2-CLI-01; until then `placeholder.schema.json` |
+| `envelope/<verb>.schema.json` | the `--json` envelope of each verb; `error.schema.json` for a failure, `spilled.schema.json` for the stub `--max-chars` prints | P2-CLI-01 |
 | `envelope/history/<schema_version>/` | every published minor of the envelope, for the compatibility tests | P2-CLI-01 |
 | `mcp/<tool>.input.json`, `mcp/<tool>.output.json` | the input and output schema of each MCP tool | P3-MCP-04, P3-MCP-07 |
 | `mcp/MAPPING.md` | per tool: the verb flags exposed, renamed and excluded | P3-MCP-04, P3-MCP-07 |
@@ -24,6 +24,21 @@ Every `.json` file here:
 - marks additions and deprecations with `x-since` and `x-deprecated`, whose
   value is a `schema_version` string
 
+## The envelope's version
+
+`schema_version` is `0.2`, frozen by P2-CLI-01. From there the envelope changes
+additively only (a new field, a new verb, a new value of an enumerated field),
+each change a deviation entry in the specification, its fields marked
+`x-since` with the minor that adds them. `history/<minor>/` keeps each minor as
+published; `history/0.2/` is the minor in progress until v0.2.0 is tagged, so a
+package before then that adds to the envelope updates it as well.
+
+The schemas list the values of the enumerated fields: the warning codes and the
+error codes of the conventions (`WARNING_CODES` and `ERROR_CODES` in
+`crates/duscope-core/src/envelope.rs`), an entry's `kind`, its `flags`, and the
+rest under `envelope::values`. A field only one platform fills is marked
+`x-platforms`.
+
 ## Checks
 
 - `duscope/tests/schemas.rs` applies the rules above to every file.
@@ -36,7 +51,13 @@ Every `.json` file here:
   (`duscope_by_type` is `by-type`). It is a unit test because the types derive
   `JsonSchema` only under `cfg(test)`, which keeps `schemars` out of the binary.
 - `crates/duscope-core/tests/schema_drift.rs` checks that `schemars` and
-  `jsonschema` stay dev-dependencies.
+  `jsonschema` stay dev-dependencies, and that every schema under `history/`
+  is a subset of its verb's schema now: nothing a published minor had is
+  dropped or changes type.
+- `duscope/tests/schemas.rs` also validates every golden envelope
+  (`duscope/tests/golden/<verb>_json_*.snap`) against its verb's schema and
+  against the verb's schema in every published minor of the same major, and
+  checks that every error and warning code the source writes is in the tables.
 
 The `schemas` CI job runs all three, and `just test` includes them.
 

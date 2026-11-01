@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use duscope_core::envelope::{DiffTotals, Envelope, QueryBlock, SCHEMA_VERSION, Tool};
+use duscope_core::envelope::{DiffEntry, DiffTotals, Envelope, QueryBlock, SCHEMA_VERSION, Tool};
 use duscope_core::index::Index;
 use duscope_core::query::{
     self, DEFAULT_MIN_DELTA, DiffQuery, ScanQuery, ScanSelector, SizeKind, Subtree, TreeView,
@@ -12,6 +12,7 @@ use duscope_core::query::{
 };
 use duscope_core::resolve::{resolve_in_index, resolve_path};
 
+use super::next::Hints;
 use super::source::{core_failure, saved_block};
 use super::{Exit, Failure};
 use crate::cli::{self, DiffArgs};
@@ -92,7 +93,7 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         query::short_id(&dir, &totals.new_scan),
     );
     let footer = footer(&totals, &ids, output);
-    let envelope = Envelope {
+    let mut envelope = Envelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
         tool: Tool::CURRENT,
@@ -113,6 +114,7 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         warnings: Vec::new(),
         next: Vec::new(),
     };
+    envelope.next = next(&envelope);
     check(&old)?;
     check(&new)?;
     output.list_diff(&envelope, &totals, &footer)
@@ -165,6 +167,23 @@ fn open(text: &str, dir: &Path, cwd: &Path, under: Option<&Path>) -> Result<Inde
     Ok(resolved.index)
 }
 
+/// `diff`'s hints, on the new scan: the largest change still in it, and
+/// the largest entries under the path.
+fn next(e: &Envelope<DiffEntry>) -> Vec<String> {
+    let Some(mut hints) = Hints::new(e.scan.id.as_deref()) else {
+        return Vec::new();
+    };
+    let changed = e
+        .entries
+        .iter()
+        .find(|row| row.change != "removed")
+        .map(|row| row.path.as_str());
+    hints
+        .run("explain", changed, &[])
+        .run("top", Some(&e.query.path), &[])
+        .done()
+}
+
 /// `index_corrupt` when a read of `index` failed after it opened.
 fn check(index: &Index) -> Result<(), Failure> {
     match index.failure() {
@@ -212,8 +231,8 @@ fn footer(t: &DiffTotals, (old_id, new_id): &(String, String), output: &Output) 
         "+{} added · -{} removed · net {net} · {} entries added, {} removed, {} changed · {old_id} → {new_id}",
         size(t.added_bytes),
         size(t.removed_bytes),
-        thousands(t.entries_added),
-        thousands(t.entries_removed),
-        thousands(t.entries_changed),
+        thousands(t.added_count),
+        thousands(t.removed_count),
+        thousands(t.changed_count),
     )
 }
