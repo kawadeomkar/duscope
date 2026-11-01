@@ -298,6 +298,7 @@ fn check(dir: &Path, selector: &str, now: i64, output: &Output) -> Result<(), Fa
         cwd: &cwd,
         max_age_ns: i64::MAX,
         now,
+        trust: super::trusted(),
     };
     let Some(resolved) = resolve_scan(&selector, &q, scanned).map_err(core_failure)? else {
         return Err(Failure::new(

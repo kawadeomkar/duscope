@@ -1,6 +1,7 @@
 //! P2-IDX-03: the reader, against the arena each index was written from,
 //! and `--scan`'s resolution.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -322,6 +323,7 @@ fn q<'a>(dir: &'a Path, path: Option<&'a Path>, cwd: &'a Path, now: i64) -> Scan
         cwd,
         max_age_ns: 7 * DAY,
         now,
+        trust: &[],
     }
 }
 
@@ -442,4 +444,173 @@ fn p2_idx_03_latest_is_the_newest_usable_scan_holding_the_path() {
     .unwrap()
     .unwrap();
     assert_eq!(r.index.meta().scan_id.as_str(), "300000000000");
+}
+
+/// A copy of a small index, changed by `sql` through a connection that may
+/// write anything, as whoever made a hostile file could.
+fn hostile(dir: &Path, name: &str, sql: &str) -> PathBuf {
+    let mut tree = MemProvider::new("/t");
+    tree.file("x", 1);
+    let file = small_index(&dir.join(name), &tree, "abcdef012345", 1);
+    let db = Connection::open(&file).unwrap();
+    db.execute_batch(sql).unwrap();
+    drop(db);
+    file
+}
+
+fn refused(file: &Path) -> String {
+    match Index::open(file) {
+        Err(CoreError::IndexCorrupt { message, .. }) => message,
+        other => panic!("{}: {other:?}", file.display()),
+    }
+}
+
+#[test]
+fn p2_sec_01_a_hostile_index_is_refused_or_neutralised() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    // Views and triggers are switched off: the file opens, reads as the
+    // index it was, and its views cannot be read.
+    let file = hostile(
+        &dir,
+        "views",
+        "CREATE VIEW peek AS SELECT sql FROM sqlite_schema; \
+         CREATE TRIGGER t AFTER INSERT ON scan_meta BEGIN DELETE FROM dirs; END;",
+    );
+    let index = Index::open(&file).unwrap();
+    assert_eq!(index.len(), 2);
+    assert!(index.failure().is_none());
+    let read = index
+        .db()
+        .query_row("SELECT count(*) FROM peek", [], |row| row.get::<_, i64>(0));
+    assert!(
+        read.unwrap_err().to_string().contains("prohibited"),
+        "a view reads"
+    );
+    // A table the reader reads, made a view: refused, not followed.
+    let file = hostile(
+        &dir,
+        "meta-view",
+        "ALTER TABLE scan_meta RENAME TO real_meta; \
+         CREATE VIEW scan_meta AS SELECT * FROM real_meta;",
+    );
+    assert!(refused(&file).contains("prohibited"));
+    // A virtual table, however its statement is spelled: refused before
+    // anything connects it. The bundled SQLite has no virtual table
+    // modules to make one with (a system SQLite has), so the schema's row
+    // is written as a hostile file's would be.
+    for (name, sql) in [
+        ("virtual", "CREATE VIRTUAL TABLE v USING rtree(id, a, b)"),
+        (
+            "virtual-spelled",
+            "create/* a */ -- b\n\tVirtual table v using rtree(id, a, b)",
+        ),
+    ] {
+        let file = hostile(
+            &dir,
+            name,
+            &format!(
+                "PRAGMA writable_schema = ON; \
+                 INSERT INTO sqlite_schema VALUES ('table', 'v', 'v', 0, '{sql}');"
+            ),
+        );
+        assert_eq!(
+            refused(&file),
+            "its schema has a virtual table, v",
+            "{name}"
+        );
+    }
+    // A large schema is refused once counted, a huge one while it loads.
+    let mut tables = String::from("BEGIN;");
+    for n in 0..300 {
+        write!(tables, " CREATE TABLE t{n} (x);").unwrap();
+    }
+    tables.push_str(" COMMIT;");
+    let file = hostile(&dir, "large", &tables);
+    assert_eq!(refused(&file), "its schema has more than 256 objects");
+    // 200,000 views, written as rows (made one by one, views take time
+    // quadratic in their number).
+    let file = hostile(
+        &dir,
+        "huge",
+        "PRAGMA writable_schema = ON; \
+         WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 199999) \
+         INSERT INTO sqlite_schema \
+         SELECT 'view', 'v' || i, 'v' || i, 0, 'CREATE VIEW v' || i || ' AS SELECT ' || i FROM n;",
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(refused(&file), "its schema has more than 256 objects");
+    let stopped = started.elapsed();
+    let all = Connection::open(&file).unwrap();
+    let started = std::time::Instant::now();
+    all.query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
+        .unwrap();
+    let loaded = started.elapsed();
+    assert!(
+        stopped * 10 < loaded,
+        "stopping took {stopped:?}, loading the whole schema {loaded:?}"
+    );
+    // One statement past the parser's limit.
+    let long = format!(
+        "CREATE TABLE long (x DEFAULT '{}');",
+        "x".repeat(usize::try_from(super::SQL_LENGTH).unwrap())
+    );
+    let file = hostile(&dir, "long", &long);
+    assert!(refused(&file).contains("too big"), "{}", refused(&file));
+    // A value past the reader's limit reads as a damaged entry.
+    let file = hostile(
+        &dir,
+        "big-name",
+        &format!(
+            "UPDATE files SET name = zeroblob({}) WHERE id = 1;",
+            super::VALUE_LENGTH + 1
+        ),
+    );
+    let index = Index::open(&file).unwrap();
+    let _ = index.node(1);
+    assert!(index.failure().unwrap().contains("too big"));
+    // tool_version names a duscope version.
+    for (name, value) in [("no-tool", None), ("odd-tool", Some("evil"))] {
+        let sql = match value {
+            None => "DELETE FROM scan_meta WHERE key = 'tool_version';".to_owned(),
+            Some(v) => format!("UPDATE scan_meta SET value = '{v}' WHERE key = 'tool_version';"),
+        };
+        let file = hostile(&dir, name, &sql);
+        assert!(refused(&file).contains("tool_version"), "{name}");
+    }
+}
+
+#[test]
+fn p2_sec_01_virtual_tables_are_told_from_their_text() {
+    for sql in [
+        "CREATE VIRTUAL TABLE v USING rtree(a)",
+        "create virtual table v using fts5(a)",
+        "CREATE/**/VIRTUAL TABLE v USING x",
+        "CREATE -- c\n VIRTUAL TABLE v USING x",
+        "CREATE\t\r\n\x0cVIRTUAL TABLE v USING x",
+    ] {
+        assert!(super::creates_virtual_table(sql), "{sql:?}");
+    }
+    for sql in [
+        "CREATE TABLE virtual (x)",
+        "CREATE TABLE v (virtual)",
+        "CREATE VIRTUALS TABLE v",
+        "CREATEVIRTUAL TABLE v",
+        "CREATE /* VIRTUAL */ TABLE v (x)",
+        "CREATE -- VIRTUAL\n TABLE v (x)",
+        "CREATE",
+        "",
+    ] {
+        assert!(!super::creates_virtual_table(sql), "{sql:?}");
+    }
+}
+
+#[test]
+fn p2_sec_01_tool_versions_are_versions() {
+    for good in ["0.2.0", "1.10.3", "0.2.0-rc.1", "0.0.0+abc"] {
+        assert!(super::is_version(good), "{good}");
+    }
+    for bad in ["", "0.2", "0.2.0.1", "v0.2.0", "0..1", "a.b.c", "0.2.x"] {
+        assert!(!super::is_version(bad), "{bad}");
+    }
 }

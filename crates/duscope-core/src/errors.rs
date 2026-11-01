@@ -107,4 +107,8 @@ pub enum CoreError {
         /// What is wrong with it.
         message: String,
     },
+    /// An index file outside the index directory that `--trust` does not
+    /// name.
+    #[error("the index {0} is outside the index directory, and --trust does not name it")]
+    UntrustedIndex(String),
 }

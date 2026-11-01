@@ -17,6 +17,7 @@ gix-ignore.workspace = true
 globset.workspace = true
 hmac.workspace = true
 jiff.workspace = true
+log.workspace = true
 quick-xml.workspace = true
 regex.workspace = true
 rusqlite.workspace = true

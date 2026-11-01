@@ -103,6 +103,7 @@ pub fn source(
             cwd: &cwd,
             max_age_ns,
             now,
+            trust: super::trusted(),
         };
         let resolved =
             resolve_scan(&selector, &q, |index| usable(walk, index)).map_err(core_failure)?;
@@ -640,6 +641,10 @@ pub fn core_failure(error: CoreError) -> Failure {
         }
         CoreError::ImportInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())
             .hint("Rerun duscope import with --format naming the tool that wrote the file"),
+        CoreError::UntrustedIndex(ref file) => {
+            let hint = format!("Rerun the command with --trust {file} if you trust the file");
+            Failure::new(Exit::Runtime, "untrusted_index", error.to_string()).hint(hint)
+        }
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
     }
 }

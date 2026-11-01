@@ -98,6 +98,7 @@ impl Lookup {
             cwd: &self.cwd,
             max_age_ns: self.max_age_ns,
             now: self.now,
+            trust: super::trusted(),
         };
         resolve_scan(selector, &q, scanned).map_err(core_failure)
     }
