@@ -1064,6 +1064,47 @@ pub struct DiffEnvelope<'a, V> {
     pub diff: &'a DiffTotals,
 }
 
+/// `schema`'s answer: the index's layout, each table's rows in the saved
+/// scan read (null without one), and the verbs whose envelope
+/// `schema --envelope <verb>` prints.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct SchemaInfo {
+    /// The index version this duscope writes.
+    pub index_version: &'static str,
+    /// Each table, in the layout's order.
+    pub tables: Vec<TableEntry>,
+    /// The verbs with an envelope schema, and `error`.
+    pub envelopes: Vec<&'static str>,
+}
+
+/// A table of the index.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct TableEntry {
+    /// Its name.
+    pub name: String,
+    /// Its columns, in order.
+    pub columns: Vec<ColumnEntry>,
+    /// Its rows in the saved scan; null when none was read.
+    pub rows: Option<u64>,
+}
+
+/// A column of a table.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct ColumnEntry {
+    /// Its name.
+    pub name: String,
+    /// Its declared type (`INTEGER`, `TEXT`, `BLOB`); empty for none.
+    pub r#type: String,
+    /// Whether it may be null.
+    pub nullable: bool,
+    /// The platforms that fill it: `macos`, `linux`.
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "enum": ["macos", "linux"]})))]
+    pub platforms: Vec<&'static str>,
+}
+
 /// What `query` was asked.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]

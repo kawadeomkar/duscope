@@ -235,6 +235,21 @@ impl Index {
         &self.path
     }
 
+    /// The rows of `table`, one of the layout's.
+    pub fn rows(&self, table: &str) -> Result<u64, CoreError> {
+        // The name comes from the built-in layout, never from a user.
+        let count: i64 = self
+            .db
+            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| CoreError::IndexCorrupt {
+                file: self.path.display().to_string(),
+                message: e.to_string(),
+            })?;
+        Ok(unsigned(count))
+    }
+
     /// The connection, for the query plans.
     pub(crate) fn db(&self) -> &Connection {
         &self.db

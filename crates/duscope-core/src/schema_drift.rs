@@ -29,7 +29,8 @@ use serde_json::Value;
 use crate::envelope::{
     ByTypeEntry, CacheEntry, CheckedEntry, DiffEntry, DiffEnvelope, Envelope, ErrorEnvelope,
     Explain, Listing, ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry, ScanErrorEntry,
-    SpilledEnvelope, SqlQueryBlock, SqlResult, StaleEntry, Summary, TopEntry, TreeEntry,
+    SchemaInfo, SpilledEnvelope, SqlQueryBlock, SqlResult, StaleEntry, Summary, TopEntry,
+    TreeEntry,
 };
 
 /// Each envelope schema file: its path under `schemas/`, and the schema derived
@@ -67,6 +68,10 @@ fn derived_schemas() -> Vec<(&'static str, Value)> {
             derive::<ObjectEnvelope<SqlResult, SqlQueryBlock>>(),
         ),
         ("envelope/scans.schema.json", derive::<Listing<ScansRow>>()),
+        (
+            "envelope/schema.schema.json",
+            derive::<ObjectEnvelope<SchemaInfo>>(),
+        ),
         ("envelope/error.schema.json", derive::<ErrorEnvelope>()),
         (
             "envelope/spilled.schema.json",
