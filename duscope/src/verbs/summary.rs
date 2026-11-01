@@ -12,6 +12,7 @@ use duscope_core::envelope::{
 use duscope_core::query::{self, SizeKind};
 
 use super::Failure;
+use super::next::Hints;
 use super::scan;
 use super::source;
 use crate::cli::SummaryArgs;
@@ -99,9 +100,10 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
             source.finished_ns().saturating_sub(source.started_ns()) / 1_000_000,
         )
         .unwrap_or(0),
-        threads: block.thread_count,
+        thread_count: block.thread_count,
     };
     let warnings = source.warnings(&args.walk);
+    let next = next(block.id.as_deref(), &result.path);
     let envelope = ObjectEnvelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
@@ -113,12 +115,25 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
         scan: Some(block),
         result,
         warnings,
-        next: Vec::new(),
+        next,
     };
     source.check()?;
     let lines = people(&envelope.result, output, size);
     output.object(&envelope, &plain(&envelope.result), &lines)?;
     source.finish(&args.walk, output)
+}
+
+/// `summary`'s hints: the largest entries, the classes and the caches
+/// under the path.
+fn next(scan: Option<&str>, path: &str) -> Vec<String> {
+    let Some(mut hints) = Hints::new(scan) else {
+        return Vec::new();
+    };
+    hints
+        .run("top", Some(path), &[])
+        .run("by-type", Some(path), &[])
+        .run("caches", Some(path), &[])
+        .done()
 }
 
 /// A scan block's volume, with the bytes found on it.
@@ -191,7 +206,7 @@ fn people(s: &Summary, output: &Output, size: SizeKind) -> Vec<(String, String)>
         "scan".to_owned(),
         format!(
             "{} · {} ms · {} threads · attrs {}",
-            s.started_at, s.duration_ms, s.threads, s.attrs
+            s.started_at, s.duration_ms, s.thread_count, s.attrs
         ),
     ));
     lines

@@ -173,7 +173,7 @@ impl Found {
     fn removed(&mut self, old: &(impl TreeView + ?Sized), id: u32, q: &DiffQuery, report: bool) {
         let node = old.node(id);
         let bytes = size_of(old, id, q.size);
-        self.totals.entries_removed += entries(&node);
+        self.totals.removed_count += entries(&node);
         self.totals.removed_bytes += bytes;
         if report {
             self.changes.push(Change {
@@ -191,7 +191,7 @@ impl Found {
     fn added(&mut self, new: &(impl TreeView + ?Sized), id: u32, q: &DiffQuery, report: bool) {
         let node = new.node(id);
         let bytes = size_of(new, id, q.size);
-        self.totals.entries_added += entries(&node);
+        self.totals.added_count += entries(&node);
         self.totals.added_bytes += bytes;
         if report {
             self.changes.push(Change {
@@ -219,10 +219,10 @@ impl Found {
         let (old_bytes, new_bytes) = (size_of(old, was, q.size), size_of(new, is, q.size));
         let (was_node, is_node) = (old.node(was), new.node(is));
         if was_node.is_dir() == is_node.is_dir() {
-            self.totals.entries_changed += 1;
+            self.totals.changed_count += 1;
         } else {
-            self.totals.entries_removed += entries(&was_node);
-            self.totals.entries_added += entries(&is_node);
+            self.totals.removed_count += entries(&was_node);
+            self.totals.added_count += entries(&is_node);
             self.totals.removed_bytes += old_bytes;
             self.totals.added_bytes += new_bytes;
         }
@@ -384,7 +384,7 @@ fn pair(
     if ob == nb {
         return;
     }
-    found.totals.entries_changed += 1;
+    found.totals.changed_count += 1;
     if report {
         found.resized(is, ob, nb, q);
     }

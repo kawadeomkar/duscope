@@ -18,9 +18,9 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use duscope_core::envelope::{
-    ByTypeEntry, CacheEntry, CheckedEntry, DiffEntry, DiffTotals, Envelope, ErrorEnvelope, Listing,
-    ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry, ScanErrorEntry, SqlQueryBlock,
-    SqlResult, SqlValue, StaleEntry, TopEntry, TreeEntry, Warning,
+    ByTypeEntry, CacheEntry, CheckedEntry, DiffEntry, DiffEnvelope, DiffTotals, Envelope,
+    ErrorEnvelope, Listing, ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry,
+    ScanErrorEntry, SqlQueryBlock, SqlResult, SqlValue, StaleEntry, TopEntry, TreeEntry, Warning,
 };
 use serde::Serialize;
 
@@ -822,13 +822,6 @@ impl Output {
         totals: Option<&DiffTotals>,
         footer: &str,
     ) -> Result<(), Failure> {
-        /// An envelope and `diff`'s totals, as one JSON object.
-        #[derive(Serialize)]
-        struct WithDiff<'a, V> {
-            #[serde(flatten)]
-            envelope: &'a V,
-            diff: &'a DiffTotals,
-        }
         let verb = envelope.query.command;
         let chosen = self.chosen::<T>(verb)?;
         if let Some(chosen) = &chosen {
@@ -841,7 +834,7 @@ impl Output {
                 let selected = fields::select(envelope, chosen);
                 match totals {
                     Some(diff) => self.json(
-                        &WithDiff {
+                        &DiffEnvelope {
                             envelope: &selected,
                             diff,
                         },
@@ -855,7 +848,7 @@ impl Output {
             }
             (Format::Json, None) => match totals {
                 Some(diff) => self.json(
-                    &WithDiff { envelope, diff },
+                    &DiffEnvelope { envelope, diff },
                     &envelope.entries,
                     &envelope.warnings,
                     scan,

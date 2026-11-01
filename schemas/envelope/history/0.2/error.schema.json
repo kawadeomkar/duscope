@@ -1,0 +1,122 @@
+{
+  "$defs": {
+    "ErrorObject": {
+      "description": "The conventions' error object.",
+      "properties": {
+        "code": {
+          "description": "The error code (`scan_not_found`, `permission_denied`, …).",
+          "enum": [
+            "usage",
+            "scan_not_found",
+            "invalid_cursor",
+            "unknown_field",
+            "attrs_not_collected",
+            "incompatible_scans",
+            "confirmation_required",
+            "expectation_mismatch",
+            "refused_path",
+            "handle_invalid",
+            "handle_expired",
+            "trash_unavailable",
+            "path_changed",
+            "untrusted_index",
+            "not_compiled",
+            "not_available",
+            "deadline_exceeded",
+            "index_version_mismatch",
+            "index_corrupt",
+            "index_write_failed",
+            "index_stale",
+            "sql_denied",
+            "sql_timeout",
+            "io_error",
+            "permission_denied",
+            "interrupted"
+          ],
+          "type": "string"
+        },
+        "fixable_by": {
+          "description": "Who can fix it: `user`, `agent` or `none`.",
+          "enum": [
+            "user",
+            "agent",
+            "none"
+          ],
+          "type": "string"
+        },
+        "hint": {
+          "description": "One imperative sentence naming a command; null when none helps.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "One sentence.",
+          "type": "string"
+        },
+        "retryable": {
+          "description": "Whether the same command may succeed if run again.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "hint",
+        "retryable",
+        "fixable_by"
+      ],
+      "type": "object"
+    },
+    "Tool": {
+      "description": "The program that wrote an envelope.",
+      "properties": {
+        "name": {
+          "const": "duscope",
+          "description": "Always `duscope`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The release, as `duscope --version` prints it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "error.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A failure, as `--json` prints it.",
+  "properties": {
+    "error": {
+      "$ref": "#/$defs/ErrorObject",
+      "description": "What went wrong."
+    },
+    "ok": {
+      "description": "Always false.",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "description": "The version of the envelope's shape.",
+      "type": "string"
+    },
+    "tool": {
+      "$ref": "#/$defs/Tool",
+      "description": "The program."
+    }
+  },
+  "required": [
+    "ok",
+    "schema_version",
+    "tool",
+    "error"
+  ],
+  "title": "ErrorEnvelope",
+  "type": "object",
+  "x-since": "0.2"
+}

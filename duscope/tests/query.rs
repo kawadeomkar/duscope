@@ -54,7 +54,14 @@ fn tree(env: &TestEnv, name: &str) -> PathBuf {
 fn save(env: &TestEnv, root: &Path) {
     ok(&run(
         env,
-        &["scan", root.to_str().unwrap(), "--save", "--json"],
+        &[
+            "scan",
+            root.to_str().unwrap(),
+            "--save",
+            "--json",
+            "--threads",
+            "4",
+        ],
     ));
 }
 
@@ -75,6 +82,32 @@ fn p2_qry_07_golden_of_plain_on_a_tree() {
     golden(
         "query_plain_largest.snap",
         &String::from_utf8(out.stdout).unwrap(),
+    );
+    // The envelope, and a refusal's.
+    let out = run(
+        &env,
+        &["query", root.to_str().unwrap(), "--sql", LARGEST, "--json"],
+    );
+    assert!(out.status.success());
+    let os = std::env::consts::OS;
+    golden(
+        &format!("query_json_largest@{os}.snap"),
+        &duscope_testkit::normalize(&String::from_utf8(out.stdout).unwrap(), &root),
+    );
+    let out = run(
+        &env,
+        &[
+            "query",
+            root.to_str().unwrap(),
+            "--sql",
+            "DELETE FROM files",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    golden(
+        "error_json_sql_denied.snap",
+        &duscope_testkit::normalize(&String::from_utf8(out.stdout).unwrap(), &root),
     );
 }
 
