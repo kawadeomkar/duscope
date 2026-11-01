@@ -50,6 +50,9 @@ pub struct Scanned {
     pub started_ns: i64,
     /// When it finished.
     pub finished_ns: i64,
+    /// The saved scan this one scans again (`rescan`); `None` for a fresh
+    /// scan.
+    pub parent: Option<ScanId>,
 }
 
 /// What the volume mounted at the root uses that the scan did not find,
@@ -265,7 +268,7 @@ pub fn save(
         excluded_count: scanned.summary.excluded,
         clones_unavailable: scanned.summary.clones_unavailable,
         incremental: false,
-        parent_scan_id: None,
+        parent_scan_id: scanned.parent.as_ref().map(ToString::to_string),
         source: "scan".to_owned(),
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
@@ -520,6 +523,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         clones_asked: walk_args.clones,
         started_ns,
         finished_ns: now(walk_args)?,
+        parent: None,
     };
     phases(&scanned, walk_time, rollup_time);
     Ok(scanned)
@@ -971,6 +975,7 @@ mod tests {
             clones_asked: false,
             started_ns: 0,
             finished_ns: 0,
+            parent: None,
         }
     }
 
@@ -1028,6 +1033,7 @@ mod tests {
             clones_asked: false,
             started_ns: 0,
             finished_ns: 0,
+            parent: None,
         };
         let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
         else {

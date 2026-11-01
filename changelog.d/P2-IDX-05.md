@@ -1,0 +1,2 @@
+### Added
+- `rescan [path]` scans a saved scan's root again with the options it was scanned with (excludes, `-x`, clones, links, attributes, threads, size), and saves the result as a new index whose `parent_scan_id` names the old one, which stays until `scans --prune`; queries then read the new one. `--scan` names the saved scan; `--full` is what every rescan does until the incremental one arrives, and `--incremental` answers `not_available` until then.
