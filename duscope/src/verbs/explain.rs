@@ -2,12 +2,15 @@
 //! it (or `--scan`), else from a fresh `stat`; and with `--errors`, what a
 //! saved scan could not read.
 
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use duscope_core::envelope::{
     Envelope, Explain, ObjectEnvelope, ObjectQuery, QueryBlock, SCHEMA_VERSION, ScanBlock,
     ScanErrorEntry, Tool,
 };
+use duscope_core::handle::{Handle, HandlePayload, Key, LIFETIME_NS};
 use duscope_core::index::Index;
 use duscope_core::query::{
     ExplainQuery, Resolved, ScanQuery, ScanSelector, SizeKind, abs_path, clock, explain,
@@ -157,6 +160,8 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
             Vec::new(),
         ),
     };
+    let mut result = result;
+    result.handle = handle(&lookup, &path, &result, scan.as_ref());
     let path = path.to_string_lossy().into_owned();
     let next = next(scan.as_ref(), file.as_deref(), &path, result.kind);
     let envelope = ObjectEnvelope {
@@ -174,6 +179,37 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
     };
     let lines = people(&envelope.result, output);
     output.object(&envelope, &plain(&envelope.result), &lines)
+}
+
+/// A handle for `path` as `explain` found it: its device and inode now
+/// (`lstat`: the path itself, not what a link leads to), its bytes on disk
+/// in `result`, the scan, fifteen minutes from now; signed with the key in
+/// the index directory. None where the path is gone or the key cannot be
+/// read or made, which a warning in the log says.
+fn handle(
+    lookup: &Lookup,
+    path: &Path,
+    result: &Explain,
+    scan: Option<&ScanBlock>,
+) -> Option<String> {
+    let dir = lookup.dir.as_deref()?;
+    let found = std::fs::symlink_metadata(path).ok()?;
+    let key = match Key::open(dir) {
+        Ok(key) => key,
+        Err(e) => {
+            log::warn!("no handle: {e}");
+            return None;
+        }
+    };
+    let payload = HandlePayload {
+        path: path.as_os_str().as_bytes().to_vec(),
+        dev: found.dev(),
+        ino: found.ino(),
+        allocated: result.allocated_bytes,
+        scan_id: scan.and_then(|s| s.id.clone()).unwrap_or_default(),
+        expires_at: lookup.now.saturating_add(LIFETIME_NS),
+    };
+    Some(Handle::issue(&key, &payload))
 }
 
 /// `explain`'s hints: what the scan could not read, when it could not

@@ -381,6 +381,13 @@
             "integer",
             "null"
           ]
+        },
+        "handle": {
+          "description": "A handle for `clean --from`: base64url of what `explain` found\n(the path, its device and inode, its bytes on disk, the scan, an\nexpiry fifteen minutes on) and their HMAC; null where none could be\nissued (the path is gone, or the key cannot be read).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -410,7 +417,8 @@
         "git",
         "flags",
         "confidence",
-        "evidence"
+        "evidence",
+        "handle"
       ],
       "type": "object"
     },

@@ -149,6 +149,7 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
         flags: flag_names(&node),
         confidence,
         evidence,
+        handle: None,
     })
 }
 
@@ -272,6 +273,7 @@ pub fn explain_unindexed(path: &Path, q: &ExplainQuery<'_>) -> Result<Explain, C
         flags: Vec::new(),
         confidence: "low",
         evidence,
+        handle: None,
     })
 }
 
