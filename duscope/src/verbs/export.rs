@@ -17,7 +17,7 @@ use clap::ValueEnum;
 
 use duscope_core::CoreError;
 use duscope_core::interchange::{flat, gpscan, ncdu, qdirstat};
-use duscope_core::query::{TreeView, clock};
+use duscope_core::query::TreeView;
 use duscope_walk::Attrs;
 
 use super::source::{self, core_failure};
@@ -93,7 +93,7 @@ pub fn run(
             FormatArg::Ncdu => {
                 let opts = ncdu::NcduOpts {
                     progver: version,
-                    timestamp: clock::now().div_euclid(1_000_000_000),
+                    timestamp: index.meta().started_at.div_euclid(1_000_000_000),
                 };
                 ncdu::write(index, base, &opts, out)
             }
