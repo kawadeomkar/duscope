@@ -556,6 +556,30 @@ pub fn abs_path(view: &(impl TreeView + ?Sized), id: u32) -> Vec<u8> {
     path
 }
 
+/// `bytes` in the largest unit of `base` it reaches (`units` from bytes
+/// up), with one decimal; below the first step, a whole number of bytes. A
+/// value that rounds up to the next unit is shown in it (`1.0 MiB`, not
+/// `1024.0 KiB`).
+pub fn scaled(bytes: u64, base: u64, units: &[&str]) -> String {
+    let mut unit = 0;
+    let mut divisor = 1u128;
+    while u128::from(bytes) >= divisor * u128::from(base) && unit + 1 < units.len() {
+        divisor *= u128::from(base);
+        unit += 1;
+    }
+    if unit == 0 {
+        return format!("{bytes} {}", units[0]);
+    }
+    // One decimal from integer arithmetic: tenths of the unit, rounded.
+    let mut tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
+    if tenths >= u128::from(base) * 10 && unit + 1 < units.len() {
+        divisor *= u128::from(base);
+        unit += 1;
+        tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
+    }
+    format!("{}.{} {}", tenths / 10, tenths % 10, units[unit])
+}
+
 /// `part` as a percentage of `whole`, with one decimal.
 pub fn pct(part: u64, whole: u64) -> f64 {
     if whole == 0 {

@@ -31,7 +31,9 @@ use rusqlite::limits::Limit;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 
-use super::{TreeView, abs_path};
+use std::os::unix::ffi::OsStrExt;
+
+use super::{TreeView, scaled};
 use crate::CoreError;
 use crate::envelope::{SqlResult, SqlValue};
 use crate::index::Index;
@@ -72,6 +74,11 @@ pub const TABLES: [&str; 9] = [
     "scan_errors",
     "type_stats",
 ];
+
+/// The prefixes of `SQLite`'s own tables and of the table-valued functions
+/// it registers when a statement first names them (`json_each`), which no
+/// module list shows before then.
+const SQLITE_NAMESPACES: [&str; 4] = ["sqlite_", "pragma_", "json_", "jsonb_"];
 
 /// The functions a statement may call: `SQLite`'s core scalars and
 /// aggregates (and their other names), its date and time functions, its
@@ -193,9 +200,9 @@ pub struct SqlQuery<'a> {
 /// The rows `q.sql` returns from `index`, in the sandbox.
 pub fn sql(index: &Index, q: &SqlQuery<'_>) -> Result<SqlResult, CoreError> {
     let deadline = Instant::now() + q.timeout;
-    let (body, _) = statement(q.sql);
-    let limit = limit(q.sql, q.max_rows);
-    let db = sandbox(index)?;
+    let (body, limited) = statement(q.sql);
+    let limit = limit(limited, q.max_rows);
+    let (db, reader) = sandbox(index)?;
     // Why the authorizer denied what it denied first: SQLite says only
     // "not authorized".
     let refused: Arc<Mutex<Option<String>>> = Arc::default();
@@ -219,6 +226,13 @@ pub fn sql(index: &Index, q: &SqlQuery<'_>) -> Result<SqlResult, CoreError> {
             "the statement is empty: give query one SELECT".to_owned(),
         ));
     }
+    // The statement's own names: the wrapper's `*` would rename a second
+    // `id` to `id:1`.
+    let columns: Vec<String> = alone
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     drop(alone);
     // A line of its own each side, so that a comment at the statement's
     // end ends before the wrapper's parenthesis.
@@ -230,7 +244,6 @@ pub fn sql(index: &Index, q: &SqlQuery<'_>) -> Result<SqlResult, CoreError> {
             stmt.raw_bind_parameter(at, value).map_err(fail)?;
         }
     }
-    let columns: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
     db.progress_handler(PROGRESS_OPS, Some(move || Instant::now() >= deadline))
         .map_err(|e| setup(index, &e))?;
     let mut rows: Vec<Vec<SqlValue>> = Vec::new();
@@ -260,27 +273,58 @@ pub fn sql(index: &Index, q: &SqlQuery<'_>) -> Result<SqlResult, CoreError> {
         }
         rows.push(values);
     }
+    drop(cursor);
+    // What `path` and `under` could not read, they answered wrongly.
+    let failed = reader
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .failure();
+    if let Some(message) = failed {
+        return Err(if message.contains("out of memory") {
+            memory()
+        } else {
+            CoreError::IndexCorrupt {
+                file: index.file().display().to_string(),
+                message,
+            }
+        });
+    }
     Ok(SqlResult {
         columns,
         row_count: rows.len() as u64,
         rows,
         truncated,
+        limit: limit as u64,
+        limited,
     })
 }
 
-/// The rows `sql` returns at most under `--max-rows`: `max_rows` when it
-/// has a `LIMIT` of its own, 25 (or `max_rows`, if lower) when it has not.
-pub fn limit(sql: &str, max_rows: usize) -> usize {
-    if statement(sql).1 {
+/// The rows a statement returns at most under `--max-rows`: `max_rows`
+/// when it has a `LIMIT` of its own (`limited`), 25 (or `max_rows`, if
+/// lower) when it has not.
+fn limit(limited: bool, max_rows: usize) -> usize {
+    if limited {
         max_rows
     } else {
         DEFAULT_LIMIT.min(max_rows)
     }
 }
 
+/// `sql_denied` for a statement that outgrew the heap limit.
+fn memory() -> CoreError {
+    CoreError::SqlDenied(format!(
+        "the statement needed more than the {} MiB of memory query allows",
+        HEAP_LIMIT >> 20
+    ))
+}
+
+/// The index the functions read through, shared by them.
+type Reader = Arc<Mutex<Index>>;
+
 /// The sandbox's connection to `index`'s file, duscope's functions
-/// registered, with neither the authorizer nor the deadline yet.
-fn sandbox(index: &Index) -> Result<Connection, CoreError> {
+/// registered, with neither the authorizer nor the deadline yet; and the
+/// index the functions read through.
+fn sandbox(index: &Index) -> Result<(Connection, Reader), CoreError> {
     let db = Connection::open_with_flags(
         uri(index.file()),
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -310,7 +354,7 @@ fn sandbox(index: &Index) -> Result<Connection, CoreError> {
     .map_err(|e| setup(index, &e))?;
     // The functions read the index through a connection of their own,
     // without the sandbox's limits: what they read is duscope's to decide.
-    let reader = Arc::new(Mutex::new(Index::open(index.file())?));
+    let reader: Reader = Arc::new(Mutex::new(Index::open(index.file())?));
     let flags = FunctionFlags::SQLITE_UTF8
         | FunctionFlags::SQLITE_DETERMINISTIC
         | FunctionFlags::SQLITE_DIRECTONLY;
@@ -320,8 +364,9 @@ fn sandbox(index: &Index) -> Result<Connection, CoreError> {
         Ok(id_arg(ctx, 0, &index).and_then(|id| path(&index, id)))
     })
     .map_err(|e| setup(index, &e))?;
+    let ranges = Arc::clone(&reader);
     db.create_scalar_function("under", 2, flags, move |ctx| {
-        let index = reader.lock().unwrap_or_else(PoisonError::into_inner);
+        let index = ranges.lock().unwrap_or_else(PoisonError::into_inner);
         let (Some(id), Some(root)) = (int_arg(ctx, 0), id_arg(ctx, 1, &index)) else {
             return Ok(None);
         };
@@ -330,20 +375,31 @@ fn sandbox(index: &Index) -> Result<Connection, CoreError> {
     })
     .map_err(|e| setup(index, &e))?;
     db.create_scalar_function("human_size", 1, flags, |ctx| {
-        Ok(int_arg(ctx, 0).map(|bytes| {
-            let size = human_size(bytes.unsigned_abs());
-            if bytes < 0 { format!("-{size}") } else { size }
-        }))
+        let bytes = match ctx.get_raw(0) {
+            ValueRef::Integer(n) => n,
+            // An average or a total: the nearest whole byte.
+            ValueRef::Real(x) if x.is_finite() => whole(x),
+            _ => return Ok(None),
+        };
+        let size = human_size(bytes.unsigned_abs());
+        Ok(Some(if bytes < 0 { format!("-{size}") } else { size }))
     })
     .map_err(|e| setup(index, &e))?;
-    Ok(db)
+    Ok((db, reader))
 }
 
-/// What `index`'s file holds, read before the authorizer, which denies
-/// reads of `sqlite_schema`.
+/// `x` rounded to the nearest integer, saturating past `i64`'s range.
+#[allow(clippy::cast_possible_truncation)]
+fn whole(x: f64) -> i64 {
+    x.round() as i64
+}
+
+/// What `index`'s file holds, and the virtual-table modules a statement
+/// could name as tables (`json_each`), read before the authorizer, which
+/// denies reads of `sqlite_schema` and every `PRAGMA`.
 #[derive(Debug, Default)]
 struct Schema {
-    /// Every table, index, view and trigger.
+    /// Every table, index, view and trigger, and every module.
     names: Vec<String>,
     /// The views and triggers: what reads through them is theirs, not the
     /// statement's.
@@ -365,6 +421,14 @@ fn schema(index: &Index, db: &Connection) -> Result<Schema, CoreError> {
         }
         schema.names.push(name);
     }
+    let mut modules = db
+        .prepare("SELECT name FROM pragma_module_list")
+        .map_err(|e| setup(index, &e))?;
+    let modules: Vec<String> = modules
+        .query_map([], |row| row.get(0))
+        .and_then(Iterator::collect)
+        .map_err(|e| setup(index, &e))?;
+    schema.names.extend(modules);
     Ok(schema)
 }
 
@@ -391,18 +455,20 @@ fn authorize(
             let allowed = if column_name.is_empty() {
                 // A table the statement reads none of the columns of
                 // (`count(*)`), by the name it gives: one of the index's,
-                // or a name the file holds nothing under (a common table
-                // expression's). It reads no values either way.
+                // or a name neither the file nor a module holds anything
+                // under (a common table expression's). It reads no values
+                // either way.
                 let named = |name: &str| name.eq_ignore_ascii_case(table_name);
                 direct
                     && ctx
                         .database_name
                         .is_none_or(|db| db.eq_ignore_ascii_case("main"))
                     && (TABLES.iter().any(|t| named(t))
-                        || !(table_name
-                            .get(..7)
-                            .is_some_and(|p| p.eq_ignore_ascii_case("sqlite_"))
-                            || schema.names.iter().any(|s| named(s))))
+                        || !(SQLITE_NAMESPACES.iter().any(|prefix| {
+                            table_name
+                                .get(..prefix.len())
+                                .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+                        }) || schema.names.iter().any(|s| named(s))))
             } else {
                 direct && ctx.database_name == Some("main") && TABLES.contains(&table_name)
             };
@@ -454,10 +520,13 @@ fn statement(sql: &str) -> (&str, bool) {
                 at += rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
             }
             b'/' if rest.starts_with(b"/*") => {
-                at += rest[2..]
-                    .windows(2)
-                    .position(|w| w == b"*/")
-                    .map_or(rest.len(), |end| end + 4);
+                match rest[2..].windows(2).position(|w| w == b"*/") {
+                    Some(end) => at += end + 4,
+                    // A comment `SQLite` ends at the end of the input
+                    // would swallow the wrapper's parenthesis: the
+                    // statement ends where it starts.
+                    None => return (&sql[..at], limited),
+                }
             }
             quote @ (b'\'' | b'"' | b'`' | b'[') => {
                 let close = if quote == b'[' { b']' } else { quote };
@@ -539,15 +608,23 @@ fn id_arg(ctx: &Context<'_>, at: usize, index: &Index) -> Option<u32> {
 /// `None` where the parents do not reach the root within the scan's
 /// entries, as in a damaged index.
 fn path(index: &Index, id: u32) -> Option<Value> {
+    let mut names: Vec<Vec<u8>> = Vec::new();
     let mut at = id;
     for _ in 0..index.len() {
         if at == 0 {
-            let path = abs_path(index, id);
+            let mut path = index.root_path().as_os_str().as_bytes().to_vec();
+            for name in names.iter().rev() {
+                if path.last() != Some(&b'/') {
+                    path.push(b'/');
+                }
+                path.extend_from_slice(name);
+            }
             return Some(match String::from_utf8(path) {
                 Ok(text) => Value::Text(text),
                 Err(e) => Value::Blob(e.into_bytes()),
             });
         }
+        names.push(index.name(at).into_owned());
         at = index.node(at).parent;
     }
     None
@@ -557,23 +634,11 @@ fn path(index: &Index, id: u32) -> Option<Value> {
 /// (`412.3 GiB`; `999 B` below a KiB). A value that rounds up to the next
 /// unit is shown in it (`1.0 MiB`, not `1024.0 KiB`).
 pub fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
-    let mut unit = 0;
-    let mut divisor = 1u128;
-    while u128::from(bytes) >= divisor * 1024 && unit + 1 < UNITS.len() {
-        divisor *= 1024;
-        unit += 1;
-    }
-    if unit == 0 {
-        return format!("{bytes} B");
-    }
-    let mut tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
-    if tenths >= 10_240 && unit + 1 < UNITS.len() {
-        divisor *= 1024;
-        unit += 1;
-        tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
-    }
-    format!("{}.{} {}", tenths / 10, tenths % 10, UNITS[unit])
+    scaled(
+        bytes,
+        1024,
+        &["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"],
+    )
 }
 
 /// A failure setting the sandbox up on `index`: its file is not one `SQLite`
@@ -613,10 +678,7 @@ fn failure(e: &rusqlite::Error, refused: &Mutex<Option<String>>, timeout: Durati
     match code {
         Some(ErrorCode::AuthorizationForStatementDenied) => CoreError::SqlDenied(message),
         Some(ErrorCode::OperationInterrupted) => CoreError::SqlTimeout(timeout.as_secs()),
-        Some(ErrorCode::OutOfMemory) => CoreError::SqlDenied(format!(
-            "the statement needed more than the {} MiB of memory query allows",
-            HEAP_LIMIT >> 20
-        )),
+        Some(ErrorCode::OutOfMemory) => memory(),
         Some(ErrorCode::TooBig) => CoreError::SqlDenied(format!(
             "a value passed the {} bytes query allows",
             LIMITS[0].1

@@ -287,4 +287,41 @@ fn p2_qry_07_people_get_a_table_and_a_footer() {
         lines.last().unwrap().starts_with("4 rows · saved scan "),
         "{text}"
     );
+    // The footer names what gets more rows.
+    let out = run(
+        &env,
+        &[
+            "query",
+            root.to_str().unwrap(),
+            "--sql",
+            "SELECT id FROM files",
+            "--max-rows",
+            "2",
+            "--format",
+            "table",
+        ],
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.lines()
+            .last()
+            .unwrap()
+            .starts_with("2 rows, the limit of 2: raise --max-rows for more · "),
+        "{text}"
+    );
+    // A floating-point value reads as the JSON writes it.
+    let out = run(
+        &env,
+        &[
+            "query",
+            root.to_str().unwrap(),
+            "--sql",
+            "SELECT 3.0 AS x, 1e300 AS y, 9e999 AS z",
+            "--plain",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "x\ty\tz\n3.0\t1e+300\t\n"
+    );
 }

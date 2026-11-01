@@ -173,7 +173,8 @@ fn p2_qry_07_path_under_and_human_size() {
         &index,
         &query(&format!(
             "SELECT path({w}), path(0), under({w}, {c}), under({w}, {a}), \
-             human_size(1536), human_size(-1536), human_size(999), path(99999), under({w}, 99999)"
+             human_size(1536), human_size(-1536), human_size(999), path(99999), under({w}, 99999), \
+             human_size(1536.4), human_size('1536')"
         )),
     )
     .unwrap();
@@ -189,8 +190,17 @@ fn p2_qry_07_path_under_and_human_size() {
             SqlValue::Text("999 B".to_owned()),
             SqlValue::Null,
             SqlValue::Null,
+            SqlValue::Text("1.5 KiB".to_owned()),
+            SqlValue::Null,
         ]]
     );
+    // An average is a size too.
+    let got = sql(
+        &index,
+        &query("SELECT human_size(avg(apparent)) FROM files WHERE apparent >= 1024"),
+    )
+    .unwrap();
+    assert_eq!(got.rows, [vec![SqlValue::Text("20.5 KiB".to_owned())]]);
     // A path that is not UTF-8 is bytes.
     let got = sql(
         &index,
@@ -281,6 +291,8 @@ fn p2_qry_07_adversarial_statements_are_refused_with_their_codes() {
         ("BEGIN", Refusal::Denied),
         ("SAVEPOINT s", Refusal::Denied),
         ("SELECT * FROM sqlite_master", Refusal::Denied),
+        ("SELECT count(*) FROM json_each('[1, 2]')", Refusal::Denied),
+        ("SELECT count(*) FROM pragma_module_list", Refusal::Denied),
         ("SELECT count(*) FROM sqlite_schema", Refusal::Denied),
         ("SELECT name FROM temp.sqlite_master", Refusal::Denied),
         (
@@ -366,10 +378,29 @@ fn p2_qry_07_common_table_expressions_joins_and_counts_read_the_tables() {
             "SELECT count(*) FROM files a, files b WHERE a.id = b.id",
             42,
         ),
+        // A comment SQLite ends at the end of the input.
+        ("SELECT count(*) FROM files /* to the end", 42),
+        ("SELECT count(*) FROM files -- to the end", 42),
     ] {
         let got = sql(&index, &query(statement)).unwrap();
         assert_eq!(ints(&got.rows), [expected], "{statement}");
     }
+}
+
+#[test]
+fn p2_qry_07_columns_keep_the_names_the_statement_gives() {
+    let env = TestEnv::new();
+    let index = Index::open(&index(&env)).unwrap();
+    let got = sql(
+        &index,
+        &query(
+            "SELECT d.id, f.id, 2 AS x, 3 AS x FROM dirs d \
+             JOIN files f ON f.parent_id = d.id LIMIT 1",
+        ),
+    )
+    .unwrap();
+    assert_eq!(got.columns, ["id", "id", "x", "x"]);
+    assert_eq!(got.rows[0].len(), 4);
 }
 
 #[test]

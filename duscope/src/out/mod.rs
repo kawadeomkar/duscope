@@ -27,6 +27,12 @@ use serde::Serialize;
 pub use args::{ColorWhen, FormatArg, OutputArgs};
 pub use fields::Fields;
 
+/// A floating-point value as the JSON writes it (`3.0`, `1e300`); empty
+/// for one the JSON writes as null.
+fn real(x: f64) -> String {
+    serde_json::Number::from_f64(x).map_or_else(String::new, |n| n.to_string())
+}
+
 /// Writes `bytes` to stdout as they are (the treemap's escapes and
 /// cells); a closed pipe ends the output quietly.
 pub fn emit_bytes(bytes: &[u8]) -> Result<(), Failure> {
@@ -705,7 +711,7 @@ impl Output {
                         .map(|value| match value {
                             SqlValue::Null => Cow::Borrowed(&b""[..]),
                             SqlValue::Integer(n) => Cow::Owned(n.to_string().into_bytes()),
-                            SqlValue::Real(x) => Cow::Owned(x.to_string().into_bytes()),
+                            SqlValue::Real(x) => Cow::Owned(real(*x).into_bytes()),
                             SqlValue::Text(text) => Cow::Borrowed(text.as_bytes()),
                             SqlValue::Bytes(bytes) => Cow::Borrowed(bytes.as_slice()),
                         })
@@ -728,7 +734,7 @@ impl Output {
                             .map(|value| match value {
                                 SqlValue::Null => String::new(),
                                 SqlValue::Integer(n) => n.to_string(),
-                                SqlValue::Real(x) => x.to_string(),
+                                SqlValue::Real(x) => real(*x),
                                 SqlValue::Text(text) => printable(text).into_owned(),
                                 SqlValue::Bytes(bytes) => {
                                     printable(&String::from_utf8_lossy(bytes)).into_owned()
