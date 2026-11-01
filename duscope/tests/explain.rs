@@ -6,6 +6,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -69,6 +70,8 @@ fn p2_qry_04_goldens_for_each_kind_of_fact() {
     let id = saved["scan"]["id"].as_str().unwrap().to_owned();
     let loose = env.tmp_dir().join("loose.txt");
     fs::write(&loose, b"not in any scan").unwrap();
+    // Its mode, whatever the umask (the golden shows it).
+    fs::set_permissions(&loose, fs::Permissions::from_mode(0o644)).unwrap();
     let os = std::env::consts::OS;
     let cases: [(&str, PathBuf); 7] = [
         ("hard_link", root.join("cases/hard-links/a/original.bin")),
