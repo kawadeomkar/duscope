@@ -152,7 +152,9 @@ fn parent(args: &RescanArgs, dir: &Path) -> Result<Parent, Failure> {
         max_age_ns: i64::MAX,
         now: clock::now(),
     };
-    let resolved = resolve_scan(&selector, &q, |_| true).map_err(core_failure)?;
+    // An imported tree has no scan options: latest passes it over.
+    let resolved =
+        resolve_scan(&selector, &q, |index| index.meta().source == "scan").map_err(core_failure)?;
     let index = resolved.map(|r| r.index).ok_or_else(|| {
         Failure::new(
             Exit::NotFound,
@@ -161,6 +163,21 @@ fn parent(args: &RescanArgs, dir: &Path) -> Result<Parent, Failure> {
         )
         .hint(format!("Run duscope scan --save {} first", path.display()))
     })?;
+    let source = &index.meta().source;
+    if source != "scan" {
+        return Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            format!(
+                "saved scan {} is an import ({source}), which has no scan options to scan with again",
+                index.meta().scan_id
+            ),
+        )
+        .hint(format!(
+            "Run duscope scan --save {} to scan the tree here",
+            index.root_path().display()
+        )));
+    }
     let (options, attrs) = rescan::options(&index).map_err(core_failure)?;
     Ok(Parent {
         id: index.meta().scan_id.clone(),

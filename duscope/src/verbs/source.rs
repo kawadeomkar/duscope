@@ -143,8 +143,12 @@ pub fn source(
 
 /// Whether `index` holds the tree a scan with `walk`'s options would: the
 /// same excludes, filesystems, clone and link handling, and the attributes
-/// the verb may ask for.
+/// the verb may ask for. An imported tree, which another tool read, is
+/// read only when `--scan` names it.
 fn usable(walk: &WalkArgs, index: &Index) -> bool {
+    if index.meta().source != "scan" {
+        return false;
+    }
     let content = |options: &str| {
         let mut value: serde_json::Value = serde_json::from_str(options).unwrap_or_default();
         if let Some(map) = value.as_object_mut() {
@@ -620,6 +624,8 @@ pub fn core_failure(error: CoreError) -> Failure {
             .hint("Rerun duscope query with a narrower statement, or a --timeout up to 60"),
         CoreError::SqlInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())
             .hint("Run duscope schema to list the tables and their columns"),
+        CoreError::ImportInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())
+            .hint("Rerun duscope import with --format naming the tool that wrote the file"),
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
     }
 }

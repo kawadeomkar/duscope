@@ -325,7 +325,7 @@ stays 0; bits 9 to 11 are set on directories only, and bit 12 on files only.
 | `n_entries` | INTEGER | rows in `dirs` and `files` together |
 | `incremental` | INTEGER | 1 when an incremental rescan wrote the file |
 | `parent_scan_id` | TEXT | the scan a rescan started from; NULL for a fresh scan |
-| `source` | TEXT | `scan`, or `import:<format>` for an imported tree |
+| `source` | TEXT | `scan`, or `import:ncdu`, `import:gdu` or `import:gpscan` for a tree `import` read from another tool's file; the list verbs read an import only where `--scan` names it |
 | `tool_version` | TEXT | the duscope version that wrote the file |
 | `sibling_order` | TEXT | how siblings are ordered: `bytewise` |
 
