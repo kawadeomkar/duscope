@@ -14,6 +14,7 @@ pub mod diff;
 pub mod explain;
 pub mod plan;
 pub mod resolve;
+pub mod sql;
 mod stale;
 pub mod summary;
 pub mod timegrammar;
@@ -51,6 +52,7 @@ pub use regex::bytes::Regex;
 pub use resolve::{
     Resolved, ScanQuery, ScanSelector, index_files, resolve_scan, short_id, shortest_prefix, under,
 };
+pub use sql::{SqlQuery, human_size, sql};
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
 pub use summary::{SummaryBytes, VolumeBytes, VolumeRoot, VolumeUse, shares, summary, unaccounted};
 pub use top::{TopQuery, top};
