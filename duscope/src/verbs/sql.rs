@@ -45,9 +45,10 @@ pub fn run(args: &SqlArgs, index_dir: Option<&Path>, output: &Output) -> Result<
                 let label = format!("saved as {}", short_id(dir, id.as_str()));
                 (id.clone(), dir.clone(), label)
             } else {
+                let id = scan::scan_id(scanned)?;
                 let dir = scratch_dir()?;
                 scratch = Some(dir.clone());
-                (scan::scan_id(scanned)?, dir, "not saved".to_owned())
+                (id, dir, "not saved".to_owned())
             };
             let saved = scan::save(scanned, &args.walk, &[], &id, Some(&dir), output, false)
                 .and_then(|()| Index::open(&index_path(&dir, &id)).map_err(core_failure));
@@ -73,8 +74,7 @@ pub fn run(args: &SqlArgs, index_dir: Option<&Path>, output: &Output) -> Result<
     remove(scratch.as_deref());
     let result = answer.map_err(core_failure)?;
     checked?;
-    let limit = sql::limit(&args.sql, max_rows);
-    let footer = footer(&result, limit, &scan_label);
+    let footer = footer(&result, max_rows, &scan_label);
     let envelope = ObjectEnvelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
@@ -84,7 +84,7 @@ pub fn run(args: &SqlArgs, index_dir: Option<&Path>, output: &Output) -> Result<
             command: "query",
             path,
             sql: args.sql.clone(),
-            limit: limit as u64,
+            limit: result.limit,
             max_rows: max_rows as u64,
             timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
         },
@@ -136,19 +136,27 @@ fn remove(scratch: Option<&Path>) {
     }
 }
 
-/// The one line for people: the rows, whether the limit cut them, and the
-/// scan.
-fn footer(result: &SqlResult, limit: usize, scan: &str) -> String {
+/// The one line for people: the rows, whether the limit cut them and what
+/// gets more, and the scan.
+fn footer(result: &SqlResult, max_rows: usize, scan: &str) -> String {
     let rows = match result.row_count {
         1 => "1 row".to_owned(),
         n => format!("{} rows", thousands(n)),
     };
-    if result.truncated {
-        format!(
-            "{rows}, the limit of {}: add a LIMIT or --max-rows for more · {scan}",
-            thousands(limit as u64)
-        )
-    } else {
-        format!("{rows} · {scan}")
+    if !result.truncated {
+        return format!("{rows} · {scan}");
     }
+    let more = if result.limited && max_rows < sql::MAX_ROWS {
+        "raise --max-rows for more"
+    } else if result.limited {
+        "narrow the statement: 10,000 rows is the most query returns"
+    } else if result.limit < max_rows as u64 {
+        "add a LIMIT for more"
+    } else {
+        "raise --max-rows for more"
+    };
+    format!(
+        "{rows}, the limit of {}: {more} · {scan}",
+        thousands(result.limit)
+    )
 }

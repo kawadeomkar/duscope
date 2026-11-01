@@ -899,6 +899,12 @@ pub struct SqlResult {
     pub row_count: u64,
     /// Whether the statement had rows past the limit.
     pub truncated: bool,
+    /// The most rows the answer could hold, which the query block says.
+    #[serde(skip)]
+    pub limit: u64,
+    /// Whether the statement had a `LIMIT` of its own.
+    #[serde(skip)]
+    pub limited: bool,
 }
 
 /// A value of a row `query --sql` returns: JSON's own for a null, a

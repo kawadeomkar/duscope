@@ -56,9 +56,10 @@ duscope query ~ --sql "SELECT path(id), human_size(allocated) FROM files
 ```
 
 - **What a statement may do.** Read the tables above (not `sqlite_schema`,
-  views or other databases) through SQLite's core, date and JSON functions;
-  every write, `PRAGMA`, `ATTACH`, transaction, window function and other
-  function is refused (`sql_denied`). A statement without a `LIMIT` of its own
+  views or other databases) through SQLite's core, date and JSON functions
+  (an aggregate may run over a window, as `sum(allocated) OVER (…)`); every
+  write, `PRAGMA`, `ATTACH`, transaction, window-only function (`row_number`,
+  `rank`, …) and other function is refused (`sql_denied`). A statement without a `LIMIT` of its own
   returns 25 rows at most; `--max-rows` (10,000 at most) caps one with a
   `LIMIT`. `--timeout` (5 s, at most 60) stops it (`sql_timeout`), and SQLite
   may use 256 MiB of memory for it.

@@ -2,6 +2,7 @@
 
 use super::{DEFAULT_LIMIT, TABLES, human_size, limit, statement};
 use crate::index::SCHEMA;
+use crate::query::scaled;
 
 #[test]
 fn p2_qry_07_the_tables_are_the_index_layouts() {
@@ -39,9 +40,9 @@ fn p2_qry_07_a_limit_counts_only_outside_parentheses_quotes_and_comments() {
     ] {
         assert_eq!(statement(sql).1, limited, "{sql}");
     }
-    assert_eq!(limit("SELECT 1", 10_000), DEFAULT_LIMIT);
-    assert_eq!(limit("SELECT 1", 10), 10);
-    assert_eq!(limit("SELECT 1 LIMIT 500", 10_000), 10_000);
+    assert_eq!(limit(false, 10_000), DEFAULT_LIMIT);
+    assert_eq!(limit(false, 10), 10);
+    assert_eq!(limit(true, 10_000), 10_000);
 }
 
 #[test]
@@ -50,9 +51,11 @@ fn p2_qry_07_the_statement_ends_at_its_first_semicolon() {
     assert_eq!(statement("SELECT ';'; ").0, "SELECT ';'");
     assert_eq!(statement("SELECT 1 /* ; */").0, "SELECT 1 /* ; */");
     assert_eq!(statement("SELECT 1").0, "SELECT 1");
-    // An unterminated quote or comment runs to the end.
+    // An unterminated quote runs to the end; an unterminated comment,
+    // which would swallow the wrapper's parenthesis, is cut off.
     assert_eq!(statement("SELECT 'a;").0, "SELECT 'a;");
-    assert_eq!(statement("SELECT 1 /* ;").0, "SELECT 1 /* ;");
+    assert_eq!(statement("SELECT 1 /* ;").0, "SELECT 1 ");
+    assert!(statement("SELECT 1 LIMIT 2 /* x").1);
 }
 
 #[test]
@@ -68,4 +71,6 @@ fn p2_qry_07_human_size_is_the_tables_iec_with_one_decimal() {
     ] {
         assert_eq!(human_size(bytes), shown, "{bytes}");
     }
+    assert_eq!(scaled(999, 1000, &["B", "kB"]), "999 B");
+    assert_eq!(scaled(999_950, 1000, &["B", "kB", "MB"]), "1.0 MB");
 }

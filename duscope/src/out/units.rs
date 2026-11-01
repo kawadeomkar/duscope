@@ -19,7 +19,7 @@ impl Units {
         if self.bytes {
             bytes.to_string()
         } else if self.si {
-            scaled(bytes, 1000, &["B", "kB", "MB", "GB", "TB", "PB", "EB"])
+            duscope_core::query::scaled(bytes, 1000, &["B", "kB", "MB", "GB", "TB", "PB", "EB"])
         } else {
             iec(bytes)
         }
@@ -30,29 +30,6 @@ impl Units {
 /// and as `query`'s `human_size` does.
 pub fn iec(bytes: u64) -> String {
     duscope_core::query::human_size(bytes)
-}
-
-/// `bytes` in the largest unit of `base` it reaches, with one decimal.
-fn scaled(bytes: u64, base: u64, units: &[&str]) -> String {
-    let mut unit = 0;
-    let mut divisor = 1u128;
-    while u128::from(bytes) >= divisor * u128::from(base) && unit + 1 < units.len() {
-        divisor *= u128::from(base);
-        unit += 1;
-    }
-    if unit == 0 {
-        return format!("{bytes} B");
-    }
-    // One decimal from integer arithmetic: tenths of the unit, rounded; a
-    // value that rounds up to the next unit is shown in it (1.0 MiB, not
-    // 1024.0 KiB).
-    let mut tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
-    if tenths >= u128::from(base) * 10 && unit + 1 < units.len() {
-        divisor *= u128::from(base);
-        unit += 1;
-        tenths = (u128::from(bytes) * 10 + divisor / 2) / divisor;
-    }
-    format!("{}.{} {}", tenths / 10, tenths % 10, units[unit])
 }
 
 /// A count with thousands separators.
