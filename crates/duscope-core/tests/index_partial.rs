@@ -1,6 +1,6 @@
-//! P2-QRY-02: an index written before `dirs_errors` and `dirs_excluded`
-//! answers as one with them: the partial indexes speed the counts up and
-//! decide nothing.
+//! P2-QRY-02, P2-QRY-03: an index written before `dirs_errors`,
+//! `dirs_excluded` and `files_dataless` answers as one with them: the
+//! partial indexes speed the counts up and decide nothing.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -69,8 +69,10 @@ fn p2_qry_02_an_index_without_the_partial_indexes_answers_alike() {
     let older = dir.join("older.db");
     fs::copy(&file, &older).unwrap();
     let db = rusqlite::Connection::open(&older).unwrap();
-    db.execute_batch("DROP INDEX dirs_errors; DROP INDEX dirs_excluded;")
-        .unwrap();
+    db.execute_batch(
+        "DROP INDEX dirs_errors; DROP INDEX dirs_excluded; DROP INDEX files_dataless;",
+    )
+    .unwrap();
     drop(db);
     let without = Index::open(&older).unwrap();
     let last = with.node(0).last_id;
@@ -78,6 +80,8 @@ fn p2_qry_02_an_index_without_the_partial_indexes_answers_alike() {
     assert_eq!(without.unreadable_dirs(0, last), 1);
     assert_eq!(with.excluded().len(), 1);
     assert_eq!(without.excluded(), with.excluded());
+    assert_eq!(without.dataless_bytes(0), with.dataless_bytes(0));
+    assert_eq!(without.errors_under(0, last), with.errors_under(0, last));
     for id in 0..with.len() {
         assert_eq!(without.child_dirs(id), with.child_dirs(id), "{id}");
     }

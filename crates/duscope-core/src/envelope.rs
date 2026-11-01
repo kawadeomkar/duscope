@@ -162,6 +162,12 @@ pub struct VolumeEntry {
     pub total_bytes: u64,
     /// Bytes an unprivileged user can still write.
     pub free_bytes: u64,
+    /// Its device, which places the scan's directories on it.
+    #[serde(skip)]
+    pub dev: u64,
+    /// Its mount options.
+    #[serde(skip)]
+    pub options: Vec<String>,
 }
 
 /// What a list verb was asked.
@@ -768,7 +774,8 @@ pub struct Summary {
     pub dir_count: u64,
     /// Directories and entries the scan could not read.
     pub error_count: u64,
-    /// Entries that disappeared during the scan.
+    /// Entries that disappeared during the scan: the whole scan's, since
+    /// the index does not place them under a path.
     pub vanished_count: u64,
     /// `basic` or `full`.
     pub attrs: &'static str,
