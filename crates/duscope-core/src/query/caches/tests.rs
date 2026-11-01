@@ -279,3 +279,91 @@ fn p2_qry_05_by_project_sums_each_projects_caches() {
     assert_eq!(kept, [Some("/p/a"), Some("/p/c")]);
     assert_eq!(page.total_count, 2);
 }
+
+#[test]
+fn p2_qry_05_loose_gives_way_to_a_confirmed_cache_inside() {
+    // build/ has no gradle or cmake marker above it: under --loose it is a
+    // row until a confirmed cache turns up inside it, and then it gives way
+    // to what is inside.
+    let mut tree = MemProvider::new("/r");
+    tree.file("build/tools/web/package.json", 300)
+        .file("build/tools/web/node_modules/x/index.js", 2 * MIB)
+        .file("build/other/target/debug/bin", MIB)
+        .file("stray/target/x/node_modules/y/index.js", MIB);
+    let vendored = Caches::vendored();
+    let q = CachesQuery {
+        loose: true,
+        ..query(&vendored, &nothing_above)
+    };
+    assert_eq!(
+        rows(&tree, &q),
+        [
+            row(
+                "/r/build/tools/web/node_modules",
+                "node_modules",
+                Some("/r/build/tools/web"),
+                true
+            ),
+            // Inside the row that gave way: a row of its own.
+            row("/r/build/other/target", "target", None, false),
+            // Inside a row that stands: part of it.
+            row("/r/stray/target", "target", None, false),
+        ]
+    );
+    // Without --loose, only the confirmed one.
+    assert_eq!(
+        rows(&tree, &query(&vendored, &nothing_above)),
+        [row(
+            "/r/build/tools/web/node_modules",
+            "node_modules",
+            Some("/r/build/tools/web"),
+            true
+        )]
+    );
+}
+
+#[test]
+fn p2_qry_05_the_nearest_marker_chooses_the_rule() {
+    let mut tree = MemProvider::new("/r");
+    tree.file("build.gradle", 100)
+        .file("native/CMakeLists.txt", 100)
+        .file("native/build/app.o", MIB)
+        .file("build/libs/app.jar", MIB);
+    let vendored = Caches::vendored();
+    let q = query(&vendored, &nothing_above);
+    let (arena, rollup) = scan(&tree);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
+    let page = caches(&view, &q);
+    let got: Vec<(&str, &str, Option<&str>)> = page
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.regenerable_by, e.project_root.as_deref()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("/r/build", "gradle build", Some("/r")),
+            ("/r/native/build", "cmake --build", Some("/r/native")),
+        ]
+    );
+}
+
+#[test]
+fn p2_qry_05_a_project_row_names_its_ten_largest_caches() {
+    let mut tree = MemProvider::new("/r");
+    tree.file("pyproject.toml", 100);
+    for i in 0..12u64 {
+        tree.file(format!("pkg{i:02}/__pycache__/m.pyc"), (i + 1) << 10);
+    }
+    let vendored = Caches::vendored();
+    let q = query(&vendored, &nothing_above);
+    let (arena, rollup) = scan(&tree);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
+    let page = projects(&view, &q);
+    assert_eq!(page.entries.len(), 1);
+    let row = &page.entries[0];
+    assert_eq!(row.cache_count, 12);
+    assert_eq!(row.caches.len(), super::PROJECT_CACHES);
+    assert_eq!(row.caches[0], "/r/pkg11/__pycache__");
+    assert_eq!(row.apparent_bytes, (1..=12).sum::<u64>() << 10);
+}

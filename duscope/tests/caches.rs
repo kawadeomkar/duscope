@@ -258,3 +258,21 @@ fn p2_qry_05_a_saved_scan_read_below_its_root_finds_the_marker_above() {
         home.join("Projects/rust-cli").to_str().unwrap()
     );
 }
+
+#[test]
+fn p2_qry_05_exclude_caches_is_refused() {
+    let env = TestEnv::new();
+    let home = fs::canonicalize(env.fixtures().path("home")).unwrap();
+    let out = run(
+        &env,
+        &[
+            "caches",
+            home.to_str().unwrap(),
+            "--exclude-caches",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "usage");
+}
