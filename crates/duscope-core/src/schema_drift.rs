@@ -40,6 +40,10 @@ use crate::envelope::{
 fn derived_schemas() -> Vec<(&'static str, Value)> {
     vec![
         ("envelope/scan.schema.json", derive::<Envelope<TopEntry>>()),
+        (
+            "envelope/rescan.schema.json",
+            derive::<Envelope<TopEntry>>(),
+        ),
         ("envelope/top.schema.json", derive::<Envelope<TopEntry>>()),
         ("envelope/tree.schema.json", derive::<Envelope<TreeEntry>>()),
         (

@@ -157,6 +157,8 @@ pub enum Verb {
     Schema(SchemaArgs),
     /// List, prune or check the saved scans
     Scans(ScansArgs),
+    /// Scan a saved scan's root again, with the options it was scanned with
+    Rescan(RescanArgs),
     /// Print the manual page, in roff, to stdout
     Man,
     /// Print the completion script for a shell to stdout
@@ -601,6 +603,26 @@ pub struct DiffArgs {
     pub size: Option<SizeKind>,
 }
 
+/// `rescan`'s flags.
+#[derive(Debug, Clone, Args)]
+pub struct RescanArgs {
+    /// A path the saved scan holds (default: the current directory)
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
+    /// The saved scan to scan again: latest, an id prefix, or an index file
+    #[arg(long, value_name = "SCAN")]
+    pub scan: Option<String>,
+
+    /// Scan the whole tree again (what every rescan does until phase 5)
+    #[arg(long, conflicts_with = "incremental")]
+    pub full: bool,
+
+    /// Scan only what changed since the saved scan (not yet available)
+    #[arg(long)]
+    pub incremental: bool,
+}
+
 /// `schema`'s flags.
 #[derive(Debug, Clone, Args)]
 pub struct SchemaArgs {
@@ -861,7 +883,10 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             max_age_default(&mut args.max_age);
             args.caches_extra.clone_from(&config.caches_extra);
         }
-        Some(Verb::Scans(_) | Verb::Schema(_) | Verb::Man | Verb::Completions(_)) => {}
+        // A rescan takes the saved scan's options, not the file's.
+        Some(
+            Verb::Scans(_) | Verb::Rescan(_) | Verb::Schema(_) | Verb::Man | Verb::Completions(_),
+        ) => {}
     }
     Ok(())
 }
