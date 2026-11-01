@@ -163,7 +163,7 @@ pub enum Verb {
     Export(ExportArgs),
     /// Save a tree that ncdu, gdu or GrandPerspective wrote as a scan
     Import(ImportArgs),
-    /// Draw the treemap as a picture: --format svg, at any size
+    /// Draw the treemap as a picture, --format svg or png, at any size
     Render(RenderArgs),
     /// Print the manual page, in roff, to stdout
     Man,
@@ -618,7 +618,8 @@ pub struct ExportArgs {
     pub index: IndexArgs,
 }
 
-/// `render`'s flags; the format is `--format svg`, or the `-o` file's.
+/// `render`'s flags; the format is `--format svg` or `png`, or the `-o`
+/// file's.
 #[derive(Debug, Clone, Args)]
 pub struct RenderArgs {
     #[command(flatten)]

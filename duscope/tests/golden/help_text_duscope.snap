@@ -22,7 +22,7 @@ Verbs:
   rescan       Scan a saved scan's root again, with the options it was scanned with
   export       Write a saved scan for other tools, in the format --format names
   import       Save a tree that ncdu, gdu or GrandPerspective wrote as a scan
-  render       Draw the treemap as a picture: --format svg, at any size
+  render       Draw the treemap as a picture, --format svg or png, at any size
   man          Print the manual page, in roff, to stdout
   completions  Print the completion script for a shell to stdout
   help         Print this message or the help of the given subcommand(s)
@@ -158,6 +158,7 @@ Output:
           - csv:      Comma-separated values, a row an entry (export)
           - gdu:      gdu's JSON (import)
           - svg:      An SVG picture of the treemap (render)
+          - png:      A PNG picture of the treemap (render)
 
       --color <WHEN>
           When to use colour
