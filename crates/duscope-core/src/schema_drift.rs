@@ -44,6 +44,10 @@ fn derived_schemas() -> Vec<(&'static str, Value)> {
             "envelope/rescan.schema.json",
             derive::<Envelope<TopEntry>>(),
         ),
+        (
+            "envelope/import.schema.json",
+            derive::<Envelope<TopEntry>>(),
+        ),
         ("envelope/top.schema.json", derive::<Envelope<TopEntry>>()),
         ("envelope/tree.schema.json", derive::<Envelope<TreeEntry>>()),
         (

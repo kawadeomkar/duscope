@@ -83,9 +83,11 @@ impl From<FormatArg> for Format {
             FormatArg::Json => Format::Json,
             FormatArg::Ndjson => Format::Ndjson,
             // export's own: a machine format, its payload alone on stdout.
-            FormatArg::Ncdu | FormatArg::Gpscan | FormatArg::Qdirstat | FormatArg::Csv => {
-                Format::Plain
-            }
+            FormatArg::Ncdu
+            | FormatArg::Gpscan
+            | FormatArg::Qdirstat
+            | FormatArg::Csv
+            | FormatArg::Gdu => Format::Plain,
         }
     }
 }
