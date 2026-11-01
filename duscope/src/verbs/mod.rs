@@ -7,6 +7,7 @@ mod query;
 mod scan;
 mod scans;
 mod source;
+mod summary;
 mod treemap;
 
 pub use scan::report_interrupt;
@@ -92,6 +93,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::ByType(args)) => query::by_type(&args, index_dir, output),
         Some(Verb::Stale(args)) => query::stale(&args, index_dir, output),
         Some(Verb::Caches(args)) => query::caches(&args, index_dir, output),
+        Some(Verb::Summary(args)) => summary::run(&args, index_dir, output),
         Some(Verb::Explain(args)) => explain::run(&args, index_dir, output),
         Some(Verb::Scans(args)) => scans::run(&args, index_dir, output),
         Some(Verb::Man) => man::run(),

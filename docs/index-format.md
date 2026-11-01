@@ -230,6 +230,7 @@ Created after the rows are inserted:
 | `files_mtime` | `files (mtime)` | files by age |
 | `dirs_errors` | `dirs (id) WHERE errors IS NOT NULL` | the unreadable directories of a subtree, counted without reading every row |
 | `dirs_excluded` | `dirs (id) WHERE flags & 3072 != 0` | the directories the excludes kept the scan out of (flags bits 10 and 11) |
+| `files_dataless` | `files (id) WHERE flags & 4 != 0` | the dataless files (flags bit 2), which `summary` adds up without reading every file |
 
 There is no name or extension index, and no path column: a path is resolved
 through `parent_id`, and a directory's own files are an id range. For the
