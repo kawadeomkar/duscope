@@ -19,9 +19,10 @@
 //! the payload, then the expiry: [`CoreError::HandleInvalid`],
 //! [`CoreError::HandleExpired`].
 
+use std::fmt::Write as _;
 use std::fs::{self, DirBuilder, File};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -61,64 +62,92 @@ impl Key {
     /// # Errors
     ///
     /// [`CoreError::HandleKey`] when the key cannot be read or made, is not
-    /// 32 bytes, or others may read it.
+    /// a regular file of 32 bytes that this user owns, or others may read
+    /// it: whoever can read or plant the key can forge handles.
     pub fn open(dir: &Path) -> Result<Key, CoreError> {
         let file = dir.join(KEY_FILE);
         let fail = |message: String| CoreError::HandleKey {
             file: file.display().to_string(),
             message,
         };
-        match File::open(&file) {
-            Ok(mut opened) => {
-                let mode = opened
-                    .metadata()
-                    .map_err(|e| fail(e.to_string()))?
-                    .permissions()
-                    .mode();
-                if mode & 0o077 != 0 {
-                    return Err(fail(format!(
-                        "others may read it (mode {:04o}), and whoever reads it can forge handles",
-                        mode & 0o7777
-                    )));
-                }
-                let mut key = [0; 32];
-                let mut rest = Vec::new();
-                opened
-                    .read_exact(&mut key)
-                    .and_then(|()| opened.read_to_end(&mut rest))
-                    .map_err(|e| fail(format!("not a key of 32 bytes: {e}")))?;
-                if !rest.is_empty() {
-                    return Err(fail("not a key of 32 bytes".to_owned()));
-                }
-                Ok(Key(key))
-            }
+        let found = match fs::symlink_metadata(&file) {
+            Ok(found) => found,
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 Key::create(dir, &file).map_err(|e| fail(e.to_string()))?;
-                Key::open(dir)
+                fs::symlink_metadata(&file).map_err(|e| fail(e.to_string()))?
             }
-            Err(e) => Err(fail(e.to_string())),
+            Err(e) => return Err(fail(e.to_string())),
+        };
+        // The key itself, not what a link leads to, and this user's alone.
+        if !found.file_type().is_file() {
+            return Err(fail("not a regular file".to_owned()));
         }
+        if found.uid() != duscope_walk::effective_uid() {
+            return Err(fail(format!(
+                "another user owns it (uid {}), and whoever planted it can forge handles",
+                found.uid()
+            )));
+        }
+        let mode = found.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(fail(format!(
+                "others may read it (mode {:04o}), and whoever reads it can forge handles",
+                mode & 0o7777
+            )));
+        }
+        let mut opened = File::open(&file).map_err(|e| fail(e.to_string()))?;
+        // The file opened is the one checked, not one swapped in since.
+        let opened_meta = opened.metadata().map_err(|e| fail(e.to_string()))?;
+        if (opened_meta.dev(), opened_meta.ino()) != (found.dev(), found.ino()) {
+            return Err(fail("it changed while it was read".to_owned()));
+        }
+        let mut key = [0; 32];
+        let mut rest = Vec::new();
+        opened
+            .read_exact(&mut key)
+            .and_then(|()| opened.read_to_end(&mut rest))
+            .map_err(|e| fail(format!("not a key of 32 bytes: {e}")))?;
+        if !rest.is_empty() {
+            return Err(fail("not a key of 32 bytes".to_owned()));
+        }
+        Ok(Key(key))
     }
 
     /// Writes a new key beside `file` and links it into place, unless a
-    /// key got there first.
+    /// key got there first; where the filesystem has no hard links, creates
+    /// `file` itself, unless it exists.
     fn create(dir: &Path, file: &Path) -> std::io::Result<()> {
         DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         let mut key = [0; 32];
-        File::open("/dev/urandom")?.read_exact(&mut key)?;
-        let staged: PathBuf = dir.join(format!(".{KEY_FILE}.{}", std::process::id()));
-        let written = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&staged)
-            .and_then(|mut out| out.write_all(&key).and_then(|()| out.sync_all()))
-            .and_then(|()| match fs::hard_link(&staged, file) {
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
-                other => other,
-            });
+        let mut salt = [0; 8];
+        let mut random = File::open("/dev/urandom")?;
+        random.read_exact(&mut key)?;
+        random.read_exact(&mut salt)?;
+        let new_file = |path: &Path| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .and_then(|mut out| out.write_all(&key).and_then(|()| out.sync_all()))
+        };
+        let salt = salt.iter().fold(String::new(), |mut hex, b| {
+            let _ = write!(hex, "{b:02x}");
+            hex
+        });
+        let staged: PathBuf = dir.join(format!(".{KEY_FILE}.{salt}"));
+        new_file(&staged)?;
+        let linked = fs::hard_link(&staged, file);
+        // Only this call's own staged file goes.
         let removed = fs::remove_file(&staged);
-        written.and(removed)
+        match linked {
+            Ok(()) => removed,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => removed,
+            Err(_) => match new_file(file) {
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => removed,
+                other => other.and(removed),
+            },
+        }
     }
 
     /// A key of these bytes, for tests.
@@ -166,9 +195,15 @@ impl Handle {
         bytes.extend_from_slice(&payload.dev.to_be_bytes());
         bytes.extend_from_slice(&payload.ino.to_be_bytes());
         bytes.extend_from_slice(&payload.allocated.to_be_bytes());
-        let scan = payload.scan_id.as_bytes();
-        let scan = &scan[..scan.len().min(usize::from(u8::MAX))];
-        bytes.push(u8::try_from(scan.len()).unwrap_or(u8::MAX));
+        // A scan id is 12 hex digits; anything longer is cut, on a
+        // character, to the 255 bytes its length byte counts.
+        let id = &payload.scan_id;
+        let cut = (0..=id.len().min(usize::from(u8::MAX)))
+            .rev()
+            .find(|&i| id.is_char_boundary(i))
+            .unwrap_or(0);
+        let scan = &id.as_bytes()[..cut];
+        bytes.push(u8::try_from(scan.len()).unwrap_or(0));
         bytes.extend_from_slice(scan);
         bytes.extend_from_slice(&payload.path);
         let mut mac = key.mac();
@@ -292,8 +327,8 @@ mod tests {
 
     #[test]
     fn p2_core_01_the_key_is_made_once_private_and_checked() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("duscope");
+        let env = duscope_testkit::TestEnv::new();
+        let home = env.tmp_dir().join("duscope");
         let key = Key::open(&home).unwrap();
         let file = home.join(KEY_FILE);
         let meta = std::fs::metadata(&file).unwrap();
@@ -316,5 +351,12 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(&file, b"short").unwrap();
         assert!(matches!(Key::open(&home), Err(CoreError::HandleKey { .. })));
+        // A symbolic link in its place, dangling or not, is refused, not
+        // followed or written through.
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(home.join("nowhere"), &file).unwrap();
+        let err = Key::open(&home).unwrap_err().to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+        assert!(!home.join("nowhere").exists());
     }
 }

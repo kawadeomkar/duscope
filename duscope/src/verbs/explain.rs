@@ -132,7 +132,7 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
         caches: &caches,
         env: &env,
     };
-    let (scan, file, result, warnings) = match lookup.resolve(&selector, Some(&path))? {
+    let (scan, file, mut result, warnings) = match lookup.resolve(&selector, Some(&path))? {
         Some(r) => {
             let facts = explain(&r.index, r.base, &q).map_err(core_failure)?;
             let warnings = r
@@ -160,8 +160,7 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
             Vec::new(),
         ),
     };
-    let mut result = result;
-    result.handle = handle(&lookup, &path, &result, scan.as_ref());
+    result.handle = handle(output, lookup.dir.as_deref(), &path, &result, scan.as_ref());
     let path = path.to_string_lossy().into_owned();
     let next = next(scan.as_ref(), file.as_deref(), &path, result.kind);
     let envelope = ObjectEnvelope {
@@ -181,19 +180,45 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
     output.object(&envelope, &plain(&envelope.result), &lines)
 }
 
-/// A handle for `path` as `explain` found it: its device and inode now
-/// (`lstat`: the path itself, not what a link leads to), its bytes on disk
-/// in `result`, the scan, fifteen minutes from now; signed with the key in
-/// the index directory. None where the path is gone or the key cannot be
-/// read or made, which a warning in the log says.
+/// A handle for `path` as `explain` found it, for `--json` alone, which
+/// prints it: its device and inode now (`lstat`: the path itself, not what
+/// a link leads to), its bytes on disk in `result`, the scan, fifteen
+/// minutes from now by the clock; signed with the key in the index
+/// directory `dir`. A saved scan's facts are signed only for the entry it
+/// saw: the same kind, and for a non-directory the same modification time.
+/// None where the path is gone or changed since the scan, or the key cannot
+/// be read or made, which a warning in the log says.
 fn handle(
-    lookup: &Lookup,
+    output: &Output,
+    dir: Option<&Path>,
     path: &Path,
     result: &Explain,
     scan: Option<&ScanBlock>,
 ) -> Option<String> {
-    let dir = lookup.dir.as_deref()?;
+    if !output.is_json() {
+        return None;
+    }
+    let dir = dir?;
     let found = std::fs::symlink_metadata(path).ok()?;
+    let kind = if found.is_dir() {
+        "dir"
+    } else if found.is_file() {
+        "file"
+    } else if found.file_type().is_symlink() {
+        "symlink"
+    } else {
+        "other"
+    };
+    let mtime = timegrammar::iso8601(
+        found
+            .mtime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(found.mtime_nsec()),
+    );
+    if scan.is_some() && (kind != result.kind || (kind != "dir" && mtime != result.mtime)) {
+        log::warn!("no handle: {} has changed since the scan", path.display());
+        return None;
+    }
     let key = match Key::open(dir) {
         Ok(key) => key,
         Err(e) => {
@@ -207,7 +232,8 @@ fn handle(
         ino: found.ino(),
         allocated: result.allocated_bytes,
         scan_id: scan.and_then(|s| s.id.clone()).unwrap_or_default(),
-        expires_at: lookup.now.saturating_add(LIFETIME_NS),
+        // The clock, not --test-now: a handle holds fifteen minutes.
+        expires_at: clock::now().saturating_add(LIFETIME_NS),
     };
     Some(Handle::issue(&key, &payload))
 }

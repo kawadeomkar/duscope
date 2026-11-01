@@ -41,6 +41,10 @@ fn p2_core_01_explain_hands_out_a_handle_that_verifies() {
         &["scan", root.to_str().unwrap(), "--save", "--json"],
     ));
     let file = root.join("sub/big.bin");
+    // Output for people prints no handle, and makes no key.
+    let out = run(&env, &["explain", file.to_str().unwrap(), "--plain"]);
+    assert!(out.status.success());
+    assert!(!env.index_dir().join(KEY_FILE).exists());
     let explained = json(&run(&env, &["explain", file.to_str().unwrap(), "--json"]));
     let token = explained["result"]["handle"].as_str().unwrap();
     // The key the command made, 0600, beside the indexes.
@@ -74,8 +78,22 @@ fn p2_core_01_explain_hands_out_a_handle_that_verifies() {
     ));
     let token = explained["result"]["handle"].as_str().unwrap();
     assert_eq!(Handle::verify(&key, token, now).unwrap().scan_id, "");
+    // An entry changed since the scan gets none: the scan's facts are not
+    // the entry's.
+    let later = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_900_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    let explained = json(&run(&env, &["explain", file.to_str().unwrap(), "--json"]));
+    assert_eq!(explained["result"]["handle"], Value::Null);
     // A key others may read issues no handle; explain answers still.
     fs::set_permissions(&key_file, Permissions::from_mode(0o644)).unwrap();
-    let explained = json(&run(&env, &["explain", file.to_str().unwrap(), "--json"]));
+    let explained = json(&run(
+        &env,
+        &["explain", elsewhere.to_str().unwrap(), "--json"],
+    ));
     assert_eq!(explained["result"]["handle"], Value::Null);
 }
