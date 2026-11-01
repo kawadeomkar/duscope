@@ -32,7 +32,6 @@ cargo_metadata.workspace = true
 duscope-testkit.workspace = true
 proptest.workspace = true
 schemars.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true
