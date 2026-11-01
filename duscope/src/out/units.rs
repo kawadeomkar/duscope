@@ -26,13 +26,10 @@ impl Units {
     }
 }
 
-/// Bytes in IEC units with one decimal, as tables and footers show them.
+/// Bytes in IEC units with one decimal, as tables and footers show them,
+/// and as `query`'s `human_size` does.
 pub fn iec(bytes: u64) -> String {
-    scaled(
-        bytes,
-        1024,
-        &["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"],
-    )
+    duscope_core::query::human_size(bytes)
 }
 
 /// `bytes` in the largest unit of `base` it reaches, with one decimal.

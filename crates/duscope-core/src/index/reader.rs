@@ -961,7 +961,7 @@ fn empty(id: u32) -> Node {
 /// The read-only, immutable URI of `path`: every byte but the unreserved
 /// ones and `/` percent-encoded, so `?`, `#` and `%` in a name stay in the
 /// path.
-fn uri(path: &Path) -> String {
+pub(crate) fn uri(path: &Path) -> String {
     let mut uri = String::from("file:");
     for &b in path.as_os_str().as_bytes() {
         if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {

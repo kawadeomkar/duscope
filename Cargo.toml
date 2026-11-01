@@ -45,9 +45,10 @@ log = "=0.4.34"
 # The allocator of the musl builds only (P1-BENCH-03); no default features.
 mimalloc = { version = "=0.1.52", default-features = false }
 # The index (P2-IDX-02): `bundled` compiles the SQLite the binary ships, with
-# the features duscope does not use left out (.cargo/config.toml). 0.40.2 is
+# the features duscope does not use left out (.cargo/config.toml); `functions`,
+# `hooks` and `limits` for the `query --sql` sandbox (P2-QRY-07). 0.40.2 is
 # the newest release the 1.88 toolchain builds: 0.41 needs 1.89.
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "functions", "hooks", "limits"] }
 # Scan ids: SHA-256 of the root, the start time and 8 random bytes.
 sha2 = { version = "=0.11.1", default-features = false }
 thiserror = "2.0.21"

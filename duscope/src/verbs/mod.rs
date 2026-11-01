@@ -8,6 +8,7 @@ mod query;
 mod scan;
 mod scans;
 mod source;
+mod sql;
 mod summary;
 mod treemap;
 
@@ -97,6 +98,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::Summary(args)) => summary::run(&args, index_dir, output),
         Some(Verb::Diff(args)) => diff::run(&args, index_dir, output),
         Some(Verb::Explain(args)) => explain::run(&args, index_dir, output),
+        Some(Verb::Query(args)) => sql::run(&args, index_dir, output),
         Some(Verb::Scans(args)) => scans::run(&args, index_dir, output),
         Some(Verb::Man) => man::run(),
         Some(Verb::Completions(args)) => completions::run(args.shell),
