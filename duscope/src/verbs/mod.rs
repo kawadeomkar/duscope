@@ -8,6 +8,7 @@ mod next;
 mod query;
 mod scan;
 mod scans;
+mod schema;
 mod source;
 mod sql;
 mod summary;
@@ -100,6 +101,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::Diff(args)) => diff::run(&args, index_dir, output),
         Some(Verb::Explain(args)) => explain::run(&args, index_dir, output),
         Some(Verb::Query(args)) => sql::run(&args, index_dir, output),
+        Some(Verb::Schema(args)) => schema::run(&args, index_dir, output),
         Some(Verb::Scans(args)) => scans::run(&args, index_dir, output),
         Some(Verb::Man) => man::run(),
         Some(Verb::Completions(args)) => completions::run(args.shell),
