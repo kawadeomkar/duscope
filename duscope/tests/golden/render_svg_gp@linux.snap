@@ -131,13 +131,20 @@
 <clipPath id="c27"><rect x="126" y="214" width="61" height="54"/></clipPath><g clip-path="url(#c27)"><text x="132" y="225" fill="#11111b">media/</text><text x="132" y="238" fill="#11111b">3.5M</text></g>
 <clipPath id="c28"><rect x="126" y="268" width="42" height="27"/></clipPath><g clip-path="url(#c28)"><text x="132" y="279" fill="#11111b">upd…</text></g>
 <clipPath id="c29"><rect x="187" y="214" width="52" height="42"/></clipPath><g clip-path="url(#c29)"><text x="193" y="225" fill="#11111b">Exam…</text><text x="193" y="238" fill="#11111b">2.3M</text></g>
-<rect x="6" y="375" width="7" height="7" fill="#94e2d5"/><text x="16" y="382" fill="#cdd6f4">data 22%</text>
-<rect x="78" y="375" width="7" height="7" fill="#f5c2e7"/><text x="88" y="382" fill="#cdd6f4">media 20%</text>
-<rect x="156" y="375" width="7" height="7" fill="#cba6f7"/><text x="166" y="382" fill="#cdd6f4">binaries 18%</text>
-<rect x="252" y="375" width="7" height="7" fill="#89b4fa"/><text x="262" y="382" fill="#cdd6f4">code 10%</text>
-<rect x="324" y="375" width="7" height="7" fill="#a6e3a1"/><text x="334" y="382" fill="#cdd6f4">docs 6%</text>
-<rect x="390" y="375" width="7" height="7" fill="#fab387"/><text x="400" y="382" fill="#cdd6f4">archives 3%</text>
-<rect x="480" y="375" width="7" height="7" fill="#6c7086"/><text x="490" y="382" fill="#cdd6f4">other 10%</text>
+<rect x="6" y="375" width="7" height="7" fill="#94e2d5"/>
+<text x="16" y="382" fill="#cdd6f4">data 22%</text>
+<rect x="78" y="375" width="7" height="7" fill="#f5c2e7"/>
+<text x="88" y="382" fill="#cdd6f4">media 20%</text>
+<rect x="156" y="375" width="7" height="7" fill="#cba6f7"/>
+<text x="166" y="382" fill="#cdd6f4">binaries 18%</text>
+<rect x="252" y="375" width="7" height="7" fill="#89b4fa"/>
+<text x="262" y="382" fill="#cdd6f4">code 10%</text>
+<rect x="324" y="375" width="7" height="7" fill="#a6e3a1"/>
+<text x="334" y="382" fill="#cdd6f4">docs 6%</text>
+<rect x="390" y="375" width="7" height="7" fill="#fab387"/>
+<text x="400" y="382" fill="#cdd6f4">archives 3%</text>
+<rect x="480" y="375" width="7" height="7" fill="#6c7086"/>
+<text x="490" y="382" fill="#cdd6f4">other 10%</text>
 <text x="6" y="395" fill="#cdd6f4">252.3 MiB allocated · 43,137 files · 8,129 dirs · SAVED SCAN</text>
 <defs>
 <linearGradient id="v0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#e6f0ff"/><stop offset="0.25" stop-color="#c6dcff"/><stop offset="0.375" stop-color="#a7c8ff"/><stop offset="0.5" stop-color="#89b4fa"/><stop offset="0.625" stop-color="#789edb"/><stop offset="0.75" stop-color="#6787bb"/><stop offset="0.875" stop-color="#56719c"/><stop offset="1" stop-color="#455a7d"/></linearGradient><linearGradient id="h0"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#e6f0ff"/><stop offset="0.25" stop-color="#c6dcff"/><stop offset="0.375" stop-color="#a7c8ff"/><stop offset="0.5" stop-color="#89b4fa"/><stop offset="0.625" stop-color="#789edb"/><stop offset="0.75" stop-color="#6787bb"/><stop offset="0.875" stop-color="#56719c"/><stop offset="1" stop-color="#455a7d"/></linearGradient>

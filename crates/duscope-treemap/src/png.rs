@@ -7,10 +7,12 @@
 //!   top-left corner is lightest and the bottom and right edges darkest,
 //!   pixel for pixel as `GrandPerspective` fills a rectangle. Tiles under
 //!   3 px each way are flat, as in the SVG.
-//! - **Labels** are drawn in the bundled Inter ([`crate::font`]): each
+//! - **Labels** are drawn in the bundled Inter (the `font` module): each
 //!   glyph's quadratic outline flattened to lines and filled with
 //!   anti-aliasing by signed-area accumulation (as `font-rs` does),
-//!   blended over the tile and clipped to it; no hinting, no kerning.
+//!   blended over the tile and clipped to it; no hinting, no kerning. The
+//!   font holds ASCII and Latin-1: a character beyond them is its `.notdef`
+//!   box, where the SVG leaves the browser's fonts to draw it.
 //! - **The file:** 8-bit RGB, each row `Sub`-filtered, compressed with
 //!   zlib and checksummed with CRC-32, both through `flate2`.
 
@@ -61,7 +63,7 @@ pub fn write_png(
         pixels: [base.0, base.1, base.2].repeat(width * height),
         tables: HashMap::new(),
         font: Font::inter(),
-        font_px: f32::from(u16::try_from(metrics.font).unwrap_or(12)),
+        font_px: to_f32(metrics.font),
     };
     let tiles = draw(view, opts, metrics, &mut canvas)?;
     canvas.encode(out)?;
@@ -153,8 +155,6 @@ impl Png {
         let Some((min_x, min_y, max_x, max_y)) = bounds(&lines) else {
             return;
         };
-        // The glyph's own cells: a column to spare on the right, where the
-        // accumulation spills.
         // The glyph's cells start at its box's whole-pixel corner, which may
         // lie left of or above the picture; a column to spare on the right,
         // where the accumulation spills.
@@ -234,19 +234,28 @@ impl Canvas for Png {
             }
             return Ok(());
         }
-        let table = self
-            .tables
+        // The table and the pixels, borrowed apart.
+        let Png {
+            width,
+            height,
+            pixels,
+            tables,
+            ..
+        } = self;
+        let table = tables
             .entry(rgb)
-            .or_insert_with(|| (0..256).map(|i| shade(rgb, i)).collect())
-            .clone();
-        for dy in 0..h {
+            .or_insert_with(|| (0..256).map(|i| shade(rgb, i)).collect());
+        for dy in 0..h.min(height.saturating_sub(y0)) {
             // 256 × (y from the bottom + 0.5) / h, in whole steps.
             let rise = 256 * (2 * (h - 1 - dy) + 1) / (2 * h);
-            for dx in 0..w {
+            let row = 3 * ((y0 + dy) * *width + x0);
+            for dx in 0..w.min(width.saturating_sub(x0)) {
                 // 256 × (1 − (x + 0.5) / w).
                 let fall = 256 * (2 * (w - dx) - 1) / (2 * w);
-                let step = rise.min(fall).min(255);
-                self.put(x0 + dx, y0 + dy, table[step]);
+                let (red, green, blue) = table[rise.min(fall).min(255)];
+                if let Some(pixel) = pixels.get_mut(row + 3 * dx..row + 3 * dx + 3) {
+                    pixel.copy_from_slice(&[red, green, blue]);
+                }
             }
         }
         Ok(())
@@ -270,11 +279,8 @@ impl Canvas for Png {
     }
 
     fn swatch(&mut self, x: u32, y: u32, side: u32, rgb: Rgb) -> io::Result<()> {
-        let (x, y, side) = (
-            to_usize(f64::from(x)),
-            to_usize(f64::from(y)),
-            to_usize(f64::from(side)),
-        );
+        let index = |v: u32| usize::try_from(v).unwrap_or(usize::MAX);
+        let (x, y, side) = (index(x), index(y), index(side));
         for py in y..y + side {
             for px in x..x + side {
                 self.put(px, py, rgb);
@@ -310,9 +316,11 @@ fn flatten(contour: &[Point], line: &mut dyn FnMut(Spot, Spot)) {
     // Start on the curve: the first on-curve point, else the midpoint of
     // the first two (both control points).
     let first_on = (0..n).find(|&i| contour[i].on);
+    // The walk goes on from `offset`: the on-curve start itself, or the
+    // first control point, whose curve begins at that midpoint.
     let (start, offset) = match first_on {
         Some(i) => ((at(i).0, at(i).1), i),
-        None => (mid((at(0).0, at(0).1), (at(1).0, at(1).1)), 1),
+        None => (mid((at(0).0, at(0).1), (at(1).0, at(1).1)), 0),
     };
     let mut current = start;
     let mut control: Option<(f32, f32)> = None;
@@ -542,12 +550,18 @@ mod tests {
         let near = |a: f32, b: f32| (a - b).abs() < 0.01;
         assert!(near(cover[5 + 1], 1.0) && near(cover[2 * 5 + 2], 1.0));
         assert!(near(cover[0], 0.0) && near(cover[5 + 3], 0.0));
-        // A contour of control points only closes on itself.
-        let mut segments = 0;
-        let points =
-            [(0, 0), (100, 0), (100, 100)].map(|(x, y)| crate::font::Point { x, y, on: false });
-        flatten(&points, &mut |_, _| segments += 1);
-        assert!(segments > 3);
+        // A contour of control points only: a curve through the midpoints
+        // of its sides, all four of them.
+        let mut ends = Vec::new();
+        let points = [(0, 0), (100, 0), (100, 100), (0, 100)].map(|(x, y)| crate::font::Point {
+            x,
+            y,
+            on: false,
+        });
+        flatten(&points, &mut |_, b| ends.push(b));
+        for side in [(50.0, 0.0), (100.0, 50.0), (50.0, 100.0), (0.0, 50.0)] {
+            assert!(ends.contains(&side), "{side:?}: {ends:?}");
+        }
         // Text inks pixels inside its clip and none outside.
         let mut png = canvas(120, 40);
         png.draw_text(4, 24, "Hello", (255, 255, 255), Rect::new(0, 0, 60, 40));
