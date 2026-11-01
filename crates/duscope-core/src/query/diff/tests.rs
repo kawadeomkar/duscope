@@ -47,7 +47,7 @@ fn rows(page: &Page<DiffEntry>) -> Vec<(String, &'static str, i64)> {
             (
                 e.path.strip_prefix("/r/").unwrap_or(&e.path).to_owned(),
                 e.change,
-                e.bytes_delta,
+                e.delta_bytes,
             )
         })
         .collect()
@@ -72,9 +72,9 @@ fn p2_qry_06_an_unchanged_tree_diffs_to_nothing() {
     assert_eq!(totals.net_bytes, 0);
     assert_eq!(
         (
-            totals.entries_added,
-            totals.entries_removed,
-            totals.entries_changed
+            totals.added_count,
+            totals.removed_count,
+            totals.changed_count
         ),
         (0, 0, 0)
     );
@@ -112,7 +112,7 @@ fn p2_qry_06_a_scripted_change_set() {
     assert_eq!(old_row.collapsed_count, Some(4));
     assert_eq!(old_row.new_bytes, None);
     // The tiny growth is counted though no row shows it.
-    assert_eq!(totals.entries_changed, 3);
+    assert_eq!(totals.changed_count, 3);
     assert_eq!(totals.added_bytes, 11 * MIB + 20 + 5);
 }
 
@@ -136,7 +136,7 @@ fn p2_qry_06_depth_attributes_deeper_changes_to_the_directory_at_it() {
     );
     // The totals still count what was added beneath.
     let (_, totals) = run(&old, &new, &q);
-    assert_eq!(totals.entries_added, 3);
+    assert_eq!(totals.added_count, 3);
     assert_eq!(totals.added_bytes, 5 * MIB);
     // --depth 0: the root, whole.
     let root = DiffQuery {
@@ -196,5 +196,5 @@ fn p2_qry_06_roots_that_are_files_compare_as_files() {
     let (page, _) = diff(&old_file, &new_file, &query());
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].change, "grown");
-    assert_eq!(page.entries[0].bytes_delta, 2 * DELTA_MIB);
+    assert_eq!(page.entries[0].delta_bytes, 2 * DELTA_MIB);
 }

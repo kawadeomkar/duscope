@@ -1,0 +1,1 @@
+{"ok":false,"schema_version":"0.2","tool":{"name":"duscope","version":"<version>"},"error":{"code":"sql_denied","message":"query runs a statement that reads, and this one writes","hint":"Rerun duscope query with one SELECT of the tables duscope schema lists","retryable":false,"fixable_by":"agent"}}

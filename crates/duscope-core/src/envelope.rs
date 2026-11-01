@@ -1,7 +1,8 @@
 //! The types of the JSON envelope that every verb prints under `--json`.
 //!
-//! The envelope types arrive with P1-CLI-02. Until P2-CLI-01 points the schema
-//! drift test at them, the test runs on [`PlaceholderEnvelope`].
+//! The envelope types arrived with P1-CLI-02; P2-CLI-01 froze them at
+//! `schema_version` 0.2, each verb's described by a file under
+//! `schemas/envelope/`.
 //!
 //! Every envelope type derives `schemars::JsonSchema` in test builds only, with
 //! `#[cfg_attr(test, derive(schemars::JsonSchema))]`. `schemars` is a
@@ -9,40 +10,147 @@
 //! (`src/schema_drift.rs`) compares each derived schema with its checked-in file
 //! under `schemas/`.
 
-/// A stand-in for the envelope types, for the schema drift test until phase 2.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct PlaceholderEnvelope {
-    /// Whether the command succeeded.
-    pub ok: bool,
-    /// The version of the envelope schema.
-    pub schema_version: String,
-    /// The rows.
-    pub entries: Vec<PlaceholderEntry>,
-    /// The number of rows in `entries`.
-    pub returned_count: u64,
-    /// Where the next page starts, or null on the last page.
-    pub next_cursor: Option<String>,
+/// The version of the envelope's shape, frozen at 0.2 (P2-CLI-01): it
+/// changes additively only, a minor at a time, and `schemas/envelope/`
+/// describes it with every published minor under `history/`.
+pub const SCHEMA_VERSION: &str = "0.2";
+
+/// The warning codes of the conventions appendix, the only values of
+/// [`Warning::code`].
+pub const WARNING_CODES: [&str; 15] = [
+    "partial_read",
+    "mounts_excluded",
+    "stale_index",
+    "scan_age",
+    "atime_unreliable",
+    "attrs_not_collected",
+    "dataless_present",
+    "full_disk_access_missing",
+    "clones_unavailable",
+    "upper_bound",
+    "vanished",
+    "index_untouched",
+    "spilled",
+    "deprecated_flag",
+    "tz_unavailable",
+];
+
+/// The error codes of the conventions appendix, the only values of
+/// [`ErrorObject::code`], each with the exit code it carries.
+pub const ERROR_CODES: [(&str, u8); 26] = [
+    ("usage", 2),
+    ("scan_not_found", 3),
+    ("invalid_cursor", 2),
+    ("unknown_field", 2),
+    ("attrs_not_collected", 1),
+    ("incompatible_scans", 2),
+    ("confirmation_required", 1),
+    ("expectation_mismatch", 1),
+    ("refused_path", 1),
+    ("handle_invalid", 1),
+    ("handle_expired", 1),
+    ("trash_unavailable", 1),
+    ("path_changed", 1),
+    ("untrusted_index", 1),
+    ("not_compiled", 2),
+    ("not_available", 2),
+    ("deadline_exceeded", 1),
+    ("index_version_mismatch", 5),
+    ("index_corrupt", 5),
+    ("index_write_failed", 1),
+    ("index_stale", 1),
+    ("sql_denied", 1),
+    ("sql_timeout", 1),
+    ("io_error", 1),
+    ("permission_denied", 4),
+    ("interrupted", 130),
+];
+
+/// The values of the envelope's enumerated fields, as its schemas list
+/// them.
+pub mod values {
+    /// An entry's `kind`.
+    pub const KINDS: [&str; 4] = ["file", "dir", "symlink", "other"];
+    /// `size_kind`.
+    pub const SIZE_KINDS: [&str; 2] = ["allocated", "apparent"];
+    /// `attrs`.
+    pub const ATTRS: [&str; 2] = ["basic", "full"];
+    /// Why the scan did not enter a volume or directory.
+    pub const SKIP_REASONS: [&str; 7] = [
+        "firmlinked",
+        "kernel",
+        "network",
+        "one_file_system",
+        "bind_cycle",
+        "excluded",
+        "excluded_cache",
+    ];
+    /// Why a directory was excluded.
+    pub const EXCLUDE_REASONS: [&str; 2] = ["excluded", "excluded_cache"];
+    /// A row's `flags`.
+    pub const FLAGS: [&str; 11] = [
+        "sparse",
+        "compressed",
+        "dataless",
+        "purgeable",
+        "may_share",
+        "shares_all",
+        "mount_root",
+        "subvolume",
+        "upper_bound",
+        "unreadable",
+        "uncharged",
+    ];
+    /// `diff`'s `change`.
+    pub const CHANGES: [&str; 5] = ["added", "removed", "grown", "shrunk", "kind_changed"];
+    /// Who can fix an error.
+    pub const FIXABLE_BY: [&str; 3] = ["user", "agent", "none"];
+    /// `explain`'s `confidence`.
+    pub const CONFIDENCES: [&str; 3] = ["high", "medium", "low"];
+    /// `explain`'s `freeable_kind`.
+    pub const FREEABLE_KINDS: [&str; 3] = ["exact", "lower_bound", "upper_bound"];
+    /// The commands that regenerate a cache.
+    pub const REGENERABLE_BY: [&str; 9] = [
+        "npm install",
+        "cargo build",
+        "pip install",
+        "gradle build",
+        "cmake --build",
+        "pod install",
+        "composer install",
+        "xcodebuild",
+        "unknown",
+    ];
+    /// What `scans --prune` removed.
+    pub const PRUNED_KINDS: [&str; 3] = ["index", "temporary", "spill"];
 }
 
-/// One row of the placeholder envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct PlaceholderEntry {
-    /// The absolute path of the entry.
-    pub path: String,
-    /// The bytes the entry occupies on disk.
-    pub allocated_bytes: u64,
+/// `values` with null, for a nullable field's values.
+#[cfg(test)]
+fn nullable(values: &[&'static str]) -> Vec<Option<&'static str>> {
+    values.iter().copied().map(Some).chain([None]).collect()
 }
 
-/// The version of the envelope's shape. It changes additively only once
-/// P2-CLI-01 freezes it at 0.2.
-pub const SCHEMA_VERSION: &str = "0.1";
+/// A field whose values grow additively (a warning code, a flag): the
+/// values known now, or any string, so a reader of this minor accepts the
+/// next one's.
+#[cfg(test)]
+fn known<T: serde::Serialize>(values: T) -> serde_json::Value {
+    serde_json::json!([{"enum": values}, {"type": "string"}])
+}
+
+/// The error codes alone, for [`ErrorObject::code`]'s values.
+#[cfg(test)]
+fn error_codes() -> Vec<&'static str> {
+    ERROR_CODES.iter().map(|&(code, _)| code).collect()
+}
 
 /// The program that wrote an envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Tool {
     /// Always `duscope`.
+    #[cfg_attr(test, schemars(extend("const" = "duscope")))]
     pub name: &'static str,
     /// The release, as `duscope --version` prints it.
     pub version: &'static str,
@@ -59,10 +167,11 @@ impl Tool {
 /// What every list verb prints under `--json`: one object, its rows in
 /// `entries`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Envelope<T> {
     /// Whether the command succeeded.
     pub ok: bool,
-    /// [`SCHEMA_VERSION`].
+    /// The version of the envelope's shape.
     pub schema_version: &'static str,
     /// The program.
     pub tool: Tool,
@@ -78,8 +187,7 @@ pub struct Envelope<T> {
     pub total_count: u64,
     /// Whether `--limit` left rows out.
     pub truncated: bool,
-    /// Where the next page starts; null on the last page (pages arrive
-    /// with the index).
+    /// Where the next page starts (`--cursor`); null on the last page.
     pub next_cursor: Option<String>,
     /// Warnings, with their codes.
     pub warnings: Vec<Warning>,
@@ -89,6 +197,7 @@ pub struct Envelope<T> {
 
 /// The scan an envelope describes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ScanBlock {
     /// The saved scan's id; null for a scan that was not saved.
     pub id: Option<String>,
@@ -97,13 +206,17 @@ pub struct ScanBlock {
     /// The root as the command line gave it.
     pub root_as_given: String,
     /// When the scan started.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub started_at: String,
     /// When it finished.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub finished_at: String,
     /// The size the rows are ranked and shown by: `allocated` or
     /// `apparent`.
+    #[cfg_attr(test, schemars(extend("enum" = values::SIZE_KINDS)))]
     pub size_kind: &'static str,
     /// The attributes collected: `basic` or `full`.
+    #[cfg_attr(test, schemars(extend("enum" = values::ATTRS)))]
     pub attrs: &'static str,
     /// Worker threads.
     pub thread_count: u64,
@@ -138,15 +251,18 @@ pub struct ScanBlock {
 
 /// A directory the scan listed but did not enter because of an exclude.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ExcludedEntry {
     /// Its absolute path, as lossy UTF-8.
     pub path: String,
     /// `excluded` (a glob or ignore pattern) or `excluded_cache`.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(values::EXCLUDE_REASONS))))]
     pub reason: &'static str,
 }
 
 /// A volume the scan met.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct VolumeEntry {
     /// Where it is mounted.
     pub mount_point: String,
@@ -155,6 +271,7 @@ pub struct VolumeEntry {
     /// Whether the scan entered it.
     pub entered: bool,
     /// Why not (`one_file_system`, `network`, …); null when it did.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::SKIP_REASONS)))))]
     pub reason: Option<&'static str>,
     /// Mounted read-only.
     pub read_only: bool,
@@ -172,6 +289,7 @@ pub struct VolumeEntry {
 
 /// What a list verb was asked.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct QueryBlock {
     /// The verb.
     pub command: &'static str,
@@ -189,8 +307,10 @@ pub struct QueryBlock {
 
 /// A warning.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Warning {
     /// One of the conventions' warning codes.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(WARNING_CODES))))]
     pub code: &'static str,
     /// One sentence.
     pub message: String,
@@ -202,10 +322,11 @@ pub struct Warning {
 
 /// A failure, as `--json` prints it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ErrorEnvelope {
     /// Always false.
     pub ok: bool,
-    /// [`SCHEMA_VERSION`].
+    /// The version of the envelope's shape.
     pub schema_version: &'static str,
     /// The program.
     pub tool: Tool,
@@ -215,8 +336,10 @@ pub struct ErrorEnvelope {
 
 /// The conventions' error object.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ErrorObject {
     /// The error code (`scan_not_found`, `permission_denied`, …).
+    #[cfg_attr(test, schemars(extend("anyOf" = known(error_codes()))))]
     pub code: &'static str,
     /// One sentence.
     pub message: String,
@@ -225,11 +348,13 @@ pub struct ErrorObject {
     /// Whether the same command may succeed if run again.
     pub retryable: bool,
     /// Who can fix it: `user`, `agent` or `none`.
+    #[cfg_attr(test, schemars(extend("enum" = values::FIXABLE_BY)))]
     pub fixable_by: &'static str,
 }
 
 /// A row of `top`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TopEntry {
     /// The entry's absolute path, as lossy UTF-8.
     pub path: String,
@@ -242,6 +367,7 @@ pub struct TopEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `file`, `dir`, `symlink` or `other`.
+    #[cfg_attr(test, schemars(extend("enum" = values::KINDS)))]
     pub kind: &'static str,
     /// How far below the root it is.
     pub depth: u32,
@@ -257,18 +383,21 @@ pub struct TopEntry {
     /// Directories in the subtree, the directory included; 0 for a file.
     pub dir_count: u64,
     /// The newest modification time in the subtree.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub max_mtime: String,
     /// The directories the row was cut through to reach it, outermost
     /// first: each held a child of at least 80% of its bytes.
     pub via: Vec<String>,
     /// What else is true of it (`upper_bound`, `unreadable`, `sparse`,
     /// `uncharged`, …).
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
 }
 
 /// A row of `tree`: the entries down to `--depth`, largest first under
 /// each directory.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TreeEntry {
     /// The entry's absolute path, as lossy UTF-8.
     pub path: String,
@@ -281,6 +410,7 @@ pub struct TreeEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `file`, `dir`, `symlink` or `other`.
+    #[cfg_attr(test, schemars(extend("enum" = values::KINDS)))]
     pub kind: &'static str,
     /// How far below the root it is; the root is 0.
     pub depth: u32,
@@ -297,13 +427,16 @@ pub struct TreeEntry {
     /// Directories in the subtree, the directory included; 0 for a file.
     pub dir_count: u64,
     /// The newest modification time in the subtree.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub max_mtime: String,
     /// What else is true of it.
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
 }
 
 /// A row of `by-type`: one file class.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ByTypeEntry {
     /// The class: `code`, `media`, `archives`, `data`, `binaries`, `docs`
     /// or `other`.
@@ -322,6 +455,7 @@ pub struct ByTypeEntry {
 
 /// One of a class's largest files.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Example {
     /// The file's absolute path, as lossy UTF-8.
     pub path: String,
@@ -339,6 +473,7 @@ pub struct Example {
 /// A row of `stale`: a large file nobody has changed (or read) since the
 /// cutoff.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct StaleEntry {
     /// The file's absolute path, as lossy UTF-8.
     pub path: String,
@@ -351,20 +486,25 @@ pub struct StaleEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `file`, `symlink` or `other`.
+    #[cfg_attr(test, schemars(extend("enum" = values::KINDS)))]
     pub kind: &'static str,
     /// Bytes on disk.
     pub allocated_bytes: u64,
     /// Apparent bytes.
     pub apparent_bytes: u64,
     /// Last modification.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub mtime: String,
     /// Last inode change.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub ctime: String,
     /// Last access; null when the scan did not collect it.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub atime: Option<String>,
     /// Its hard links.
     pub nlink: u32,
     /// What else is true of it.
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
 }
 
@@ -375,7 +515,7 @@ pub struct StaleEntry {
 pub enum NdjsonLine<'a, T> {
     /// The first line.
     Scan {
-        /// [`SCHEMA_VERSION`].
+        /// The version of the envelope's shape.
         schema_version: &'static str,
         /// The program.
         tool: Tool,
@@ -386,7 +526,7 @@ pub enum NdjsonLine<'a, T> {
     },
     /// The first line of a listing of saved scans, which has no scan.
     Listing {
-        /// [`SCHEMA_VERSION`].
+        /// The version of the envelope's shape.
         schema_version: &'static str,
         /// The program.
         tool: Tool,
@@ -453,6 +593,7 @@ pub(crate) fn encode64(bytes: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
 
 /// A cache directory, as `caches` lists it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct CacheEntry {
     /// Its path, absolute, as lossy UTF-8.
     pub path: String,
@@ -467,6 +608,7 @@ pub struct CacheEntry {
     /// The rule that names it: a name or glob, or `CACHEDIR.TAG`.
     pub rule: String,
     /// The command that regenerates it.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(values::REGENERABLE_BY))))]
     pub regenerable_by: &'static str,
     /// The directory holding the marker that confirms it (the project);
     /// null when a `CACHEDIR.TAG`, an ancestor path or nothing (`--loose`)
@@ -489,11 +631,13 @@ pub struct CacheEntry {
     /// Non-directories under it.
     pub file_count: u64,
     /// The newest modification time under it.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub max_mtime: String,
 }
 
 /// A project's caches, as `caches --by-project` lists them.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ProjectEntry {
     /// The directory holding the marker; null for the caches no marker
     /// confirms.
@@ -508,6 +652,7 @@ pub struct ProjectEntry {
     /// Its caches.
     pub cache_count: u64,
     /// The newest modification time in the project, caches included.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub max_mtime: String,
     /// Its largest caches' paths, largest first, at most ten;
     /// `cache_count` counts them all.
@@ -519,10 +664,11 @@ pub struct ProjectEntry {
 /// scan it read (null when none was), and the object as `result`. `query`
 /// says what it was asked in a block of its own.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ObjectEnvelope<T, Q = ObjectQuery> {
     /// Whether the command succeeded.
     pub ok: bool,
-    /// [`SCHEMA_VERSION`].
+    /// The version of the envelope's shape.
     pub schema_version: &'static str,
     /// The program.
     pub tool: Tool,
@@ -540,6 +686,7 @@ pub struct ObjectEnvelope<T, Q = ObjectQuery> {
 
 /// What a one-object verb was asked.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ObjectQuery {
     /// The verb.
     pub command: &'static str,
@@ -550,6 +697,7 @@ pub struct ObjectQuery {
 /// What `explain` says of one path: facts with their evidence, never a
 /// verdict.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Explain {
     /// The path, absolute, as lossy UTF-8.
     pub path: String,
@@ -562,6 +710,7 @@ pub struct Explain {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `file`, `dir`, `symlink` or `other`.
+    #[cfg_attr(test, schemars(extend("enum" = values::KINDS)))]
     pub kind: &'static str,
     /// Apparent bytes: a directory's subtree, hard links counted once.
     pub apparent_bytes: u64,
@@ -572,12 +721,16 @@ pub struct Explain {
     /// A directory's directories, itself included; null for a file.
     pub dir_count: Option<u64>,
     /// Its modification time.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub mtime: String,
     /// Its inode change time.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub ctime: String,
     /// Its access time, when collected.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub atime: Option<String>,
     /// Its creation time, when collected and the filesystem has one.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub btime: Option<String>,
     /// Its mode bits, when collected.
     pub mode: Option<u32>,
@@ -589,25 +742,32 @@ pub struct Explain {
     pub nlink: Option<u64>,
     /// Links of the inodes under the path that lie outside it.
     pub links_outside_subtree: Option<u64>,
-    /// Whether a file is a member of a clone group; null for a directory.
+    /// Whether a file is a member of a clone group; null for a directory,
+    /// and where the scan recorded no clone ids (it did not count clones,
+    /// or the filesystem has none: every one but APFS).
     pub is_clone: Option<bool>,
     /// The members of a file's clone group; null when it is none's.
     pub clone_group_size: Option<u64>,
-    /// Members of the clone groups under the path that lie outside it.
+    /// Members of the clone groups under the path that lie outside it;
+    /// null where the scan recorded no clone ids.
     pub clone_members_outside: Option<u64>,
     /// The bytes deleting the path would free now.
     pub freeable_now_bytes: Option<u64>,
     /// `exact`, `lower_bound` or `upper_bound`.
+    #[cfg_attr(test, schemars(extend("enum" = nullable(&values::FREEABLE_KINDS))))]
     pub freeable_kind: Option<&'static str>,
     /// The command that regenerates a cache directory, from the rules.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::REGENERABLE_BY)))))]
     pub regenerable_by: Option<&'static str>,
     /// Whether the directory holds a valid `CACHEDIR.TAG`.
     pub cachedir_tag: bool,
     /// What git says of the path; null outside a repository.
     pub git: Option<ExplainGit>,
     /// Its storage flags, and `upper_bound`, `unreadable`, `uncharged`.
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
     /// `high`, `medium` or `low`.
+    #[cfg_attr(test, schemars(extend("enum" = values::CONFIDENCES)))]
     pub confidence: &'static str,
     /// Where each fact came from: tables, rules, markers, files.
     pub evidence: Vec<String>,
@@ -615,6 +775,7 @@ pub struct Explain {
 
 /// What git says of a path.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ExplainGit {
     /// The repository's working tree root.
     pub repo_root: String,
@@ -629,6 +790,7 @@ pub struct ExplainGit {
 /// A directory or entry a scan could not read, as `explain --errors` lists
 /// it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ScanErrorEntry {
     /// Its path, absolute, as lossy UTF-8.
     pub path: String,
@@ -637,6 +799,7 @@ pub struct ScanErrorEntry {
     pub path_bytes: Vec<u8>,
     /// `directory` (listed but not read) or `entry` (listed but not
     /// examined).
+    #[cfg_attr(test, schemars(extend("enum" = ["directory", "entry"])))]
     pub kind: &'static str,
     /// The error number.
     pub errno: i32,
@@ -648,10 +811,11 @@ pub struct ScanErrorEntry {
 /// block (it lists the saved scans, not the rows of one), and the index
 /// directory it read.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Listing<T> {
     /// Whether the command succeeded.
     pub ok: bool,
-    /// [`SCHEMA_VERSION`].
+    /// The version of the envelope's shape.
     pub schema_version: &'static str,
     /// The program.
     pub tool: Tool,
@@ -675,6 +839,7 @@ pub struct Listing<T> {
 
 /// What `scans` was asked.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ListingQuery {
     /// `scans`, `scans --prune` or `scans --check`.
     pub command: &'static str,
@@ -684,16 +849,20 @@ pub struct ListingQuery {
 
 /// A saved scan, as `scans` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct SavedScanEntry {
     /// The scan's id.
     pub id: String,
     /// Its root.
     pub root: String,
     /// When it started.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub started_at: String,
     /// When it finished.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub finished_at: String,
     /// The attributes it collected: `basic` or `full`.
+    #[cfg_attr(test, schemars(extend("enum" = values::ATTRS)))]
     pub attrs: &'static str,
     /// Entries in it, the root included.
     pub entry_count: u64,
@@ -723,31 +892,36 @@ pub struct SavedScanEntry {
 
 /// A file `scans --prune` removed.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct PrunedEntry {
     /// The file.
     pub path: String,
     /// `index`, `temporary` (a write that never finished) or `spill`.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(values::PRUNED_KINDS))))]
     pub kind: &'static str,
     /// The scan whose index it was; null for the others.
     pub id: Option<String>,
     /// Its size.
-    pub bytes: u64,
+    pub size_bytes: u64,
 }
 
 /// A saved scan `scans --check` found sound.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct CheckedEntry {
     /// The scan's id.
     pub id: String,
     /// Its file.
     pub index_path: String,
     /// What `PRAGMA quick_check` said: `ok`.
+    #[cfg_attr(test, schemars(extend("const" = "ok")))]
     pub quick_check: &'static str,
 }
 
 /// `summary`'s answer: a scan's totals under a path, each volume's share,
 /// and how the scan ran.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Summary {
     /// The path, absolute.
     pub path: String,
@@ -779,23 +953,27 @@ pub struct Summary {
     /// the index does not place them under a path.
     pub vanished_count: u64,
     /// `basic` or `full`.
+    #[cfg_attr(test, schemars(extend("enum" = values::ATTRS)))]
     pub attrs: &'static str,
     /// Whether the scan updated an earlier one.
     pub incremental: bool,
     /// The scan it updated; null for a full scan.
     pub parent_scan_id: Option<String>,
     /// When the scan started.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub started_at: String,
     /// When it finished.
+    #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub finished_at: String,
     /// How long it took.
     pub duration_ms: u64,
     /// The worker threads it ran.
-    pub threads: u64,
+    pub thread_count: u64,
 }
 
 /// A volume's share in `summary`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct SummaryVolume {
     /// Where it is mounted.
     pub mount_point: String,
@@ -814,11 +992,13 @@ pub struct SummaryVolume {
     /// Whether the scan entered it.
     pub entered: bool,
     /// Why not, when it did not.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::SKIP_REASONS)))))]
     pub reason: Option<&'static str>,
 }
 
 /// A change `diff` found.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DiffEntry {
     /// The entry's path, absolute: in the new scan, or the old one for
     /// `removed`.
@@ -832,15 +1012,17 @@ pub struct DiffEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `added`, `removed`, `grown`, `shrunk` or `kind_changed`.
+    #[cfg_attr(test, schemars(extend("enum" = values::CHANGES)))]
     pub change: &'static str,
     /// What it is: in the new scan, or the old one for `removed`.
+    #[cfg_attr(test, schemars(extend("enum" = values::KINDS)))]
     pub kind: &'static str,
     /// Its bytes in the old scan; null when it was not there.
     pub old_bytes: Option<u64>,
     /// Its bytes in the new scan; null when it is not there.
     pub new_bytes: Option<u64>,
     /// New less old, in the size compared.
-    pub bytes_delta: i64,
+    pub delta_bytes: i64,
     /// For a directory added or removed whole, the entries in it, itself
     /// included; null otherwise.
     pub collapsed_count: Option<u64>,
@@ -849,6 +1031,7 @@ pub struct DiffEntry {
 /// What `diff` adds up: bytes and entries come and gone, whatever
 /// `--min-delta` left out of the rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DiffTotals {
     /// The old scan's id.
     pub old_scan: String,
@@ -861,16 +1044,29 @@ pub struct DiffTotals {
     /// The new total less the old.
     pub net_bytes: i64,
     /// Entries in the new scan only, those in added directories included.
-    pub entries_added: u64,
+    pub added_count: u64,
     /// Entries in the old scan only.
-    pub entries_removed: u64,
+    pub removed_count: u64,
     /// Files in both whose own size differs, and entries in both whose
     /// kind differs (beneath a directory `--depth` compares whole too).
-    pub entries_changed: u64,
+    pub changed_count: u64,
+}
+
+/// What `diff` prints under `--json`: a list's envelope (`V`, its rows
+/// perhaps narrowed by `--fields`), then the totals.
+#[derive(Debug, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct DiffEnvelope<'a, V> {
+    /// The list's fields.
+    #[serde(flatten)]
+    pub envelope: &'a V,
+    /// The totals.
+    pub diff: &'a DiffTotals,
 }
 
 /// What `query` was asked.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct SqlQueryBlock {
     /// The verb, `query`.
     pub command: &'static str,
@@ -890,6 +1086,7 @@ pub struct SqlQueryBlock {
 /// What `query --sql` answers: the statement's columns, and its rows up to
 /// the limit.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct SqlResult {
     /// The columns' names, in order.
     pub columns: Vec<String>,
@@ -939,6 +1136,32 @@ impl serde::Serialize for SqlValue {
                 map.end()
             }
         }
+    }
+}
+
+// The schema of a value as `Serialize` above writes it. A `$bytes` object
+// is named through `propertyNames`, not `properties`: property names in a
+// schema keep to MCP's `[A-Za-z0-9_.-]`.
+#[cfg(test)]
+impl schemars::JsonSchema for SqlValue {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SqlValue".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "A value of a row: null, a number, a string, or {\"$bytes\": base64} for a BLOB or text that is not UTF-8.",
+            "anyOf": [
+                {"type": ["null", "integer", "number", "string"]},
+                {
+                    "type": "object",
+                    "propertyNames": {"const": "$bytes"},
+                    "additionalProperties": {"type": "string", "contentEncoding": "base64"},
+                    "minProperties": 1,
+                    "maxProperties": 1
+                }
+            ]
+        })
     }
 }
 
@@ -1063,7 +1286,7 @@ impl Fields for SavedScanEntry {
 }
 
 impl Fields for PrunedEntry {
-    const NAMES: &'static [&'static str] = &["path", "kind", "id", "bytes"];
+    const NAMES: &'static [&'static str] = &["path", "kind", "id", "size_bytes"];
 }
 
 impl Fields for CheckedEntry {
@@ -1079,7 +1302,7 @@ impl Fields for DiffEntry {
         "kind",
         "old_bytes",
         "new_bytes",
-        "bytes_delta",
+        "delta_bytes",
         "collapsed_count",
     ];
 }
@@ -1091,10 +1314,11 @@ impl Fields for ScanErrorEntry {
 /// What stdout gets in place of an envelope longer than `--max-chars`: the
 /// file the whole envelope went to, and its first rows.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct SpilledEnvelope<T> {
     /// Whether the command succeeded.
     pub ok: bool,
-    /// [`SCHEMA_VERSION`].
+    /// The version of the envelope's shape.
     pub schema_version: &'static str,
     /// The program.
     pub tool: Tool,
@@ -1108,6 +1332,7 @@ pub struct SpilledEnvelope<T> {
 
 /// An envelope written to a file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Spill {
     /// The file, absolute.
     pub path: String,
@@ -1119,7 +1344,7 @@ pub struct Spill {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, name_fields};
+    use super::{base64, name_fields, values};
 
     #[test]
     fn p1_cli_02_base64_matches_rfc_4648() {
@@ -1273,7 +1498,7 @@ mod tests {
             path: "/p".into(),
             kind: "spill",
             id: None,
-            bytes: 1,
+            size_bytes: 1,
         });
         assert_names(&CheckedEntry {
             id: "i".into(),
@@ -1287,5 +1512,72 @@ mod tests {
             errno: 13,
             message: "denied".into(),
         });
+    }
+
+    #[test]
+    fn p2_cli_01_the_schemas_values_are_the_ones_the_code_writes() {
+        use duscope_walk::{Flags, Kind, Skip};
+
+        use crate::query::{Node, flag_names, kind_name};
+        use crate::rules::Regenerable;
+
+        for kind in [
+            Kind::File,
+            Kind::Dir,
+            Kind::Symlink,
+            Kind::Socket,
+            Kind::Fifo,
+            Kind::Char,
+            Kind::Block,
+            Kind::Unknown,
+        ] {
+            assert!(values::KINDS.contains(&kind_name(kind)), "{kind:?}");
+        }
+        let skips = [
+            Skip::Firmlinked,
+            Skip::Kernel,
+            Skip::Network,
+            Skip::OneFileSystem,
+            Skip::BindCycle,
+            Skip::Excluded,
+            Skip::ExcludedCache,
+        ];
+        let names: Vec<&str> = skips.iter().map(|s| s.as_str()).collect();
+        assert_eq!(names, values::SKIP_REASONS);
+        assert!(values::EXCLUDE_REASONS.iter().all(|r| names.contains(r)));
+        for command in values::REGENERABLE_BY {
+            let rule: Regenerable = serde_json::from_value(command.into()).unwrap();
+            assert_eq!(rule.as_str(), command);
+        }
+        // A file with every flag, charged to another link.
+        let node = Node {
+            id: 1,
+            parent: 0,
+            depth: 1,
+            kind: Kind::File,
+            allocated: 0,
+            apparent: 0,
+            file_count: 1,
+            dir_count: 0,
+            mtime_ns: 0,
+            max_mtime_ns: 0,
+            ctime_ns: 0,
+            atime_ns: None,
+            btime_ns: None,
+            mode: None,
+            nlink: 2,
+            charged: false,
+            linked_away: false,
+            flags: Flags::all(),
+            upper_bound: true,
+            unreadable: true,
+            files_end: 1,
+            last_id: 1,
+        };
+        let mut written = flag_names(&node);
+        let mut listed = values::FLAGS.to_vec();
+        written.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(written, listed);
     }
 }

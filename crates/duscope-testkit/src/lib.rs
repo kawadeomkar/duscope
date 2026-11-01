@@ -157,9 +157,10 @@ pub fn golden(name: &str, actual: &str) {
 
 /// `text`, a command's output, without what differs between runs, machines
 /// and releases, for a golden file: the root's path as `<root>`, the scan's
-/// id and times, the version, every `volumes` array (sizes and free space),
-/// and in a table's footer the scan's duration and the saved scan's id and
-/// time.
+/// id and times (in the `next` hints too: the scan and the cursor they
+/// name, and the next page's whole command, which repeats the test's own),
+/// the version, every `volumes` array (sizes and free space), and in a
+/// table's footer the scan's duration and the saved scan's id and time.
 ///
 /// # Panics
 ///
@@ -178,6 +179,31 @@ pub fn normalize(text: &str, root: &Path) -> String {
         ("\"name\":\"duscope\",\"version\":\"", "<version>"),
     ] {
         replace_values(&mut text, key, '"', placeholder);
+    }
+    // The next page: the command that ran, with its cursor.
+    let mut from = 0;
+    while let Some(at) = text[from..].find("\"duscope ").map(|n| from + n + 1) {
+        let end = text[at..].find('"').map_or(text.len(), |n| at + n);
+        if text[at..end].contains(" --cursor ") {
+            text.replace_range(at..end, "<next page>");
+            from = at + "<next page>".len();
+        } else {
+            from = end;
+        }
+    }
+    for (flag, placeholder) in [
+        ("--scan ", "<id>"),
+        ("--errors ", "<id>"),
+        ("--cursor ", "<cursor>"),
+    ] {
+        let mut from = 0;
+        while let Some(at) = text[from..].find(flag).map(|n| from + n + flag.len()) {
+            let end = text[at..]
+                .find([' ', '"', '\n'])
+                .map_or(text.len(), |n| at + n);
+            text.replace_range(at..end, placeholder);
+            from = at + placeholder.len();
+        }
     }
     let key = "\"volumes\":[";
     let mut from = 0;

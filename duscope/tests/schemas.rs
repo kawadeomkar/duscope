@@ -366,3 +366,178 @@ fn p0_repo_05_schemas_directory_has_the_layout() {
         "schemas/index/v2.sql starts with its header comment"
     );
 }
+
+/// The verb whose envelope the golden file `name` holds:
+/// `top_json_home@macos.snap` is `top`'s, `by_type_json_verbs@linux.snap`
+/// `by-type`'s; `None` for a golden of another format.
+fn golden_verb(name: &str) -> Option<String> {
+    let (verb, _) = name.split_once("_json_")?;
+    Some(verb.replace('_', "-"))
+}
+
+/// A golden envelope as JSON, with what the golden masked put back as
+/// values of their types: an unquoted placeholder (`"uid":<id>`) as 0, a
+/// masked `volumes` array as empty.
+fn unmask(text: &str) -> Value {
+    let mut text = text.replace("\"volumes\":[\"<volumes>\"]", "\"volumes\":[]");
+    while let Some(at) = text.find(":<") {
+        let end = text[at..].find('>').map_or(text.len(), |n| at + n + 1);
+        text.replace_range(at + 1..end, "0");
+    }
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
+}
+
+/// Every golden envelope: its file name, its verb, and its JSON.
+fn golden_envelopes() -> Vec<(String, String, Value)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let mut goldens: Vec<(String, String, Value)> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter_map(|name| {
+            let verb = golden_verb(&name)?;
+            let text = fs::read_to_string(dir.join(&name)).unwrap();
+            Some((name, verb, unmask(&text)))
+        })
+        .collect();
+    goldens.sort_by(|a, b| a.0.cmp(&b.0));
+    goldens
+}
+
+/// Where `instance` breaks `schema`, one line each; empty when it passes.
+fn violations(schema: &Value, instance: &Value) -> Vec<String> {
+    let validator = jsonschema::draft202012::new(schema).unwrap();
+    validator
+        .iter_errors(instance)
+        .map(|e| format!("{}: {e}", e.instance_path()))
+        .collect()
+}
+
+#[test]
+fn p2_cli_01_every_golden_envelope_validates_against_its_verb_schema() {
+    let goldens = golden_envelopes();
+    assert!(goldens.len() >= 10, "{} golden envelopes", goldens.len());
+    let mut problems = Vec::new();
+    for (name, verb, envelope) in &goldens {
+        let file = schemas_dir().join(format!("envelope/{verb}.schema.json"));
+        let Ok(text) = fs::read_to_string(&file) else {
+            problems.push(format!(
+                "{name}: no schema for {verb} at {}",
+                file.display()
+            ));
+            continue;
+        };
+        let schema: Value = serde_json::from_str(&text).unwrap();
+        problems.extend(
+            violations(&schema, envelope)
+                .into_iter()
+                .map(|v| format!("{name} against {verb}.schema.json: {v}")),
+        );
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The major of a `schema_version` (`0` of `0.2`).
+fn major(version: &str) -> &str {
+    version.split('.').next().unwrap_or(version)
+}
+
+#[test]
+fn p2_cli_01_golden_envelopes_validate_against_every_published_minor() {
+    let history = schemas_dir().join("envelope/history");
+    let current = duscope_core::envelope::SCHEMA_VERSION;
+    let mut minors: Vec<String> = fs::read_dir(&history)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|minor| major(minor) == major(current))
+        .collect();
+    minors.sort();
+    assert!(
+        minors.iter().any(|m| m == current),
+        "history/ keeps no copy of {current}: {minors:?}"
+    );
+    let mut problems = Vec::new();
+    for minor in &minors {
+        for (name, verb, envelope) in golden_envelopes() {
+            let file = history.join(minor).join(format!("{verb}.schema.json"));
+            // A verb a minor did not have yet has nothing to stay compatible with.
+            let Ok(text) = fs::read_to_string(&file) else {
+                continue;
+            };
+            let schema: Value = serde_json::from_str(&text).unwrap();
+            problems.extend(
+                violations(&schema, &envelope)
+                    .into_iter()
+                    .map(|v| format!("{name} against history/{minor}/{verb}.schema.json: {v}")),
+            );
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The exit code of each `Exit` variant, as `verbs/mod.rs` numbers them.
+fn exit_code(variant: &str) -> Option<u8> {
+    match variant {
+        "Success" => Some(0),
+        "Runtime" => Some(1),
+        "Usage" => Some(2),
+        "NotFound" => Some(3),
+        "Permission" => Some(4),
+        "Index" => Some(5),
+        "Interrupted" => Some(130),
+        _ => None,
+    }
+}
+
+/// Every `.rs` file under `dir`.
+fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn p2_cli_01_every_code_the_source_writes_is_in_the_tables() {
+    use duscope_core::envelope::{ERROR_CODES, WARNING_CODES};
+    use duscope_core::query::Regex;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    sources(&root.join("src"), &mut files);
+    sources(&root.join("../crates/duscope-core/src"), &mut files);
+    let failure = Regex::new(r#"Failure::new\(\s*Exit::(\w+),\s*"(\w+)""#).unwrap();
+    let warning = Regex::new(r#"Warning \{\s*code: "(\w+)""#).unwrap();
+    let mut problems = Vec::new();
+    let (mut failures, mut warnings) = (0, 0);
+    for file in &files {
+        let text = fs::read(file).unwrap();
+        for found in failure.captures_iter(&text) {
+            let variant = String::from_utf8_lossy(&found[1]).into_owned();
+            let code = String::from_utf8_lossy(&found[2]).into_owned();
+            failures += 1;
+            match ERROR_CODES.iter().find(|(c, _)| *c == code) {
+                Some(&(_, exit)) if exit_code(&variant) == Some(exit) => {}
+                Some(&(_, exit)) => problems.push(format!(
+                    "{}: {code} exits {variant}, the table says {exit}",
+                    file.display()
+                )),
+                None => problems.push(format!("{}: {code} is not an error code", file.display())),
+            }
+        }
+        for found in warning.captures_iter(&text) {
+            let code = String::from_utf8_lossy(&found[1]).into_owned();
+            warnings += 1;
+            if !WARNING_CODES.contains(&code.as_str()) {
+                problems.push(format!("{}: {code} is not a warning code", file.display()));
+            }
+        }
+    }
+    assert!(
+        failures > 20 && warnings > 5,
+        "{failures} failures, {warnings} warnings"
+    );
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

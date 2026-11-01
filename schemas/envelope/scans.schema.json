@@ -1,0 +1,368 @@
+{
+  "$defs": {
+    "CheckedEntry": {
+      "description": "A saved scan `scans --check` found sound.",
+      "properties": {
+        "id": {
+          "description": "The scan's id.",
+          "type": "string"
+        },
+        "index_path": {
+          "description": "Its file.",
+          "type": "string"
+        },
+        "quick_check": {
+          "const": "ok",
+          "description": "What `PRAGMA quick_check` said: `ok`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "index_path",
+        "quick_check"
+      ],
+      "type": "object"
+    },
+    "ListingQuery": {
+      "description": "What `scans` was asked.",
+      "properties": {
+        "command": {
+          "description": "`scans`, `scans --prune` or `scans --check`.",
+          "type": "string"
+        },
+        "index_dir": {
+          "description": "The index directory, absolute.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "index_dir"
+      ],
+      "type": "object"
+    },
+    "PrunedEntry": {
+      "description": "A file `scans --prune` removed.",
+      "properties": {
+        "id": {
+          "description": "The scan whose index it was; null for the others.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "index",
+                "temporary",
+                "spill"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "`index`, `temporary` (a write that never finished) or `spill`.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file.",
+          "type": "string"
+        },
+        "size_bytes": {
+          "description": "Its size.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "id",
+        "size_bytes"
+      ],
+      "type": "object"
+    },
+    "SavedScanEntry": {
+      "description": "A saved scan, as `scans` lists it.",
+      "properties": {
+        "allocated_bytes": {
+          "description": "Bytes on disk under the root.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "apparent_bytes": {
+          "description": "Apparent bytes under the root.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "attrs": {
+          "description": "The attributes it collected: `basic` or `full`.",
+          "enum": [
+            "basic",
+            "full"
+          ],
+          "type": "string"
+        },
+        "dir_count": {
+          "description": "Directories, the root included.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entry_count": {
+          "description": "Entries in it, the root included.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file_count": {
+          "description": "Non-directories.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "finished_at": {
+          "description": "When it finished.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "id": {
+          "description": "The scan's id.",
+          "type": "string"
+        },
+        "index_bytes": {
+          "description": "The size of its file.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "index_path": {
+          "description": "Its file.",
+          "type": "string"
+        },
+        "index_version": {
+          "description": "The index version of its file.",
+          "type": "string"
+        },
+        "parent_scan_id": {
+          "description": "The scan a rescan started from; null for a fresh scan.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root": {
+          "description": "Its root.",
+          "type": "string"
+        },
+        "source": {
+          "description": "`scan`, or `import:<format>`.",
+          "type": "string"
+        },
+        "started_at": {
+          "description": "When it started.",
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "root",
+        "started_at",
+        "finished_at",
+        "attrs",
+        "entry_count",
+        "allocated_bytes",
+        "apparent_bytes",
+        "file_count",
+        "dir_count",
+        "parent_scan_id",
+        "source",
+        "index_version",
+        "index_bytes",
+        "index_path"
+      ],
+      "type": "object"
+    },
+    "ScansRow": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SavedScanEntry"
+        },
+        {
+          "$ref": "#/$defs/PrunedEntry"
+        },
+        {
+          "$ref": "#/$defs/CheckedEntry"
+        }
+      ]
+    },
+    "Tool": {
+      "description": "The program that wrote an envelope.",
+      "properties": {
+        "name": {
+          "const": "duscope",
+          "description": "Always `duscope`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The release, as `duscope --version` prints it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "Warning": {
+      "description": "A warning.",
+      "properties": {
+        "code": {
+          "anyOf": [
+            {
+              "enum": [
+                "partial_read",
+                "mounts_excluded",
+                "stale_index",
+                "scan_age",
+                "atime_unreliable",
+                "attrs_not_collected",
+                "dataless_present",
+                "full_disk_access_missing",
+                "clones_unavailable",
+                "upper_bound",
+                "vanished",
+                "index_untouched",
+                "spilled",
+                "deprecated_flag",
+                "tz_unavailable"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "One of the conventions' warning codes.",
+          "type": "string"
+        },
+        "count": {
+          "description": "How many things it is about, where that applies.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hint": {
+          "description": "One imperative sentence naming a command.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "One sentence.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "count",
+        "hint"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "scans.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What `scans` prints under `--json`: the fields of a list, without a scan\nblock (it lists the saved scans, not the rows of one), and the index\ndirectory it read.",
+  "properties": {
+    "entries": {
+      "description": "The rows.",
+      "items": {
+        "$ref": "#/$defs/ScansRow"
+      },
+      "type": "array"
+    },
+    "next": {
+      "description": "Up to three runnable commands, most useful first.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Where the next page starts; null on the last page.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ok": {
+      "description": "Whether the command succeeded.",
+      "type": "boolean"
+    },
+    "query": {
+      "$ref": "#/$defs/ListingQuery",
+      "description": "What was asked."
+    },
+    "returned_count": {
+      "description": "Rows in `entries`.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "schema_version": {
+      "description": "The version of the envelope's shape.",
+      "type": "string"
+    },
+    "tool": {
+      "$ref": "#/$defs/Tool",
+      "description": "The program."
+    },
+    "total_count": {
+      "description": "Rows before any limit.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "truncated": {
+      "description": "Whether a limit left rows out.",
+      "type": "boolean"
+    },
+    "warnings": {
+      "description": "Warnings, with their codes.",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ok",
+    "schema_version",
+    "tool",
+    "query",
+    "entries",
+    "returned_count",
+    "total_count",
+    "truncated",
+    "next_cursor",
+    "warnings",
+    "next"
+  ],
+  "title": "Listing",
+  "type": "object",
+  "x-since": "0.2"
+}

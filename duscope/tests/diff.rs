@@ -113,7 +113,7 @@ fn p2_qry_06_golden_for_a_scripted_change_set() {
         .iter()
         .find(|e| e["path"].as_str().unwrap().ends_with("docs/b2.bin"))
         .unwrap();
-    assert_eq!(link["bytes_delta"], 0);
+    assert_eq!(link["delta_bytes"], 0);
     let old = listed["entries"]
         .as_array()
         .unwrap()
@@ -129,7 +129,7 @@ fn p2_qry_06_golden_for_a_scripted_change_set() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|e| e["bytes_delta"].as_i64().unwrap().unsigned_abs())
+        .map(|e| e["delta_bytes"].as_i64().unwrap().unsigned_abs())
         .collect();
     assert!(deltas.windows(2).all(|w| w[0] >= w[1]), "{deltas:?}");
 }
@@ -144,7 +144,7 @@ fn p2_qry_06_an_unchanged_tree_diffs_to_nothing() {
     let listed = ok(&run(&env, &["diff", &first, &second, "--json"]));
     assert_eq!(listed["entries"], serde_json::json!([]));
     assert_eq!(listed["diff"]["net_bytes"], 0);
-    assert_eq!(listed["diff"]["entries_changed"], 0);
+    assert_eq!(listed["diff"]["changed_count"], 0);
 }
 
 #[test]
@@ -222,5 +222,5 @@ fn p2_qry_06_a_link_that_takes_the_charge_leaves_its_original_unchanged() {
     assert!(rows[0]["path"].as_str().unwrap().ends_with("docs/a0.bin"));
     assert_eq!(rows[0]["change"], "added");
     assert_eq!(listed["diff"]["net_bytes"], 0);
-    assert_eq!(listed["diff"]["entries_changed"], 0);
+    assert_eq!(listed["diff"]["changed_count"], 0);
 }

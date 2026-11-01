@@ -232,7 +232,7 @@ fn next_line(root: Option<&str>, dot: &str, width: u16) -> String {
 
 /// `text` as one word for a POSIX shell: as it is when it holds only
 /// characters no shell treats specially, single-quoted otherwise.
-fn shell_quote(text: &str) -> String {
+pub(super) fn shell_quote(text: &str) -> String {
     let plain = !text.is_empty()
         && text
             .chars()

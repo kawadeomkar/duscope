@@ -1,0 +1,568 @@
+{
+  "$defs": {
+    "ExcludedEntry": {
+      "description": "A directory the scan listed but did not enter because of an exclude.",
+      "properties": {
+        "path": {
+          "description": "Its absolute path, as lossy UTF-8.",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "excluded",
+                "excluded_cache"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "`excluded` (a glob or ignore pattern) or `excluded_cache`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "QueryBlock": {
+      "description": "What a list verb was asked.",
+      "properties": {
+        "command": {
+          "description": "The verb.",
+          "type": "string"
+        },
+        "depth": {
+          "description": "`--depth`; null when not limited.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "filters": {
+          "description": "The filters applied, as given (`--min-size=1M`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "`--limit`; null when every row is returned (`--format ndjson`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The path the rows are under, absolute.",
+          "type": "string"
+        },
+        "sort": {
+          "description": "The sort key and direction (`allocated_desc`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "path",
+        "depth",
+        "limit",
+        "sort",
+        "filters"
+      ],
+      "type": "object"
+    },
+    "ScanBlock": {
+      "description": "The scan an envelope describes.",
+      "properties": {
+        "attrs": {
+          "description": "The attributes collected: `basic` or `full`.",
+          "enum": [
+            "basic",
+            "full"
+          ],
+          "type": "string"
+        },
+        "device_confined": {
+          "description": "Whether the scan stayed on the root's filesystem (`-x`).",
+          "type": "boolean"
+        },
+        "dir_count": {
+          "description": "Directories, the root included.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error_count": {
+          "description": "Directories that could not be read, and entries listed but not\nread.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "excluded": {
+          "description": "Each directory the excludes kept the scan out of, path bytewise.",
+          "items": {
+            "$ref": "#/$defs/ExcludedEntry"
+          },
+          "type": "array"
+        },
+        "excluded_count": {
+          "description": "Files left out and directories not entered by the excludes\n(`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file_count": {
+          "description": "Non-directories.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "finished_at": {
+          "description": "When it finished.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "fs_type": {
+          "description": "The root volume's filesystem type; null when the scan recorded no\nvolume.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The saved scan's id; null for a scan that was not saved.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "incremental": {
+          "description": "Whether the scan reused an earlier one (never before phase 5).",
+          "type": "boolean"
+        },
+        "root": {
+          "description": "The root, absolute, symbolic links resolved.",
+          "type": "string"
+        },
+        "root_as_given": {
+          "description": "The root as the command line gave it.",
+          "type": "string"
+        },
+        "size_kind": {
+          "description": "The size the rows are ranked and shown by: `allocated` or\n`apparent`.",
+          "enum": [
+            "allocated",
+            "apparent"
+          ],
+          "type": "string"
+        },
+        "started_at": {
+          "description": "When the scan started.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "thread_count": {
+          "description": "Worker threads.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_allocated_bytes": {
+          "description": "Bytes on disk, hard links and clones counted once.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_apparent_bytes": {
+          "description": "Apparent bytes, hard links counted once.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vanished_count": {
+          "description": "Entries that disappeared during the scan.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "volumes": {
+          "description": "Every volume the scan met, entered or not.",
+          "items": {
+            "$ref": "#/$defs/VolumeEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "root",
+        "root_as_given",
+        "started_at",
+        "finished_at",
+        "size_kind",
+        "attrs",
+        "thread_count",
+        "fs_type",
+        "device_confined",
+        "total_allocated_bytes",
+        "total_apparent_bytes",
+        "file_count",
+        "dir_count",
+        "error_count",
+        "vanished_count",
+        "incremental",
+        "volumes",
+        "excluded_count",
+        "excluded"
+      ],
+      "type": "object"
+    },
+    "StaleEntry": {
+      "description": "A row of `stale`: a large file nobody has changed (or read) since the\ncutoff.",
+      "properties": {
+        "allocated_bytes": {
+          "description": "Bytes on disk.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "apparent_bytes": {
+          "description": "Apparent bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "atime": {
+          "description": "Last access; null when the scan did not collect it.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ctime": {
+          "description": "Last inode change.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "flags": {
+          "description": "What else is true of it.",
+          "items": {
+            "anyOf": [
+              {
+                "enum": [
+                  "sparse",
+                  "compressed",
+                  "dataless",
+                  "purgeable",
+                  "may_share",
+                  "shares_all",
+                  "mount_root",
+                  "subvolume",
+                  "upper_bound",
+                  "unreadable",
+                  "uncharged"
+                ]
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "`file`, `symlink` or `other`.",
+          "enum": [
+            "file",
+            "dir",
+            "symlink",
+            "other"
+          ],
+          "type": "string"
+        },
+        "mtime": {
+          "description": "Last modification.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "name": {
+          "description": "Its name, as lossy UTF-8.",
+          "type": "string"
+        },
+        "name_raw": {
+          "description": "The name's bytes in base64, only when they are not valid UTF-8.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nlink": {
+          "description": "Its hard links.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file's absolute path, as lossy UTF-8.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "name",
+        "kind",
+        "allocated_bytes",
+        "apparent_bytes",
+        "mtime",
+        "ctime",
+        "atime",
+        "nlink",
+        "flags"
+      ],
+      "type": "object"
+    },
+    "Tool": {
+      "description": "The program that wrote an envelope.",
+      "properties": {
+        "name": {
+          "const": "duscope",
+          "description": "Always `duscope`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The release, as `duscope --version` prints it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "VolumeEntry": {
+      "description": "A volume the scan met.",
+      "properties": {
+        "entered": {
+          "description": "Whether the scan entered it.",
+          "type": "boolean"
+        },
+        "free_bytes": {
+          "description": "Bytes an unprivileged user can still write.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fs_type": {
+          "description": "The filesystem type.",
+          "type": "string"
+        },
+        "mount_point": {
+          "description": "Where it is mounted.",
+          "type": "string"
+        },
+        "read_only": {
+          "description": "Mounted read-only.",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "firmlinked",
+                "kernel",
+                "network",
+                "one_file_system",
+                "bind_cycle",
+                "excluded",
+                "excluded_cache",
+                null
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Why not (`one_file_system`, `network`, …); null when it did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total_bytes": {
+          "description": "The volume's size.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mount_point",
+        "fs_type",
+        "entered",
+        "reason",
+        "read_only",
+        "total_bytes",
+        "free_bytes"
+      ],
+      "type": "object"
+    },
+    "Warning": {
+      "description": "A warning.",
+      "properties": {
+        "code": {
+          "anyOf": [
+            {
+              "enum": [
+                "partial_read",
+                "mounts_excluded",
+                "stale_index",
+                "scan_age",
+                "atime_unreliable",
+                "attrs_not_collected",
+                "dataless_present",
+                "full_disk_access_missing",
+                "clones_unavailable",
+                "upper_bound",
+                "vanished",
+                "index_untouched",
+                "spilled",
+                "deprecated_flag",
+                "tz_unavailable"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "One of the conventions' warning codes.",
+          "type": "string"
+        },
+        "count": {
+          "description": "How many things it is about, where that applies.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hint": {
+          "description": "One imperative sentence naming a command.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "One sentence.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "count",
+        "hint"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "stale.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What every list verb prints under `--json`: one object, its rows in\n`entries`.",
+  "properties": {
+    "entries": {
+      "description": "The rows.",
+      "items": {
+        "$ref": "#/$defs/StaleEntry"
+      },
+      "type": "array"
+    },
+    "next": {
+      "description": "Up to three runnable commands for the same scan, most useful first.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Where the next page starts (`--cursor`); null on the last page.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ok": {
+      "description": "Whether the command succeeded.",
+      "type": "boolean"
+    },
+    "query": {
+      "$ref": "#/$defs/QueryBlock",
+      "description": "What was asked."
+    },
+    "returned_count": {
+      "description": "Rows in `entries`.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "scan": {
+      "$ref": "#/$defs/ScanBlock",
+      "description": "The scan the rows come from."
+    },
+    "schema_version": {
+      "description": "The version of the envelope's shape.",
+      "type": "string"
+    },
+    "tool": {
+      "$ref": "#/$defs/Tool",
+      "description": "The program."
+    },
+    "total_count": {
+      "description": "Rows the query matched before `--limit`.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "truncated": {
+      "description": "Whether `--limit` left rows out.",
+      "type": "boolean"
+    },
+    "warnings": {
+      "description": "Warnings, with their codes.",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ok",
+    "schema_version",
+    "tool",
+    "scan",
+    "query",
+    "entries",
+    "returned_count",
+    "total_count",
+    "truncated",
+    "next_cursor",
+    "warnings",
+    "next"
+  ],
+  "title": "Envelope",
+  "type": "object",
+  "x-since": "0.2"
+}

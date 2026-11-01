@@ -23,6 +23,7 @@ use duscope_core::query::{
 };
 use duscope_walk::Attrs;
 
+use super::next::Hints;
 use super::source::core_failure;
 use super::{Exit, Failure};
 use crate::cli::ScansArgs;
@@ -153,7 +154,19 @@ fn list(dir: &Path, output: &Output) -> Result<(), Failure> {
         output.units.size(bytes),
         dir.display()
     );
-    output.listing(&listing("scans", dir, entries), &footer)
+    let mut listed = listing("scans", dir, entries);
+    // The newest scan, at the top.
+    if let Some(newest) = listed.entries.first()
+        && let Some(mut hints) = Hints::new(Some(&newest.id), Some(Path::new(&newest.index_path)))
+    {
+        let root = Some(newest.root.as_str());
+        listed.next = hints
+            .run("summary", root, &[])
+            .run("top", root, &[])
+            .run("caches", root, &[])
+            .done();
+    }
+    output.listing(&listed, &footer)
 }
 
 /// `--prune`.
@@ -189,7 +202,7 @@ fn prune(dir: &Path, now: i64, output: &Output) -> Result<(), Failure> {
     for file in old_spills(dir) {
         removed.push(remove(&file, "spill", None)?);
     }
-    let bytes: u64 = removed.iter().map(|r| r.bytes).sum();
+    let bytes: u64 = removed.iter().map(|r| r.size_bytes).sum();
     let footer = format!(
         "removed {} files, {} · kept {} saved scans",
         thousands(removed.len() as u64),
@@ -214,7 +227,7 @@ fn remove(file: &Path, kind: &'static str, id: Option<String>) -> Result<PrunedE
         path: file.to_string_lossy().into_owned(),
         kind,
         id,
-        bytes,
+        size_bytes: bytes,
     })
 }
 

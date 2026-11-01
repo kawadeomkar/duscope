@@ -17,6 +17,7 @@ use duscope_core::query::{
 use duscope_core::rules::Classes;
 use duscope_walk::VolumeInfo;
 
+use super::next::{self, Hinted};
 use super::scan;
 use super::source::{self, Source, core_failure};
 use super::{Exit, Failure};
@@ -93,6 +94,13 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         let (mut envelope, footer, fresh) =
             top_envelope(fresh, &args.walk, None, "scan", false, true, None, output)?;
         envelope.scan.id = id.as_ref().map(ToString::to_string);
+        let file = id.as_ref().and_then(|id| {
+            index_dir
+                .map(Path::to_owned)
+                .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)))
+                .map(|dir| duscope_core::index::index_path(&dir, id))
+        });
+        envelope.next = next::list(&envelope, file.as_deref(), args.walk.path.as_deref());
         output.list(&envelope, &footer)?;
         match fresh {
             Source::Fresh { scanned, .. } => *scanned,
@@ -495,7 +503,7 @@ pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> R
 }
 
 /// Writes a verb's page as its envelope, and saves a scan run for it.
-fn write<T: Row>(
+fn write<T: Row + Hinted>(
     prepared: Prepared,
     walk: &WalkArgs,
     verb: &'static str,
@@ -776,7 +784,7 @@ fn filters(
 /// back.
 // The parts of an envelope, each from where the verb has it.
 #[allow(clippy::too_many_arguments)]
-fn envelope<T>(
+fn envelope<T: Hinted>(
     prepared: Prepared,
     walk: &WalkArgs,
     verb: &'static str,
@@ -819,7 +827,7 @@ fn envelope<T>(
     // The path the rows are under: the scan's root, or the path inside a
     // saved scan's root.
     let path = source.view().root_path().to_string_lossy().into_owned();
-    let envelope = Envelope {
+    let mut envelope = Envelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
         tool: Tool::CURRENT,
@@ -840,6 +848,11 @@ fn envelope<T>(
         warnings,
         next: Vec::new(),
     };
+    envelope.next = next::list(
+        &envelope,
+        source.index_file().as_deref(),
+        walk.path.as_deref(),
+    );
     (envelope, footer, source)
 }
 
