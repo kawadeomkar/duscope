@@ -3,6 +3,7 @@
 mod completions;
 mod diff;
 mod explain;
+mod export;
 mod man;
 mod next;
 mod query;
@@ -105,6 +106,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::Schema(args)) => schema::run(&args, index_dir, output),
         Some(Verb::Scans(args)) => scans::run(&args, index_dir, output),
         Some(Verb::Rescan(args)) => rescan::run(&args, index_dir, output),
+        Some(Verb::Export(args)) => export::run(&args, cli.output.format, index_dir, output),
         Some(Verb::Man) => man::run(),
         Some(Verb::Completions(args)) => completions::run(args.shell),
     }

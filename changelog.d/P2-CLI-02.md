@@ -1,0 +1,2 @@
+### Added
+- `export [path] --format F` writes a saved scan (or one run for it) for other tools: `ncdu` (JSON that `ncdu -f` opens), `gpscan` (GrandPerspective's gzip XML; with `-o FILE.gpscan` or into a pipe), `qdirstat` (QDirStat's cache file; needs a scan with `--attrs full`), or `ndjson` and `csv`, a row an entry with its path, kind, sizes, link count, time and a directory's totals. `--size apparent` exports apparent sizes where the format has one measure.

@@ -12,6 +12,7 @@ include.workspace = true
 
 [dependencies]
 duscope-walk.workspace = true
+flate2.workspace = true
 gix-ignore.workspace = true
 globset.workspace = true
 jiff.workspace = true

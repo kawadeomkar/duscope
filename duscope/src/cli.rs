@@ -159,6 +159,8 @@ pub enum Verb {
     Scans(ScansArgs),
     /// Scan a saved scan's root again, with the options it was scanned with
     Rescan(RescanArgs),
+    /// Write a saved scan for other tools, in the format --format names
+    Export(ExportArgs),
     /// Print the manual page, in roff, to stdout
     Man,
     /// Print the completion script for a shell to stdout
@@ -603,6 +605,15 @@ pub struct DiffArgs {
     pub size: Option<SizeKind>,
 }
 
+/// `export`'s flags; the format is `--format`.
+#[derive(Debug, Clone, Args)]
+pub struct ExportArgs {
+    #[command(flatten)]
+    pub walk: WalkArgs,
+    #[command(flatten)]
+    pub index: IndexArgs,
+}
+
 /// `rescan`'s flags.
 #[derive(Debug, Clone, Args)]
 pub struct RescanArgs {
@@ -870,7 +881,9 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         Some(Verb::Stale(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
         Some(Verb::Caches(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
         Some(
-            Verb::Summary(SummaryArgs { walk, index }) | Verb::Query(SqlArgs { walk, index, .. }),
+            Verb::Summary(SummaryArgs { walk, index })
+            | Verb::Query(SqlArgs { walk, index, .. })
+            | Verb::Export(ExportArgs { walk, index }),
         ) => {
             walk_defaults(walk)?;
             index_defaults(index);

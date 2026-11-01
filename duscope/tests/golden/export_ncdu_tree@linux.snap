@@ -1,0 +1,9 @@
+[1,2,{"progname":"duscope","progver":"0.1.0","timestamp":2114380800},
+[{"name":"<root>","asize":4096,"dsize":4096,"dev":0,"uid":0,"gid":0,"mode":16877,"mtime":1800000000},
+{"name":"a-link.bin","asize":5000,"dsize":8192,"ino":0,"hlnkc":true,"nlink":2,"uid":0,"gid":0,"mode":33188,"mtime":1800000000},
+{"name":"a.bin","asize":5000,"dsize":8192,"ino":0,"hlnkc":true,"nlink":2,"uid":0,"gid":0,"mode":33188,"mtime":1800000000},
+{"name":"empty","asize":0,"dsize":0,"uid":0,"gid":0,"mode":33188,"mtime":1800000000},
+{"name":"lnk","asize":5,"dsize":0,"notreg":true,"uid":0,"gid":0,"mode":41471,"mtime":0},
+{"name":"say \"hi\" & bye\tnow.txt","asize":300,"dsize":4096,"uid":0,"gid":0,"mode":33188,"mtime":1800000000},
+[{"name":"sub dir","asize":4096,"dsize":4096,"uid":0,"gid":0,"mode":16877,"mtime":1800000000},
+{"name":"x.txt","asize":1,"dsize":4096,"uid":0,"gid":0,"mode":33188,"mtime":1800000000}]]]
