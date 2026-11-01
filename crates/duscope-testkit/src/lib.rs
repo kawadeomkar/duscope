@@ -171,6 +171,8 @@ pub fn normalize(text: &str, root: &Path) -> String {
     let mut text = text.replace(root, "<root>");
     for (key, placeholder) in [
         ("\"id\":\"", "<id>"),
+        // A page's cursor names the scan.
+        ("\"next_cursor\":\"", "<cursor>"),
         ("\"started_at\":\"", "<time>"),
         ("\"finished_at\":\"", "<time>"),
         ("\"name\":\"duscope\",\"version\":\"", "<version>"),

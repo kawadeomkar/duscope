@@ -8,7 +8,7 @@ use std::path::Path;
 use duscope_core::CoreError;
 use duscope_core::envelope::{
     ByTypeEntry, CacheEntry, Envelope, ProjectEntry, QueryBlock, SCHEMA_VERSION, StaleEntry, Tool,
-    TopEntry, Warning,
+    TopEntry, TreeEntry, Warning,
 };
 use duscope_core::query::{
     self, After, ByTypeQuery, CachesQuery, Cursor, DEFAULT_MIN_SIZE, Filters, Page, Regex,
@@ -68,6 +68,9 @@ enum DepthUse {
 /// The rows of `scan`: the root's largest entries, as `top` lists them by
 /// default; on a terminal, or with `--treemap always`, the treemap.
 pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    if output.format != Format::Treemap && output.fields_first::<TopEntry>("scan")? {
+        return Ok(());
+    }
     // The map's flags are settled first: a refused one costs no scan.
     let style = if output.format == Format::Treemap {
         Some(super::treemap::style(args, output)?)
@@ -112,6 +115,9 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
 
 /// `top`.
 pub fn top(args: &TopArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    if output.fields_first::<TopEntry>("top")? {
+        return Ok(());
+    }
     limit(Some(&args.query), output)?;
     let (cursor, index) = cursor_of(&args.query, &args.index)?;
     let source = source::source(&args.walk, &index, index_dir)?;
@@ -199,6 +205,9 @@ pub(super) fn top_envelope(
 
 /// `tree`.
 pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    if output.fields_first::<TreeEntry>("tree")? {
+        return Ok(());
+    }
     no_pages(&args.query, "tree")?;
     limit(Some(&args.query), output)?;
     let source = source::source(&args.walk, &args.index, index_dir)?;
@@ -267,6 +276,9 @@ pub fn by_type(
         "--classes"
     };
     let classes = classes(args.classes.as_deref(), label)?;
+    if output.fields_first::<ByTypeEntry>("by-type")? {
+        return Ok(());
+    }
     no_pages(&args.query, "by-type")?;
     limit(Some(&args.query), output)?;
     let source = source::source(&args.walk, &args.index, index_dir)?;
@@ -305,6 +317,9 @@ pub fn by_type(
 
 /// `stale`.
 pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    if output.fields_first::<StaleEntry>("stale")? {
+        return Ok(());
+    }
     let older = args
         .query
         .older_than
@@ -394,6 +409,14 @@ pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> R
         .hint("Run duscope caches without --exclude-caches"));
     }
     let rules = scan::cache_rules(args.walk.caches_extra.as_deref())?;
+    let listed = if args.by_project {
+        output.fields_first::<ProjectEntry>("caches --by-project")?
+    } else {
+        output.fields_first::<CacheEntry>("caches")?
+    };
+    if listed {
+        return Ok(());
+    }
     if args.by_project {
         no_pages(&args.query, "caches --by-project")?;
     }
@@ -613,20 +636,21 @@ fn prepare(
     })
 }
 
-/// The rows a list returns: `--limit`, 25 by default, at most 100; every
-/// row under `--format ndjson`. A `--limit` above 100 is a usage error,
-/// raised before the scan.
+/// The rows a list returns: `--limit`, 25 by default, at most 100 unless
+/// `-o FILE` takes them; every row under `--all` or `--format ndjson`. A
+/// `--limit` above 100 is otherwise a usage error, raised before the scan.
 fn limit(args: Option<&QueryArgs>, output: &Output) -> Result<Option<usize>, Failure> {
-    if output.format == Format::Ndjson {
+    if output.format == Format::Ndjson || args.is_some_and(|a| a.all) {
         return Ok(None);
     }
     match args.and_then(|a| a.limit) {
-        Some(asked) if asked > MAX_LIMIT => Err(Failure::new(
+        // A file takes any number of rows.
+        Some(asked) if asked > MAX_LIMIT && output.file.is_none() => Err(Failure::new(
             Exit::Usage,
             "usage",
             format!("--limit {asked} is more than the {MAX_LIMIT} rows a list returns"),
         )
-        .hint("Rerun duscope with --format ndjson to stream every row")),
+        .hint("Rerun duscope with --format ndjson or --all to stream every row, or -o FILE")),
         asked => Ok(Some(asked.unwrap_or(DEFAULT_LIMIT))),
     }
 }
