@@ -16,6 +16,8 @@ CFLAGS_x86_64_unknown_linux_musl = "-DMI_DEFAULT_ARENA_EAGER_COMMIT=0 -DMI_DEFAU
 # not use: full-text search, R-trees, dbstat, column metadata, soundex, stat4,
 # extension loading, the deprecated interfaces and shared cache. It saves 0.63
 # MB of the 1.98 MB SQLite adds to the binary (x86_64). JSON stays: the scan's
-# options are JSON, and `query --sql` may read them. libsqlite3-sys applies
-# these after its own defaults.
-LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE -USQLITE_ENABLE_DBSTAT_VTAB -USQLITE_ENABLE_COLUMN_METADATA -USQLITE_SOUNDEX -USQLITE_ENABLE_STAT4 -USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DEFAULT_MEMSTATUS=0"
+# options are JSON, and `query --sql` may read them. Memory accounting stays
+# on (SQLite's default): without it the sandbox's 256 MiB heap limit is not
+# enforced (P2-QRY-07; it costs the index write under 3%). libsqlite3-sys
+# applies these after its own defaults.
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE -USQLITE_ENABLE_DBSTAT_VTAB -USQLITE_ENABLE_COLUMN_METADATA -USQLITE_SOUNDEX -USQLITE_ENABLE_STAT4 -USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE"

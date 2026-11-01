@@ -46,6 +46,30 @@ Names are BLOBs: `CAST(name AS TEXT)` in SQLite, `decode(name)` in DuckDB
 and holds both integers and text; if DuckDB reports a type mismatch reading it,
 `SET sqlite_all_varchar = true` reads every column as text.
 
+`duscope query --sql` runs one read-only `SELECT` over these tables in a
+sandbox and prints the rows in the envelope (`{columns, rows, row_count,
+truncated}`; a BLOB as `{"$bytes": "<base64>"}`):
+
+```sh
+duscope query ~ --sql "SELECT path(id), human_size(allocated) FROM files
+                       WHERE under(id, :root_id) ORDER BY allocated DESC LIMIT 10"
+```
+
+- **What a statement may do.** Read the tables above (not `sqlite_schema`,
+  views or other databases) through SQLite's core, date and JSON functions
+  (an aggregate may run over a window, as `sum(allocated) OVER (…)`); every
+  write, `PRAGMA`, `ATTACH`, transaction, window-only function (`row_number`,
+  `rank`, …) and other function is refused (`sql_denied`). A statement without a `LIMIT` of its own
+  returns 25 rows at most; `--max-rows` (10,000 at most) caps one with a
+  `LIMIT`. `--timeout` (5 s, at most 60) stops it (`sql_timeout`), and SQLite
+  may use 256 MiB of memory for it.
+- **duscope's functions.** `path(id)` is an entry's absolute path (a BLOB where
+  it is not UTF-8), `human_size(bytes)` a size as tables show it
+  (`412.3 GiB`), and `under(id, root_id)` 1 when `id` is `root_id` or below it.
+- **Parameters.** `:root_id` is the entry of the path `query` was given (the
+  scan's root by default) and `:root_last` the last id below it, so a subtree
+  is `id BETWEEN :root_id AND :root_last`.
+
 ## Conventions
 
 - **Ids.** Every entry has an id, numbered in pre-order from 0 (the root) in one

@@ -16,6 +16,7 @@ Verbs:
   summary      A scan's totals: per volume, as du counts them, and what it left unfound
   diff         What changed between two saved scans of one tree
   explain      Facts about one path: links, clones, what deleting it frees, caches, git
+  query        One read-only SQL statement over a saved scan's tables
   scans        List, prune or check the saved scans
   man          Print the manual page, in roff, to stdout
   completions  Print the completion script for a shell to stdout

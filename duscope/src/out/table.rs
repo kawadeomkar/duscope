@@ -9,13 +9,18 @@ use super::{Row, Units};
 /// but the last is right-aligned; the last, the path, is not padded.
 pub fn table<T: Row>(rows: &[T], units: Units, size_kind: &str, color: bool) -> String {
     let cells: Vec<Vec<String>> = rows.iter().map(|row| row.cells(units, size_kind)).collect();
-    let last = T::COLUMNS.len() - 1;
+    grid(T::COLUMNS, &cells, color)
+}
+
+/// [`table`]'s layout of `cells` under the headings `columns`.
+pub fn grid(columns: &[&str], cells: &[Vec<String>], color: bool) -> String {
+    let last = columns.len().saturating_sub(1);
     let widths: Vec<usize> = (0..last)
         .map(|c| {
             cells
                 .iter()
                 .map(|row| row[c].chars().count())
-                .chain([T::COLUMNS[c].len()])
+                .chain([columns[c].chars().count()])
                 .max()
                 .unwrap_or(0)
         })
@@ -31,12 +36,12 @@ pub fn table<T: Row>(rows: &[T], units: Units, size_kind: &str, color: bool) -> 
         }
         out
     };
-    let mut out = line(T::COLUMNS);
+    let mut out = line(columns);
     if color {
         out = format!("\x1b[1m{out}\x1b[0m");
     }
     out.push('\n');
-    for row in &cells {
+    for row in cells {
         let row: Vec<&str> = row.iter().map(String::as_str).collect();
         out.push_str(&line(&row));
         out.push('\n');

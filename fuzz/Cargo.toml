@@ -1,0 +1,28 @@
+# The fuzz targets: a crate of its own outside the workspace, as cargo-fuzz
+# lays it out, built and run on nightly only (`cargo +nightly fuzz run
+# <target>`). libfuzzer-sys is the libFuzzer runtime cargo-fuzz builds the
+# targets against; nothing here reaches the binary.
+[package]
+name = "duscope-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+duscope-core = { path = "../crates/duscope-core" }
+duscope-walk = { path = "../crates/duscope-walk" }
+libfuzzer-sys = "=0.4.13"
+
+# Not a member of the repository's workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "sql"
+path = "fuzz_targets/sql.rs"
+test = false
+doc = false
+bench = false

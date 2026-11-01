@@ -73,4 +73,14 @@ pub enum CoreError {
     /// `--cursor` is not a cursor, or not one of this scan and query.
     #[error("{0}")]
     InvalidCursor(String),
+    /// `query --sql` refused the statement: not one read of the index's
+    /// tables through the functions it allows, or past one of its limits.
+    #[error("{0}")]
+    SqlDenied(String),
+    /// `query --sql` ran past its `--timeout`, in seconds.
+    #[error("the statement ran past the {0} s --timeout")]
+    SqlTimeout(u64),
+    /// `query --sql` was given a statement `SQLite` cannot prepare.
+    #[error("{0}")]
+    SqlInvalid(String),
 }
