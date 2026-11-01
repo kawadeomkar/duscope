@@ -595,10 +595,6 @@ pub struct DiffArgs {
     /// The size compared: bytes on disk or apparent length
     #[arg(long, value_enum, value_name = "KIND")]
     pub size: Option<SizeKind>,
-
-    /// How old a saved scan may be before a warning (h, d, w, y; default 7d)
-    #[arg(skip)]
-    pub max_age: Option<String>,
 }
 
 /// `summary`'s flags.
@@ -749,11 +745,8 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
                 .map_err(|_| refused("threads", threads.line, &format!("at most {MAX_THREADS}")))?;
             walk.threads = Some(n);
         }
-        if walk.size.is_none()
-            && !walk.apparent_size
-            && let Some(size) = &d.size
-        {
-            walk.size = Some(choice(config, "size", size)?);
+        if !walk.apparent_size {
+            size_default(config, &mut walk.size)?;
         }
         if let Some(attrs) = &d.attrs
             && attrs_defaulted()
@@ -775,11 +768,7 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
     };
     let index_defaults = |index: &mut IndexArgs| max_age_default(&mut index.max_age);
     let query_defaults = |query: &mut QueryArgs, index: &mut IndexArgs| {
-        if query.limit.is_none()
-            && let Some(limit) = &d.limit
-        {
-            query.limit = Some(usize::try_from(limit.value).unwrap_or(usize::MAX));
-        }
+        limit_default(config, &mut query.limit);
         index_defaults(index);
     };
     let list_defaults = |walk: &mut WalkArgs,
@@ -821,7 +810,10 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             walk_defaults(&mut a.walk)?;
             index_defaults(&mut a.index);
         }
-        Some(Verb::Diff(args)) => max_age_default(&mut args.max_age),
+        Some(Verb::Diff(args)) => {
+            size_default(config, &mut args.size)?;
+            limit_default(config, &mut args.limit);
+        }
         Some(Verb::Explain(args)) => {
             max_age_default(&mut args.max_age);
             args.caches_extra.clone_from(&config.caches_extra);
@@ -829,6 +821,25 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         Some(Verb::Scans(_) | Verb::Man | Verb::Completions(_)) => {}
     }
     Ok(())
+}
+
+/// `[defaults] size` where no flag set `--size`.
+fn size_default(config: &Config, size: &mut Option<SizeKind>) -> Result<(), Failure> {
+    if size.is_none()
+        && let Some(set) = &config.defaults.size
+    {
+        *size = Some(choice(config, "size", set)?);
+    }
+    Ok(())
+}
+
+/// `[defaults] limit` where no flag set `--limit`.
+fn limit_default(config: &Config, limit: &mut Option<usize>) {
+    if limit.is_none()
+        && let Some(set) = &config.defaults.limit
+    {
+        *limit = Some(usize::try_from(set.value).unwrap_or(usize::MAX));
+    }
 }
 
 /// A `[defaults]` value the flag would refuse: a usage error naming the file
