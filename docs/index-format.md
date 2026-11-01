@@ -310,7 +310,7 @@ stays 0; bits 9 to 11 are set on directories only, and bit 12 on files only.
 | `started_at` | INTEGER | when the scan started |
 | `finished_at` | INTEGER | when it finished |
 | `attrs` | TEXT | `basic`, or `full` when the scan collected `atime`, `btime`, `mode`, `uid` and `gid` |
-| `options` | TEXT | the scan's options as JSON: `clones`, `one_file_system`, `include_network`, `follow_symlinks`, `excludes`, `exclude_files`, `ignore_files`, `exclude_caches`, `threads`, `size_kind`; a rescan reuses them |
+| `options` | TEXT | the scan's options as JSON: `clones`, `one_file_system`, `include_network`, `follow_symlinks`, `excludes`, `exclude_files` and `ignore_files` (absolute), `exclude_caches`, `caches_extra` (the extra cache rules under `exclude_caches`, else null), `threads`, `size_kind`; `rescan` scans with them again, and a key a file lacks reads as its default |
 | `platform` | TEXT | the operating system and its kernel or Darwin version |
 | `scanning_uid` | INTEGER | the user id the scan ran as |
 | `thread_count` | INTEGER | the worker threads the walk ran |
