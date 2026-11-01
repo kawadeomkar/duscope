@@ -86,12 +86,16 @@ fn p2_qry_04_links_inside_and_outside_the_path() {
     assert_eq!(original.links_outside_subtree, Some(3));
     assert_eq!(original.freeable_now_bytes, Some(0));
     assert_eq!(original.freeable_kind, Some("lower_bound"));
-    // a/ holds two of the four.
+    // a/ holds two of the four: deleting it frees its own blocks (none on
+    // APFS, a block on ext4), not the file's.
     let a = facts("cases/hard-links/a");
     assert_eq!(a.links_outside_subtree, Some(2));
     assert_eq!(
         (a.freeable_now_bytes, a.freeable_kind),
-        (Some(0), Some("lower_bound"))
+        (
+            Some(a.allocated_bytes - original.allocated_bytes),
+            Some("lower_bound")
+        )
     );
     // The case's root holds all four, and the pair's both: exact.
     let all = facts("cases/hard-links");
@@ -171,7 +175,7 @@ fn p2_qry_04_outside_a_repository_no_git_index_is_read() {
     assert_eq!(
         git::index_reads(),
         before,
-        "gix-index was read outside a repository"
+        "an index file was read outside a repository"
     );
 }
 
@@ -192,4 +196,47 @@ fn p2_qry_04_a_path_no_saved_scan_holds_is_stat_with_low_confidence() {
     assert_eq!(facts.freeable_kind, Some("upper_bound"));
     assert_eq!(facts.evidence, ["stat: no saved scan holds the path"]);
     assert!(explain_unindexed(&env.tmp_dir().join("absent"), &q).is_err());
+}
+
+/// `path` as components.
+fn components(path: &str) -> Vec<&[u8]> {
+    path.split('/').map(str::as_bytes).collect()
+}
+
+#[test]
+fn p2_qry_04_the_nearest_marker_chooses_the_rule() {
+    let caches = Caches::vendored();
+    // repo/build.gradle and repo/native/CMakeLists.txt: native/build is
+    // cmake's, though gradle's rule comes first.
+    let path = components("repo/native/build");
+    let held =
+        |k: usize, marker: &str| matches!((k, marker), (1, "build.gradle") | (2, "CMakeLists.txt"));
+    let (rule, at) = caches.taking(&path, held, false).unwrap();
+    assert_eq!(rule.regenerable_by.as_str(), "cmake --build");
+    assert_eq!(at, Some(2));
+    // A marker rule wins over the CACHEDIR.TAG rule after it.
+    let path = components("p/target");
+    let (rule, at) = caches
+        .taking(&path, |k, m| k == 1 && m == "Cargo.toml", true)
+        .unwrap();
+    assert_eq!((rule.regenerable_by.as_str(), at), ("cargo build", Some(1)));
+    let (rule, at) = caches.taking(&path, |_, _| false, true).unwrap();
+    assert_eq!((rule.name.as_deref(), at), (None, None));
+}
+
+#[test]
+fn p2_qry_04_a_marker_beyond_a_directory_of_the_rules_name_confirms_that_one() {
+    let caches = Caches::vendored();
+    // w/Cargo.toml, w/target/fixtures/cases/target: the outer target is
+    // the cache, the inner one part of it.
+    let path = components("w/target/fixtures/cases/target");
+    let held = |k: usize, marker: &str| k == 1 && marker == "Cargo.toml";
+    assert!(caches.taking(&path, held, false).is_none());
+    let outer = components("w/target");
+    assert!(caches.taking(&outer, held, false).is_some());
+    // Another rule's name does not stop the search.
+    let path = components("w/target/web/node_modules");
+    let held = |k: usize, marker: &str| k == 1 && marker == "package.json";
+    let (rule, at) = caches.taking(&path, held, false).unwrap();
+    assert_eq!((rule.regenerable_by.as_str(), at), ("npm install", Some(1)));
 }

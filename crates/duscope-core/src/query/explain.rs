@@ -87,7 +87,7 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
     let (freeable, freeable_kind) = freeable(index, &node, &shared, &mut evidence);
     let cache = node.is_dir().then(|| {
         cache_facts(q.caches, &path, |dir, marker| {
-            has_in_index(index, dir, marker)
+            holds_file(index, dir, marker)
         })
     });
     let (regenerable_by, cachedir_tag, cache_medium) = cache.unwrap_or((None, false, false));
@@ -222,7 +222,7 @@ pub fn explain_unindexed(path: &Path, q: &ExplainQuery<'_>) -> Result<Explain, C
         (Some(allocated), Some("upper_bound"))
     };
     let (regenerable_by, cachedir_tag, _) = if is_dir {
-        cache_facts(q.caches, path, |dir, marker| dir.join(marker).is_file())
+        cache_facts(q.caches, path, fs_holds_file)
     } else {
         (None, false, false)
     };
@@ -358,21 +358,31 @@ impl Shared {
     }
 }
 
+/// Whether the directory at `dir` holds an entry `name` that is not a
+/// directory, as a scan would list it: a symbolic link counts and is not
+/// followed.
+pub fn fs_holds_file(dir: &Path, name: &str) -> bool {
+    dir.join(name)
+        .symlink_metadata()
+        .is_ok_and(|meta| !meta.is_dir())
+}
+
 /// Whether the directory at `dir` holds a file named `marker`, read from
 /// the index where the scan holds `dir`, from the filesystem above its
 /// root.
-fn has_in_index(index: &Index, dir: &Path, marker: &str) -> bool {
+pub fn holds_file(index: &Index, dir: &Path, marker: &str) -> bool {
     match crate::resolve::resolve_in_index(index, dir) {
         Some(_) => crate::resolve::resolve_in_index(index, &dir.join(marker))
             .is_some_and(|id| !index.node(id).is_dir()),
-        None => dir.join(marker).is_file(),
+        None => fs_holds_file(dir, marker),
     }
 }
 
 /// The cache facts of the directory at `path`: the command that regenerates
 /// it when a rule confirms it, whether it holds a valid `CACHEDIR.TAG`, and
 /// whether a rule's name matched without its marker. `has_marker(dir,
-/// name)` says whether `dir` holds a file `name`; every ancestor is asked.
+/// name)` says whether `dir` holds a file `name`; the ancestors are asked
+/// nearest first ([`Caches::taking`]).
 fn cache_facts(
     caches: &Caches,
     path: &Path,
@@ -386,8 +396,15 @@ fn cache_facts(
             _ => None,
         })
         .collect();
-    let in_ancestors = |marker: &str| path.ancestors().skip(1).any(|dir| has_marker(dir, marker));
-    if let Some(rule) = caches.matching(&components, in_ancestors, tag) {
+    // The ancestor with k components is the (len - k)th; the 0th is the
+    // path itself.
+    let ancestors: Vec<&Path> = path.ancestors().collect();
+    let holds = |k: usize, marker: &str| {
+        ancestors
+            .get(components.len() - k)
+            .is_some_and(|dir| has_marker(dir, marker))
+    };
+    if let Some((rule, _)) = caches.taking(&components, holds, tag) {
         return (Some(rule.regenerable_by.as_str()), tag, false);
     }
     let name = path.file_name().map_or(&[][..], OsStr::as_bytes);
