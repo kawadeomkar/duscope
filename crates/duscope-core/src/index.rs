@@ -4,6 +4,7 @@
 //! The DDL is `schemas/index/v2.sql`, copied byte for byte into
 //! `index/schema.sql` so the published crate carries it.
 
+pub mod layout;
 pub mod reader;
 pub mod scanid;
 pub mod writer;

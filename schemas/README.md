@@ -33,6 +33,10 @@ grow), each change a deviation entry in the specification, its fields marked
 published; `history/0.2/` is the minor in progress until v0.2.0 is tagged, so a
 package before then that adds to the envelope updates it as well.
 
+`duscope schema --envelope <verb>` prints a verb's file; the binary carries a
+copy of each (`duscope/src/verbs/schema/`), which a test holds equal to this
+directory's.
+
 The schemas list the values of the enumerated fields, from `WARNING_CODES`,
 `ERROR_CODES` and `envelope::values` in `crates/duscope-core/src/envelope.rs`:
 
