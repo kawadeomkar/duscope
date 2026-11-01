@@ -43,6 +43,8 @@ flate2 = { version = "1.1.10", default-features = false, features = ["rust_backe
 gix-ignore = { version = "=0.24.1", default-features = false }
 jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 globset = { version = "=0.4.20", default-features = false }
+# The MAC of `explain`'s handles (P2-CORE-01), over the SHA-256 of sha2.
+hmac = "=0.13.0"
 libc = "=0.2.191"
 log = "=0.4.34"
 # The allocator of the musl builds only (P1-BENCH-03); no default features.

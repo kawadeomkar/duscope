@@ -773,6 +773,11 @@ pub struct Explain {
     pub confidence: &'static str,
     /// Where each fact came from: tables, rules, markers, files.
     pub evidence: Vec<String>,
+    /// A handle for `clean --from`: base64url of what `explain` found
+    /// (the path, its device and inode, its bytes on disk, the scan, an
+    /// expiry fifteen minutes on) and their HMAC; null where none could be
+    /// issued (the path is gone, or the key cannot be read).
+    pub handle: Option<String>,
 }
 
 /// What git says of a path.

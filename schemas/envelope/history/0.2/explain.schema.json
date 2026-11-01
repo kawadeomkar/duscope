@@ -280,6 +280,13 @@
           ],
           "description": "What git says of the path; null outside a repository."
         },
+        "handle": {
+          "description": "A handle for `clean --from`: base64url of what `explain` found\n(the path, its device and inode, its bytes on disk, the scan, an\nexpiry fifteen minutes on) and their HMAC; null where none could be\nissued (the path is gone, or the key cannot be read).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "is_clone": {
           "description": "Whether a file is a member of a clone group; null for a directory,\nand where the scan recorded no clone ids (it did not count clones,\nor the filesystem has none: every one but APFS).",
           "type": [
@@ -410,7 +417,8 @@
         "git",
         "flags",
         "confidence",
-        "evidence"
+        "evidence",
+        "handle"
       ],
       "type": "object"
     },

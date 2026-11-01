@@ -93,4 +93,18 @@ pub enum CoreError {
     /// A file to import could not be read.
     #[error("cannot read the file to import: {0}")]
     ImportRead(std::io::Error),
+    /// A handle this duscope did not issue, or that is not a handle.
+    #[error("{0}")]
+    HandleInvalid(String),
+    /// A handle past its fifteen minutes.
+    #[error("the handle has expired: handles hold for fifteen minutes")]
+    HandleExpired,
+    /// The key handles are signed with could not be read or made.
+    #[error("the handle key {file}: {message}")]
+    HandleKey {
+        /// The key file.
+        file: String,
+        /// What is wrong with it.
+        message: String,
+    },
 }

@@ -119,13 +119,13 @@ pub fn query_hash<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// `bytes` in base64url, without padding.
-fn base64url(bytes: &[u8]) -> String {
+pub(crate) fn base64url(bytes: &[u8]) -> String {
     crate::envelope::encode64(bytes, ALPHABET, false)
 }
 
 /// The bytes of base64url `text`, padding allowed; `None` when it is not
 /// base64url.
-fn from_base64url(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn from_base64url(text: &str) -> Option<Vec<u8>> {
     let text = text.trim_end_matches('=');
     let mut out = Vec::with_capacity(text.len() * 3 / 4);
     let mut acc: u32 = 0;

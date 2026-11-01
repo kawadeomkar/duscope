@@ -630,6 +630,14 @@ pub fn core_failure(error: CoreError) -> Failure {
             .hint("Rerun duscope query with a narrower statement, or a --timeout up to 60"),
         CoreError::SqlInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())
             .hint("Run duscope schema to list the tables and their columns"),
+        CoreError::HandleInvalid(_) => {
+            Failure::new(Exit::Runtime, "handle_invalid", error.to_string())
+                .hint("Run duscope explain --json again for a fresh handle")
+        }
+        CoreError::HandleExpired => {
+            Failure::new(Exit::Runtime, "handle_expired", error.to_string())
+                .hint("Run duscope explain --json again for a fresh handle")
+        }
         CoreError::ImportInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())
             .hint("Rerun duscope import with --format naming the tool that wrote the file"),
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
