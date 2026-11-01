@@ -494,7 +494,8 @@ pub struct ProjectEntry {
     pub cache_count: u64,
     /// The newest modification time in the project, caches included.
     pub max_mtime: String,
-    /// Its caches' paths, largest first.
+    /// Its largest caches' paths, largest first, at most ten;
+    /// `cache_count` counts them all.
     pub caches: Vec<String>,
 }
 
