@@ -114,7 +114,7 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         warnings: Vec::new(),
         next: Vec::new(),
     };
-    envelope.next = next(&envelope);
+    envelope.next = next(&envelope, new.file());
     check(&old)?;
     check(&new)?;
     output.list_diff(&envelope, &totals, &footer)
@@ -169,8 +169,8 @@ fn open(text: &str, dir: &Path, cwd: &Path, under: Option<&Path>) -> Result<Inde
 
 /// `diff`'s hints, on the new scan: the largest change still in it, and
 /// the largest entries under the path.
-fn next(e: &Envelope<DiffEntry>) -> Vec<String> {
-    let Some(mut hints) = Hints::new(e.scan.id.as_deref()) else {
+fn next(e: &Envelope<DiffEntry>, file: &Path) -> Vec<String> {
+    let Some(mut hints) = Hints::new(e.scan.id.as_deref(), Some(file)) else {
         return Vec::new();
     };
     let changed = e

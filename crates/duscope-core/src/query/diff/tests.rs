@@ -47,7 +47,7 @@ fn rows(page: &Page<DiffEntry>) -> Vec<(String, &'static str, i64)> {
             (
                 e.path.strip_prefix("/r/").unwrap_or(&e.path).to_owned(),
                 e.change,
-                e.bytes_delta,
+                e.delta_bytes,
             )
         })
         .collect()
@@ -196,5 +196,5 @@ fn p2_qry_06_roots_that_are_files_compare_as_files() {
     let (page, _) = diff(&old_file, &new_file, &query());
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].change, "grown");
-    assert_eq!(page.entries[0].bytes_delta, 2 * DELTA_MIB);
+    assert_eq!(page.entries[0].delta_bytes, 2 * DELTA_MIB);
 }

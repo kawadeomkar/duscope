@@ -129,7 +129,7 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
         caches: &caches,
         env: &env,
     };
-    let (scan, result, warnings) = match lookup.resolve(&selector, Some(&path))? {
+    let (scan, file, result, warnings) = match lookup.resolve(&selector, Some(&path))? {
         Some(r) => {
             let facts = explain(&r.index, r.base, &q).map_err(core_failure)?;
             let warnings = r
@@ -142,16 +142,23 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
             } else {
                 SizeKind::Allocated
             };
-            (Some(saved_block(&r.index, size)), facts, warnings)
+            let file = r.index.file().to_owned();
+            (
+                Some(saved_block(&r.index, size)),
+                Some(file),
+                facts,
+                warnings,
+            )
         }
         None => (
+            None,
             None,
             explain_unindexed(&path, &q).map_err(core_failure)?,
             Vec::new(),
         ),
     };
     let path = path.to_string_lossy().into_owned();
-    let next = next(scan.as_ref(), &path, result.kind);
+    let next = next(scan.as_ref(), file.as_deref(), &path, result.kind);
     let envelope = ObjectEnvelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
@@ -171,8 +178,8 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
 
 /// `explain`'s hints: what the scan could not read, when it could not
 /// read something, and a directory's largest entries and caches.
-fn next(scan: Option<&ScanBlock>, path: &str, kind: &str) -> Vec<String> {
-    let Some(mut hints) = Hints::new(scan.and_then(|s| s.id.as_deref())) else {
+fn next(scan: Option<&ScanBlock>, file: Option<&Path>, path: &str, kind: &str) -> Vec<String> {
+    let Some(mut hints) = Hints::new(scan.and_then(|s| s.id.as_deref()), file) else {
         return Vec::new();
     };
     if scan.is_some_and(|s| s.error_count > 0) {

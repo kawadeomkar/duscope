@@ -103,7 +103,11 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
         thread_count: block.thread_count,
     };
     let warnings = source.warnings(&args.walk);
-    let next = next(block.id.as_deref(), &result.path);
+    let next = next(
+        block.id.as_deref(),
+        source.index_file().as_deref(),
+        &result.path,
+    );
     let envelope = ObjectEnvelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
@@ -125,8 +129,8 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
 
 /// `summary`'s hints: the largest entries, the classes and the caches
 /// under the path.
-fn next(scan: Option<&str>, path: &str) -> Vec<String> {
-    let Some(mut hints) = Hints::new(scan) else {
+fn next(scan: Option<&str>, file: Option<&Path>, path: &str) -> Vec<String> {
+    let Some(mut hints) = Hints::new(scan, file) else {
         return Vec::new();
     };
     hints

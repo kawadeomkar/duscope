@@ -52,6 +52,12 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
         message: e.to_string(),
     };
     let node = index.node(id);
+    // Clone facts where the scan recorded clone ids: it counted clones (the
+    // default), on a filesystem that has them (APFS). Elsewhere it does not
+    // know, rather than knows none.
+    let options: serde_json::Value =
+        serde_json::from_str(&index.meta().options).unwrap_or_default();
+    let clones = !index.meta().clones_unavailable && options["clones"].as_bool() != Some(false);
     let path_bytes = abs_path(index, id);
     let path = PathBuf::from(OsStr::from_bytes(&path_bytes));
     let (name, name_raw) = name_fields(&index.name(id));
@@ -132,9 +138,9 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
         gid,
         nlink: (!node.is_dir()).then_some(u64::from(node.nlink)),
         links_outside_subtree: Some(shared.links_outside),
-        is_clone: (!node.is_dir()).then_some(shared.own_clone.is_some()),
+        is_clone: (clones && !node.is_dir()).then_some(shared.own_clone.is_some()),
         clone_group_size: shared.own_clone,
-        clone_members_outside: Some(shared.clone_outside),
+        clone_members_outside: clones.then_some(shared.clone_outside),
         freeable_now_bytes: entered.then_some(freeable),
         freeable_kind: entered.then_some(freeable_kind),
         regenerable_by,

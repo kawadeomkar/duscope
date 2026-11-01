@@ -1,39 +1,14 @@
 //! The types of the JSON envelope that every verb prints under `--json`.
 //!
-//! The envelope types arrive with P1-CLI-02. Until P2-CLI-01 points the schema
-//! drift test at them, the test runs on [`PlaceholderEnvelope`].
+//! The envelope types arrived with P1-CLI-02; P2-CLI-01 froze them at
+//! `schema_version` 0.2, each verb's described by a file under
+//! `schemas/envelope/`.
 //!
 //! Every envelope type derives `schemars::JsonSchema` in test builds only, with
 //! `#[cfg_attr(test, derive(schemars::JsonSchema))]`. `schemars` is a
 //! dev-dependency, so the derive never reaches the binary. The drift test
 //! (`src/schema_drift.rs`) compares each derived schema with its checked-in file
 //! under `schemas/`.
-
-/// A stand-in for the envelope types, for the schema drift test until phase 2.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct PlaceholderEnvelope {
-    /// Whether the command succeeded.
-    pub ok: bool,
-    /// The version of the envelope schema.
-    pub schema_version: String,
-    /// The rows.
-    pub entries: Vec<PlaceholderEntry>,
-    /// The number of rows in `entries`.
-    pub returned_count: u64,
-    /// Where the next page starts, or null on the last page.
-    pub next_cursor: Option<String>,
-}
-
-/// One row of the placeholder envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct PlaceholderEntry {
-    /// The absolute path of the entry.
-    pub path: String,
-    /// The bytes the entry occupies on disk.
-    pub allocated_bytes: u64,
-}
 
 /// The version of the envelope's shape, frozen at 0.2 (P2-CLI-01): it
 /// changes additively only, a minor at a time, and `schemas/envelope/`
@@ -150,13 +125,21 @@ pub mod values {
     pub const PRUNED_KINDS: [&str; 3] = ["index", "temporary", "spill"];
 }
 
-/// `values` with null, for a nullable field's `enum`.
+/// `values` with null, for a nullable field's values.
 #[cfg(test)]
 fn nullable(values: &[&'static str]) -> Vec<Option<&'static str>> {
     values.iter().copied().map(Some).chain([None]).collect()
 }
 
-/// The error codes alone, for [`ErrorObject::code`]'s `enum`.
+/// A field whose values grow additively (a warning code, a flag): the
+/// values known now, or any string, so a reader of this minor accepts the
+/// next one's.
+#[cfg(test)]
+fn known<T: serde::Serialize>(values: T) -> serde_json::Value {
+    serde_json::json!([{"enum": values}, {"type": "string"}])
+}
+
+/// The error codes alone, for [`ErrorObject::code`]'s values.
 #[cfg(test)]
 fn error_codes() -> Vec<&'static str> {
     ERROR_CODES.iter().map(|&(code, _)| code).collect()
@@ -273,7 +256,7 @@ pub struct ExcludedEntry {
     /// Its absolute path, as lossy UTF-8.
     pub path: String,
     /// `excluded` (a glob or ignore pattern) or `excluded_cache`.
-    #[cfg_attr(test, schemars(extend("enum" = values::EXCLUDE_REASONS)))]
+    #[cfg_attr(test, schemars(extend("anyOf" = known(values::EXCLUDE_REASONS))))]
     pub reason: &'static str,
 }
 
@@ -288,7 +271,7 @@ pub struct VolumeEntry {
     /// Whether the scan entered it.
     pub entered: bool,
     /// Why not (`one_file_system`, `network`, …); null when it did.
-    #[cfg_attr(test, schemars(extend("enum" = nullable(&values::SKIP_REASONS))))]
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::SKIP_REASONS)))))]
     pub reason: Option<&'static str>,
     /// Mounted read-only.
     pub read_only: bool,
@@ -327,7 +310,7 @@ pub struct QueryBlock {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Warning {
     /// One of the conventions' warning codes.
-    #[cfg_attr(test, schemars(extend("enum" = WARNING_CODES)))]
+    #[cfg_attr(test, schemars(extend("anyOf" = known(WARNING_CODES))))]
     pub code: &'static str,
     /// One sentence.
     pub message: String,
@@ -356,7 +339,7 @@ pub struct ErrorEnvelope {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ErrorObject {
     /// The error code (`scan_not_found`, `permission_denied`, …).
-    #[cfg_attr(test, schemars(extend("enum" = error_codes())))]
+    #[cfg_attr(test, schemars(extend("anyOf" = known(error_codes()))))]
     pub code: &'static str,
     /// One sentence.
     pub message: String,
@@ -407,7 +390,7 @@ pub struct TopEntry {
     pub via: Vec<String>,
     /// What else is true of it (`upper_bound`, `unreadable`, `sparse`,
     /// `uncharged`, …).
-    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "enum": values::FLAGS})))]
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
 }
 
@@ -447,7 +430,7 @@ pub struct TreeEntry {
     #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub max_mtime: String,
     /// What else is true of it.
-    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "enum": values::FLAGS})))]
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
 }
 
@@ -521,7 +504,7 @@ pub struct StaleEntry {
     /// Its hard links.
     pub nlink: u32,
     /// What else is true of it.
-    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "enum": values::FLAGS})))]
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
 }
 
@@ -625,7 +608,7 @@ pub struct CacheEntry {
     /// The rule that names it: a name or glob, or `CACHEDIR.TAG`.
     pub rule: String,
     /// The command that regenerates it.
-    #[cfg_attr(test, schemars(extend("enum" = values::REGENERABLE_BY)))]
+    #[cfg_attr(test, schemars(extend("anyOf" = known(values::REGENERABLE_BY))))]
     pub regenerable_by: &'static str,
     /// The directory holding the marker that confirms it (the project);
     /// null when a `CACHEDIR.TAG`, an ancestor path or nothing (`--loose`)
@@ -759,11 +742,14 @@ pub struct Explain {
     pub nlink: Option<u64>,
     /// Links of the inodes under the path that lie outside it.
     pub links_outside_subtree: Option<u64>,
-    /// Whether a file is a member of a clone group; null for a directory.
+    /// Whether a file is a member of a clone group; null for a directory,
+    /// and where the scan recorded no clone ids (it did not count clones,
+    /// or the filesystem has none: every one but APFS).
     pub is_clone: Option<bool>,
     /// The members of a file's clone group; null when it is none's.
     pub clone_group_size: Option<u64>,
-    /// Members of the clone groups under the path that lie outside it.
+    /// Members of the clone groups under the path that lie outside it;
+    /// null where the scan recorded no clone ids.
     pub clone_members_outside: Option<u64>,
     /// The bytes deleting the path would free now.
     pub freeable_now_bytes: Option<u64>,
@@ -771,14 +757,14 @@ pub struct Explain {
     #[cfg_attr(test, schemars(extend("enum" = nullable(&values::FREEABLE_KINDS))))]
     pub freeable_kind: Option<&'static str>,
     /// The command that regenerates a cache directory, from the rules.
-    #[cfg_attr(test, schemars(extend("enum" = nullable(&values::REGENERABLE_BY))))]
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::REGENERABLE_BY)))))]
     pub regenerable_by: Option<&'static str>,
     /// Whether the directory holds a valid `CACHEDIR.TAG`.
     pub cachedir_tag: bool,
     /// What git says of the path; null outside a repository.
     pub git: Option<ExplainGit>,
     /// Its storage flags, and `upper_bound`, `unreadable`, `uncharged`.
-    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "enum": values::FLAGS})))]
+    #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
     /// `high`, `medium` or `low`.
     #[cfg_attr(test, schemars(extend("enum" = values::CONFIDENCES)))]
@@ -911,12 +897,12 @@ pub struct PrunedEntry {
     /// The file.
     pub path: String,
     /// `index`, `temporary` (a write that never finished) or `spill`.
-    #[cfg_attr(test, schemars(extend("enum" = values::PRUNED_KINDS)))]
+    #[cfg_attr(test, schemars(extend("anyOf" = known(values::PRUNED_KINDS))))]
     pub kind: &'static str,
     /// The scan whose index it was; null for the others.
     pub id: Option<String>,
     /// Its size.
-    pub bytes: u64,
+    pub size_bytes: u64,
 }
 
 /// A saved scan `scans --check` found sound.
@@ -1006,7 +992,7 @@ pub struct SummaryVolume {
     /// Whether the scan entered it.
     pub entered: bool,
     /// Why not, when it did not.
-    #[cfg_attr(test, schemars(extend("enum" = nullable(&values::SKIP_REASONS))))]
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::SKIP_REASONS)))))]
     pub reason: Option<&'static str>,
 }
 
@@ -1036,7 +1022,7 @@ pub struct DiffEntry {
     /// Its bytes in the new scan; null when it is not there.
     pub new_bytes: Option<u64>,
     /// New less old, in the size compared.
-    pub bytes_delta: i64,
+    pub delta_bytes: i64,
     /// For a directory added or removed whole, the entries in it, itself
     /// included; null otherwise.
     pub collapsed_count: Option<u64>,
@@ -1300,7 +1286,7 @@ impl Fields for SavedScanEntry {
 }
 
 impl Fields for PrunedEntry {
-    const NAMES: &'static [&'static str] = &["path", "kind", "id", "bytes"];
+    const NAMES: &'static [&'static str] = &["path", "kind", "id", "size_bytes"];
 }
 
 impl Fields for CheckedEntry {
@@ -1316,7 +1302,7 @@ impl Fields for DiffEntry {
         "kind",
         "old_bytes",
         "new_bytes",
-        "bytes_delta",
+        "delta_bytes",
         "collapsed_count",
     ];
 }
@@ -1512,7 +1498,7 @@ mod tests {
             path: "/p".into(),
             kind: "spill",
             id: None,
-            bytes: 1,
+            size_bytes: 1,
         });
         assert_names(&CheckedEntry {
             id: "i".into(),
