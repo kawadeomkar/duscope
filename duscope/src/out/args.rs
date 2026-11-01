@@ -12,11 +12,13 @@ use clap::{Args, ValueEnum};
 #[command(next_help_heading = "Output")]
 pub struct OutputArgs {
     /// Print the JSON envelope (--format json)
-    #[arg(long, global = true, conflicts_with_all = ["plain", "format"])]
+    // Beside --format only for import, whose input --format names: main
+    // refuses the pair for the other verbs.
+    #[arg(long, global = true, conflicts_with = "plain")]
     pub json: bool,
 
     /// One tab-separated record per line, sizes in bytes (--format plain)
-    #[arg(long, global = true, conflicts_with = "format")]
+    #[arg(long, global = true)]
     pub plain: bool,
 
     /// The output format

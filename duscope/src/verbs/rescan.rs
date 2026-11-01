@@ -15,7 +15,7 @@ use duscope_core::resolve::resolve_path;
 use super::next;
 use super::query::top_envelope;
 use super::scan;
-use super::source::{Source, core_failure};
+use super::source::{Source, core_failure, scanned};
 use super::{Exit, Failure};
 use crate::cli::{AttrsArg, RescanArgs, SizeKind, WalkArgs};
 use crate::out::Output;
@@ -152,9 +152,7 @@ fn parent(args: &RescanArgs, dir: &Path) -> Result<Parent, Failure> {
         max_age_ns: i64::MAX,
         now: clock::now(),
     };
-    // An imported tree has no scan options: latest passes it over.
-    let resolved =
-        resolve_scan(&selector, &q, |index| index.meta().source == "scan").map_err(core_failure)?;
+    let resolved = resolve_scan(&selector, &q, scanned).map_err(core_failure)?;
     let index = resolved.map(|r| r.index).ok_or_else(|| {
         Failure::new(
             Exit::NotFound,
@@ -163,8 +161,9 @@ fn parent(args: &RescanArgs, dir: &Path) -> Result<Parent, Failure> {
         )
         .hint(format!("Run duscope scan --save {} first", path.display()))
     })?;
-    let source = &index.meta().source;
-    if source != "scan" {
+    // An imported tree has no scan options to scan with.
+    if !scanned(&index) {
+        let source = &index.meta().source;
         return Err(Failure::new(
             Exit::Usage,
             "usage",
