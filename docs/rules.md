@@ -43,7 +43,7 @@ Each `[[rule]]` names a directory and what confirms that it is a cache:
 | Field | Meaning |
 | --- | --- |
 | `name` | the directory's name, or a glob over it (one path component) |
-| `markers` | file names, any one of which in an ancestor of the directory confirms it; at scan time the scanner looks only in the directory's parent |
+| `markers` | file names, any one of which in an ancestor of the directory confirms it, and the nearest ancestor holding one is its project; the search stops at an ancestor of the rule's own name, which a marker beyond it confirms instead (a `target` inside a cargo project's `target` is part of that one); at scan time the scanner looks only in the directory's parent |
 | `under` | a path that the directory's parent must end with (`Library/Developer/Xcode`) |
 | `cachedir_tag` | `true`: any directory holding a valid `CACHEDIR.TAG`, whatever its name; the rule takes no `name`, `markers` or `under` |
 | `regenerable_by` | what rebuilds it, from a fixed set |

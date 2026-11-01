@@ -36,7 +36,7 @@ use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::rollup::RollUp;
 
 pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
-pub use explain::{ExplainQuery, explain, explain_unindexed};
+pub use explain::{ExplainQuery, explain, explain_unindexed, fs_holds_file, holds_file};
 pub use plan::{Cut, Plan, Ranked};
 /// The regular expressions `--regex` takes, matched against path bytes.
 pub use regex::bytes::Regex;

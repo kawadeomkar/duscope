@@ -32,12 +32,16 @@ fn checkout() -> PathBuf {
 }
 
 /// `text` without what differs between runs and machines: the shared
-/// normalisation, the scan id, the entries' times and owners, and the
+/// normalisation, the scan id, the whole tree's totals (a directory's
+/// blocks differ between runners), the entries' times and owners, and the
 /// checkout's path.
 fn normalize(text: &str, root: &Path, id: &str) -> String {
     let mut text = duscope_testkit::normalize(text, root);
     text = text.replace(id, "<id>");
     text = text.replace(checkout().to_str().unwrap(), "<checkout>");
+    for key in ["total_allocated_bytes", "total_apparent_bytes"] {
+        replace_values(&mut text, &format!("\"{key}\":"), ',', "<total>");
+    }
     for key in ["mtime", "ctime", "atime", "btime"] {
         replace_values(&mut text, &format!("\"{key}\":\""), '"', "<time>");
     }
