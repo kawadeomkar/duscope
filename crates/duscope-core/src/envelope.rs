@@ -436,6 +436,135 @@ pub fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// What a verb that answers with one object (`explain`; `summary` and
+/// `schema` to come) prints under `--json`: the shared fields, the scan it
+/// read (null when none was), and the object as `result`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ObjectEnvelope<T> {
+    /// Whether the command succeeded.
+    pub ok: bool,
+    /// [`SCHEMA_VERSION`].
+    pub schema_version: &'static str,
+    /// The program.
+    pub tool: Tool,
+    /// The saved scan the answer comes from; null when none holds the path.
+    pub scan: Option<ScanBlock>,
+    /// What was asked.
+    pub query: ObjectQuery,
+    /// The answer.
+    pub result: T,
+    /// Warnings, with their codes.
+    pub warnings: Vec<Warning>,
+    /// Up to three runnable commands, most useful first.
+    pub next: Vec<String>,
+}
+
+/// What a one-object verb was asked.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ObjectQuery {
+    /// The verb.
+    pub command: &'static str,
+    /// The path it was asked about, absolute.
+    pub path: String,
+}
+
+/// What `explain` says of one path: facts with their evidence, never a
+/// verdict.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Explain {
+    /// The path, absolute, as lossy UTF-8.
+    pub path: String,
+    /// The path's bytes, for `--plain`.
+    #[serde(skip)]
+    pub path_bytes: Vec<u8>,
+    /// Its name.
+    pub name: String,
+    /// The name's bytes in base64 when they are not UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_raw: Option<String>,
+    /// `file`, `dir`, `symlink` or `other`.
+    pub kind: &'static str,
+    /// Apparent bytes: a directory's subtree, hard links counted once.
+    pub apparent_bytes: u64,
+    /// Bytes on disk: a directory's subtree, hard links and clones once.
+    pub allocated_bytes: u64,
+    /// A directory's non-directories; null for a file.
+    pub file_count: Option<u64>,
+    /// A directory's directories, itself included; null for a file.
+    pub dir_count: Option<u64>,
+    /// Its modification time.
+    pub mtime: String,
+    /// Its inode change time.
+    pub ctime: String,
+    /// Its access time, when collected.
+    pub atime: Option<String>,
+    /// Its creation time, when collected and the filesystem has one.
+    pub btime: Option<String>,
+    /// Its mode bits, when collected.
+    pub mode: Option<u32>,
+    /// Its owner, when collected.
+    pub uid: Option<u32>,
+    /// Its group, when collected.
+    pub gid: Option<u32>,
+    /// A file's link count; null for a directory.
+    pub nlink: Option<u64>,
+    /// Links of the inodes under the path that lie outside it.
+    pub links_outside_subtree: Option<u64>,
+    /// Whether a file is a member of a clone group; null for a directory.
+    pub is_clone: Option<bool>,
+    /// The members of a file's clone group; null when it is none's.
+    pub clone_group_size: Option<u64>,
+    /// Members of the clone groups under the path that lie outside it.
+    pub clone_members_outside: Option<u64>,
+    /// The bytes deleting the path would free now.
+    pub freeable_now_bytes: Option<u64>,
+    /// `exact`, `lower_bound` or `upper_bound`.
+    pub freeable_kind: Option<&'static str>,
+    /// The command that regenerates a cache directory, from the rules.
+    pub regenerable_by: Option<&'static str>,
+    /// Whether the directory holds a valid `CACHEDIR.TAG`.
+    pub cachedir_tag: bool,
+    /// What git says of the path; null outside a repository.
+    pub git: Option<ExplainGit>,
+    /// Its storage flags, and `upper_bound`, `unreadable`, `uncharged`.
+    pub flags: Vec<&'static str>,
+    /// `high`, `medium` or `low`.
+    pub confidence: &'static str,
+    /// Where each fact came from: tables, rules, markers, files.
+    pub evidence: Vec<String>,
+}
+
+/// What git says of a path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExplainGit {
+    /// The repository's working tree root.
+    pub repo_root: String,
+    /// Whether git ignores the path, or a directory above it.
+    pub ignored: bool,
+    /// Whether the pattern that ignores it marks it precious (`$name`).
+    pub precious: bool,
+    /// Whether a tracked file lies at or under the path.
+    pub tracked_inside: bool,
+}
+
+/// A directory or entry a scan could not read, as `explain --errors` lists
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ScanErrorEntry {
+    /// Its path, absolute, as lossy UTF-8.
+    pub path: String,
+    /// Its path's bytes, for `--plain`.
+    #[serde(skip)]
+    pub path_bytes: Vec<u8>,
+    /// `directory` (listed but not read) or `entry` (listed but not
+    /// examined).
+    pub kind: &'static str,
+    /// The error number.
+    pub errno: i32,
+    /// What the system calls it.
+    pub message: String,
+}
+
 /// What `scans` prints under `--json`: the fields of a list, without a scan
 /// block (it lists the saved scans, not the rows of one), and the index
 /// directory it read.

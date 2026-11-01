@@ -181,7 +181,8 @@ fn p2_idx_01_the_indexes_follow_the_tables() {
         !tables.contains("CREATE INDEX"),
         "an index comes before the inserts"
     );
-    assert_eq!(tables.matches("CREATE TABLE").count(), 8);
+    // The proposal's eight, and shared_members (DEV-68).
+    assert_eq!(tables.matches("CREATE TABLE").count(), 9);
     let statements: Vec<&str> = indexes.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(statements.len(), 4, "{statements:?}");
     assert!(

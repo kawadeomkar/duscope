@@ -684,7 +684,13 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
 /// The cache rules: the vendored ones, with the configuration's
 /// `[caches] extra` table merged over them.
 fn caches(args: &WalkArgs) -> Result<Caches, Failure> {
-    let Some(file) = &args.caches_extra else {
+    cache_rules(args.caches_extra.as_deref())
+}
+
+/// The cache rules: the vendored ones, with the configuration's
+/// `[caches] extra` table merged over them.
+pub(super) fn cache_rules(extra: Option<&Path>) -> Result<Caches, Failure> {
+    let Some(file) = extra else {
         return Ok(Caches::vendored());
     };
     let refused = |message: String| {

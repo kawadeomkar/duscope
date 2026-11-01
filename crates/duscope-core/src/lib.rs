@@ -12,6 +12,7 @@ pub mod arena;
 pub mod config;
 pub mod envelope;
 mod errors;
+pub mod git;
 pub mod index;
 pub mod query;
 pub mod resolve;

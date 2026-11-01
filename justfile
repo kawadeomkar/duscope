@@ -3,11 +3,14 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # Stripped release binary budget in bytes: the larger of the two release targets
-# CI holds to it, measured plus 10% (P1-REL-01), and again with the bundled
-# SQLite at -O1 (P2-IDX-02, DEV-66). Run 41236633872 measured x86_64 musl at
-# 5,889,920 bytes and arm64 macOS at 4,878,880; plus 10% is 6,478,912, so
-# 6.48 MB. The spec's ceiling stays 8 MB.
-size_budget := "6480000"
+# CI holds to it, measured plus 10% (P1-REL-01), again with the bundled SQLite
+# at -O1 (P2-IDX-02, DEV-66), and again with thin LTO as phase 2 grew. Run
+# 41263296119 (p2-qry-04-explain, 223cc43) measured x86_64 musl at 6,700,928
+# bytes and arm64 macOS at 5,635,232; plus 10% is 7,371,021, so 7.38 MB. Abort
+# on panic (P2-QRY-04) then took 13% off (4,889,664 bytes on arm64 macOS) and
+# the budget stayed, as room for the rest of phase 2. The spec's ceiling stays
+# 8 MB.
+size_budget := "7380000"
 
 # Developer tools installed by `just setup`, mirrored in CONTRIBUTING.md.
 cargo_deny_version := "0.20.2"
