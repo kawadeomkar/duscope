@@ -67,6 +67,14 @@ impl Cli {
             _ => None,
         }
     }
+
+    /// Whether the verb was asked for every row (`--all`).
+    pub fn wants_all(&self) -> bool {
+        match &self.verb {
+            Some(Verb::Diff(a)) => a.all,
+            _ => self.query_args().is_some_and(|q| q.all),
+        }
+    }
 }
 
 /// The flags every verb takes before or after its name, beside the output
@@ -139,6 +147,8 @@ pub enum Verb {
     Caches(CachesArgs),
     /// A scan's totals: per volume, as du counts them, and what it left unfound
     Summary(SummaryArgs),
+    /// What changed between two saved scans of one tree
+    Diff(DiffArgs),
     /// Facts about one path: links, clones, what deleting it frees, caches, git
     Explain(ExplainArgs),
     /// List, prune or check the saved scans
@@ -551,6 +561,46 @@ pub struct CachesArgs {
     pub loose: bool,
 }
 
+/// `diff`'s arguments.
+#[derive(Debug, Clone, Args)]
+pub struct DiffArgs {
+    /// The older saved scan: an id prefix, latest, or an index file
+    #[arg(value_name = "OLD")]
+    pub old: String,
+
+    /// The newer saved scan
+    #[arg(value_name = "NEW")]
+    pub new: String,
+
+    /// Compare this path, which both scans hold, rather than their roots
+    #[arg(long, value_name = "PATH")]
+    pub under: Option<PathBuf>,
+
+    /// Leave out growth or shrinkage smaller than this (default 1M)
+    #[arg(long, value_parser = parse_size, value_name = "SIZE")]
+    pub min_delta: Option<u64>,
+
+    /// Compare directories at this depth whole (alias: --max-depth)
+    #[arg(long, visible_alias = "max-depth", value_name = "N")]
+    pub depth: Option<u32>,
+
+    /// Rows to show
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+
+    /// Every row, with no --limit: as ndjson, unless --plain or --format
+    #[arg(long, conflicts_with = "limit")]
+    pub all: bool,
+
+    /// The size compared: bytes on disk or apparent length
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub size: Option<SizeKind>,
+
+    /// How old a saved scan may be before a warning (h, d, w, y; default 7d)
+    #[arg(skip)]
+    pub max_age: Option<String>,
+}
+
 /// `summary`'s flags.
 #[derive(Debug, Clone, Args)]
 pub struct SummaryArgs {
@@ -771,6 +821,7 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             walk_defaults(&mut a.walk)?;
             index_defaults(&mut a.index);
         }
+        Some(Verb::Diff(args)) => max_age_default(&mut args.max_age),
         Some(Verb::Explain(args)) => {
             max_age_default(&mut args.max_age);
             args.caches_extra.clone_from(&config.caches_extra);

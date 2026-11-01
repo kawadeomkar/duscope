@@ -10,6 +10,7 @@
 mod by_type;
 pub mod caches;
 pub mod cursor;
+pub mod diff;
 pub mod explain;
 pub mod plan;
 pub mod resolve;
@@ -42,6 +43,7 @@ use crate::rollup::RollUp;
 pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
 pub use caches::{CachesQuery, caches, projects};
 pub use cursor::{After, Cursor, query_hash};
+pub use diff::{DEFAULT_MIN_DELTA, DiffQuery, diff};
 pub use explain::{ExplainQuery, explain, explain_unindexed, fs_holds_file, holds_file};
 pub use plan::{Cut, Plan, Ranked};
 /// The regular expressions `--regex` takes, matched against path bytes.
