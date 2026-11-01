@@ -152,7 +152,10 @@ fn format_refused(cli: &Cli) -> Option<Failure> {
                 | out::FormatArg::Qdirstat
                 | out::FormatArg::Csv,
             Some(Verb::Export(_))
-        ) | (out::FormatArg::Svg, Some(Verb::Render(_)))
+        ) | (
+            out::FormatArg::Svg | out::FormatArg::Png,
+            Some(Verb::Render(_))
+        )
     );
     if taken {
         return None;
