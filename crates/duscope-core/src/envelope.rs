@@ -816,6 +816,58 @@ pub struct SummaryVolume {
     pub reason: Option<&'static str>,
 }
 
+/// A change `diff` found.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiffEntry {
+    /// The entry's path, absolute: in the new scan, or the old one for
+    /// `removed`.
+    pub path: String,
+    /// The path's bytes, for `--plain`.
+    #[serde(skip)]
+    pub path_bytes: Vec<u8>,
+    /// Its name.
+    pub name: String,
+    /// The name's bytes in base64 when they are not UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_raw: Option<String>,
+    /// `added`, `removed`, `grown`, `shrunk` or `kind_changed`.
+    pub change: &'static str,
+    /// What it is: in the new scan, or the old one for `removed`.
+    pub kind: &'static str,
+    /// Its bytes in the old scan; null when it was not there.
+    pub old_bytes: Option<u64>,
+    /// Its bytes in the new scan; null when it is not there.
+    pub new_bytes: Option<u64>,
+    /// New less old, in the size compared.
+    pub bytes_delta: i64,
+    /// For a directory added or removed whole, the entries in it, itself
+    /// included; null otherwise.
+    pub collapsed_count: Option<u64>,
+}
+
+/// What `diff` adds up: bytes and entries come and gone, whatever
+/// `--min-delta` left out of the rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DiffTotals {
+    /// The old scan's id.
+    pub old_scan: String,
+    /// The new scan's id.
+    pub new_scan: String,
+    /// Bytes in the entries added.
+    pub added_bytes: u64,
+    /// Bytes in the entries removed.
+    pub removed_bytes: u64,
+    /// The new total less the old.
+    pub net_bytes: i64,
+    /// Entries in the new scan only, those in added directories included.
+    pub entries_added: u64,
+    /// Entries in the old scan only.
+    pub entries_removed: u64,
+    /// Entries in both whose bytes or kind differ (a directory at
+    /// `--depth` counted once).
+    pub entries_changed: u64,
+}
+
 /// The fields of a row as `--fields` names them, in the order the row
 /// writes them.
 pub trait Fields {
@@ -942,6 +994,20 @@ impl Fields for PrunedEntry {
 
 impl Fields for CheckedEntry {
     const NAMES: &'static [&'static str] = &["id", "index_path", "quick_check"];
+}
+
+impl Fields for DiffEntry {
+    const NAMES: &'static [&'static str] = &[
+        "path",
+        "name",
+        "name_raw",
+        "change",
+        "kind",
+        "old_bytes",
+        "new_bytes",
+        "bytes_delta",
+        "collapsed_count",
+    ];
 }
 
 impl Fields for ScanErrorEntry {

@@ -14,6 +14,7 @@ Verbs:
   stale        Large files not modified (or accessed) since a date
   caches       Regenerable caches (node_modules, target, .venv, …) and their projects
   summary      A scan's totals: per volume, as du counts them, and what it left unfound
+  diff         What changed between two saved scans of one tree
   explain      Facts about one path: links, clones, what deleting it frees, caches, git
   scans        List, prune or check the saved scans
   man          Print the manual page, in roff, to stdout
