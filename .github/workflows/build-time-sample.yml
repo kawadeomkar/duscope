@@ -1,6 +1,6 @@
 # Temporary, on this branch only (never merged): cold release builds of the
-# p2-idx-02-sqlite-o1 branch (SQLite at -O1 through the profile override) on 16
-# shared ubuntu-24.04 runners, with cargo's timings per unit.
+# p2-qry-04-explain branch with thin LTO on 24 shared ubuntu-24.04 runners, with
+# cargo's timings per unit.
 name: Build-time sample (temporary)
 
 on:
@@ -15,15 +15,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [o1]
-        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        variant: [thin]
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: 0036ceaf9f92d8cca7d81a8fd59aaadfc3cb9f75
+          ref: 223cc435b60511e6e1aa67d19dd94072795df073
       - name: Install the pinned toolchain
         run: rustup toolchain install --profile minimal && rustc --version
       - name: Fetch dependencies (not timed)
