@@ -126,6 +126,39 @@ fn decide(theme_arg: Option<&OsString>, color: bool, env: &MapEnv) -> Result<Sty
     })
 }
 
+/// The colours of a picture (`render`): the pack `--theme` names; else
+/// `DUSCOPE_THEME`'s where it names one with colours, or Mocha, a picture
+/// having no terminal behind it to suit; and `LS_COLORS`, for `--color-by
+/// lscolors`. A pack `--theme` names without colours of its own
+/// (`terminal-native`, `no-color`) is refused.
+pub(super) fn picture(theme_arg: Option<&OsString>) -> Result<(Pack, LsColors), Failure> {
+    let env = MapEnv::read(|name| std::env::var_os(name));
+    let colourless = |pack: &Pack| pack.shades || pack.name == "terminal-native";
+    let pack = match theme_arg {
+        Some(_) => theme(theme_arg, &env)?,
+        None => std::env::var_os("DUSCOPE_THEME")
+            .filter(|v| !v.is_empty())
+            .and_then(|v| theme(Some(&v), &env).ok())
+            .filter(|pack| !colourless(pack))
+            .unwrap_or_else(|| named("mocha")),
+    };
+    if colourless(&pack) {
+        return Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            format!(
+                "--theme {} takes its colours from a terminal, which a picture has not",
+                pack.name
+            ),
+        )
+        .hint("Run duscope render with --theme mocha, tokyo-night, dracula, gruvbox, light or a theme file"));
+    }
+    Ok((
+        pack,
+        ls_colors(env.ls_colors.as_deref().unwrap_or_default()),
+    ))
+}
+
 /// Draws the treemap of `scanned` in `style`.
 pub fn draw(
     scanned: &Scanned,
@@ -245,7 +278,7 @@ pub(super) fn shell_quote(text: &str) -> String {
 }
 
 /// Each class's share of the scan, largest first, `other` last.
-fn legend(
+pub(super) fn legend(
     view: &(impl TreeView + ?Sized),
     classes: &Classes,
     size: query::SizeKind,

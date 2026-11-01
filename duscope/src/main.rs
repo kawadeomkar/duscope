@@ -72,35 +72,7 @@ fn main() -> ExitCode {
             return ExitCode::from(failure.exit.code());
         }
     };
-    // --format names the output, as --json and --plain do, for every verb
-    // but import.
-    if cli.output.format.is_some() && (cli.output.json || cli.output.plain) {
-        let flag = if cli.output.json { "--json" } else { "--plain" };
-        let failure = Failure::new(
-            Exit::Usage,
-            "usage",
-            format!("the argument '--format <FORMAT>' cannot be used with '{flag}'"),
-        )
-        .hint("Run duscope --help for the verbs and their flags");
-        output.failure(&failure);
-        return ExitCode::from(failure.exit.code());
-    }
-    if let Some(format) = cli.output.format.filter(|f| f.interchange())
-        && !matches!(cli.verb, Some(Verb::Export(_)))
-    {
-        let failure = Failure::new(
-            Exit::Usage,
-            "usage",
-            format!(
-                "--format {} is another tool's format, which export writes and import reads",
-                format
-                    .to_possible_value()
-                    .map_or_else(String::new, |v| v.get_name().to_owned())
-            ),
-        )
-        .hint(
-            "Run duscope export --format to write a saved scan in it, or duscope import to read it",
-        );
+    if let Some(failure) = format_refused(&cli) {
         output.failure(&failure);
         return ExitCode::from(failure.exit.code());
     }
@@ -158,6 +130,50 @@ fn config_failure(error: &CoreError) -> Failure {
 /// The command line and the matches of its verb (the top level's without
 /// one). Without a verb, `scan`'s flags and path come first; with one, only
 /// the global flags may come before it.
+/// A `--format` the verb does not take: beside `--json` or `--plain`,
+/// which name the output as it does (import's, which names its input, was
+/// moved out already), or one only another verb takes.
+fn format_refused(cli: &Cli) -> Option<Failure> {
+    let format = cli.output.format?;
+    if cli.output.json || cli.output.plain {
+        let flag = if cli.output.json { "--json" } else { "--plain" };
+        return Some(
+            Failure::new(
+                Exit::Usage,
+                "usage",
+                format!("the argument '--format <FORMAT>' cannot be used with '{flag}'"),
+            )
+            .hint("Run duscope --help for the verbs and their flags"),
+        );
+    }
+    let verbs = format.verbs()?;
+    let taken = matches!(
+        (format, &cli.verb),
+        (
+            out::FormatArg::Ncdu
+                | out::FormatArg::Gpscan
+                | out::FormatArg::Qdirstat
+                | out::FormatArg::Csv,
+            Some(Verb::Export(_))
+        ) | (out::FormatArg::Svg, Some(Verb::Render(_)))
+    );
+    if taken {
+        return None;
+    }
+    let name = format
+        .to_possible_value()
+        .map_or_else(String::new, |v| v.get_name().to_owned());
+    let verb = verbs.split(' ').next().unwrap_or(verbs);
+    Some(
+        Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("--format {name} is for {verbs} alone"),
+        )
+        .hint(format!("Run duscope {verb} --format {name}")),
+    )
+}
+
 fn parse() -> Result<(Cli, ArgMatches), clap::Error> {
     let mut command = Cli::command();
     let matches = command.try_get_matches_from_mut(std::env::args_os())?;

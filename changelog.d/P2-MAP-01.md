@@ -1,0 +1,2 @@
+### Added
+- `render [path]` draws the treemap as an SVG picture at any size (`--width`, `--height`; 1200 × 800 by default), to stdout or `-o FILE.svg`: tiles shaded with GrandPerspective's gradient, labelled with names and sizes where they fit, with the legend and the totals under the map. `--layout squarify` (the default) or `gp` (GrandPerspective's bisection, files cut from subfolders), `--color-by`, `--theme`, `--depth` and `--pool-files` work as for the terminal map.
