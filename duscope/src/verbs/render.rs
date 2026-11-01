@@ -9,7 +9,6 @@
 
 use std::path::Path;
 
-use duscope_core::query::timegrammar;
 use duscope_treemap::Algorithm;
 use duscope_treemap::paint::{ColorBy, Glyphs, PaintOpts};
 use duscope_treemap::svg::{SvgOpts, write_svg};
@@ -23,10 +22,12 @@ use crate::out::{self, FormatArg, Output, stderr_line, thousands};
 /// The picture's size without `--width` and `--height`.
 const DEFAULT_SIZE: (u16, u16) = (1200, 800);
 
-/// `render`.
+/// `render`; `json_or_plain`: `--json` or `--plain` was given, which a picture does
+/// not answer.
 pub fn run(
     args: &RenderArgs,
     format: Option<FormatArg>,
+    json_or_plain: bool,
     index_dir: Option<&Path>,
     output: &Output,
 ) -> Result<(), Failure> {
@@ -52,7 +53,16 @@ pub fn run(
             );
         }
     }
-    let (pack, ls_colors) = treemap::picture(args.theme.as_ref())?;
+    // The picture is the output: no envelope or records beside it.
+    if json_or_plain {
+        return Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            "render writes an SVG picture, which --json and --plain do not describe",
+        )
+        .hint("Rerun duscope render without --json or --plain"));
+    }
+    let (pack, ls_colors) = treemap::picture(args.theme.as_ref(), args.configured_theme.as_ref())?;
     let classes = super::query::classes(args.walk.classes_extra.as_deref(), "[classes] extra")?;
     let source = source::source(&args.walk, &args.index, index_dir)?;
     let warnings = source.warnings(&args.walk);
@@ -79,7 +89,7 @@ pub fn run(
             min_tile: 1,
             pool_files: args.pool_files,
             size,
-            now: timegrammar::now(),
+            now: scan::now(&args.walk)?,
             classes: &classes,
         },
         algorithm: match args.layout {
@@ -93,12 +103,22 @@ pub fn run(
         summary: summary.clone(),
     };
     let mut tiles = 0;
-    whole(output, |out| {
+    // An index that failed partway is the render's failure, found before
+    // the picture replaces an -o file.
+    let mut failed = None;
+    let written = whole(output, |out| {
         tiles = write_svg(&*view, &opts, out)?;
+        if let Err(failure) = source.check() {
+            failed = Some(failure);
+            return Err(std::io::Error::other("the index could not be read"));
+        }
         Ok(())
-    })?;
+    });
+    if let Some(failure) = failed {
+        return Err(failure);
+    }
+    written?;
     drop(view);
-    source.check()?;
     if !output.quiet {
         out::warn(&warnings);
         stderr_line(&format!(
