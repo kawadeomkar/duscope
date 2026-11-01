@@ -72,6 +72,19 @@ fn main() -> ExitCode {
             return ExitCode::from(failure.exit.code());
         }
     };
+    // --format names the output, as --json and --plain do, for every verb
+    // but import.
+    if cli.output.format.is_some() && (cli.output.json || cli.output.plain) {
+        let flag = if cli.output.json { "--json" } else { "--plain" };
+        let failure = Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("the argument '--format <FORMAT>' cannot be used with '{flag}'"),
+        )
+        .hint("Run duscope --help for the verbs and their flags");
+        output.failure(&failure);
+        return ExitCode::from(failure.exit.code());
+    }
     if let Some(format) = cli.output.format.filter(|f| f.interchange())
         && !matches!(cli.verb, Some(Verb::Export(_)))
     {

@@ -100,6 +100,11 @@ pub struct Imported {
     pub entry_errors: u64,
     /// Directories the tool listed but did not enter.
     pub skipped_dirs: u64,
+    /// Entries an exclude pattern left out, and directories it kept the
+    /// tool out of.
+    pub excluded: u64,
+    /// Directories the tool did not enter because they are other volumes.
+    pub mounts_excluded: u64,
 }
 
 /// Reads the tree in `input`, as `format` or the format the file shows.
@@ -119,47 +124,58 @@ fn import_capped(
     format: Option<ImportFormat>,
     cap: u64,
 ) -> Result<Imported, CoreError> {
-    let mut input = BufReader::new(input);
-    let gzip = input
-        .fill_buf()
-        .map_err(|e| read_error(&e))?
-        .starts_with(&[0x1f, 0x8b]);
+    let (head, rest) = peel(input, 2)?;
+    let gzip = head.starts_with(&[0x1f, 0x8b]);
+    let input = io::Cursor::new(head).chain(rest);
     if gzip {
         let capped = Capped {
             inner: MultiGzDecoder::new(input),
             left: cap,
         };
-        read(BufReader::new(capped), format)
+        read(Box::new(capped), format)
     } else {
-        read(input, format)
+        read(Box::new(input), format)
     }
 }
 
-/// Reads the tree in the (decompressed) `input`.
-fn read(mut input: impl BufRead, format: Option<ImportFormat>) -> Result<Imported, CoreError> {
+/// Reads the tree in the (decompressed) `input`, through one reader type,
+/// so that each format's reader is compiled once.
+fn read(input: Box<dyn Read + '_>, format: Option<ImportFormat>) -> Result<Imported, CoreError> {
+    // A byte-order mark before the first character, whatever the format.
+    let (mut head, rest) = peel(input, 3)?;
+    if head.starts_with(b"\xef\xbb\xbf") {
+        head.clear();
+    }
+    let mut input = BufReader::new(io::Cursor::new(head).chain(rest));
     let format = match format {
         Some(format) => Some(format),
         None => sniff(&mut input)?,
     };
     match format {
-        Some(ImportFormat::Gpscan) => gpscan::read(input),
-        format => ncdu::read(input, format),
+        Some(ImportFormat::Gpscan) => gpscan::read(&mut input),
+        format => ncdu::read(&mut input, format),
     }
+}
+
+/// The first `n` bytes of `input` (fewer only at its end), however short
+/// its reads, and the rest of it.
+fn peel<R: Read>(mut input: R, n: u64) -> Result<(Vec<u8>, R), CoreError> {
+    let mut head = Vec::new();
+    (&mut input)
+        .take(n)
+        .read_to_end(&mut head)
+        .map_err(|e| read_error(&e))?;
+    Ok((head, input))
 }
 
 /// The format the file's first character shows: `<` for XML, a
 /// `.gpscan`; `None` for JSON, whose metadata tells ncdu's from gdu's.
-fn sniff(input: &mut impl BufRead) -> Result<Option<ImportFormat>, CoreError> {
+fn sniff(input: &mut dyn BufRead) -> Result<Option<ImportFormat>, CoreError> {
     loop {
         let buf = input.fill_buf().map_err(|e| read_error(&e))?;
         let Some(&first) = buf.first() else {
             return Err(CoreError::ImportInvalid("the file is empty".to_owned()));
         };
-        // A byte-order mark, then white space, before the first character.
-        if buf.starts_with(b"\xef\xbb\xbf") {
-            input.consume(3);
-            continue;
-        }
         if first.is_ascii_whitespace() {
             input.consume(1);
             continue;
@@ -242,6 +258,9 @@ pub(crate) struct Item {
     pub unreadable: bool,
     /// A directory the tool listed but did not enter.
     pub skipped: Option<Skip>,
+    /// An entry an exclude pattern left out, of no kind the file says: it is
+    /// counted, not listed, as a walk leaves out an excluded file.
+    pub left_out: bool,
 }
 
 impl Item {
@@ -258,6 +277,7 @@ impl Item {
             nlink: 1,
             unreadable: false,
             skipped: None,
+            left_out: false,
         }
     }
 }
@@ -280,6 +300,8 @@ pub(crate) struct Builder {
     unreadable_dirs: u64,
     entry_errors: u64,
     skipped_dirs: u64,
+    excluded: u64,
+    mounts_excluded: u64,
     /// Every entry's sizes so far, added up: at most `i64::MAX`, so that no
     /// total of the roll-up or column of the index can overflow.
     sum_apparent: u64,
@@ -296,6 +318,8 @@ impl Builder {
             unreadable_dirs: 0,
             entry_errors: 0,
             skipped_dirs: 0,
+            excluded: 0,
+            mounts_excluded: 0,
             sum_apparent: 0,
             sum_allocated: 0,
         }
@@ -341,12 +365,20 @@ impl Builder {
         if self.open.is_empty() {
             return Err(invalid("the tree's root is not a directory"));
         }
+        if item.left_out {
+            self.excluded += 1;
+            return Ok(());
+        }
         if item.kind == Kind::Dir {
             let skipped = item.skipped;
             let unreadable = item.unreadable;
             let dir = self.dir_entry(item)?;
             if let Some(reason) = skipped {
                 self.skipped_dirs += 1;
+                match reason {
+                    Skip::Excluded | Skip::ExcludedCache => self.excluded += 1,
+                    _ => self.mounts_excluded += 1,
+                }
                 self.push(ScanEvent::Skipped { dir, reason })?;
             }
             if unreadable {
@@ -416,6 +448,8 @@ impl Builder {
             unreadable_dirs: self.unreadable_dirs,
             entry_errors: self.entry_errors,
             skipped_dirs: self.skipped_dirs,
+            excluded: self.excluded,
+            mounts_excluded: self.mounts_excluded,
         })
     }
 
@@ -462,18 +496,20 @@ impl Builder {
     /// `name` checked as an entry's name in the open directory, which it
     /// is now one of; the directory.
     fn check_name(&mut self, name: &[u8]) -> Result<DirId, CoreError> {
-        let shown = String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
+        let shown = || String::from_utf8_lossy(&name[..name.len().min(64)]).into_owned();
         if name.is_empty() || name == b"." || name == b".." {
-            return Err(invalid(&format!("{shown:?} is not a name")));
+            return Err(invalid(&format!("{:?} is not a name", shown())));
         }
         if name.contains(&b'/') || name.contains(&0) {
             return Err(invalid(&format!(
-                "the name {shown:?} holds a slash or a NUL byte"
+                "the name {:?} holds a slash or a NUL byte",
+                shown()
             )));
         }
         if name.len() > NAME_MAX {
             return Err(invalid(&format!(
-                "the name {shown:?}… is longer than 64 KiB"
+                "the name {:?}… is longer than 64 KiB",
+                shown()
             )));
         }
         let open = self
@@ -484,7 +520,8 @@ impl Builder {
         name.hash(&mut hasher);
         if !open.names.insert(hasher.finish()) {
             return Err(invalid(&format!(
-                "the name {shown:?} comes twice in one directory"
+                "the name {:?} comes twice in one directory",
+                shown()
             )));
         }
         Ok(open.dir)
