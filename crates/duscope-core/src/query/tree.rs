@@ -43,6 +43,7 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
         return Page {
             entries: Vec::new(),
             total_count: 0,
+            next: None,
         };
     }
     let depth = q.depth.unwrap_or(2);
@@ -93,6 +94,7 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
     Page {
         entries,
         total_count,
+        next: None,
     }
 }
 
