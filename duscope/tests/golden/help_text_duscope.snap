@@ -168,6 +168,20 @@ Output:
       --header
           Start --plain output with a line of field names
 
+      --fields <FIELDS>
+          The fields of each row, comma-separated, in that order (help lists them)
+
+      --detail
+          Every field of each row
+
+  -o, --output <FILE>
+          Write the output to FILE, with no --limit cap and no --max-chars
+
+      --max-chars <N>
+          Put a JSON envelope over N characters in a file; print its first rows
+          
+          Kept a week in the index directory's out/; default 24000, 0 never
+
       --config <FILE>
           The configuration file, or none for the built-in defaults
           
