@@ -1,0 +1,8 @@
+{"path":"<root>","kind":"dir","depth":0,"allocated_bytes":0,"apparent_bytes":256,"charged":true,"nlink":1,"mtime":"2027-01-15T08:00:00Z","subtree_allocated_bytes":16384,"subtree_apparent_bytes":5658}
+{"path":"<root>/a-link.bin","kind":"file","depth":1,"allocated_bytes":8192,"apparent_bytes":5000,"charged":true,"nlink":2,"mtime":"2027-01-15T08:00:00Z","subtree_allocated_bytes":null,"subtree_apparent_bytes":null}
+{"path":"<root>/a.bin","kind":"file","depth":1,"allocated_bytes":8192,"apparent_bytes":5000,"charged":false,"nlink":2,"mtime":"2027-01-15T08:00:00Z","subtree_allocated_bytes":null,"subtree_apparent_bytes":null}
+{"path":"<root>/empty","kind":"file","depth":1,"allocated_bytes":0,"apparent_bytes":0,"charged":true,"nlink":1,"mtime":"2027-01-15T08:00:00Z","subtree_allocated_bytes":null,"subtree_apparent_bytes":null}
+{"path":"<root>/lnk","kind":"symlink","depth":1,"allocated_bytes":0,"apparent_bytes":5,"charged":true,"nlink":1,"mtime":"<time>","subtree_allocated_bytes":null,"subtree_apparent_bytes":null}
+{"path":"<root>/say \"hi\" & bye\tnow.txt","kind":"file","depth":1,"allocated_bytes":4096,"apparent_bytes":300,"charged":true,"nlink":1,"mtime":"2027-01-15T08:00:00Z","subtree_allocated_bytes":null,"subtree_apparent_bytes":null}
+{"path":"<root>/sub dir","kind":"dir","depth":1,"allocated_bytes":0,"apparent_bytes":96,"charged":true,"nlink":1,"mtime":"2027-01-15T08:00:00Z","subtree_allocated_bytes":4096,"subtree_apparent_bytes":97}
+{"path":"<root>/sub dir/x.txt","kind":"file","depth":2,"allocated_bytes":4096,"apparent_bytes":1,"charged":true,"nlink":1,"mtime":"2027-01-15T08:00:00Z","subtree_allocated_bytes":null,"subtree_apparent_bytes":null}

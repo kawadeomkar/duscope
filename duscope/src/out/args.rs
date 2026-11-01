@@ -88,6 +88,24 @@ pub enum FormatArg {
     Json,
     /// One JSON object per line, every row
     Ndjson,
+    /// ncdu's JSON (export)
+    Ncdu,
+    /// GrandPerspective's .gpscan (export)
+    Gpscan,
+    /// QDirStat's cache file (export)
+    Qdirstat,
+    /// Comma-separated values, a row an entry (export)
+    Csv,
+}
+
+impl FormatArg {
+    /// Whether only `export` writes it.
+    pub fn exports_only(self) -> bool {
+        matches!(
+            self,
+            FormatArg::Ncdu | FormatArg::Gpscan | FormatArg::Qdirstat | FormatArg::Csv
+        )
+    }
 }
 
 /// `--color`.

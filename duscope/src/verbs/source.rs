@@ -10,11 +10,12 @@
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use duscope_core::CoreError;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
-use duscope_core::index::{Index, ScanId};
+use duscope_core::index::{Index, ScanId, index_path};
 use duscope_core::query::{
     self, ScanQuery, ScanSelector, SizeKind, Subtree, TreeView, resolve_scan, short_id, timegrammar,
 };
@@ -402,6 +403,104 @@ impl Source {
             })?;
         }
         Ok(())
+    }
+}
+
+/// A source as an index file, for the verbs that read one (`query`,
+/// `export`): a saved scan as it is; a scan run for the verb saved first,
+/// in the index directory, or under `--no-save` in a scratch directory
+/// that goes when this does.
+#[derive(Debug)]
+pub struct Indexed {
+    /// The index.
+    pub index: Box<Index>,
+    /// The entry the verb is about.
+    pub base: u32,
+    /// The scan for people: `saved scan 3f9a`, `saved as 3f9a`, `not saved`.
+    pub label: String,
+    /// The scratch directory, after the index so it goes after it.
+    _scratch: Scratch,
+}
+
+/// A scratch directory, removed when this goes.
+#[derive(Debug)]
+struct Scratch(Option<PathBuf>);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.0
+            && let Err(e) = std::fs::remove_dir_all(dir)
+        {
+            log::warn!("cannot remove {}: {e}", dir.display());
+        }
+    }
+}
+
+impl Source {
+    /// The source as an index (see [`Indexed`]); `walk` and `excludes`
+    /// are the fresh scan's, for its saved options, and `verb` names the
+    /// directory of an index not kept.
+    pub fn indexed(
+        self,
+        verb: &str,
+        walk: &WalkArgs,
+        excludes: &[String],
+        output: &Output,
+    ) -> Result<Indexed, Failure> {
+        match self {
+            Source::Saved { index, base, .. } => {
+                let dir = index.file().parent().and_then(Path::parent);
+                let id = index.meta().scan_id.as_str();
+                let short = dir.map_or_else(|| id.to_owned(), |dir| short_id(dir, id));
+                Ok(Indexed {
+                    index,
+                    base,
+                    label: format!("saved scan {short}"),
+                    _scratch: Scratch(None),
+                })
+            }
+            Source::Fresh { scanned, save } => {
+                let (id, dir, label, scratch) = if let Some((id, dir)) = save {
+                    let label = format!("saved as {}", short_id(&dir, id.as_str()));
+                    (id, dir, label, Scratch(None))
+                } else {
+                    let id = scan::scan_id(&scanned)?;
+                    let dir = scratch_dir(verb)?;
+                    (id, dir.clone(), "not saved".to_owned(), Scratch(Some(dir)))
+                };
+                // On a failure below, `scratch` goes, and its directory.
+                scan::save(&scanned, walk, excludes, &id, Some(&dir), output, false)?;
+                let index = Index::open(&index_path(&dir, &id)).map_err(core_failure)?;
+                Ok(Indexed {
+                    index: Box::new(index),
+                    base: 0,
+                    label,
+                    _scratch: scratch,
+                })
+            }
+        }
+    }
+}
+
+/// A new directory, the owner's only, for the index of a scan not to be
+/// kept (`--no-save`, or no index directory): `duscope-<verb>-…` under the
+/// temporary directory.
+fn scratch_dir(verb: &str) -> Result<PathBuf, Failure> {
+    let mut n = 0;
+    loop {
+        let dir = std::env::temp_dir().join(format!("duscope-{verb}-{}-{n}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => n += 1,
+            Err(e) => {
+                return Err(Failure::new(
+                    Exit::Runtime,
+                    "io_error",
+                    format!("cannot make a directory for the scan's index: {e}"),
+                )
+                .hint("Rerun without --no-save, or with --index-dir"));
+            }
+        }
     }
 }
 
