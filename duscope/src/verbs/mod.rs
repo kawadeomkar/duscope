@@ -4,6 +4,7 @@ mod completions;
 mod diff;
 mod explain;
 mod man;
+mod next;
 mod query;
 mod scan;
 mod scans;
