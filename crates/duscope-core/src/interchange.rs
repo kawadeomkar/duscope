@@ -15,33 +15,11 @@ pub mod ncdu;
 pub mod qdirstat;
 
 use std::collections::HashMap;
-use std::io;
 use std::os::unix::ffi::OsStringExt;
 
 use crate::CoreError;
-use crate::index::{EXCLUDED, EXCLUDED_CACHE, FIRMLINK, Index, LATER_LINK};
+use crate::index::{EXCLUDED, EXCLUDED_CACHE, Index, LATER_LINK};
 use crate::query::TreeView;
-
-/// Why an export stopped.
-#[derive(Debug)]
-pub enum ExportError {
-    /// The output could not be written.
-    Write(io::Error),
-    /// The index could not be read.
-    Index(CoreError),
-}
-
-impl From<io::Error> for ExportError {
-    fn from(e: io::Error) -> ExportError {
-        ExportError::Write(e)
-    }
-}
-
-impl From<CoreError> for ExportError {
-    fn from(e: CoreError) -> ExportError {
-        ExportError::Index(e)
-    }
-}
 
 /// What a row's kind is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +86,8 @@ pub struct Row {
     /// A hard-linked file's device and inode.
     pub inode: Option<(u64, u64)>,
     /// Why the scan listed it without entering it, as ncdu names it:
-    /// `pattern` (an exclude), `otherfs`, `kernfs` or `frmlink`.
+    /// `pattern` (an exclude), `otherfs`, `kernfs`, or `frmlink` (the
+    /// volume a macOS scan reaches through its firmlinks).
     pub excluded: Option<&'static str>,
     /// A directory's facts.
     pub dir: Option<DirFacts>,
@@ -118,18 +97,16 @@ pub struct Row {
 ///
 /// # Errors
 ///
-/// [`ExportError::Index`] when the index cannot be read, and whatever
-/// `each` returns.
+/// [`CoreError::IndexCorrupt`] when the index cannot be read, and
+/// whatever `each` returns.
 pub fn walk(
     index: &Index,
     base: u32,
-    mut each: impl FnMut(&Row) -> Result<(), ExportError>,
-) -> Result<(), ExportError> {
-    let corrupt = |e: rusqlite::Error| {
-        ExportError::Index(CoreError::IndexCorrupt {
-            file: index.file().display().to_string(),
-            message: e.to_string(),
-        })
+    mut each: impl FnMut(&Row) -> Result<(), CoreError>,
+) -> Result<(), CoreError> {
+    let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
+        file: index.file().display().to_string(),
+        message: e.to_string(),
     };
     let last = index.node(base).last_id;
     let facts = Facts {
@@ -181,10 +158,10 @@ pub fn walk(
         }
     }
     if let Some(message) = index.failure() {
-        return Err(ExportError::Index(CoreError::IndexCorrupt {
+        return Err(CoreError::IndexCorrupt {
             file: index.file().display().to_string(),
             message,
-        }));
+        });
     }
     Ok(())
 }
@@ -205,10 +182,10 @@ impl Facts<'_> {
         let id: u32 = row.get(0)?;
         let flags: u32 = row.get(13)?;
         let depth: u32 = row.get(16)?;
+        // A firmlink (`FIRMLINK`) is entered: only the volume behind the
+        // firmlinks is left alone, as `unentered` finds.
         let excluded = if flags & (EXCLUDED | EXCLUDED_CACHE) != 0 {
             Some("pattern")
-        } else if flags & FIRMLINK != 0 {
-            Some("frmlink")
         } else {
             self.unentered.get(&id).copied()
         };

@@ -282,7 +282,7 @@ fn p2_qry_07_without_a_saved_scan_it_scans_first() {
     let left: Vec<_> = fs::read_dir(env.tmp_dir())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("duscope-index-"))
+        .filter(|name| name.starts_with("duscope-query-"))
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }
