@@ -67,6 +67,14 @@ impl Cli {
             _ => None,
         }
     }
+
+    /// Whether the verb was asked for every row (`--all`).
+    pub fn wants_all(&self) -> bool {
+        match &self.verb {
+            Some(Verb::Diff(a)) => a.all,
+            _ => self.query_args().is_some_and(|q| q.all),
+        }
+    }
 }
 
 /// The flags every verb takes before or after its name, beside the output
@@ -139,6 +147,8 @@ pub enum Verb {
     Caches(CachesArgs),
     /// A scan's totals: per volume, as du counts them, and what it left unfound
     Summary(SummaryArgs),
+    /// What changed between two saved scans of one tree
+    Diff(DiffArgs),
     /// Facts about one path: links, clones, what deleting it frees, caches, git
     Explain(ExplainArgs),
     /// List, prune or check the saved scans
@@ -551,6 +561,42 @@ pub struct CachesArgs {
     pub loose: bool,
 }
 
+/// `diff`'s arguments.
+#[derive(Debug, Clone, Args)]
+pub struct DiffArgs {
+    /// The older saved scan: an id prefix, latest, or an index file
+    #[arg(value_name = "OLD")]
+    pub old: String,
+
+    /// The newer saved scan
+    #[arg(value_name = "NEW")]
+    pub new: String,
+
+    /// Compare this path, which both scans hold, rather than their roots
+    #[arg(long, value_name = "PATH")]
+    pub under: Option<PathBuf>,
+
+    /// Leave out growth or shrinkage smaller than this (default 1M)
+    #[arg(long, value_parser = parse_size, value_name = "SIZE")]
+    pub min_delta: Option<u64>,
+
+    /// Compare directories at this depth whole (alias: --max-depth)
+    #[arg(long, visible_alias = "max-depth", value_name = "N")]
+    pub depth: Option<u32>,
+
+    /// Rows to show
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+
+    /// Every row, with no --limit: as ndjson, unless --plain or --format
+    #[arg(long, conflicts_with = "limit")]
+    pub all: bool,
+
+    /// The size compared: bytes on disk or apparent length
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub size: Option<SizeKind>,
+}
+
 /// `summary`'s flags.
 #[derive(Debug, Clone, Args)]
 pub struct SummaryArgs {
@@ -699,11 +745,8 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
                 .map_err(|_| refused("threads", threads.line, &format!("at most {MAX_THREADS}")))?;
             walk.threads = Some(n);
         }
-        if walk.size.is_none()
-            && !walk.apparent_size
-            && let Some(size) = &d.size
-        {
-            walk.size = Some(choice(config, "size", size)?);
+        if !walk.apparent_size {
+            size_default(config, &mut walk.size)?;
         }
         if let Some(attrs) = &d.attrs
             && attrs_defaulted()
@@ -725,11 +768,7 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
     };
     let index_defaults = |index: &mut IndexArgs| max_age_default(&mut index.max_age);
     let query_defaults = |query: &mut QueryArgs, index: &mut IndexArgs| {
-        if query.limit.is_none()
-            && let Some(limit) = &d.limit
-        {
-            query.limit = Some(usize::try_from(limit.value).unwrap_or(usize::MAX));
-        }
+        limit_default(config, &mut query.limit);
         index_defaults(index);
     };
     let list_defaults = |walk: &mut WalkArgs,
@@ -771,6 +810,10 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             walk_defaults(&mut a.walk)?;
             index_defaults(&mut a.index);
         }
+        Some(Verb::Diff(args)) => {
+            size_default(config, &mut args.size)?;
+            limit_default(config, &mut args.limit);
+        }
         Some(Verb::Explain(args)) => {
             max_age_default(&mut args.max_age);
             args.caches_extra.clone_from(&config.caches_extra);
@@ -778,6 +821,25 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         Some(Verb::Scans(_) | Verb::Man | Verb::Completions(_)) => {}
     }
     Ok(())
+}
+
+/// `[defaults] size` where no flag set `--size`.
+fn size_default(config: &Config, size: &mut Option<SizeKind>) -> Result<(), Failure> {
+    if size.is_none()
+        && let Some(set) = &config.defaults.size
+    {
+        *size = Some(choice(config, "size", set)?);
+    }
+    Ok(())
+}
+
+/// `[defaults] limit` where no flag set `--limit`.
+fn limit_default(config: &Config, limit: &mut Option<usize>) {
+    if limit.is_none()
+        && let Some(set) = &config.defaults.limit
+    {
+        *limit = Some(usize::try_from(set.value).unwrap_or(usize::MAX));
+    }
 }
 
 /// A `[defaults]` value the flag would refuse: a usage error naming the file

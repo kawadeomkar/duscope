@@ -56,7 +56,7 @@ fn main() -> ExitCode {
     }
     // --all streams: ndjson, unless the flags name another format; the
     // JSON envelope holds a page, not every row.
-    let all = cli.query_args().is_some_and(|q| q.all);
+    let all = cli.wants_all();
     let all_as_json = all && (cli.output.json || cli.output.format == Some(out::FormatArg::Json));
     if all && !cli.output.json && !cli.output.plain && cli.output.format.is_none() {
         cli.output.format = Some(out::FormatArg::Ndjson);

@@ -1,0 +1,2 @@
+### Added
+- `diff <old> <new>` lists what changed between two saved scans of one tree, largest change first: entries `added` and `removed` (a whole directory as one entry, with how many it held), files `grown` or `shrunk` by at least `--min-delta` (1 MiB by default), and names whose kind changed. `--depth` compares the directories at that depth whole; `--under` compares a path both scans hold. The envelope adds up the bytes added and removed, the net change and the entries added, removed and changed. Scans of other roots are refused with `incompatible_scans`.
