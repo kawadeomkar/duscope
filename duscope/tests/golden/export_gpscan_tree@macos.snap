@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GrandPerspectiveScanDump appVersion="0.1.0" formatVersion="7">
+<ScanInfo volumePath="<volume>" volumeSize="0" freeSpace="0" scanTime="2037-01-01T00:00:00Z" fileSizeMeasure="physical">
+<Folder name="<root>" created="<time>" modified="2027-01-15T08:00:00Z" accessed="<time>">
+<File name="a-link.bin" size="8192" flags="2" created="<time>" modified="2027-01-15T08:00:00Z" accessed="<time>"/>
+<File name="say &quot;hi&quot; &amp; bye now.txt" size="4096" created="<time>" modified="2027-01-15T08:00:00Z" accessed="<time>"/>
+<Folder name="sub dir" created="<time>" modified="2027-01-15T08:00:00Z" accessed="<time>">
+<File name="x.txt" size="4096" created="<time>" modified="2027-01-15T08:00:00Z" accessed="<time>"/>
+</Folder>
+</Folder>
+</ScanInfo>
+</GrandPerspectiveScanDump>

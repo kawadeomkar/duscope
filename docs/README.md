@@ -11,6 +11,9 @@ ones at the top of the repository.
 - [index-format.md](index-format.md): the SQLite file a saved scan is, table by
   table and column by column, with its flags, accounting, `scan_meta` keys and
   how to read it with `sqlite3` or DuckDB.
+- [manual-checks.md](manual-checks.md): the acceptance checks done by hand
+  (GrandPerspective opening an export), with the program's version and the
+  last result.
 - [RELEASING.md](RELEASING.md): the checklist every release tag follows, the
   patch-release subset, the secrets table and how to pull a release.
 - [rules.md](rules.md): the schemas of `classes.toml`, `caches.toml` and user
