@@ -38,6 +38,7 @@ fn query<'a>(caches: &'a Caches, above: &'a dyn Fn(&Path, &str) -> bool) -> Cach
         reverse: false,
         limit: None,
         size: SizeKind::Apparent,
+        after: None,
     }
 }
 

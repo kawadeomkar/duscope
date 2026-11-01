@@ -41,6 +41,16 @@ const DAY_NS: i64 = 86_400 * 1_000_000_000;
 
 /// `scans`, `scans --prune` or `scans --check`.
 pub fn run(args: &ScansArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    let listed = if args.prune {
+        output.fields_first::<PrunedEntry>("scans --prune")?
+    } else if args.check.is_some() {
+        output.fields_first::<CheckedEntry>("scans --check")?
+    } else {
+        output.fields_first::<SavedScanEntry>("scans")?
+    };
+    if listed {
+        return Ok(());
+    }
     let dir = match index_dir {
         Some(dir) => dir.to_owned(),
         None => {

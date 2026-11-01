@@ -54,13 +54,38 @@ fn main() -> ExitCode {
         }
         return ExitCode::from(failure.exit.code());
     }
-    let output = match Output::decide(&cli.output, treemap) {
+    // --all streams: ndjson, unless the flags name another format; the
+    // JSON envelope holds a page, not every row.
+    let all = cli.query_args().is_some_and(|q| q.all);
+    let all_as_json = all && (cli.output.json || cli.output.format == Some(out::FormatArg::Json));
+    if all && !cli.output.json && !cli.output.plain && cli.output.format.is_none() {
+        cli.output.format = Some(out::FormatArg::Ndjson);
+    }
+    let mut output = match Output::decide(&cli.output, treemap) {
         Ok(output) => output,
         Err(failure) => {
             out::to_stderr(&failure);
             return ExitCode::from(failure.exit.code());
         }
     };
+    if all_as_json {
+        let failure = Failure::new(
+            Exit::Usage,
+            "usage",
+            "--all streams every row, which the JSON envelope does not hold",
+        )
+        .hint("Run the command with --all --format ndjson, or --json with --limit");
+        output.failure(&failure);
+        return ExitCode::from(failure.exit.code());
+    }
+    // A spilled envelope goes beside the saved scans, where scans --prune
+    // finds it.
+    output.spill_dir = cli
+        .global
+        .index_dir
+        .clone()
+        .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)))
+        .map(|dir| dir.join("out"));
     match verbs::run(cli, &output) {
         Ok(()) => ExitCode::from(Exit::Success.code()),
         // Ctrl-C is the user's own doing: one line on stderr, no envelope.
@@ -157,6 +182,10 @@ fn refused(error: &clap::Error) -> ExitCode {
         null: false,
         header: false,
         quiet: false,
+        fields: None,
+        file: None,
+        max_chars: 0,
+        spill_dir: None,
     }
     .failure(&failure);
     ExitCode::from(failure.exit.code())

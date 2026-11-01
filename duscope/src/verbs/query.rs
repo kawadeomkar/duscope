@@ -8,11 +8,11 @@ use std::path::Path;
 use duscope_core::CoreError;
 use duscope_core::envelope::{
     ByTypeEntry, CacheEntry, Envelope, ProjectEntry, QueryBlock, SCHEMA_VERSION, StaleEntry, Tool,
-    TopEntry, Warning,
+    TopEntry, TreeEntry, Warning,
 };
 use duscope_core::query::{
-    self, ByTypeQuery, CachesQuery, DEFAULT_MIN_SIZE, Filters, Page, Regex, SizeKind, StaleQuery,
-    TimeField, TopQuery, TreeQuery, timegrammar,
+    self, After, ByTypeQuery, CachesQuery, Cursor, DEFAULT_MIN_SIZE, Filters, Page, Regex,
+    SizeKind, StaleQuery, TimeField, TopQuery, TreeQuery, query_hash, timegrammar,
 };
 use duscope_core::rules::Classes;
 use duscope_walk::VolumeInfo;
@@ -21,8 +21,8 @@ use super::scan;
 use super::source::{self, Source, core_failure};
 use super::{Exit, Failure};
 use crate::cli::{
-    ByTypeArgs, CachesArgs, KindArg, QueryArgs, ScanArgs, SortKey, StaleArgs, TimeField as TimeArg,
-    TopArgs, TreeArgs, WalkArgs,
+    ByTypeArgs, CachesArgs, IndexArgs, KindArg, QueryArgs, ScanArgs, SortKey, StaleArgs,
+    TimeField as TimeArg, TopArgs, TreeArgs, WalkArgs,
 };
 use crate::out::{Format, Output, Row};
 
@@ -68,6 +68,9 @@ enum DepthUse {
 /// The rows of `scan`: the root's largest entries, as `top` lists them by
 /// default; on a terminal, or with `--treemap always`, the treemap.
 pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    if output.format != Format::Treemap && output.fields_first::<TopEntry>("scan")? {
+        return Ok(());
+    }
     // The map's flags are settled first: a refused one costs no scan.
     let style = if output.format == Format::Treemap {
         Some(super::treemap::style(args, output)?)
@@ -88,7 +91,7 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
             save: None,
         };
         let (mut envelope, footer, fresh) =
-            top_envelope(fresh, &args.walk, None, "scan", false, true, output)?;
+            top_envelope(fresh, &args.walk, None, "scan", false, true, None, output)?;
         envelope.scan.id = id.as_ref().map(ToString::to_string);
         output.list(&envelope, &footer)?;
         match fresh {
@@ -112,8 +115,12 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
 
 /// `top`.
 pub fn top(args: &TopArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    if output.fields_first::<TopEntry>("top")? {
+        return Ok(());
+    }
     limit(Some(&args.query), output)?;
-    let source = source::source(&args.walk, &args.index, index_dir)?;
+    let (cursor, index) = cursor_of(&args.query, &args.index)?;
+    let source = source::source(&args.walk, &index, index_dir)?;
     let (envelope, footer, source) = top_envelope(
         source,
         &args.walk,
@@ -121,6 +128,7 @@ pub fn top(args: &TopArgs, index_dir: Option<&Path>, output: &Output) -> Result<
         "top",
         args.files,
         !args.no_cut_through,
+        cursor.as_ref(),
         output,
     )?;
     source.check()?;
@@ -129,7 +137,10 @@ pub fn top(args: &TopArgs, index_dir: Option<&Path>, output: &Output) -> Result<
 }
 
 /// The envelope and footer of `top` (or `scan`, whose `query` is `None`:
-/// the defaults) on a source, and the source back for saving.
+/// the defaults, and no pages) on a source, from `cursor`'s page, and the
+/// source back for saving.
+// The verb's switches, each a flag of its own.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub(super) fn top_envelope(
     source: Source,
     walk: &WalkArgs,
@@ -137,6 +148,7 @@ pub(super) fn top_envelope(
     verb: &'static str,
     files: bool,
     cut_through: bool,
+    cursor: Option<&Cursor>,
     output: &Output,
 ) -> Result<(Envelope<TopEntry>, String, Source), Failure> {
     let prepared = prepare(
@@ -148,6 +160,25 @@ pub(super) fn top_envelope(
         Owns::default(),
     )?;
     let depth = query.and_then(|q| q.depth);
+    // The depth the rows were listed at: --depth 0 lists depth 1.
+    let listed = if files {
+        depth
+    } else {
+        Some(depth.unwrap_or(1).max(1))
+    };
+    let shape = [
+        if files { "files" } else { "dirs" },
+        if cut_through {
+            "cut-through"
+        } else {
+            "no-cut-through"
+        },
+    ];
+    let hash = query.map(|_| page_hash(&prepared, verb, listed, &shape));
+    let after = match (cursor, &hash) {
+        (Some(cursor), Some(hash)) => Some(check_cursor(cursor, &prepared, hash)?),
+        _ => None,
+    };
     let q = TopQuery {
         depth,
         cut_through,
@@ -157,14 +188,9 @@ pub(super) fn top_envelope(
         reverse: prepared.reverse,
         limit: prepared.limit,
         size: prepared.size,
+        after,
     };
     let page = query::top(&*prepared.source.view(), &q);
-    // The depth the rows were listed at: --depth 0 lists depth 1.
-    let listed = if files {
-        depth
-    } else {
-        Some(depth.unwrap_or(1).max(1))
-    };
     Ok(envelope(
         prepared,
         walk,
@@ -172,12 +198,17 @@ pub(super) fn top_envelope(
         listed,
         page,
         Vec::new(),
+        hash.as_deref(),
         output,
     ))
 }
 
 /// `tree`.
 pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    if output.fields_first::<TreeEntry>("tree")? {
+        return Ok(());
+    }
+    no_pages(&args.query, "tree")?;
     limit(Some(&args.query), output)?;
     let source = source::source(&args.walk, &args.index, index_dir)?;
     let prepared = prepare(
@@ -206,6 +237,7 @@ pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         depth,
         page,
         Vec::new(),
+        None,
         output,
     );
     source.check()?;
@@ -244,6 +276,10 @@ pub fn by_type(
         "--classes"
     };
     let classes = classes(args.classes.as_deref(), label)?;
+    if output.fields_first::<ByTypeEntry>("by-type")? {
+        return Ok(());
+    }
+    no_pages(&args.query, "by-type")?;
     limit(Some(&args.query), output)?;
     let source = source::source(&args.walk, &args.index, index_dir)?;
     let prepared = prepare(
@@ -271,6 +307,7 @@ pub fn by_type(
         args.query.depth,
         page,
         Vec::new(),
+        None,
         output,
     );
     source.check()?;
@@ -280,6 +317,9 @@ pub fn by_type(
 
 /// `stale`.
 pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    if output.fields_first::<StaleEntry>("stale")? {
+        return Ok(());
+    }
     let older = args
         .query
         .older_than
@@ -288,7 +328,8 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
     let older_than = timegrammar::parse_age(older)
         .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--older-than {e}")))?;
     limit(Some(&args.query), output)?;
-    let source = source::source(&args.walk, &args.index, index_dir)?;
+    let (cursor, index) = cursor_of(&args.query, &args.index)?;
+    let source = source::source(&args.walk, &index, index_dir)?;
     let mut prepared = prepare(
         source,
         &args.walk,
@@ -312,6 +353,11 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
     if args.atime {
         prepared.filters.given.push("--atime".to_owned());
     }
+    let hash = page_hash(&prepared, "stale", args.query.depth, &[]);
+    let after = cursor
+        .as_ref()
+        .map(|cursor| check_cursor(cursor, &prepared, &hash))
+        .transpose()?;
     let q = StaleQuery {
         now: prepared.now,
         older_than,
@@ -322,6 +368,7 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
         reverse: prepared.reverse,
         limit: prepared.limit,
         size: prepared.size,
+        after,
     };
     let page: Page<StaleEntry> =
         query::stale(&*prepared.source.view(), &q).map_err(core_failure)?;
@@ -342,6 +389,7 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
         args.query.depth,
         page,
         warnings,
+        Some(&hash),
         output,
     );
     source.check()?;
@@ -361,8 +409,20 @@ pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> R
         .hint("Run duscope caches without --exclude-caches"));
     }
     let rules = scan::cache_rules(args.walk.caches_extra.as_deref())?;
+    let listed = if args.by_project {
+        output.fields_first::<ProjectEntry>("caches --by-project")?
+    } else {
+        output.fields_first::<CacheEntry>("caches")?
+    };
+    if listed {
+        return Ok(());
+    }
+    if args.by_project {
+        no_pages(&args.query, "caches --by-project")?;
+    }
     limit(Some(&args.query), output)?;
-    let source = source::source(&args.walk, &args.index, index_dir)?;
+    let (cursor, index) = cursor_of(&args.query, &args.index)?;
+    let source = source::source(&args.walk, &index, index_dir)?;
     let mut prepared = prepare(
         source,
         &args.walk,
@@ -385,6 +445,24 @@ pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> R
     if args.loose {
         given.push("--loose".to_owned());
     }
+    let verb = if args.by_project {
+        "caches --by-project"
+    } else {
+        "caches"
+    };
+    // The rules decide which directories are rows: a cursor of other
+    // rules pages another list.
+    let rules_file = args
+        .walk
+        .caches_extra
+        .as_ref()
+        .map(|file| file.display().to_string())
+        .unwrap_or_default();
+    let hash = page_hash(&prepared, verb, args.query.depth, &[&rules_file]);
+    let after = cursor
+        .as_ref()
+        .map(|cursor| check_cursor(cursor, &prepared, &hash))
+        .transpose()?;
     let source = &prepared.source;
     let holds = |dir: &Path, name: &str| source.holds_file(dir, name);
     let q = CachesQuery {
@@ -397,20 +475,22 @@ pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> R
         reverse: prepared.reverse,
         limit: prepared.limit,
         size: prepared.size,
+        after,
     };
     if args.by_project {
         let page: Page<ProjectEntry> = query::projects(&*source.view(), &q);
+        write(prepared, &args.walk, verb, &args.query, page, None, output)
+    } else {
+        let page: Page<CacheEntry> = query::caches(&*source.view(), &q);
         write(
             prepared,
             &args.walk,
-            "caches --by-project",
+            verb,
             &args.query,
             page,
+            Some(&hash),
             output,
         )
-    } else {
-        let page: Page<CacheEntry> = query::caches(&*source.view(), &q);
-        write(prepared, &args.walk, "caches", &args.query, page, output)
     }
 }
 
@@ -421,13 +501,88 @@ fn write<T: Row>(
     verb: &'static str,
     query: &QueryArgs,
     page: Page<T>,
+    hash: Option<&str>,
     output: &Output,
 ) -> Result<(), Failure> {
-    let (envelope, footer, source) =
-        envelope(prepared, walk, verb, query.depth, page, Vec::new(), output);
+    let (envelope, footer, source) = envelope(
+        prepared,
+        walk,
+        verb,
+        query.depth,
+        page,
+        Vec::new(),
+        hash,
+        output,
+    );
     source.check()?;
     output.list(&envelope, &footer)?;
     source.finish(walk, output)
+}
+
+/// `--cursor`, decoded, and the saved scans to read: the one the cursor
+/// pages, unless `--scan` names one (which must be the same scan).
+fn cursor_of(query: &QueryArgs, index: &IndexArgs) -> Result<(Option<Cursor>, IndexArgs), Failure> {
+    let mut index = index.clone();
+    let Some(text) = &query.cursor else {
+        return Ok((None, index));
+    };
+    let cursor = Cursor::decode(text).map_err(core_failure)?;
+    if index.scan.is_none() {
+        index.scan = Some(cursor.scan.clone());
+    }
+    Ok((Some(cursor), index))
+}
+
+/// Refuses `--cursor` for a verb whose lists do not page.
+fn no_pages(query: &QueryArgs, verb: &str) -> Result<(), Failure> {
+    match query.cursor {
+        Some(_) => Err(core_failure(CoreError::InvalidCursor(format!(
+            "{verb} does not page: --cursor pages top, stale and caches"
+        )))),
+        None => Ok(()),
+    }
+}
+
+/// The hash a cursor carries of the query it pages: the verb, the path,
+/// the depth, the sort, the filters as given, and the verb's own switches
+/// (`shape`).
+fn page_hash(prepared: &Prepared, verb: &str, depth: Option<u32>, shape: &[&str]) -> String {
+    let path = prepared
+        .source
+        .view()
+        .root_path()
+        .to_string_lossy()
+        .into_owned();
+    let depth = depth.map(|d| d.to_string()).unwrap_or_default();
+    let sort = prepared.sort.describe(prepared.size, prepared.reverse);
+    let mut parts: Vec<&str> = vec![verb, &path, &depth, &sort];
+    parts.extend(prepared.filters.given.iter().map(String::as_str));
+    // Between the filters and the switches, so neither runs into the other.
+    parts.push("\u{1}");
+    parts.extend(shape);
+    query_hash(parts)
+}
+
+/// The key the page `cursor` names starts after, when the cursor is this
+/// command's: of the scan it reads, its query, and a row of it.
+fn check_cursor(cursor: &Cursor, prepared: &Prepared, hash: &str) -> Result<After, Failure> {
+    let invalid = |why: &str| core_failure(CoreError::InvalidCursor(format!("--cursor {why}")));
+    if prepared.source.scan_id().as_deref() != Some(cursor.scan.as_str()) {
+        return Err(invalid(
+            "pages another scan than the one this command reads",
+        ));
+    }
+    if cursor.filters != hash {
+        return Err(invalid(
+            "pages another query: the verb, path, depth, sort and filters must be the ones \
+             that returned it",
+        ));
+    }
+    let view = prepared.source.view();
+    if !query::after_fits(&*view, &cursor.after, prepared.sort, prepared.size) {
+        return Err(invalid("names no row of this scan"));
+    }
+    Ok(cursor.after)
 }
 
 /// Scans' common preparation: the size kind, now, the filters, the limit
@@ -489,20 +644,21 @@ fn prepare(
     })
 }
 
-/// The rows a list returns: `--limit`, 25 by default, at most 100; every
-/// row under `--format ndjson`. A `--limit` above 100 is a usage error,
-/// raised before the scan.
+/// The rows a list returns: `--limit`, 25 by default, at most 100 unless
+/// `-o FILE` takes them; every row under `--all` or `--format ndjson`. A
+/// `--limit` above 100 is otherwise a usage error, raised before the scan.
 fn limit(args: Option<&QueryArgs>, output: &Output) -> Result<Option<usize>, Failure> {
-    if output.format == Format::Ndjson {
+    if output.format == Format::Ndjson || args.is_some_and(|a| a.all) {
         return Ok(None);
     }
     match args.and_then(|a| a.limit) {
-        Some(asked) if asked > MAX_LIMIT => Err(Failure::new(
+        // A file takes any number of rows.
+        Some(asked) if asked > MAX_LIMIT && output.file.is_none() => Err(Failure::new(
             Exit::Usage,
             "usage",
             format!("--limit {asked} is more than the {MAX_LIMIT} rows a list returns"),
         )
-        .hint("Rerun duscope with --format ndjson to stream every row")),
+        .hint("Rerun duscope with --format ndjson or --all to stream every row, or -o FILE")),
         asked => Ok(Some(asked.unwrap_or(DEFAULT_LIMIT))),
     }
 }
@@ -618,6 +774,8 @@ fn filters(
 
 /// The envelope of a verb's page, the footer for people, and the source
 /// back.
+// The parts of an envelope, each from where the verb has it.
+#[allow(clippy::too_many_arguments)]
 fn envelope<T>(
     prepared: Prepared,
     walk: &WalkArgs,
@@ -625,6 +783,7 @@ fn envelope<T>(
     depth: Option<u32>,
     page: Page<T>,
     extra: Vec<Warning>,
+    hash: Option<&str>,
     output: &Output,
 ) -> (Envelope<T>, String, Source) {
     let Prepared {
@@ -643,6 +802,20 @@ fn envelope<T>(
     warnings.extend(flag_warnings);
     warnings.extend(extra);
     let returned_count = page.entries.len() as u64;
+    // The next page's cursor: a saved scan's (or one this command saves),
+    // for a verb that pages, when rows remain.
+    let next_cursor = match (page.next, hash, &block.id) {
+        (Some(after), Some(hash), Some(scan)) => Some(
+            Cursor {
+                scan: scan.clone(),
+                after,
+                filters: hash.to_owned(),
+            }
+            .encode(),
+        ),
+        _ => None,
+    };
+    let truncated = page.truncated;
     // The path the rows are under: the scan's root, or the path inside a
     // saved scan's root.
     let path = source.view().root_path().to_string_lossy().into_owned();
@@ -662,8 +835,8 @@ fn envelope<T>(
         entries: page.entries,
         returned_count,
         total_count: page.total_count,
-        truncated: returned_count < page.total_count,
-        next_cursor: None,
+        truncated,
+        next_cursor,
         warnings,
         next: Vec::new(),
     };

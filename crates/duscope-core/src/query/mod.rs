@@ -9,6 +9,7 @@
 
 mod by_type;
 pub mod caches;
+pub mod cursor;
 pub mod explain;
 pub mod plan;
 pub mod resolve;
@@ -34,10 +35,12 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::CoreError;
 use crate::arena::{Arena, DirRec, EntryIdx};
+use crate::index::Index;
 use crate::rollup::RollUp;
 
 pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
 pub use caches::{CachesQuery, caches, projects};
+pub use cursor::{After, Cursor, query_hash};
 pub use explain::{ExplainQuery, explain, explain_unindexed, fs_holds_file, holds_file};
 pub use plan::{Cut, Plan, Ranked};
 /// The regular expressions `--regex` takes, matched against path bytes.
@@ -186,6 +189,13 @@ pub trait TreeView {
             next = last.checked_add(1);
         }
         dirs
+    }
+
+    /// The saved scan the view reads, and the id in it of the view's root:
+    /// what a query reads by SQL where that is faster than a walk; `None`
+    /// for the arena.
+    fn as_index(&self) -> Option<(&Index, u32)> {
+        None
     }
 }
 
@@ -367,6 +377,38 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
             .map(|(id, last)| (id.saturating_sub(self.base), last.saturating_sub(self.base)))
             .collect()
     }
+
+    fn as_index(&self) -> Option<(&Index, u32)> {
+        let (index, base) = self.view.as_index()?;
+        Some((index, base + self.base))
+    }
+}
+
+/// The largest non-directories under `dir` of `view` in allocated bytes,
+/// ties by path, at most `limit`, those past `cut` when given, and how many
+/// matched, where the view reads a saved scan ([`Index::largest_files`]);
+/// `None` for the arena, or when the read failed, which the index records.
+pub fn ranked_files(
+    view: &(impl TreeView + ?Sized),
+    dir: u32,
+    limit: usize,
+    cut: Option<Cut>,
+) -> Option<Ranked> {
+    let (index, base) = view.as_index()?;
+    match index.largest_files(dir + base, limit, cut, None) {
+        Ok(ranked) => Some(Ranked {
+            ids: ranked
+                .ids
+                .into_iter()
+                .map(|id| id.saturating_sub(base))
+                .collect(),
+            total_count: ranked.total_count,
+        }),
+        Err(e) => {
+            index.record(&e);
+            None
+        }
+    }
 }
 
 /// The size the rows are ranked and shown by.
@@ -537,6 +579,20 @@ pub struct Filters {
 }
 
 impl Filters {
+    /// Whether no filter is set: every row is kept.
+    pub fn is_empty(&self) -> bool {
+        self.glob.is_none()
+            && self.regex.is_none()
+            && self.exclude.is_none()
+            && self.kinds.is_empty()
+            && self.min_size.is_none()
+            && self.max_size.is_none()
+            && self.min_depth.is_none()
+            && self.max_depth.is_none()
+            && self.before.is_none()
+            && self.after.is_none()
+    }
+
     /// Whether a time filter asks for a time `--attrs basic` does not
     /// collect.
     pub fn needs_full(&self) -> bool {
@@ -794,8 +850,100 @@ pub fn ranked_by(
 pub struct Page<T> {
     /// The rows.
     pub entries: Vec<T>,
-    /// Rows matched before `--limit`.
+    /// Rows matched before `--limit`, those of earlier pages included.
     pub total_count: u64,
+    /// Where the next page starts, when rows remain and the verb pages.
+    pub next: Option<After>,
+    /// Whether rows remain after this page: after `--limit`, or after a
+    /// cursor's page.
+    pub truncated: bool,
+}
+
+/// Whether rows remain past `returned` rows after `seen`, of `total`.
+pub fn remain(seen: u64, returned: usize, total: u64) -> bool {
+    seen.saturating_add(returned as u64) < total
+}
+
+/// [`ranked_by`] for the page after `after`: the first `limit` candidates
+/// that sort after the row it names, and how many candidates there were in
+/// all, those before it included. Without `after`, the first page.
+pub fn ranked_after(
+    view: &(impl TreeView + ?Sized),
+    candidates: impl IntoIterator<Item = u32>,
+    key: SortKey,
+    reverse: bool,
+    limit: Option<usize>,
+    size_of: impl Fn(&Node) -> u64,
+    after: Option<&After>,
+) -> (Vec<u32>, u64) {
+    let Some(after) = after else {
+        return ranked_by(view, candidates, key, reverse, limit, size_of);
+    };
+    let row_value = sort_value(&view.node(after.id), key, reverse, &size_of);
+    let row_path = rel_path(view, after.id);
+    let paths_reversed = reverse && key == SortKey::Path;
+    let total = std::cell::Cell::new(0u64);
+    let past = candidates
+        .into_iter()
+        .inspect(|_| total.set(total.get() + 1))
+        .filter(
+            |&id| match sort_value(&view.node(id), key, reverse, &size_of).cmp(&row_value) {
+                Ordering::Less => false,
+                Ordering::Greater => true,
+                Ordering::Equal => {
+                    let path = rel_path(view, id);
+                    if paths_reversed {
+                        path < row_path
+                    } else {
+                        path > row_path
+                    }
+                }
+            },
+        );
+    let (ids, _) = ranked_by(view, past, key, reverse, limit, |node: &Node| size_of(node));
+    (ids, total.get())
+}
+
+/// Where the page after `ids` starts, `seen` rows having come before
+/// them, of `total`: after its last row, when rows remain.
+pub fn next_after(
+    view: &(impl TreeView + ?Sized),
+    ids: &[u32],
+    key: SortKey,
+    size: SizeKind,
+    seen: u64,
+    total: u64,
+) -> Option<After> {
+    let seen = seen.saturating_add(ids.len() as u64);
+    let last = *ids.last()?;
+    (seen < total).then(|| After::of(&view.node(last), key, size, seen))
+}
+
+/// Whether `after` names a row of `view` with the sort value it records:
+/// a cursor of this scan and sort, not another's.
+pub fn after_fits(
+    view: &(impl TreeView + ?Sized),
+    after: &After,
+    key: SortKey,
+    size: SizeKind,
+) -> bool {
+    after.id < view.len()
+        && After::of(&view.node(after.id), key, size, after.seen).value == after.value
+}
+
+/// The page of `ranked` (the first `seen + limit` rows, as the index's
+/// plans rank them) after `after`, when its row is where the cursor says:
+/// the rows after it, else `None` (the walk pages).
+pub fn page_of(ranked: Ranked, after: Option<&After>) -> Option<Ranked> {
+    let Some(after) = after else {
+        return Some(ranked);
+    };
+    let seen = usize::try_from(after.seen).ok()?;
+    let at = seen.checked_sub(1)?;
+    (ranked.ids.get(at) == Some(&after.id)).then(|| Ranked {
+        ids: ranked.ids[seen..].to_vec(),
+        total_count: ranked.total_count,
+    })
 }
 
 /// What a query was asked for that the scan did not collect.

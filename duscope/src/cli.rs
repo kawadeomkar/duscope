@@ -55,6 +55,20 @@ pub struct Cli {
     pub global: GlobalArgs,
 }
 
+impl Cli {
+    /// The list flags of the verb, for a verb that lists.
+    pub fn query_args(&self) -> Option<&QueryArgs> {
+        match &self.verb {
+            Some(Verb::Top(a)) => Some(&a.query),
+            Some(Verb::Tree(a)) => Some(&a.query),
+            Some(Verb::ByType(a)) => Some(&a.query),
+            Some(Verb::Stale(a)) => Some(&a.query),
+            Some(Verb::Caches(a)) => Some(&a.query),
+            _ => None,
+        }
+    }
+}
+
 /// The flags every verb takes before or after its name, beside the output
 /// flags: the configuration file and how much goes to stderr.
 #[derive(Debug, Clone, Default, Args)]
@@ -375,10 +389,13 @@ pub struct QueryArgs {
     #[arg(long, value_name = "GLOB")]
     pub exclude: Vec<String>,
 
-    /// Where the next page starts
-    // Pages arrive with the index (phase 2).
-    #[arg(long, value_name = "CURSOR", hide = true)]
+    /// Where the next page starts: an envelope's next_cursor
+    #[arg(long, value_name = "CURSOR", conflicts_with = "all")]
     pub cursor: Option<String>,
+
+    /// Every row, with no --limit: as ndjson, unless --plain or --format
+    #[arg(long, conflicts_with = "limit")]
+    pub all: bool,
 
     /// Treat unreadable directories as a failure (exit 4)
     #[arg(long)]
