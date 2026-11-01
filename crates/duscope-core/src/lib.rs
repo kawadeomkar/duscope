@@ -13,6 +13,7 @@ pub mod config;
 pub mod envelope;
 mod errors;
 pub mod git;
+pub mod handle;
 pub mod index;
 pub mod interchange;
 pub mod query;
