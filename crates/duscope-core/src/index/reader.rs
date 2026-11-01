@@ -607,9 +607,9 @@ impl Index {
             if misses.len() >= SINGLES {
                 misses.clear();
             }
-            let missed = misses.entry(start).or_insert(0);
-            *missed = missed.saturating_add(1);
-            *missed < MISSES
+            let count = misses.entry(start).or_insert(0);
+            *count = count.saturating_add(1);
+            *count < MISSES
         };
         if alone {
             drop(blocks);

@@ -9,6 +9,7 @@
 
 mod by_type;
 pub mod caches;
+pub mod cursor;
 pub mod explain;
 pub mod plan;
 pub mod resolve;
@@ -39,6 +40,7 @@ use crate::rollup::RollUp;
 
 pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
 pub use caches::{CachesQuery, caches, projects};
+pub use cursor::{After, Cursor, query_hash};
 pub use explain::{ExplainQuery, explain, explain_unindexed, fs_holds_file, holds_file};
 pub use plan::{Cut, Plan, Ranked};
 /// The regular expressions `--regex` takes, matched against path bytes.
@@ -848,8 +850,92 @@ pub fn ranked_by(
 pub struct Page<T> {
     /// The rows.
     pub entries: Vec<T>,
-    /// Rows matched before `--limit`.
+    /// Rows matched before `--limit`, those of earlier pages included.
     pub total_count: u64,
+    /// Where the next page starts, when rows remain and the verb pages.
+    pub next: Option<After>,
+}
+
+/// [`ranked_by`] for the page after `after`: the first `limit` candidates
+/// that sort after the row it names, and how many candidates there were in
+/// all, those before it included. Without `after`, the first page.
+pub fn ranked_after(
+    view: &(impl TreeView + ?Sized),
+    candidates: impl IntoIterator<Item = u32>,
+    key: SortKey,
+    reverse: bool,
+    limit: Option<usize>,
+    size_of: impl Fn(&Node) -> u64,
+    after: Option<&After>,
+) -> (Vec<u32>, u64) {
+    let Some(after) = after else {
+        return ranked_by(view, candidates, key, reverse, limit, size_of);
+    };
+    let row_value = sort_value(&view.node(after.id), key, reverse, &size_of);
+    let row_path = rel_path(view, after.id);
+    let paths_reversed = reverse && key == SortKey::Path;
+    let total = std::cell::Cell::new(0u64);
+    let past = candidates
+        .into_iter()
+        .inspect(|_| total.set(total.get() + 1))
+        .filter(
+            |&id| match sort_value(&view.node(id), key, reverse, &size_of).cmp(&row_value) {
+                Ordering::Less => false,
+                Ordering::Greater => true,
+                Ordering::Equal => {
+                    let path = rel_path(view, id);
+                    if paths_reversed {
+                        path < row_path
+                    } else {
+                        path > row_path
+                    }
+                }
+            },
+        );
+    let (ids, _) = ranked_by(view, past, key, reverse, limit, |node: &Node| size_of(node));
+    (ids, total.get())
+}
+
+/// Where the page after `ids` starts, `seen` rows having come before
+/// them, of `total`: after its last row, when rows remain.
+pub fn next_after(
+    view: &(impl TreeView + ?Sized),
+    ids: &[u32],
+    key: SortKey,
+    size: SizeKind,
+    seen: u64,
+    total: u64,
+) -> Option<After> {
+    let seen = seen + ids.len() as u64;
+    let last = *ids.last()?;
+    (seen < total).then(|| After::of(&view.node(last), key, size, seen))
+}
+
+/// Whether `after` names a row of `view` with the sort value it records:
+/// a cursor of this scan and sort, not another's.
+pub fn after_fits(
+    view: &(impl TreeView + ?Sized),
+    after: &After,
+    key: SortKey,
+    size: SizeKind,
+) -> bool {
+    after.id < view.len()
+        && After::of(&view.node(after.id), key, size, after.seen).value == after.value
+}
+
+/// The page of `ranked` (the first `seen + limit` rows, as the index's
+/// plans rank them) after `after`, when its row is where the cursor says:
+/// the rows after it, else `None` (the walk pages).
+pub fn page_of(ranked: Ranked, after: Option<&After>) -> Option<Ranked> {
+    let Some(after) = after else {
+        return Some(ranked);
+    };
+    let seen = usize::try_from(after.seen).ok()?;
+    let at = seen.checked_sub(1)?;
+    (ranked.ids.get(at) == Some(&after.id)).then(|| Ranked {
+        ids: ranked.ids[seen..].to_vec(),
+        total_count: ranked.total_count,
+    })
 }
 
 /// What a query was asked for that the scan did not collect.
