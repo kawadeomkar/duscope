@@ -397,6 +397,7 @@ dependencies = [
  "duscope-treemap",
  "duscope-tui",
  "duscope-walk",
+ "flate2",
  "globset",
  "jsonschema",
  "log",
@@ -453,6 +454,7 @@ name = "duscope-treemap"
 version = "0.1.0"
 dependencies = [
  "duscope-core",
+ "flate2",
  "proptest",
  "serde",
  "thiserror 2.0.21",

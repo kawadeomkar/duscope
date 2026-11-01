@@ -1,16 +1,20 @@
-//! P2-MAP-01: `render` writes the treemap as SVG: golden pictures of the
-//! fixture tree in both layouts, a full picture that `xmllint` reads as
-//! well-formed XML with a gradient for every shaded tile, and the errors.
+//! P2-MAP-01 and P2-MAP-02: `render` writes the treemap as SVG and PNG:
+//! golden pictures of the fixture tree in both layouts (the PNGs by a
+//! perceptual hash), a full SVG that `xmllint` reads as well-formed XML
+//! with a gradient for every shaded tile, a PNG every chunk of which
+//! checks, and the errors.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Output};
 
 use duscope_core::query::Regex;
-use duscope_testkit::{TestEnv, golden, normalize};
+use duscope_testkit::{TestEnv, golden, golden_dir, normalize};
 
 fn run(env: &TestEnv, args: &[&str]) -> Output {
     env.cmd().args(args).output().unwrap()
@@ -126,14 +130,15 @@ fn p2_map_01_render_wants_svg_and_a_pack_with_colours() {
     let env = TestEnv::new();
     let root = saved_home(&env);
     let png = env.tmp_dir().join("map.png");
-    // PNG is the next package's.
+    // A picture is the output: --json, with a PNG as with an SVG, is
+    // refused before anything is written.
     let out = run(
         &env,
         &["render", &root, "-o", png.to_str().unwrap(), "--json"],
     );
     assert_eq!(out.status.code(), Some(2));
     let error: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(error["error"]["code"], "not_available");
+    assert_eq!(error["error"]["code"], "usage");
     assert!(!png.exists());
     for args in [
         vec!["render", &root, "--format", "csv"],
@@ -219,4 +224,138 @@ fn p2_map_01_every_tile_is_painted_and_labels_keep_to_their_tiles() {
         let out = run(&env, &["render", "/r", "--scan", &id, flag]);
         assert_eq!(out.status.code(), Some(2), "{flag}");
     }
+}
+
+/// The width, height and RGB pixels of a PNG `render` wrote (8-bit RGB,
+/// each row Sub-filtered), every chunk's CRC checked.
+fn decode(png: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    let be32 = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    let (mut width, mut height, mut idat) = (0, 0, Vec::new());
+    let mut at = 8;
+    loop {
+        let length = be32(at) as usize;
+        let kind = &png[at + 4..at + 8];
+        let data = &png[at + 8..at + 8 + length];
+        let mut crc = flate2::Crc::new();
+        crc.update(kind);
+        crc.update(data);
+        assert_eq!(crc.sum(), be32(at + 8 + length), "{kind:?}");
+        match kind {
+            b"IHDR" => {
+                width = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+                height = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
+                assert_eq!(&data[8..13], &[8, 2, 0, 0, 0]);
+            }
+            b"IDAT" => idat.extend_from_slice(data),
+            b"IEND" => break,
+            _ => {}
+        }
+        at += 12 + length;
+    }
+    let mut raw = Vec::new();
+    flate2::read::ZlibDecoder::new(&idat[..])
+        .read_to_end(&mut raw)
+        .unwrap();
+    let stride = 3 * width;
+    assert_eq!(raw.len(), height * (stride + 1));
+    let mut pixels = Vec::with_capacity(height * stride);
+    for row in raw.chunks_exact(stride + 1) {
+        assert_eq!(row[0], 1, "Sub filter");
+        let start = pixels.len();
+        for (i, &byte) in row[1..].iter().enumerate() {
+            let left = if i >= 3 { pixels[start + i - 3] } else { 0 };
+            pixels.push(byte.wrapping_add(left));
+        }
+    }
+    (width, height, pixels)
+}
+
+/// A 256-bit difference hash: the picture in grey, shrunk to 17 × 16 cells
+/// by averaging, each bit whether a cell is lighter than the one on its
+/// right; as hex.
+fn dhash(width: usize, height: usize, pixels: &[u8]) -> String {
+    let mut cells = [[0.0f64; 17]; 16];
+    for (y, row) in pixels.chunks_exact(3 * width).enumerate() {
+        for (x, rgb) in row.chunks_exact(3).enumerate() {
+            let grey =
+                0.299 * f64::from(rgb[0]) + 0.587 * f64::from(rgb[1]) + 0.114 * f64::from(rgb[2]);
+            cells[y * 16 / height][x * 17 / width] += grey;
+        }
+    }
+    let mut hex = String::new();
+    for row in cells {
+        let mut bits = 0u32;
+        for x in 0..16 {
+            bits = (bits << 1) | u32::from(row[x] > row[x + 1]);
+        }
+        let _ = write!(hex, "{bits:04x}");
+    }
+    hex
+}
+
+/// Compares `hash` with the golden `name`, within 16 bits of 256.
+fn hash_golden(name: &str, hash: &str) {
+    let path = golden_dir().join(name);
+    if std::env::var_os("DUSCOPE_TEST_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
+        fs::write(&path, format!("{hash}\n")).unwrap();
+        return;
+    }
+    let want = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let differ: u32 = u128::from_str_radix(&want.trim()[..32], 16)
+        .map(|a| (a ^ u128::from_str_radix(&hash[..32], 16).unwrap()).count_ones())
+        .unwrap()
+        + u128::from_str_radix(&want.trim()[32..], 16)
+            .map(|a| (a ^ u128::from_str_radix(&hash[32..], 16).unwrap()).count_ones())
+            .unwrap();
+    assert!(differ <= 16, "{name}: {differ} bits differ from {want}");
+}
+
+#[test]
+fn p2_map_02_golden_pngs_by_their_perceptual_hash() {
+    let env = TestEnv::new();
+    let root = saved_home(&env);
+    let os = std::env::consts::OS;
+    let cases: [(&str, &[&str]); 2] = [
+        ("squarify", &[]),
+        ("gp", &["--layout", "gp", "--color-by", "folder"]),
+    ];
+    for (name, extra) in cases {
+        let file = env.tmp_dir().join(format!("{name}.png"));
+        let mut args = vec![
+            "render",
+            root.as_str(),
+            "--width",
+            "640",
+            "--height",
+            "400",
+            "--depth",
+            "2",
+            "-o",
+            file.to_str().unwrap(),
+        ];
+        args.extend(extra);
+        let out = run(&env, &args);
+        ok(&out);
+        assert!(String::from_utf8_lossy(&out.stderr).contains("rendered 640×400 png"));
+        let (width, height, pixels) = decode(&fs::read(&file).unwrap());
+        assert_eq!((width, height), (640, 400));
+        hash_golden(
+            &format!("render_png_{name}@{os}.snap"),
+            &dhash(width, height, &pixels),
+        );
+    }
+    // Into a pipe with --format png; a picture over 64 Mi pixels refused.
+    let piped = ok(&run(
+        &env,
+        &["render", &root, "--format", "png", "--depth", "1"],
+    ));
+    assert_eq!(&piped[..4], b"\x89PNG");
+    let out = run(
+        &env,
+        &[
+            "render", &root, "--format", "png", "--width", "16384", "--height", "16384",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
 }
