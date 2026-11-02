@@ -148,7 +148,9 @@ fn platform_tests() -> bool {
     on
 }
 
-/// Runs a command of the test environment, failing the test on an error.
+/// Runs a command of the test environment, failing the test on an error
+/// (macOS's test runs `hdiutil` through [`TestEnv::hdiutil`]).
+#[cfg(target_os = "linux")]
 fn system(env: &TestEnv, program: &str, args: &[&dyn AsRef<std::ffi::OsStr>]) {
     let out = env.command(program).args(args).output().unwrap();
     assert!(
@@ -256,33 +258,18 @@ fn p2_qry_03_macos_a_mounted_image_has_unaccounted_bytes() {
     let mount = work.join("mnt");
     fs::create_dir_all(&mount).unwrap();
     let image = work.join("image.dmg");
-    system(
-        &env,
-        "hdiutil",
-        &[
-            &"create",
-            &"-quiet",
-            &"-size",
-            &"32m",
-            &"-fs",
-            &"APFS",
-            &"-volname",
-            &"DUSCOPE",
-            &image,
-        ],
-    );
-    system(
-        &env,
-        "hdiutil",
-        &[
-            &"attach",
-            &"-quiet",
-            &"-nobrowse",
-            &"-mountpoint",
-            &mount,
-            &image,
-        ],
-    );
+    env.hdiutil(&[
+        &"create",
+        &"-ov",
+        &"-size",
+        &"32m",
+        &"-fs",
+        &"APFS",
+        &"-volname",
+        &"DUSCOPE",
+        &image,
+    ]);
+    env.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &mount, &image]);
     let _mounted = Mounted {
         env: &env,
         point: mount.clone(),
