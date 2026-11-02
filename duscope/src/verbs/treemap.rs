@@ -42,6 +42,10 @@ struct MapEnv {
     locale: Option<String>,
     /// `LS_COLORS`.
     ls_colors: Option<String>,
+    /// Whether the terminal's background is light, as its answer to the
+    /// viewer's OSC 11 question tells it; `None` where it was not asked or
+    /// did not answer, and for the static map, which never asks.
+    light: Option<bool>,
 }
 
 impl MapEnv {
@@ -56,15 +60,20 @@ impl MapEnv {
                 .iter()
                 .find_map(|name| value(name).filter(|v| !v.is_empty())),
             ls_colors: value("LS_COLORS"),
+            light: None,
         }
     }
 
-    /// Whether `COLORFGBG` names a light background (`…;7` or `…;15`).
+    /// Whether the background is light: as `COLORFGBG` names it (`…;7` or
+    /// `…;15`), else as the terminal answered the viewer.
     fn light_background(&self) -> bool {
-        self.colorfgbg
-            .as_deref()
-            .and_then(|v| v.rsplit(';').next())
-            .is_some_and(|bg| bg == "7" || bg == "15")
+        match &self.colorfgbg {
+            Some(v) => v
+                .rsplit(';')
+                .next()
+                .is_some_and(|bg| bg == "7" || bg == "15"),
+            None => self.light == Some(true),
+        }
     }
 
     /// Whether `COLORTERM` promises 24-bit colour.
@@ -78,6 +87,71 @@ impl MapEnv {
             let v = v.to_ascii_lowercase();
             v.contains("utf-8") || v.contains("utf8")
         })
+    }
+}
+
+/// The viewer's style (`view`, `scan -i`): the static map's, except that
+/// with neither `--theme` nor `COLORFGBG` the terminal's answer to OSC 11
+/// (`light`) picks the light pack or Mocha.
+pub(super) fn viewer_style(
+    theme_arg: Option<&OsString>,
+    color: bool,
+    light: Option<bool>,
+) -> Result<Style, Failure> {
+    let env = MapEnv {
+        light,
+        ..MapEnv::read(|name| std::env::var_os(name))
+    };
+    decide(theme_arg, color, &env)
+}
+
+/// Whether the viewer's colours wait on the terminal's background: no
+/// `--theme` (nor `DUSCOPE_THEME`, nor the configuration's), colour on, and
+/// no `COLORFGBG`.
+pub(super) fn asks_background(theme_arg: Option<&OsString>, color: bool) -> bool {
+    theme_arg.is_none() && color && std::env::var_os("COLORFGBG").is_none()
+}
+
+impl Style {
+    /// How the viewer paints the map in this style: `color_by`, `depth`,
+    /// `min_tile` and `pool_files` as `scan`'s flags of those names say.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn paint_opts<'a>(
+        &'a self,
+        color_by: Option<ColorByArg>,
+        depth: Option<u32>,
+        min_tile: Option<MinTile>,
+        pool_files: bool,
+        size: query::SizeKind,
+        now: i64,
+        classes: &'a Classes,
+    ) -> PaintOpts<'a> {
+        PaintOpts {
+            pack: &self.pack,
+            color_by: match color_by {
+                None | Some(ColorByArg::Type) => ColorBy::Type,
+                Some(ColorByArg::Folder) => ColorBy::Folder,
+                Some(ColorByArg::Level) => ColorBy::Level,
+                Some(ColorByArg::Age) => ColorBy::Age,
+                Some(ColorByArg::Lscolors) => ColorBy::LsColors(self.ls_colors.clone()),
+            },
+            glyphs: self.glyphs,
+            depth,
+            min_tile: match min_tile {
+                None | Some(MinTile::One) => 1,
+                Some(MinTile::Two) => 2,
+                Some(MinTile::Four) => 4,
+            },
+            pool_files,
+            size,
+            now,
+            classes,
+        }
+    }
+
+    /// The colours the terminal shows.
+    pub(super) fn depth(&self) -> Depth {
+        self.depth
     }
 }
 

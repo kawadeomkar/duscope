@@ -31,6 +31,16 @@ The five largest files, by SQL over the saved scan's tables.
 .B duscope rescan ~/src
 Scan the tree a saved scan holds again, with the options it was taken with.
 .TP
+.B duscope view ~
+The treemap of the home folder in the interactive viewer, from the newest
+saved scan that holds it, or a new scan;
+.B q
+or
+.B Ctrl\-C
+quits and leaves the terminal as it was.
+.B duscope scan ~ \-i
+scans first.
+.TP
 .B duscope render ~ \-o home.svg
 The treemap as an SVG file;
 .B \-\-format png

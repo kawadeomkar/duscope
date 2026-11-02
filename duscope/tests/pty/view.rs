@@ -8,7 +8,9 @@
 use std::process::Output;
 use std::time::Duration;
 
+use duscope_core::rules::Class;
 use duscope_testkit::{TestEnv, duscope_bin};
+use duscope_treemap::packs::Pack;
 use termlens::{Key, Screen, Terminal};
 
 /// The fixture case the viewer opens.
@@ -182,10 +184,10 @@ fn p4_tui_01_a_stdout_that_is_not_a_terminal_is_refused() {
     assert_eq!(envelope["error"]["fixable_by"], "agent");
 }
 
-/// The background colours of the cells the viewer drew, in a terminal that
-/// answers OSC 11 with `background` and has the environment `extra` (24-bit
-/// colour, so the cells carry the pack's own colours).
-fn backgrounds(
+/// The colours of the cells the viewer drew, foreground and background, in
+/// a terminal that answers OSC 11 with `background` and has the environment
+/// `extra` (24-bit colour, so the cells carry the pack's own colours).
+fn colours_drawn(
     env: &TestEnv,
     background: (u8, u8, u8),
     extra: &[(&str, &str)],
@@ -204,11 +206,16 @@ fn backgrounds(
         .arg(&tree)
         .spawn(duscope_bin())
         .unwrap();
-    let screen = terminal.wait_frame(up).unwrap();
+    // The frame is whole once its last row, the key line, is drawn.
+    terminal
+        .wait_until(|s| up(s) && !s.row_text(29).trim().is_empty())
+        .unwrap();
+    let screen = terminal.screen();
     let mut colours = Vec::new();
     for row in 0..screen.rows() {
         for col in 0..screen.cols() {
             if let Some(cell) = screen.cell(row, col) {
+                colours.push(cell.style().fg);
                 colours.push(cell.style().bg);
             }
         }
@@ -218,20 +225,40 @@ fn backgrounds(
     colours
 }
 
-/// Mocha's base and the light pack's.
-const MOCHA_BASE: termlens::Color = termlens::Color::Rgb(0x1e, 0x1e, 0x2e);
-const LIGHT_BASE: termlens::Color = termlens::Color::Rgb(0xff, 0xff, 0xff);
+/// The colour `pack` gives archives and media, which the fixture case
+/// holds, as the terminal shows it.
+fn class_colours(pack: &str) -> Vec<termlens::Color> {
+    let pack = Pack::named(pack).unwrap();
+    [Class::Archives, Class::Media]
+        .into_iter()
+        .map(|class| match pack.class(class) {
+            duscope_treemap::cells::Color::Rgb(r, g, b) => termlens::Color::Rgb(r, g, b),
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
 
 #[test]
 fn p4_tui_01_the_terminal_background_picks_dark_or_light() {
     let env = TestEnv::new();
+    let (light, mocha) = (class_colours("light"), class_colours("mocha"));
+    let drawn_in =
+        |colours: &[termlens::Color], pack: &[termlens::Color], other: &[termlens::Color]| {
+            pack.iter().all(|c| colours.contains(c)) && !other.iter().any(|c| colours.contains(c))
+        };
     // Without COLORFGBG the viewer asks the terminal (OSC 11): a white
     // background gets the light pack, a black one Mocha.
-    let light = backgrounds(&env, (255, 255, 255), &[]);
-    assert!(light.contains(&LIGHT_BASE) && !light.contains(&MOCHA_BASE));
-    let dark = backgrounds(&env, (0, 0, 0), &[]);
-    assert!(dark.contains(&MOCHA_BASE) && !dark.contains(&LIGHT_BASE));
+    assert!(drawn_in(
+        &colours_drawn(&env, (255, 255, 255), &[]),
+        &light,
+        &mocha
+    ));
+    assert!(drawn_in(
+        &colours_drawn(&env, (0, 0, 0), &[]),
+        &mocha,
+        &light
+    ));
     // COLORFGBG, when set, decides without asking.
-    let light = backgrounds(&env, (0, 0, 0), &[("COLORFGBG", "0;15")]);
-    assert!(light.contains(&LIGHT_BASE) && !light.contains(&MOCHA_BASE));
+    let colours = colours_drawn(&env, (0, 0, 0), &[("COLORFGBG", "0;15")]);
+    assert!(drawn_in(&colours, &light, &mocha));
 }

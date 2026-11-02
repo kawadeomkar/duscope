@@ -199,11 +199,7 @@ fn p1_cli_01_exit_codes() {
     let stderr = String::from_utf8_lossy(&failed.get_output().stderr).into_owned();
     assert!(stderr.starts_with("duscope: cannot read /aaa"), "{stderr}");
     // Flags of a later phase: hidden, and refused before the scan.
-    for args in [
-        ["scan", "--interactive"],
-        ["scan", "--skip-containers"],
-        ["top", "--skip-containers"],
-    ] {
+    for args in [["scan", "--skip-containers"], ["top", "--skip-containers"]] {
         let refused = duscope(&env)
             .args(args)
             .arg("--json")
