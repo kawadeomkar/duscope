@@ -28,6 +28,14 @@ class Verbose(unittest.TestCase):
             {"entries": 1_000_001, "write_s": 1.11, "us_per_entry": 1.11, "walk_s": 1.234, "rollup_s": 0.045},
         )
 
+    def test_p5_walk_04_linux_listing_and_stat_lines_are_the_walk(self):
+        stderr = self.STDERR.replace(
+            "duscope: walk: 1,000,001 entries, 125,001 directories, 3.4 GB in 1.234 s: 810,374 entries/s\n",
+            "duscope: listing: 125,001 directories in 0.412 s: 303,400 directories/s\n"
+            "duscope: stat: 1,000,001 entries, 3,400 MB in 0.822 s: 1,216,546 entries/s, 4,136 MB/s\n",
+        )
+        self.assertEqual(indexbench.parse_verbose(stderr)["walk_s"], 1.234)
+
     def test_p2_bench_01_a_scan_without_the_lines_is_an_error(self):
         with self.assertRaises(measure.MeasureError):
             indexbench.parse_verbose("duscope: walk: 1 entries, 1 directories, 0 B in 0.001 s: 1 entries/s\n")

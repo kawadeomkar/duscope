@@ -1,5 +1,6 @@
 //! P1-WALK-02: the Linux provider against `lstat`, its `statx` count, and
-//! a wide directory spread over every worker.
+//! a wide directory spread over every worker; P5-WALK-04: listing timed
+//! apart from `statx`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -9,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::thread::{self, ThreadId};
+use std::time::Duration;
 
 use duscope_testkit::TestEnv;
 
@@ -421,4 +423,32 @@ fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
         super::statx::entry(NameRef::from("d"), &unvouched, crate::Attrs::Basic).boundary,
         crate::Boundary::None
     );
+}
+
+#[test]
+fn p5_walk_04_listing_is_timed_apart_from_statx() {
+    let env = TestEnv::new();
+    let root = env.fixtures().case_root("wide-directory");
+    let mut opts = WalkOptions {
+        threads: 4,
+        ..WalkOptions::default()
+    };
+    let summary = walk_with(&LinuxProvider::new(), &root, &opts, |_| {}).unwrap();
+    assert_eq!(
+        summary.listing_and_stat, None,
+        "a default walk reads no clock"
+    );
+    assert!(summary.workers.is_empty());
+
+    opts.counters = true;
+    let summary = walk_with(&LinuxProvider::new(), &root, &opts, |_| {}).unwrap();
+    let (listing, stat) = summary.listing_and_stat.expect("Linux times listing apart");
+    assert!(listing > Duration::ZERO, "{listing:?}");
+    assert!(stat > Duration::ZERO, "{stat:?}");
+    assert_eq!(summary.workers.len(), 4);
+    let delivered: u64 = summary.workers.iter().map(|w| w.entries).sum();
+    assert_eq!(delivered, 100_000, "every file; the walk reads the root");
+    // Both are timed inside the reads that the busy time covers.
+    let busy: Duration = summary.workers.iter().map(|w| w.busy).sum();
+    assert!(listing + stat <= busy, "{listing:?} + {stat:?} > {busy:?}");
 }

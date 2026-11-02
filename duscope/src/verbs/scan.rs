@@ -557,7 +557,10 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
 }
 
 /// `-v`: the walk and the roll-up, with counts and rates; `-vv` adds each
-/// volume the walk met and its worker threads.
+/// volume the walk met, its worker threads, and each worker's entries and
+/// time in the provider's reads. Where the provider times listing apart from
+/// reading attributes (Linux), the walk is two lines, listing and stat, that
+/// share its time in the proportion the workers spent in each.
 fn phases(scanned: &Scanned, walk_time: Duration, rollup_time: Duration) {
     if !log::log_enabled!(log::Level::Info) {
         return;
@@ -566,7 +569,7 @@ fn phases(scanned: &Scanned, walk_time: Duration, rollup_time: Duration) {
     let bytes = scanned.view().node(0).allocated;
     let secs = walk_time.as_secs_f64();
     // Whole numbers per second, over at least a microsecond.
-    let rate = |n: u64| {
+    let rate = |n: u64, secs: f64| {
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -575,14 +578,36 @@ fn phases(scanned: &Scanned, walk_time: Duration, rollup_time: Duration) {
         let per_second = (n as f64 / secs.max(1e-6)) as u64;
         thousands(per_second)
     };
-    log::info!(
-        "walk: {} entries, {} directories, {} MB in {secs:.3} s: {} entries/s, {} MB/s",
-        thousands(summary.entries),
-        thousands(summary.dirs),
-        thousands(bytes / 1_000_000),
-        rate(summary.entries),
-        rate(bytes / 1_000_000),
-    );
+    if let Some((listing, stat)) = summary.listing_and_stat {
+        let busy = (listing + stat).as_secs_f64();
+        let listing_secs = if busy > 0.0 {
+            secs * listing.as_secs_f64() / busy
+        } else {
+            0.0
+        };
+        let stat_secs = secs - listing_secs;
+        log::info!(
+            "listing: {} directories in {listing_secs:.3} s: {} directories/s",
+            thousands(summary.dirs),
+            rate(summary.dirs, listing_secs),
+        );
+        log::info!(
+            "stat: {} entries, {} MB in {stat_secs:.3} s: {} entries/s, {} MB/s",
+            thousands(summary.entries),
+            thousands(bytes / 1_000_000),
+            rate(summary.entries, stat_secs),
+            rate(bytes / 1_000_000, stat_secs),
+        );
+    } else {
+        log::info!(
+            "walk: {} entries, {} directories, {} MB in {secs:.3} s: {} entries/s, {} MB/s",
+            thousands(summary.entries),
+            thousands(summary.dirs),
+            thousands(bytes / 1_000_000),
+            rate(summary.entries, secs),
+            rate(bytes / 1_000_000, secs),
+        );
+    }
     log::info!("roll-up: {:.3} s", rollup_time.as_secs_f64());
     for volume in scanned.arena.volumes() {
         let entered = match volume.reason {
@@ -599,6 +624,14 @@ fn phases(scanned: &Scanned, walk_time: Duration, rollup_time: Duration) {
         );
     }
     log::debug!(target: crate::log::DETAIL, "workers: {} threads", summary.threads);
+    for (n, worker) in summary.workers.iter().enumerate() {
+        log::debug!(
+            target: crate::log::DETAIL,
+            "worker {n}: {} entries, {:.3} s busy of {secs:.3} s",
+            thousands(worker.entries),
+            worker.busy.as_secs_f64(),
+        );
+    }
 }
 
 /// `--debug`: each directory's errors, logged as the walk delivers them,
@@ -743,6 +776,8 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
         exclude_caches,
         cancel: Arc::new(AtomicBool::new(false)),
         fallback: args.provider == Some(ProviderArg::Fallback),
+        // What `-v` and `-vv` print beside the walk's own figures.
+        counters: log::log_enabled!(log::Level::Info),
     })
 }
 

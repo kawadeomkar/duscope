@@ -15,6 +15,7 @@
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod counters;
 mod entry;
 mod errors;
 mod excludes;
@@ -37,7 +38,9 @@ use std::thread;
 use std::time::Duration;
 
 use crossbeam_deque::Worker;
+use crossbeam_utils::CachePadded;
 
+pub use counters::WorkerCounts;
 pub use entry::{
     Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, Normalization, ScanEvent, Share, Skip,
     VolumeClass, VolumeInfo,
@@ -47,6 +50,7 @@ pub use excludes::IgnoreRules;
 pub use mem::MemProvider;
 pub use options::{Attrs, CacheRule, WalkOptions};
 
+use counters::{Flushing, Slot, Timer};
 use excludes::Excludes;
 use scheduler::PoolShared;
 
@@ -136,6 +140,14 @@ pub trait Provider: Send + Sync {
     ) -> io::Result<()> {
         let _ = (dir, names, opts, out, errs);
         Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// Whether its reads time listing a directory apart from reading its
+    /// entries' attributes under [`WalkOptions::counters`]. A provider that
+    /// does adds the two times to its worker's figures as it reads; the
+    /// default, for one that cannot tell them apart, does not.
+    fn times_listing(&self) -> bool {
+        false
     }
 
     /// Whether the walk lists `entry`, a directory just read from `dir`,
@@ -387,7 +399,7 @@ impl DirHandle {
 }
 
 /// What a completed walk counted.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WalkSummary {
     /// Entries delivered, the root included.
     pub entries: u64,
@@ -413,6 +425,13 @@ pub struct WalkSummary {
     pub clones_unavailable: bool,
     /// The worker threads the walk ran.
     pub threads: usize,
+    /// Each worker's figures, by worker number, under
+    /// [`WalkOptions::counters`]; empty otherwise.
+    pub workers: Vec<WorkerCounts>,
+    /// The workers' total time listing directories and reading entries'
+    /// attributes, in that order, under [`WalkOptions::counters`] with a
+    /// provider that times them apart ([`Provider::times_listing`]).
+    pub listing_and_stat: Option<(Duration, Duration)>,
 }
 
 /// Walks `root` with this platform's provider, or the fallback provider
@@ -643,6 +662,8 @@ struct Walk<'a, P: ?Sized> {
     mounts: Mutex<HashMap<u64, Met>>,
     /// What the walk leaves out, when it leaves anything out.
     excludes: Option<Excludes<'a>>,
+    /// Each worker's figures, under [`WalkOptions::counters`].
+    slots: Option<Vec<CachePadded<Slot>>>,
 }
 
 /// What adopting a directory's entries found beside them.
@@ -738,9 +759,12 @@ pub fn walk_with<P: Provider + ?Sized>(
             },
         )])),
         excludes: Excludes::new(opts),
+        slots: opts
+            .counters
+            .then(|| (0..threads).map(|_| CachePadded::default()).collect()),
     };
-    let run = |job: Job, worker: &Worker<Job>, shared: &PoolShared<Job, Event>| {
-        state.run(job, worker, shared);
+    let run = |job: Job, idx: usize, worker: &Worker<Job>, shared: &PoolShared<Job, Event>| {
+        state.run(job, idx, worker, shared);
     };
     thread::scope(|scope| {
         let pool = scheduler::start_pool(scope, threads, QUEUED_BATCHES_PER_WORKER, &run)
@@ -766,6 +790,15 @@ pub fn walk_with<P: Provider + ?Sized>(
         let finished = finished && !opts.cancel.load(Ordering::Relaxed);
         if finished {
             summary.clones_unavailable = opts.clones && provider.clones_unavailable(opts);
+            if let Some(slots) = &state.slots {
+                summary.workers = slots.iter().map(|slot| slot.counts()).collect();
+                summary.listing_and_stat = provider.times_listing().then(|| {
+                    slots.iter().map(|slot| slot.phases()).fold(
+                        (Duration::ZERO, Duration::ZERO),
+                        |(listing, stat), (l, s)| (listing + l, stat + s),
+                    )
+                });
+            }
             Ok(summary)
         } else if state.out_of_ids.load(Ordering::Relaxed) {
             Err(WalkError::TooManyDirectories)
@@ -822,7 +855,8 @@ fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEv
 }
 
 impl<P: Provider + ?Sized> Walk<'_, P> {
-    fn run(&self, job: Job, worker: &Worker<Job>, shared: &PoolShared<Job, Event>) {
+    /// Runs one job on worker `idx`.
+    fn run(&self, job: Job, idx: usize, worker: &Worker<Job>, shared: &PoolShared<Job, Event>) {
         if self.opts.cancel.load(Ordering::Relaxed) {
             shared.stop();
             return;
@@ -830,6 +864,9 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         match job {
             Job::ReadDir(dir) => self.read_dir(&dir, worker, shared),
             Job::Stat(split, names) => self.stat(&split, names, worker, shared),
+        }
+        if let Some(slot) = self.slots.as_ref().and_then(|slots| slots.get(idx)) {
+            slot.absorb(counters::take());
         }
         if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
             shared.events.send(Event::Finished).ok();
@@ -853,6 +890,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         // The stat jobs made while reading, and whether the ids ran out.
         let mut split: Option<Arc<Split>> = None;
         let mut stopped = false;
+        let timer = self.opts.counters.then(Timer::start);
         let read = if whole {
             self.provider
                 .read_dir_split(dir, self.opts, &mut entries, &mut errors, &mut later)
@@ -860,6 +898,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             let mut flush = |entries: &mut Vec<Entry>,
                              errors: &mut Vec<ScanError>,
                              later: &mut Vec<NameRef>| {
+                // The walk's own work, which the provider's time leaves out.
+                let flushing = self.opts.counters.then(Flushing::start);
                 // After a cancel nothing more is sent: the walk is ending.
                 if stopped
                     || self.opts.cancel.load(Ordering::Relaxed)
@@ -869,6 +909,9 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     entries.clear();
                     errors.clear();
                     later.clear();
+                }
+                if let Some(flushing) = flushing {
+                    flushing.stop();
                 }
             };
             self.provider.read_dir_streaming(
@@ -880,6 +923,10 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 &mut flush,
             )
         };
+        if let Some(timer) = timer {
+            let busy = timer.elapsed();
+            counters::add(|tally| tally.busy += busy);
+        }
         if stopped {
             return;
         }
@@ -1045,10 +1092,15 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         shared: &PoolShared<Job, Event>,
     ) {
         let (mut entries, mut errors) = (Vec::new(), Vec::new());
-        if let Err(e) =
+        let timer = self.opts.counters.then(Timer::start);
+        let read =
             self.provider
-                .stat_names(&split.dir, &names, self.opts, &mut entries, &mut errors)
-        {
+                .stat_names(&split.dir, &names, self.opts, &mut entries, &mut errors);
+        if let Some(timer) = timer {
+            let busy = timer.elapsed();
+            counters::add(|tally| tally.busy += busy);
+        }
+        if let Err(e) = read {
             entries.clear();
             let errno = e.raw_os_error().unwrap_or(EIO);
             errors = names
@@ -1373,6 +1425,10 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         shared: &PoolShared<Job, Event>,
     ) {
         self.pending.fetch_add(jobs.len(), Ordering::Relaxed);
+        if self.opts.counters {
+            let sent = batch.entries.len() as u64;
+            counters::add(|tally| tally.entries += sent);
+        }
         if shared.events.send(Event::Batch(batch)).is_err() {
             shared.stop();
             return;

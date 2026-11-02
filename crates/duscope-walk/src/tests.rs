@@ -1,5 +1,5 @@
 //! P1-WALK-01: the walk over in-memory trees; P1-WALK-03: directories split
-//! into stat batches.
+//! into stat batches; P5-WALK-04: each worker's counters.
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::ffi::OsStrExt;
@@ -328,6 +328,8 @@ proptest! {
                 mounts_excluded: 0,
                 clones_unavailable: false,
                 threads,
+                workers: Vec::new(),
+                listing_and_stat: None,
             });
         }
     }
@@ -1322,4 +1324,143 @@ fn p1_test_01_a_cancel_during_a_streamed_read_ends_the_walk() {
             "keep {keep}: wide closed after the cancel"
         );
     }
+}
+
+/// P5-WALK-04: P1-WALK-03's wide directory, read by four workers.
+fn wide_walk(counters: bool) -> (MemProvider, WalkSummary) {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..20_000 {
+        tree.file(format!("wide/f{i}"), 10);
+    }
+    let provider = Splitting {
+        inner: &tree,
+        keep: 100,
+        fail_stats: false,
+        batches: Mutex::new(Vec::new()),
+        gate: Gate::new(4),
+    };
+    let opts = WalkOptions {
+        threads: 4,
+        counters,
+        ..WalkOptions::default()
+    };
+    let (result, _) = walk_events(&provider, tree.root_path(), &opts);
+    let summary = result.unwrap();
+    (tree, summary)
+}
+
+#[test]
+fn p5_walk_04_a_default_walk_counts_nothing() {
+    let (_, summary) = wide_walk(false);
+    assert_eq!(summary.workers, []);
+    assert_eq!(summary.listing_and_stat, None);
+}
+
+#[test]
+fn p5_walk_04_each_worker_counts_the_entries_it_delivered() {
+    let (tree, summary) = wide_walk(true);
+    assert_eq!(summary.workers.len(), 4, "one figure a worker");
+    let delivered: u64 = summary.workers.iter().map(|w| w.entries).sum();
+    // The root is read by the walk itself, before the workers start.
+    assert_eq!(delivered, tree.entry_count() as u64 - 1);
+    assert!(
+        summary.workers.iter().all(|w| w.entries > 0),
+        "every worker read some of the batches: {:?}",
+        summary.workers
+    );
+    // MemProvider cannot tell listing from reading attributes.
+    assert_eq!(summary.listing_and_stat, None);
+}
+
+/// Adds a listing time and a stat time for every directory it reads, as
+/// Linux's provider does, after taking `pause` in the read.
+struct Phased<'a> {
+    inner: &'a MemProvider,
+    pause: Duration,
+    asked: AtomicBool,
+}
+
+impl Provider for Phased<'_> {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        thread::sleep(self.pause);
+        if opts.counters {
+            self.asked.store(true, Ordering::Relaxed);
+            counters::add(|tally| {
+                tally.listing += Duration::from_micros(10);
+                tally.stat += Duration::from_micros(30);
+            });
+        }
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn times_listing(&self) -> bool {
+        true
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+}
+
+#[test]
+fn p5_walk_04_a_provider_that_times_listing_reports_both_times() {
+    let mut tree = MemProvider::new("/mem");
+    for i in 0..40 {
+        tree.file(format!("d{i}/f"), 10);
+    }
+    let provider = Phased {
+        inner: &tree,
+        pause: Duration::from_millis(2),
+        asked: AtomicBool::new(false),
+    };
+    let mut opts = WalkOptions {
+        threads: 3,
+        ..WalkOptions::default()
+    };
+    let summary = walk_with(&provider, tree.root_path(), &opts, |_| {}).unwrap();
+    assert_eq!(summary.listing_and_stat, None, "not asked for");
+    assert!(!provider.asked.load(Ordering::Relaxed));
+
+    opts.counters = true;
+    let summary = walk_with(&provider, tree.root_path(), &opts, |_| {}).unwrap();
+    // The root and its forty directories, each read once.
+    let reads = u32::try_from(summary.dirs).unwrap();
+    assert_eq!(reads, 41);
+    assert_eq!(
+        summary.listing_and_stat,
+        Some((
+            Duration::from_micros(10) * reads,
+            Duration::from_micros(30) * reads
+        ))
+    );
+    // Busy time is the time inside the reads, each of which pauses.
+    let busy: Duration = summary.workers.iter().map(|w| w.busy).sum();
+    assert!(busy >= Duration::from_millis(2) * reads, "{busy:?}");
+    assert_eq!(summary.workers.len(), 3);
+}
+
+#[test]
+fn p5_walk_04_busy_time_leaves_out_the_walks_flushes() {
+    let timer = counters::Timer::start();
+    let flushing = counters::Flushing::start();
+    thread::sleep(Duration::from_millis(60));
+    flushing.stop();
+    assert!(
+        timer.elapsed() < Duration::from_millis(40),
+        "{:?}",
+        timer.elapsed()
+    );
+    thread::sleep(Duration::from_millis(5));
+    assert!(timer.elapsed() >= Duration::from_millis(5));
+    counters::take();
 }

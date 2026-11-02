@@ -63,6 +63,12 @@ pub struct WalkOptions {
     /// `fstatat`, instead of this platform's own (`--provider fallback`, a
     /// hidden flag for tests).
     pub fallback: bool,
+    /// Count what each worker does: the entries it delivers and its time in
+    /// the provider's reads, and with a provider that times them apart
+    /// (Linux's), the time listing directories apart from the time reading
+    /// entries' attributes ([`WalkSummary::workers`](crate::WalkSummary)).
+    /// Off, a walk reads no clock for them.
+    pub counters: bool,
 }
 
 impl Default for WalkOptions {
@@ -80,6 +86,7 @@ impl Default for WalkOptions {
             exclude_caches: Vec::new(),
             cancel: Arc::default(),
             fallback: false,
+            counters: false,
         }
     }
 }
