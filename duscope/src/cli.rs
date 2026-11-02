@@ -111,12 +111,6 @@ pub struct GlobalArgs {
         value_name = "DIR"
     )]
     pub index_dir: Option<PathBuf>,
-
-    /// Read this index file although it is outside the index directory (repeatable)
-    ///
-    /// --scan FILE reads only index files in the index directory unless --trust names them: an index file may come from anyone
-    #[arg(long, global = true, value_name = "FILE")]
-    pub trust: Vec<PathBuf>,
 }
 
 impl GlobalArgs {
@@ -198,6 +192,12 @@ pub struct ExplainArgs {
     #[arg(long, value_name = "AGE", help_heading = "Saved scans")]
     pub max_age: Option<String>,
 
+    /// Read this index file although it is outside the index directory (repeatable)
+    ///
+    /// Outside the index directory, only the files --trust names are read
+    #[arg(long, value_name = "FILE", help_heading = "Saved scans")]
+    pub trust: Vec<PathBuf>,
+
     /// The instant "now" is, for tests
     // test-only
     #[arg(long, hide = true, value_name = "RFC3339")]
@@ -222,6 +222,12 @@ pub struct ScansArgs {
     #[arg(long, value_name = "SCAN")]
     pub check: Option<String>,
 
+    /// Read this index file although it is outside the index directory (repeatable)
+    ///
+    /// Outside the index directory, only the files --trust names are read
+    #[arg(long, value_name = "FILE", requires = "check")]
+    pub trust: Vec<PathBuf>,
+
     /// The instant "now" is, for tests
     // test-only
     #[arg(long, hide = true, value_name = "RFC3339")]
@@ -237,6 +243,12 @@ pub struct IndexArgs {
     /// Default: the newest saved scan that holds the path, else a new scan
     #[arg(long, value_name = "SCAN")]
     pub scan: Option<String>,
+
+    /// Read this index file although it is outside the index directory (repeatable)
+    ///
+    /// Outside the index directory, only the files --trust names are read
+    #[arg(long, value_name = "FILE")]
+    pub trust: Vec<PathBuf>,
 
     /// Don't save the scan run when no saved scan holds the path
     #[arg(long)]
@@ -594,6 +606,12 @@ pub struct DiffArgs {
     #[arg(long, value_name = "PATH")]
     pub under: Option<PathBuf>,
 
+    /// Read this index file although it is outside the index directory (repeatable)
+    ///
+    /// Outside the index directory, only the files --trust names are read
+    #[arg(long, value_name = "FILE")]
+    pub trust: Vec<PathBuf>,
+
     /// Leave out growth or shrinkage smaller than this (default 1M)
     #[arg(long, value_parser = parse_size, value_name = "SIZE")]
     pub min_delta: Option<u64>,
@@ -716,6 +734,12 @@ pub struct RescanArgs {
     #[arg(long, value_name = "SCAN")]
     pub scan: Option<String>,
 
+    /// Read this index file although it is outside the index directory (repeatable)
+    ///
+    /// Outside the index directory, only the files --trust names are read
+    #[arg(long, value_name = "FILE")]
+    pub trust: Vec<PathBuf>,
+
     /// Scan the whole tree again (what every rescan does until phase 5)
     #[arg(long, conflicts_with = "incremental")]
     pub full: bool,
@@ -735,6 +759,12 @@ pub struct SchemaArgs {
     /// The saved scan to count the rows of: latest, an id prefix, or an index file
     #[arg(long, value_name = "SCAN")]
     pub scan: Option<String>,
+
+    /// Read this index file although it is outside the index directory (repeatable)
+    ///
+    /// Outside the index directory, only the files --trust names are read
+    #[arg(long, value_name = "FILE")]
+    pub trust: Vec<PathBuf>,
 
     /// Print VERB's envelope as JSON Schema; with no VERB, list them
     #[arg(long, value_name = "VERB", num_args = 0..=1, default_missing_value = "")]

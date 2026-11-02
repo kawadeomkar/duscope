@@ -8,12 +8,14 @@
 //! read, and the verb warns `stale_index`.
 //!
 //! An index file outside the index directory is read only when `--trust`
-//! names it (SECURITY.md): anyone may have made it. The index directory and
-//! its files should be 0700 and 0600; a looser one is read, with a warning.
+//! names it (SECURITY.md): anyone may have made it. A link in `scans` is no
+//! saved scan, since what it leads to may be anywhere. The index directory
+//! and its files should be 0700 and 0600; a looser one is read, with a
+//! warning.
 
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::Mutex;
 
 use crate::CoreError;
 use crate::index::{Index, ScanId};
@@ -55,7 +57,8 @@ impl ScanSelector {
 }
 
 /// The index files under `index_dir` (`scans/<id>.db`), by id. Temporary
-/// files and other names are left out.
+/// files, other names and anything but a regular file (a link to a file
+/// elsewhere above all) are left out.
 pub fn index_files(index_dir: &Path) -> Vec<(ScanId, PathBuf)> {
     warn_if_open(index_dir);
     let Ok(dir) = std::fs::read_dir(index_dir.join("scans")) else {
@@ -63,6 +66,7 @@ pub fn index_files(index_dir: &Path) -> Vec<(ScanId, PathBuf)> {
     };
     let mut files: Vec<(ScanId, PathBuf)> = dir
         .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .filter_map(|entry| {
             let name = entry.file_name();
             let id = name.to_str()?.strip_suffix(".db")?;
@@ -197,80 +201,90 @@ pub fn resolve_scan(
                     file.display()
                 )));
             }
-            if !trusted(&file, q) {
+            // The resolved path is the one checked, so the one opened: a
+            // link on the way cannot be turned elsewhere in between.
+            let Some(file) = trusted(&file, q) else {
                 return Err(CoreError::UntrustedIndex(file.display().to_string()));
-            }
+            };
             named(Index::open(&file)?)
         }
     }
 }
 
-/// Whether `file` may be read: it is inside the index directory, or
-/// `--trust` names it. Both sides are resolved, so a link inside the
-/// directory to a file outside it is outside, and `--trust` may name the
-/// file by any path to it.
-fn trusted(file: &Path, q: &ScanQuery<'_>) -> bool {
-    let Ok(file) = std::fs::canonicalize(file) else {
-        return false;
-    };
+/// `file`, resolved, when it may be read: it is inside the index
+/// directory, or `--trust` names it. Both sides are resolved, so a link
+/// inside the directory to a file outside it is outside, and `--trust` may
+/// name the file by any path to it.
+fn trusted(file: &Path, q: &ScanQuery<'_>) -> Option<PathBuf> {
+    let file = std::fs::canonicalize(file).ok()?;
     if let Ok(dir) = std::fs::canonicalize(q.index_dir)
         && file.starts_with(&dir)
     {
         warn_if_open(q.index_dir);
-        return true;
+        return Some(file);
     }
     q.trust
         .iter()
         .any(|named| std::fs::canonicalize(q.cwd.join(named)).is_ok_and(|named| named == file))
+        .then_some(file)
 }
 
-/// Warns, once a process, when the index directory, its `scans`, or an
-/// index file in it is open to other users or another user's: the scans
-/// name every path measured. The writer makes them 0700 and 0600.
+/// Warns, once a process for each index directory, when it, its `scans`,
+/// or an index file in it is open to other users or another user's: the
+/// scans name every path measured. The writer makes them 0700 and 0600.
 fn warn_if_open(index_dir: &Path) {
-    static CHECKED: Once = Once::new();
-    CHECKED.call_once(|| {
-        let uid = duscope_walk::effective_uid();
-        let scans = index_dir.join("scans");
-        for dir in [index_dir, scans.as_path()] {
-            let Ok(meta) = std::fs::metadata(dir) else {
-                continue;
-            };
-            if meta.uid() != uid {
-                log::warn!(
-                    "the saved scans are not private: {} belongs to uid {}",
-                    dir.display(),
-                    meta.uid()
-                );
-            } else if meta.permissions().mode() & 0o077 != 0 {
-                log::warn!(
-                    "the saved scans are not private: {} is mode {:o}; run chmod 700 {}",
-                    dir.display(),
-                    meta.permissions().mode() & 0o7777,
-                    dir.display()
-                );
-            }
+    static CHECKED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    {
+        let mut checked = CHECKED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if checked.iter().any(|dir| dir == index_dir) {
+            return;
         }
-        let open = std::fs::read_dir(&scans)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().as_encoded_bytes().ends_with(b".db"))
-            .filter(|entry| {
-                entry
-                    .metadata()
-                    .is_ok_and(|meta| meta.uid() != uid || meta.mode() & 0o077 != 0)
-            })
-            .count();
-        if open > 0 {
+        checked.push(index_dir.to_owned());
+    }
+    let uid = duscope_walk::effective_uid();
+    let scans = index_dir.join("scans");
+    for dir in [index_dir, scans.as_path()] {
+        let Ok(meta) = std::fs::metadata(dir) else {
+            continue;
+        };
+        if meta.uid() != uid {
             log::warn!(
-                "the saved scans are not private: others may read, or another user owns, \
-                 {open} of the index files in {}; run chmod 600 {}/*.db",
-                scans.display(),
-                scans.display()
+                "the saved scans are not private: {} belongs to uid {}",
+                dir.display(),
+                meta.uid()
+            );
+        } else if meta.permissions().mode() & 0o077 != 0 {
+            log::warn!(
+                "the saved scans are not private: {} is mode {:o}; run chmod 700 {}",
+                dir.display(),
+                meta.permissions().mode() & 0o7777,
+                dir.display()
             );
         }
-    });
+    }
+    let open = std::fs::read_dir(&scans)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().as_encoded_bytes().ends_with(b".db"))
+        // Links are no saved scans (`index_files`), and a link's own
+        // mode says nothing.
+        .filter(|entry| {
+            entry
+                .metadata()
+                .is_ok_and(|meta| meta.is_file() && (meta.uid() != uid || meta.mode() & 0o077 != 0))
+        })
+        .count();
+    if open > 0 {
+        log::warn!(
+            "the saved scans are not private: others may read, or another user owns, \
+             {open} of the index files in {}; run chmod 600 {}/*.db",
+            scans.display(),
+            scans.display()
+        );
+    }
 }
 
 /// The newest scan `usable` accepts whose root contains the path (or the

@@ -499,10 +499,15 @@ fn p2_sec_01_a_hostile_index_is_refused_or_neutralised() {
     // anything connects it. The bundled SQLite has no virtual table
     // modules to make one with (a system SQLite has), so the schema's row
     // is written as a hostile file's would be.
-    for (name, sql) in [
-        ("virtual", "CREATE VIRTUAL TABLE v USING rtree(id, a, b)"),
+    for (name, kind, sql) in [
+        (
+            "virtual",
+            "table",
+            "CREATE VIRTUAL TABLE v USING rtree(id, a, b)",
+        ),
         (
             "virtual-spelled",
+            "TABLE",
             "create/* a */ -- b\n\tVirtual table v using rtree(id, a, b)",
         ),
     ] {
@@ -511,7 +516,7 @@ fn p2_sec_01_a_hostile_index_is_refused_or_neutralised() {
             name,
             &format!(
                 "PRAGMA writable_schema = ON; \
-                 INSERT INTO sqlite_schema VALUES ('table', 'v', 'v', 0, '{sql}');"
+                 INSERT INTO sqlite_schema VALUES ('{kind}', 'v', 'v', 0, '{sql}');"
             ),
         );
         assert_eq!(
@@ -550,6 +555,12 @@ fn p2_sec_01_a_hostile_index_is_refused_or_neutralised() {
         stopped * 10 < loaded,
         "stopping took {stopped:?}, loading the whole schema {loaded:?}"
     );
+}
+
+#[test]
+fn p2_sec_01_an_index_past_the_limits_is_refused() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
     // One statement past the parser's limit.
     let long = format!(
         "CREATE TABLE long (x DEFAULT '{}');",
