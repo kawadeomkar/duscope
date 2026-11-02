@@ -153,6 +153,8 @@ pub enum Verb {
     Explain(ExplainArgs),
     /// One read-only SQL statement over a saved scan's tables
     Query(SqlArgs),
+    /// The index's tables and columns, and each verb's envelope schema
+    Schema(SchemaArgs),
     /// List, prune or check the saved scans
     Scans(ScansArgs),
     /// Print the manual page, in roff, to stdout
@@ -599,6 +601,22 @@ pub struct DiffArgs {
     pub size: Option<SizeKind>,
 }
 
+/// `schema`'s flags.
+#[derive(Debug, Clone, Args)]
+pub struct SchemaArgs {
+    /// The path whose saved scan gives the rows (default: the current directory)
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
+    /// The saved scan to count the rows of: latest, an id prefix, or an index file
+    #[arg(long, value_name = "SCAN")]
+    pub scan: Option<String>,
+
+    /// Print VERB's envelope as JSON Schema; with no VERB, list them
+    #[arg(long, value_name = "VERB", num_args = 0..=1, default_missing_value = "")]
+    pub envelope: Option<String>,
+}
+
 /// `query`'s flags.
 #[derive(Debug, Clone, Args)]
 pub struct SqlArgs {
@@ -843,7 +861,7 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             max_age_default(&mut args.max_age);
             args.caches_extra.clone_from(&config.caches_extra);
         }
-        Some(Verb::Scans(_) | Verb::Man | Verb::Completions(_)) => {}
+        Some(Verb::Scans(_) | Verb::Schema(_) | Verb::Man | Verb::Completions(_)) => {}
     }
     Ok(())
 }

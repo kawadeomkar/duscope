@@ -756,6 +756,16 @@ impl Output {
         written
     }
 
+    /// Writes `records` as `--plain` does (tab-separated, `-0` and
+    /// `--header` honoured), for a verb whose rows are not a list's.
+    pub fn records<'a>(
+        &self,
+        fields: &[&str],
+        records: impl Iterator<Item = Vec<Cow<'a, [u8]>>>,
+    ) -> Result<(), Failure> {
+        self.sink(|out| format::plain(out, fields, records, self.null, self.header))
+    }
+
     /// Writes a listing of saved scans (`scans`) in the decided format,
     /// as [`Output::list`] writes a list verb's.
     pub fn listing<T: Row>(&self, listing: &Listing<T>, footer: &str) -> Result<(), Failure> {
