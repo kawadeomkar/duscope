@@ -246,11 +246,13 @@ fn p2_idx_03_each_selector_and_its_failure() {
         3,
         "scan_not_found",
     );
-    // A file that is not an index, and one of another major version: exit 5.
+    // A file that is not an index, and one of another major version: exit 5
+    // (each outside the index directory, so trusted to be opened at all).
     let junk = env.tmp_dir().join("junk.db");
     fs::write(&junk, b"no database here, not one page of it at all").unwrap();
+    let junk = junk.to_str().unwrap();
     fail(
-        &["top", "--json", "--scan", junk.to_str().unwrap()],
+        &["top", "--json", "--trust", junk, "--scan", junk],
         5,
         "index_corrupt",
     );
@@ -262,7 +264,8 @@ fn p2_idx_03_each_selector_and_its_failure() {
     )
     .unwrap();
     drop(db);
-    let out = run(&env, &["top", "--json", "--scan", v3.to_str().unwrap()]);
+    let v3 = v3.to_str().unwrap();
+    let out = run(&env, &["top", "--json", "--trust", v3, "--scan", v3]);
     assert_eq!(out.status.code(), Some(5));
     let error = &envelope(&out)["error"];
     assert_eq!(error["code"], "index_version_mismatch");
@@ -598,9 +601,11 @@ fn p2_idx_03_an_index_file_needs_no_index_directory() {
     ));
     let id = saved_scan["scan"]["id"].as_str().unwrap();
     let file = env.index_dir().join("scans").join(format!("{id}.db"));
+    // With no index directory, the file is outside it: trusted.
+    let file = file.to_str().unwrap();
     let out = env
         .cmd()
-        .args(["top", "--json", "--scan", file.to_str().unwrap()])
+        .args(["top", "--json", "--trust", file, "--scan", file])
         .env_remove("DUSCOPE_INDEX_DIR")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("HOME")

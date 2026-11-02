@@ -172,7 +172,8 @@ fn saved(
         .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)));
     let dir = match (dir, &selector) {
         (Some(dir), _) => dir,
-        (None, ScanSelector::File(_)) => cwd.to_owned(),
+        // Outside every index directory: --trust must name it.
+        (None, ScanSelector::File(_)) => PathBuf::new(),
         (None, ScanSelector::Prefix(_)) => {
             return Err(Failure::new(
                 Exit::NotFound,
@@ -190,6 +191,7 @@ fn saved(
         // The layout does not age: no saved scan is stale to it.
         max_age_ns: i64::MAX,
         now: clock::now(),
+        trust: &args.trust,
     };
     let resolved = resolve_scan(&selector, &q, scanned).map_err(core_failure)?;
     Ok(resolved.map(|r| r.index))
