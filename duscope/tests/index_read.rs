@@ -662,7 +662,9 @@ fn platform_tests() -> bool {
     on
 }
 
-/// Runs a command of the test environment, failing the test on an error.
+/// Runs a command of the test environment, failing the test on an error
+/// (macOS's tests run `hdiutil` through [`TestEnv::hdiutil`]).
+#[cfg(target_os = "linux")]
 fn system(env: &TestEnv, program: &str, args: &[&dyn AsRef<std::ffi::OsStr>]) {
     let out = env.command(program).args(args).output().unwrap();
     assert!(
@@ -739,33 +741,18 @@ fn p2_qry_01_linux_an_exfat_image_folds_case() {
 #[cfg(target_os = "macos")]
 fn attach<'a>(env: &'a TestEnv, fs: &str, work: &Path, mount: &Path) -> Mounted<'a> {
     let image = work.join("image.dmg");
-    system(
-        env,
-        "hdiutil",
-        &[
-            &"create",
-            &"-quiet",
-            &"-size",
-            &"16m",
-            &"-fs",
-            &fs,
-            &"-volname",
-            &"DUSCOPE",
-            &image,
-        ],
-    );
-    system(
-        env,
-        "hdiutil",
-        &[
-            &"attach",
-            &"-quiet",
-            &"-nobrowse",
-            &"-mountpoint",
-            &mount,
-            &image,
-        ],
-    );
+    env.hdiutil(&[
+        &"create",
+        &"-ov",
+        &"-size",
+        &"16m",
+        &"-fs",
+        &fs,
+        &"-volname",
+        &"DUSCOPE",
+        &image,
+    ]);
+    env.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &mount, &image]);
     Mounted {
         env,
         point: mount.to_owned(),
