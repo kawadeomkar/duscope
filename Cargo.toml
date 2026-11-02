@@ -118,7 +118,8 @@ opt-level = 1
 
 # The code off the scan's and the queries' hot paths, optimised for size: the
 # binary's verbs and output layer, the treemap, the TUI and MCP crates, and the
-# command line with its man page and completions. The walker, the engine
+# command line with its man page and completions, and compression (export,
+# import and PNG). The walker, the engine
 # (accounting, index, queries), SQLite and JSON output keep their levels. At
 # the top of the phase-2 stack this took the stripped arm64 macOS binary from
 # 6.16 to 5.19 MB (-16%), and the x86_64 musl one, which passed size_budget by
@@ -148,6 +149,10 @@ opt-level = "z"
 [profile.release.package.roff]
 opt-level = "z"
 [profile.release.package.unicode-width]
+opt-level = "z"
+[profile.release.package.flate2]
+opt-level = "z"
+[profile.release.package.miniz_oxide]
 opt-level = "z"
 
 # cargo-dist always builds with a profile named `dist`. It is the release profile
