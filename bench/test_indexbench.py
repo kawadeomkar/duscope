@@ -35,7 +35,10 @@ class Verbose(unittest.TestCase):
 
 class Gates(unittest.TestCase):
     def test_p2_bench_01_each_gate_holds_fails_or_was_not_measured(self):
-        got = {g["name"]: g for g in indexbench.gates({"top_p50_ms": 3.0, "top_p95_ms": 60.0, "dua_speedup_p50": 40.0})}
+        got = {
+            g["name"]: g
+            for g in indexbench.gates({"top_p50_ms": 3.0, "top_p95_ms": 60.0, "dua_speedup_p50": 40.0}, "linux")
+        }
         self.assertEqual([g[0] for g in indexbench.GATES], list(got))
         self.assertTrue(got["top_p50_ms"]["holds"])
         self.assertFalse(got["top_p95_ms"]["holds"])
@@ -44,7 +47,7 @@ class Gates(unittest.TestCase):
         self.assertIsNone(got["fdu_speedup_p50"]["value"])
 
     def test_p2_bench_01_the_gates_are_plan_specs(self):
-        limits = {name: (op, limit) for name, op, limit in indexbench.GATES}
+        limits = {name: (op, limit) for name, op, limit, _ in indexbench.GATES}
         self.assertEqual(limits["write_us_per_entry_warm_p50"], ("<=", 2.5))
         self.assertEqual(limits["write_share_of_cold_scan_p50"], ("<=", 0.25))
         for verb in ("top", "stale", "explain"):
@@ -57,6 +60,25 @@ class Gates(unittest.TestCase):
         self.assertEqual(limits["bytes_per_entry_full"], ("<=", 140.0))
         self.assertEqual(limits["dua_speedup_p50"], (">=", 20.0))
         self.assertEqual(limits["fdu_speedup_p50"], (">=", 20.0))
+
+
+    def test_p2_bench_01_the_warm_write_binds_linux_alone(self):
+        values = {"write_us_per_entry_warm_p50": 3.1, "write_share_of_cold_scan_p50": 0.2}
+        for platform, holds in (("linux", False), ("macos", None)):
+            got = {g["name"]: g for g in indexbench.gates(values, platform)}
+            self.assertIs(got["write_us_per_entry_warm_p50"]["holds"], holds, platform)
+            self.assertEqual(got["write_us_per_entry_warm_p50"]["value"], 3.1)
+            self.assertTrue(got["write_share_of_cold_scan_p50"]["holds"], platform)
+
+    def test_p2_bench_01_a_subtree_gets_50_ms_per_100k_files(self):
+        def subtree(files, ms):
+            [gate] = [g for g in indexbench.gates({"by_type_subtree_files": files, "by_type_subtree_p50_ms": ms}, "linux")
+                      if g["name"] == "by_type_subtree_p50_ms"]
+            return gate["limit"], gate["holds"]
+
+        self.assertEqual(subtree(40_000, 49.0), (50.0, True))
+        self.assertEqual(subtree(300_000, 148.0), (150.0, True))
+        self.assertEqual(subtree(300_000, 151.0), (150.0, False))
 
 
 class Pty(unittest.TestCase):
