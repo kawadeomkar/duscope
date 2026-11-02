@@ -24,6 +24,32 @@ pub(crate) fn system() -> String {
     format!("{} {}", field(&uts.sysname), field(&uts.release))
 }
 
+/// The local time now, `YYYY-MM-DDThh:mm:ss`, as a `.trashinfo` file's
+/// `DeletionDate` writes it; the epoch where the local time cannot be read.
+#[cfg(target_os = "linux")]
+pub(crate) fn local_time() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let secs = libc::time_t::try_from(secs).unwrap_or(0);
+    // SAFETY: `tm` is plain data, for which all-zero bytes are valid.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r reads one `time_t` and writes one `tm` through the
+    // pointers, which point to live values of those types.
+    if unsafe { libc::localtime_r(&raw const secs, &raw mut tm) }.is_null() {
+        return "1970-01-01T00:00:00".to_owned();
+    }
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
 /// The effective user id.
 pub(crate) fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments and always succeeds.

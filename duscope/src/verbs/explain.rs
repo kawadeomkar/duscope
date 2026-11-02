@@ -13,104 +13,24 @@ use duscope_core::envelope::{
 use duscope_core::handle::{Handle, HandlePayload, Key, LIFETIME_NS};
 use duscope_core::index::Index;
 use duscope_core::query::{
-    ExplainQuery, Resolved, ScanQuery, ScanSelector, SizeKind, abs_path, clock, explain,
-    explain_unindexed, resolve_scan, timegrammar,
+    ExplainQuery, ScanSelector, SizeKind, abs_path, clock, explain, explain_unindexed, timegrammar,
 };
 use duscope_core::resolve::resolve_path;
 
 use super::next::Hints;
-use super::source::{core_failure, saved_block, scanned, stale_index};
+use super::source::{Lookup, core_failure, saved_block, stale_index};
 use super::{Exit, Failure, scan};
 use crate::cli::ExplainArgs;
 use crate::out::{Output, thousands};
 
-/// `--max-age` when neither the flag nor the configuration sets it.
-const DEFAULT_MAX_AGE: &str = "7d";
-
-/// What both forms of `explain` resolve a saved scan with.
-struct Lookup {
-    max_age: String,
-    max_age_ns: i64,
-    now: i64,
-    cwd: PathBuf,
-    /// The index directory, when one can be found.
-    dir: Option<PathBuf>,
-    /// `--trust`.
-    trust: Vec<PathBuf>,
-}
-
-impl Lookup {
-    fn new(args: &ExplainArgs, index_dir: Option<&Path>) -> Result<Lookup, Failure> {
-        let max_age = args
-            .max_age
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MAX_AGE.to_owned());
-        let max_age_ns = timegrammar::parse_age(&max_age)
-            .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--max-age {e}")))?;
-        let now = match &args.test_now {
-            Some(text) => timegrammar::parse_date(text)
-                .map(|date| date.ns)
-                .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--test-now {e}")))?,
-            None => clock::now(),
-        };
-        let cwd = std::env::current_dir().map_err(|e| {
-            Failure::new(
-                Exit::Runtime,
-                "io_error",
-                format!("cannot read the working directory: {e}"),
-            )
-        })?;
-        let dir = index_dir
-            .map(Path::to_owned)
-            .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)));
-        Ok(Lookup {
-            max_age,
-            max_age_ns,
-            now,
-            cwd,
-            dir,
-            trust: args.trust.clone(),
-        })
-    }
-
-    /// The saved scan `selector` names for `path`: `None` when latest finds
-    /// none. Without an index directory latest has nothing to find and a
-    /// prefix nowhere to look; an index file needs none, though without one
-    /// it is outside it, so --trust must name it.
-    fn resolve(
-        &self,
-        selector: &ScanSelector,
-        path: Option<&Path>,
-    ) -> Result<Option<Resolved>, Failure> {
-        let dir = match (&self.dir, selector) {
-            (Some(dir), _) => dir.as_path(),
-            (None, ScanSelector::File(_)) => Path::new(""),
-            (None, ScanSelector::Latest) => return Ok(None),
-            (None, ScanSelector::Prefix(_)) => {
-                return Err(Failure::new(
-                    Exit::NotFound,
-                    "scan_not_found",
-                    "no index directory to look for the scan in: neither HOME nor \
-                     XDG_CACHE_HOME is set",
-                )
-                .hint("Run duscope with --index-dir naming the directory the scans are in"));
-            }
-        };
-        let q = ScanQuery {
-            index_dir: dir,
-            path,
-            cwd: &self.cwd,
-            max_age_ns: self.max_age_ns,
-            now: self.now,
-            trust: &self.trust,
-        };
-        resolve_scan(selector, &q, scanned).map_err(core_failure)
-    }
-}
-
 /// `explain`.
 pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
-    let lookup = Lookup::new(args, index_dir)?;
+    let lookup = Lookup::new(
+        args.max_age.as_deref(),
+        args.test_now.as_deref(),
+        &args.trust,
+        index_dir,
+    )?;
     if let Some(selector) = &args.errors {
         if output.fields_first::<ScanErrorEntry>("explain --errors")? {
             return Ok(());

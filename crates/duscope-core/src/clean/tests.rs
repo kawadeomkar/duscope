@@ -73,37 +73,55 @@ fn no_env(_: &str) -> Option<OsString> {
     None
 }
 
+/// Bytes on disk of `path` itself, as a scan counts them.
+fn blocks(path: &Path) -> u64 {
+    fs::symlink_metadata(path).unwrap().blocks() * 512
+}
+
+fn query(caches: &Caches) -> ExplainQuery<'_> {
+    ExplainQuery {
+        caches,
+        env: &no_env,
+    }
+}
+
 #[test]
 fn p4_core_01_a_plan_takes_each_items_facts_from_the_saved_scan() {
     let env = TestEnv::new();
     let (root, index) = saved(&env);
     let caches = Caches::vendored();
-    let q = ExplainQuery {
-        caches: &caches,
-        env: &no_env,
-    };
+    let q = query(&caches);
+    // The file alone: its other link lies outside the plan, so deleting it
+    // frees nothing.
+    let plan = clean_plan(&[item(root.join("a.bin"))], &index, &q).unwrap();
+    let file = &plan.plan.items[0];
+    assert_eq!(file.kind, "file");
+    assert_eq!(file.nlink, Some(2));
+    assert_eq!(file.links_outside_subtree, Some(1));
+    assert_eq!(file.frees_bytes, Some(0));
+    assert_eq!(file.frees_kind, Some("lower_bound"));
+    // The directory alone holds that other link and its own file: it frees
+    // the file and itself, the link's bytes kept by a.bin.
+    let plan = clean_plan(&[item(root.join("dir"))], &index, &q).unwrap();
+    let dir = &plan.plan.items[0];
+    assert_eq!(dir.kind, "dir");
+    assert_eq!(
+        dir.frees_bytes,
+        Some(blocks(&root.join("dir")) + blocks(&root.join("dir/b.bin")))
+    );
+    assert_eq!(dir.frees_kind, Some("lower_bound"));
     let plan = clean_plan(
         &[item(root.join("a.bin")), item(root.join("dir"))],
-        Some(&index),
+        &index,
         &q,
     )
     .unwrap();
     let items = &plan.plan.items;
     assert_eq!(plan.trash_count(), 2);
-    // The file's other link lies outside it: deleting it frees nothing. The
-    // directory holds that link and its own file: deleting it frees the file
-    // alone, the link's bytes kept by a.bin.
-    assert_eq!(items[0].kind, "file");
-    assert_eq!(items[0].nlink, Some(2));
-    assert_eq!(items[0].links_outside_subtree, Some(1));
-    assert_eq!(items[0].frees_bytes, Some(0));
-    assert_eq!(items[0].frees_kind, Some("lower_bound"));
-    assert_eq!(items[1].kind, "dir");
     assert_eq!(
         plan.plan.total_allocated_bytes,
         items[0].allocated_bytes + items[1].allocated_bytes
     );
-    assert_eq!(plan.plan.total_frees_bytes, items[1].frees_bytes.unwrap());
     assert!(
         items
             .iter()
@@ -113,23 +131,80 @@ fn p4_core_01_a_plan_takes_each_items_facts_from_the_saved_scan() {
 }
 
 #[test]
+fn p4_core_01_two_links_both_in_the_plan_free_their_bytes_once() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let plan = clean_plan(
+        &[item(root.join("a.bin")), item(root.join("dir/a-again.bin"))],
+        &index,
+        &q,
+    )
+    .unwrap();
+    let items = &plan.plan.items;
+    // Whichever link the scan charged frees the file; the other frees 0.
+    assert_eq!(plan.plan.total_frees_bytes, blocks(&root.join("a.bin")));
+    assert!(
+        items.iter().all(|i| i.frees_kind == Some("exact")),
+        "{items:?}"
+    );
+    // The file and the directory that holds its other link: every byte of
+    // the three.
+    let plan = clean_plan(
+        &[item(root.join("a.bin")), item(root.join("dir"))],
+        &index,
+        &q,
+    )
+    .unwrap();
+    assert_eq!(
+        plan.plan.total_frees_bytes,
+        blocks(&root.join("a.bin")) + blocks(&root.join("dir")) + blocks(&root.join("dir/b.bin"))
+    );
+}
+
+#[test]
+fn p4_core_01_an_item_made_since_the_scan_is_planned_from_disk() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    fs::write(root.join("new.bin"), vec![3u8; 7000]).unwrap();
+    fs::create_dir(root.join("new")).unwrap();
+    fs::write(root.join("new/c.bin"), vec![4u8; 6000]).unwrap();
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let plan = clean_plan(
+        &[item(root.join("new.bin")), item(root.join("new"))],
+        &index,
+        &q,
+    )
+    .unwrap();
+    let items = &plan.plan.items;
+    assert_eq!(plan.trash_count(), 2);
+    assert_eq!(items[0].allocated_bytes, blocks(&root.join("new.bin")));
+    assert_eq!(items[0].frees_kind, Some("upper_bound"));
+    // The directory with what is under it; what it frees is not known.
+    assert_eq!(
+        items[1].allocated_bytes,
+        blocks(&root.join("new")) + blocks(&root.join("new/c.bin"))
+    );
+    assert_eq!(items[1].frees_bytes, None);
+}
+
+#[test]
 fn p4_core_01_refusals_in_a_saved_scan() {
     let env = TestEnv::new();
     let (root, index) = saved(&env);
     let outside = fs::canonicalize(env.tmp_dir()).unwrap().join("outside.txt");
     fs::write(&outside, b"x").unwrap();
     let caches = Caches::vendored();
-    let q = ExplainQuery {
-        caches: &caches,
-        env: &no_env,
-    };
-    let plan = clean_plan(&[item(root.join("link")), item(outside)], Some(&index), &q).unwrap();
+    let q = query(&caches);
+    let plan = clean_plan(&[item(root.join("link")), item(outside)], &index, &q).unwrap();
     let reasons: Vec<Option<&str>> = plan.plan.items.iter().map(|i| i.reason).collect();
     assert_eq!(reasons, [Some("symlink"), Some("outside_root")]);
     assert_eq!(plan.refused_count(), 2);
     assert_eq!(plan.plan.total_allocated_bytes, 0);
     // The scan's root, alone: it holds every other item.
-    let plan = clean_plan(&[item(root.clone())], Some(&index), &q).unwrap();
+    let plan = clean_plan(&[item(root.clone())], &index, &q).unwrap();
     assert_eq!(plan.plan.items[0].reason, Some("root"));
 }
 
@@ -138,11 +213,8 @@ fn p4_core_01_overlap_a_missing_path_and_a_changed_handle_fail_the_plan() {
     let env = TestEnv::new();
     let (root, index) = saved(&env);
     let caches = Caches::vendored();
-    let q = ExplainQuery {
-        caches: &caches,
-        env: &no_env,
-    };
-    let plan = |items: &[CleanItem]| clean_plan(items, Some(&index), &q);
+    let q = query(&caches);
+    let plan = |items: &[CleanItem]| clean_plan(items, &index, &q);
     assert!(matches!(
         plan(&[item(root.join("dir")), item(root.join("dir/b.bin"))]),
         Err(CoreError::CleanOverlap(_))
@@ -151,6 +223,20 @@ fn p4_core_01_overlap_a_missing_path_and_a_changed_handle_fail_the_plan() {
         plan(&[item(root.join("a.bin")), item(root.join("a.bin"))]),
         Err(CoreError::CleanOverlap(_))
     ));
+    // Two links of one file are two items.
+    assert!(plan(&[item(root.join("a.bin")), item(root.join("dir/a-again.bin"))]).is_ok());
+    // A volume that compares names without case gives the directory a
+    // second path: still one item.
+    if root.join("DIR").exists() {
+        assert!(matches!(
+            plan(&[item(root.join("dir")), item(root.join("DIR"))]),
+            Err(CoreError::CleanOverlap(_))
+        ));
+        assert!(matches!(
+            plan(&[item(root.join("dir")), item(root.join("DIR/b.bin"))]),
+            Err(CoreError::CleanOverlap(_))
+        ));
+    }
     assert!(matches!(
         plan(&[item(root.join("gone"))]),
         Err(CoreError::ScanNotFound(_))

@@ -2,7 +2,7 @@
 //! `yes` typed in full moves anything.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use duscope_testkit::{TestEnv, duscope_bin};
@@ -27,6 +27,28 @@ fn clean(env: &TestEnv, path: &Path) -> Terminal {
         .unwrap()
 }
 
+/// A file of 3,000 bytes in a tree with a saved scan, which clean plans
+/// from.
+fn saved_file(env: &TestEnv) -> PathBuf {
+    let tree = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    let file = tree.join("a.bin");
+    fs::write(&file, vec![7u8; 3000]).unwrap();
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&tree)
+        .args(["--save", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    file
+}
+
 /// Answers the prompt with `answer` and returns the exit status and what
 /// the terminal shows.
 fn answer(terminal: &mut Terminal, answer: &str) -> (i32, String) {
@@ -47,8 +69,7 @@ fn answer(terminal: &mut Terminal, answer: &str) -> (i32, String) {
 #[test]
 fn p4_core_01_anything_but_yes_at_the_prompt_moves_nothing() {
     let env = TestEnv::new();
-    let file = fs::canonicalize(env.tmp_dir()).unwrap().join("a.bin");
-    fs::write(&file, vec![7u8; 3000]).unwrap();
+    let file = saved_file(&env);
     for typed in ["no", "y", "YES"] {
         let mut terminal = clean(&env, &file);
         let (status, text) = answer(&mut terminal, typed);
@@ -63,8 +84,7 @@ fn p4_core_01_anything_but_yes_at_the_prompt_moves_nothing() {
 #[test]
 fn p4_core_01_linux_yes_at_the_prompt_moves_the_plan() {
     let env = TestEnv::new();
-    let file = fs::canonicalize(env.tmp_dir()).unwrap().join("a.bin");
-    fs::write(&file, vec![7u8; 3000]).unwrap();
+    let file = saved_file(&env);
     let mut terminal = clean(&env, &file);
     let (status, text) = answer(&mut terminal, "yes");
     assert_eq!(status, 0, "{text}");

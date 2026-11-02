@@ -241,7 +241,7 @@ pub struct CleanArgs {
 
     /// The saved scan the sizes come from: latest, an id prefix or an index file
     ///
-    /// Default: the newest saved scan that holds the first path, else a fresh stat
+    /// Default: the newest saved scan that holds the first item; clean needs one
     #[arg(long, value_name = "SCAN", help_heading = "Saved scans")]
     pub scan: Option<String>,
 

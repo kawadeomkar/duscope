@@ -531,16 +531,17 @@ pub fn cache_dir(home: &Path) -> PathBuf {
 
 /// Moves `path` itself (a link, not what it leads to) to the Trash, as
 /// `clean` does: on macOS through `NSFileManager`'s `trashItemAtURL`, into
-/// the volume's Trash; on Linux by the XDG Trash specification, into the home
-/// Trash for an item on its filesystem and the volume's own `.Trash-$uid`
-/// otherwise. Nothing is ever removed: where the item's volume has no Trash
-/// the move can use, it is [`TrashError::Unavailable`].
+/// the volume's Trash; on Linux by the XDG Trash specification, renamed into
+/// the home Trash for an item on its filesystem and the volume's own
+/// (`.Trash/$uid` or `.Trash-$uid`) otherwise, never copied. Nothing is ever
+/// removed: where the item's volume has no Trash the move can use, it is
+/// [`TrashError::Unavailable`].
 pub fn move_to_trash(path: &Path) -> Result<(), TrashError> {
     platform::trash(path)
 }
 
-/// Whether `path` itself is a macOS firmlink (`SF_FIRMLINK`): `clean`
-/// refuses one. Never elsewhere.
+/// Whether `path` itself is a macOS firmlink, by the system's table of them
+/// (`/usr/share/firmlinks`): `clean` refuses one. Never elsewhere.
 pub fn is_firmlink(path: &Path) -> bool {
     platform::firmlink(path)
 }

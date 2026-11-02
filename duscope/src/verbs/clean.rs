@@ -3,8 +3,10 @@
 //!
 //! The items are paths and `--from` handles from `explain --json`: a
 //! handle's MAC and expiry are checked, and its path must still hold the
-//! device and inode it names. The plan's sizes come from the newest saved
-//! scan that holds the first item (or `--scan`), else from a fresh `stat`.
+//! device and inode it names. The plan is made against a saved scan, the
+//! newest that holds the first item (or `--scan`): its root bounds what may
+//! move, and its sizes are the plan's. With none, the run fails
+//! `scan_not_found`.
 //!
 //! A refused item makes the whole run a dry run (`refused_path`) unless
 //! `--skip-refused`. Without `--yes` nothing moves: on a terminal the plan is
@@ -22,23 +24,23 @@ use duscope_core::envelope::{
     CleanEnvelope, CleanQuery, CleanResult, ErrorObject, SCHEMA_VERSION, ScanBlock, Tool, Warning,
 };
 use duscope_core::handle::{Handle, Key};
-use duscope_core::query::{
-    ExplainQuery, Resolved, ScanQuery, ScanSelector, SizeKind, clock, resolve_scan, timegrammar,
-};
+use duscope_core::query::{ExplainQuery, ScanSelector, SizeKind, clock};
 
 use super::explain::unresolved_last;
-use super::source::{core_failure, saved_block, scanned, stale_index};
+use super::source::{Lookup, core_failure, saved_block, stale_index};
 use super::treemap::shell_quote;
 use super::{Exit, Failure, scan};
 use crate::cli::CleanArgs;
 use crate::out::{self, Output, thousands};
 
-/// `--max-age` when neither the flag nor the configuration sets it.
-const DEFAULT_MAX_AGE: &str = "7d";
-
 /// `clean`.
 pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
-    let lookup = Lookup::new(args, index_dir)?;
+    let lookup = Lookup::new(
+        args.max_age.as_deref(),
+        args.test_now.as_deref(),
+        &args.trust,
+        index_dir,
+    )?;
     let mut items: Vec<CleanItem> = args
         .paths
         .iter()
@@ -48,31 +50,33 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         })
         .collect();
     let handle_scan = handles(args, lookup.dir.as_deref(), &mut items)?;
-    let selector = match (&args.scan, handle_scan) {
-        (Some(text), _) => Some(ScanSelector::parse(text).map_err(core_failure)?),
+    let first = items[0].path.clone();
+    let (selector, path) = match (&args.scan, handle_scan) {
+        (Some(text), _) => (ScanSelector::parse(text).map_err(core_failure)?, None),
         (None, Some(id)) if args.paths.is_empty() => {
-            Some(ScanSelector::parse(&id).map_err(core_failure)?)
+            (ScanSelector::parse(&id).map_err(core_failure)?, None)
         }
-        (None, _) => None,
+        (None, _) => (ScanSelector::Latest, Some(first.as_path())),
     };
-    let resolved = lookup.resolve(selector.as_ref(), &items[0].path)?;
+    let Some(resolved) = lookup.resolve(&selector, path)? else {
+        return Err(no_scan(&first));
+    };
     let caches = scan::cache_rules(args.caches_extra.as_deref())?;
     let env = |name: &str| std::env::var_os(name);
     let q = ExplainQuery {
         caches: &caches,
         env: &env,
     };
-    let mut plan =
-        clean_plan(&items, resolved.as_ref().map(|r| &r.index), &q).map_err(core_failure)?;
+    let mut plan = clean_plan(&items, &resolved.index, &q).map_err(core_failure)?;
 
     let refused = plan.refused_count();
     let blocked = refused > 0 && !args.skip_refused;
     let moving = plan.trash_count();
-    let scan_block = resolved.as_ref().map(|r| block(&r.index));
+    let scan_block = block(&resolved.index);
     let mut warnings: Vec<Warning> = resolved
-        .iter()
-        .filter(|r| r.stale)
-        .map(|r| stale_index(&r.index, &lookup.max_age))
+        .stale
+        .then(|| stale_index(&resolved.index, &lookup.max_age))
+        .into_iter()
         .collect();
     let query = CleanQuery {
         command: "clean",
@@ -98,7 +102,7 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         && !output.is_machine()
         && out::interactive()
     {
-        let shown = envelope(&plan, None, scan_block.clone(), &query, None, &warnings);
+        let shown = envelope(&plan, None, &scan_block, &query, None, &warnings);
         output.clean(&shown, &plan_line(&plan, output), true)?;
         warnings.clear();
         asked = true;
@@ -107,7 +111,7 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     let outcome = act.then(|| clean_execute(&mut plan));
     plan.plan.confirmation_required = !act && !blocked && moving > 0;
     if outcome.is_some_and(|o| o.trashed_count > 0) {
-        warnings.push(index_untouched(scan_block.as_ref()));
+        warnings.push(index_untouched(&scan_block));
     }
 
     let failure = failure(&plan, blocked, outcome, asked);
@@ -118,15 +122,33 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
             .unwrap_or_else(|| out::error_object(f)),
         _ => out::error_object(f),
     });
-    let next = next(&plan, &query, outcome.is_some(), scan_block.as_ref());
+    let next = next(args, &plan, outcome.is_some(), &scan_block);
     let footer = footer(&plan, outcome, output);
-    let answer = envelope(&plan, outcome, scan_block, &query, error, &warnings);
+    let answer = envelope(&plan, outcome, &scan_block, &query, error, &warnings);
     let answer = CleanEnvelope { next, ..answer };
     output.clean(&answer, &footer, !asked)?;
     match failure {
         Some(failure) => Err(failure.reported()),
         None => Ok(()),
     }
+}
+
+/// No saved scan holds the first item: a plan needs one, for the root that
+/// bounds what may move and for its sizes.
+fn no_scan(first: &Path) -> Failure {
+    let dir = first.parent().unwrap_or(first).to_string_lossy();
+    Failure::new(
+        Exit::NotFound,
+        "scan_not_found",
+        format!(
+            "no saved scan holds {}: clean plans from a saved scan",
+            first.display()
+        ),
+    )
+    .hint(format!(
+        "Run duscope scan --save {} first, or name a saved scan with --scan",
+        shell_quote(&dir)
+    ))
 }
 
 /// The scan block of the saved scan the plan's sizes come from.
@@ -222,94 +244,11 @@ fn handles(
     Ok(scan)
 }
 
-/// How `clean` finds the saved scan its plan's sizes come from.
-struct Lookup {
-    /// The index directory, when one can be found.
-    dir: Option<PathBuf>,
-    cwd: PathBuf,
-    max_age: String,
-    max_age_ns: i64,
-    now: i64,
-    /// `--trust`.
-    trust: Vec<PathBuf>,
-}
-
-impl Lookup {
-    fn new(args: &CleanArgs, index_dir: Option<&Path>) -> Result<Lookup, Failure> {
-        let cwd = std::env::current_dir().map_err(|e| {
-            Failure::new(
-                Exit::Runtime,
-                "io_error",
-                format!("cannot read the working directory: {e}"),
-            )
-        })?;
-        let max_age = args
-            .max_age
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MAX_AGE.to_owned());
-        let max_age_ns = timegrammar::parse_age(&max_age)
-            .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--max-age {e}")))?;
-        let now = match &args.test_now {
-            Some(text) => timegrammar::parse_date(text)
-                .map(|date| date.ns)
-                .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--test-now {e}")))?,
-            None => clock::now(),
-        };
-        Ok(Lookup {
-            dir: index_dir
-                .map(Path::to_owned)
-                .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name))),
-            cwd,
-            max_age,
-            max_age_ns,
-            now,
-            trust: args.trust.clone(),
-        })
-    }
-
-    /// The scan `selector` names (an item outside it is refused), or without
-    /// one the newest saved scan that holds `first`; `None` when latest finds
-    /// none or there is no index directory to look in.
-    fn resolve(
-        &self,
-        selector: Option<&ScanSelector>,
-        first: &Path,
-    ) -> Result<Option<Resolved>, Failure> {
-        let (selector, path) = match selector {
-            Some(selector) => (selector, None),
-            None => (&ScanSelector::Latest, Some(first)),
-        };
-        let dir = match (&self.dir, selector) {
-            (Some(dir), _) => dir.as_path(),
-            (None, ScanSelector::File(_)) => Path::new(""),
-            (None, ScanSelector::Latest) => return Ok(None),
-            (None, ScanSelector::Prefix(_)) => {
-                return Err(Failure::new(
-                    Exit::NotFound,
-                    "scan_not_found",
-                    "no index directory to look for the scan in: neither HOME nor \
-                     XDG_CACHE_HOME is set",
-                )
-                .hint("Run duscope with --index-dir naming the directory the scans are in"));
-            }
-        };
-        let q = ScanQuery {
-            index_dir: dir,
-            path,
-            cwd: &self.cwd,
-            max_age_ns: self.max_age_ns,
-            now: self.now,
-            trust: &self.trust,
-        };
-        resolve_scan(selector, &q, scanned).map_err(core_failure)
-    }
-}
-
 /// The envelope of `plan`.
 fn envelope(
     plan: &Plan,
     outcome: Option<CleanOutcome>,
-    scan: Option<ScanBlock>,
+    scan: &ScanBlock,
     query: &CleanQuery,
     error: Option<ErrorObject>,
     warnings: &[Warning],
@@ -319,7 +258,7 @@ fn envelope(
         ok: error.is_none(),
         schema_version: SCHEMA_VERSION,
         tool: Tool::CURRENT,
-        scan,
+        scan: Some(scan.clone()),
         query: query.clone(),
         result: CleanResult {
             plan: plan.plan.clone(),
@@ -340,8 +279,8 @@ fn first_error(plan: &Plan) -> Option<&ErrorObject> {
 
 /// The saved scan is not changed by a move: a rescan measures the tree
 /// again.
-fn index_untouched(scan: Option<&ScanBlock>) -> Warning {
-    let hint = match scan.and_then(|s| s.id.as_deref()) {
+fn index_untouched(scan: &ScanBlock) -> Warning {
+    let hint = match scan.id.as_deref() {
         Some(id) => format!("Run duscope rescan {id} to measure the tree again"),
         None => "Run duscope scan to measure the tree again".to_owned(),
     };
@@ -354,12 +293,15 @@ fn index_untouched(scan: Option<&ScanBlock>) -> Warning {
     }
 }
 
-/// `clean`'s hints: after a plan that waits for a yes, the same command
-/// with `--yes`; after a move, the rescan that measures the tree again.
-fn next(plan: &Plan, query: &CleanQuery, acted: bool, scan: Option<&ScanBlock>) -> Vec<String> {
+/// `clean`'s hints: after a plan that waits for a yes, the same items
+/// against the same saved scan with `--yes` (a handle's item by its handle
+/// again); after a move, the rescan that measures the tree again. None for
+/// a path that is not UTF-8, which a command line cannot carry.
+fn next(args: &CleanArgs, plan: &Plan, acted: bool, scan: &ScanBlock) -> Vec<String> {
     if acted {
         return scan
-            .and_then(|s| s.id.as_deref())
+            .id
+            .as_deref()
             .map(|id| vec![format!("duscope rescan {id}")])
             .unwrap_or_default();
     }
@@ -367,11 +309,26 @@ fn next(plan: &Plan, query: &CleanQuery, acted: bool, scan: Option<&ScanBlock>) 
         return Vec::new();
     }
     let mut command = String::from("duscope clean");
-    for path in &query.paths {
-        command.push(' ');
-        command.push_str(&shell_quote(path));
+    // The plan holds the paths first, in their order, then the handles'.
+    for item in plan.plan.items.iter().take(args.paths.len()) {
+        let Ok(path) = std::str::from_utf8(&item.path_bytes) else {
+            return Vec::new();
+        };
+        let _ = write!(command, " {}", shell_quote(path));
     }
-    if query.skip_refused {
+    for token in &args.from {
+        let _ = write!(command, " --from {}", shell_quote(token));
+    }
+    if let Some(selector) = args.scan.as_deref().or(scan.id.as_deref()) {
+        let _ = write!(command, " --scan {}", shell_quote(selector));
+    }
+    for file in &args.trust {
+        let Some(file) = file.to_str() else {
+            return Vec::new();
+        };
+        let _ = write!(command, " --trust {}", shell_quote(file));
+    }
+    if args.skip_refused {
         command.push_str(" --skip-refused");
     }
     command.push_str(" --yes");

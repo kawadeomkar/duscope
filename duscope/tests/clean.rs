@@ -171,7 +171,8 @@ fn p4_core_01_the_refusal_matrix() {
         assert_eq!(value["result"]["trashed_count"], 0);
         assert!(path.exists());
     }
-    // The system's, planned only.
+    // The system's, planned only, against the test's scan: each is refused
+    // for what it is before it is outside that scan's root.
     let mut cases: Vec<(&str, &str)> = vec![("/", "root"), ("/dev", "mount_point")];
     if cfg!(target_os = "macos") {
         // A firmlink of the System volume, and the sealed System volume.
@@ -179,7 +180,8 @@ fn p4_core_01_the_refusal_matrix() {
         cases.push(("/usr/share", "read_only_volume"));
     }
     for (path, reason) in cases {
-        let value = failed(&run(&env, &["clean", path, "--json"]), 1, "refused_path");
+        let out = run(&env, &["clean", path, "--scan", &id, "--json"]);
+        let value = failed(&out, 1, "refused_path");
         assert_eq!(actions(&value), [format!("refused:{reason}")], "{path}");
     }
     // Outside the scan --scan names.
@@ -223,7 +225,7 @@ fn p4_core_01_the_refusal_matrix() {
 fn p4_core_01_without_a_terminal_nothing_moves_without_yes() {
     let env = TestEnv::new();
     let root = tree(&env);
-    save(&env, &root);
+    let id = save(&env, &root);
     let file = root.join("a.bin");
     for extra in [&[][..], &["--no-input"][..]] {
         let mut args = vec!["clean", s(&file), "--json"];
@@ -233,8 +235,11 @@ fn p4_core_01_without_a_terminal_nothing_moves_without_yes() {
         assert_eq!(value["result"]["trashed_count"], 0);
         assert_eq!(value["error"]["fixable_by"], "user");
         let next = value["next"][0].as_str().unwrap();
+        // The same items against the same saved scan.
         assert!(
-            next.starts_with("duscope clean ") && next.ends_with(" --yes"),
+            next.starts_with("duscope clean ")
+                && next.contains(&format!(" --scan {id}"))
+                && next.ends_with(" --yes"),
             "{next}"
         );
         assert!(file.exists());
@@ -254,6 +259,19 @@ fn p4_core_01_an_item_twice_inside_another_or_missing_fails_the_run() {
     let env = TestEnv::new();
     let root = tree(&env);
     let file = root.join("a.bin");
+    // No saved scan holds it: clean plans from one.
+    let out = run(&env, &["clean", s(&file), "--json"]);
+    assert_eq!(out.status.code(), Some(3));
+    let value = json(&out);
+    assert_eq!(value["error"]["code"], "scan_not_found");
+    assert!(
+        value["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("Run duscope scan --save "),
+        "{value}"
+    );
+    save(&env, &root);
     let out = run(
         &env,
         &[
@@ -290,6 +308,12 @@ fn p4_core_01_a_handle_names_the_entry_explain_examined() {
     assert_eq!(value["query"]["handle_count"], 1);
     assert_eq!(value["result"]["plan"]["items"][0]["path"], s(&file));
     assert_eq!(value["scan"]["id"], facts["scan"]["id"]);
+    // The hint names the item by its handle again.
+    let next = value["next"][0].as_str().unwrap();
+    assert!(
+        next.contains(" --from ") && next.contains(&handle) && !next.contains(s(&file)),
+        "{next}"
+    );
     // Another file at the path: another inode, made while the first exists.
     let other = root.join("a.new");
     fs::write(&other, vec![1u8; 3000]).unwrap();
@@ -299,9 +323,11 @@ fn p4_core_01_a_handle_names_the_entry_explain_examined() {
     assert_eq!(json(&out)["error"]["code"], "path_changed");
     assert!(file.exists());
     // A handle duscope did not sign.
+    // A character of the MAC: not the last, whose low bits may be padding
+    // that decodes the same whatever they are.
     let mut forged = handle.into_bytes();
-    let last = forged.len() - 1;
-    forged[last] = if forged[last] == b'A' { b'B' } else { b'A' };
+    let at = forged.len() - 2;
+    forged[at] = if forged[at] == b'A' { b'B' } else { b'A' };
     let out = run(
         &env,
         &[
@@ -379,6 +405,7 @@ fn p4_core_01_the_test_environment_moves_nothing_on_the_startup_volume() {
     // and the run says why.
     let env = TestEnv::new();
     let root = tree(&env);
+    save(&env, &root);
     let file = root.join("a.bin");
     let value = failed(
         &run(&env, &["clean", s(&file), "--yes", "--json"]),
@@ -423,6 +450,7 @@ fn p4_core_01_macos_a_trashed_file_round_trips_on_an_image() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(&file, vec![7u8; 3000]).unwrap();
     fs::write(dir.join("b.bin"), vec![9u8; 5000]).unwrap();
+    save(&env, &mount);
     let value = ok(&run(&env, &["clean", s(&file), s(&dir), "--yes", "--json"]));
     assert_eq!(value["result"]["trashed_count"], 2);
     assert!(!file.exists() && !dir.exists());

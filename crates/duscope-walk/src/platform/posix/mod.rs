@@ -317,9 +317,8 @@ pub(crate) fn statvfs(path: &CStr) -> io::Result<libc::statvfs> {
 }
 
 /// Whether this process may create entries in the directory `path`
-/// (`access(2)` with `W_OK`): whether the Linux Trash can make a volume's
-/// own Trash in its top directory.
-#[cfg(target_os = "linux")]
+/// (`access(2)` with `W_OK`): whether the Trash can move an entry out of
+/// it, or make its own directories in it.
 pub(crate) fn writable(path: &Path) -> bool {
     let Ok(c_path) = c_path(path) else {
         return false;

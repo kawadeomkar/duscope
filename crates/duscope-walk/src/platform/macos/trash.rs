@@ -9,6 +9,7 @@ use trash::macos::{DeleteMethod, TrashContextExtMacos};
 
 use super::volume;
 use crate::TrashError;
+use crate::platform::posix;
 
 /// The startup volume's two mount points: the sealed system volume and the
 /// Data volume, which holds the account's home and its Trash.
@@ -32,13 +33,37 @@ pub(in crate::platform) fn trash(path: &Path, guarded: bool) -> Result<(), Trash
             )));
         }
     }
+    // The crate percent-encodes a path that is not UTF-8 into another path,
+    // which could name another entry: such a path is never handed to it.
+    if path.to_str().is_none() {
+        return Err(TrashError::Failed(format!(
+            "cannot move {}: the Trash takes only UTF-8 paths",
+            path.display()
+        )));
+    }
+    // Moving an entry needs its directory writable: refused for that, the
+    // volume's Trash is not the matter.
+    if path.parent().is_some_and(|parent| !posix::writable(parent)) {
+        return Err(TrashError::Failed(format!(
+            "cannot move {}: permission denied on its directory",
+            path.display()
+        )));
+    }
     let mut context = trash::TrashContext::default();
     // Not the crate's default, Finder through osascript, which needs a
     // session with Finder running and plays its sound.
     context.set_delete_method(DeleteMethod::NsFileManager);
-    context
-        .delete(path)
-        .map_err(|e| TrashError::Unavailable(e.to_string()))
+    context.delete(path).map_err(|e| {
+        // The crate passes on NSFileManager's localized description only, not
+        // its code: one about permission (a protected folder, in English) is a
+        // failure to move, any other that the volume's Trash took nothing.
+        let message = e.to_string();
+        if message.to_lowercase().contains("permission") {
+            TrashError::Failed(message)
+        } else {
+            TrashError::Unavailable(message)
+        }
+    })
 }
 
 /// Whether `path` is a firmlink of the System volume, by the system's table

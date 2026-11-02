@@ -1,16 +1,18 @@
 //! `clean`: the plan of what to move to the Trash, and moving it.
 //!
-//! An item's facts come from the saved scan that holds it, as `explain`
-//! reads them: its bytes, what deleting it frees now (its bytes less those
-//! a link or clone member outside it keeps, so a file whose other links lie
-//! elsewhere frees 0), its links outside it and the command that
-//! regenerates it. An item no saved scan holds is planned from a fresh
-//! `stat`, as `explain` answers it.
+//! A plan is made against one saved scan. An item's facts come from it, as
+//! `explain` reads them: its bytes, its links outside it and the command
+//! that regenerates it. What deleting it frees is the plan's: its bytes less
+//! those a link or clone member outside the plan keeps, so a file whose
+//! other links lie elsewhere frees 0, and two links both in the plan free
+//! their bytes once. An item under the scan's root that the scan does not
+//! hold (made since) is planned from a fresh `stat`, a directory with its
+//! own walk; what it frees is not known.
 //!
 //! An item is refused, with its `reason`, when it is a symbolic link, a
-//! mount point, a firmlink, the scan's root (or `/`), outside the scan's
-//! root, or on a read-only volume. A refusal is a fact of the plan; whether
-//! it stops the run (`--skip-refused`) and whether the plan is acted on
+//! firmlink, a mount point, the scan's root (or `/`), on a read-only volume,
+//! or outside the scan's root. A refusal is a fact of the plan; whether it
+//! stops the run (`--skip-refused`) and whether the plan is acted on
 //! (`--yes`, the prompt) is the binary's to decide, which calls
 //! [`clean_execute`] only then.
 //!
@@ -19,12 +21,14 @@
 //! what the plan saw (its device and inode), and never falls back to
 //! removing it.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
+use std::fs::Metadata;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use duscope_walk::{Flags, TrashError};
+use duscope_walk::{Flags, Kind, ScanEvent, TrashError, WalkOptions};
 
 use crate::CoreError;
 use crate::envelope::{CleanPlan, ErrorObject, Explain, PlanItem, name_fields};
@@ -83,20 +87,18 @@ pub struct CleanOutcome {
     pub failed_count: u64,
 }
 
-/// The plan for `items`, from `index` (the saved scan that holds them) where
-/// there is one. A path that does not exist, or whose device and inode are
-/// not those of its handle, fails the plan ([`CoreError::ScanNotFound`],
+/// The plan for `items` against `index`, the saved scan whose root they
+/// should lie under. A path that does not exist, or whose device and inode
+/// are not those of its handle, fails the plan ([`CoreError::ScanNotFound`],
 /// [`CoreError::PathChanged`]), as does an item named twice or inside
 /// another ([`CoreError::CleanOverlap`]): `clean` acts on all or none of a
 /// list.
 pub fn clean_plan(
     items: &[CleanItem],
-    index: Option<&Index>,
+    index: &Index,
     q: &ExplainQuery<'_>,
 ) -> Result<Plan, CoreError> {
-    overlap(items)?;
-    let mut planned = Vec::with_capacity(items.len());
-    let mut idents = Vec::with_capacity(items.len());
+    let mut metas = Vec::with_capacity(items.len());
     for item in items {
         let meta = std::fs::symlink_metadata(&item.path).map_err(|e| {
             CoreError::ScanNotFound(if e.kind() == std::io::ErrorKind::NotFound {
@@ -105,19 +107,35 @@ pub fn clean_plan(
                 format!("cannot stat {}: {e}", item.path.display())
             })
         })?;
-        let ident = (meta.dev(), meta.ino());
-        if item.handle.is_some_and(|signed| signed != ident) {
+        if item
+            .handle
+            .is_some_and(|signed| signed != (meta.dev(), meta.ino()))
+        {
             return Err(CoreError::PathChanged(item.path.display().to_string()));
         }
-        let id = index.and_then(|ix| ix.lookup(ix.below_root(&item.path)?));
-        let facts = match (index, id) {
-            (Some(ix), Some(id)) => explain(ix, id, q)?,
-            _ => explain_unindexed(&item.path, q)?,
-        };
-        let reason = refusal(&item.path, &meta, index, id);
-        planned.push(plan_item(&item.path, &meta, &facts, reason));
-        idents.push(ident);
+        metas.push(meta);
     }
+    overlap(items, &metas)?;
+    let mut planned = Vec::with_capacity(items.len());
+    let mut ids = Vec::with_capacity(items.len());
+    for (item, meta) in items.iter().zip(&metas) {
+        let below = index.below_root(&item.path);
+        let under_root = below.is_some();
+        let id = below.and_then(|rel| index.lookup(rel));
+        let mut facts = match id {
+            Some(id) => explain(index, id, q)?,
+            None => explain_unindexed(&item.path, q)?,
+        };
+        // A directory made since the scan: what is under it, not its inode
+        // alone.
+        if id.is_none() && under_root && meta.is_dir() {
+            facts.allocated_bytes = walked(&item.path);
+        }
+        let reason = refusal(&item.path, meta, index, id, under_root);
+        planned.push(plan_item(&item.path, meta, &facts, reason));
+        ids.push(id);
+    }
+    plan_frees(index, &ids, &mut planned)?;
     let moving = planned.iter().filter(|item| item.action == "trash");
     let total_allocated_bytes = moving.clone().map(|item| item.allocated_bytes).sum();
     let total_frees_bytes = moving.map(|item| item.frees_bytes.unwrap_or(0)).sum();
@@ -129,29 +147,46 @@ pub fn clean_plan(
             method: "trash",
             confirmation_required: true,
         },
-        idents,
+        idents: metas.iter().map(|m| (m.dev(), m.ino())).collect(),
     })
 }
 
 /// Fails when an item is named twice, or lies inside another item: the
-/// other would move it, and its bytes would count twice.
-fn overlap(items: &[CleanItem]) -> Result<(), CoreError> {
-    for (i, item) in items.iter().enumerate() {
-        for (j, other) in items.iter().enumerate() {
-            if i == j {
+/// other would move it, and its bytes would count twice. A directory is
+/// known by its device and inode, so another path to it (a firmlink, a name
+/// in another case) is the same item; anything else by its path.
+fn overlap(items: &[CleanItem], metas: &[Metadata]) -> Result<(), CoreError> {
+    let mut dirs: HashMap<(u64, u64), &Path> = HashMap::new();
+    let mut others: HashSet<&Path> = HashSet::new();
+    for (item, meta) in items.iter().zip(metas) {
+        let path = item.path.as_path();
+        let first = if meta.is_dir() {
+            dirs.insert((meta.dev(), meta.ino()), path)
+        } else {
+            (!others.insert(path)).then_some(path)
+        };
+        if let Some(first) = first {
+            return Err(CoreError::CleanOverlap(if first == path {
+                format!("{} is named twice", path.display())
+            } else {
+                format!(
+                    "{} and {} are one directory",
+                    first.display(),
+                    path.display()
+                )
+            }));
+        }
+    }
+    for item in items {
+        for ancestor in item.path.ancestors().skip(1) {
+            let Ok(meta) = std::fs::metadata(ancestor) else {
                 continue;
-            }
-            if item.path == other.path && i < j {
-                return Err(CoreError::CleanOverlap(format!(
-                    "{} is named twice",
-                    item.path.display()
-                )));
-            }
-            if item.path != other.path && item.path.starts_with(&other.path) {
+            };
+            if let Some(outer) = dirs.get(&(meta.dev(), meta.ino())) {
                 return Err(CoreError::CleanOverlap(format!(
                     "{} lies inside {}, which the plan moves already",
                     item.path.display(),
-                    other.path.display()
+                    outer.display()
                 )));
             }
         }
@@ -159,12 +194,37 @@ fn overlap(items: &[CleanItem]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Why `path` is refused, the first that applies; `None` when it is not. `id` is its entry in `index`, which holds it.
+/// The bytes on disk of the directory `path` and what is under it on its
+/// volume, each inode once.
+fn walked(path: &Path) -> u64 {
+    let opts = WalkOptions {
+        one_file_system: true,
+        clones: false,
+        ..WalkOptions::default()
+    };
+    let mut seen = HashSet::new();
+    let mut total = 0u64;
+    // A walk that fails part way leaves what it reached: the figure is the
+    // plan's, never what is moved.
+    let _ = duscope_walk::walk(path, &opts, |event| {
+        if let ScanEvent::Entry(entry) = event {
+            if entry.kind == Kind::Dir || entry.nlink <= 1 || seen.insert((entry.dev, entry.ino)) {
+                total = total.saturating_add(entry.allocated);
+            }
+        }
+    });
+    total
+}
+
+/// Why `path` is refused, the first that applies; `None` when it is not.
+/// `id` is its entry in `index`, and `under_root` whether the scan's root
+/// holds it.
 fn refusal(
     path: &Path,
-    meta: &std::fs::Metadata,
-    index: Option<&Index>,
+    meta: &Metadata,
+    index: &Index,
     id: Option<u32>,
+    under_root: bool,
 ) -> Option<&'static str> {
     if meta.file_type().is_symlink() {
         return Some("symlink");
@@ -173,18 +233,15 @@ fn refusal(
         .parent()
         .and_then(|parent| std::fs::metadata(parent).ok())
         .map(|parent| parent.dev());
-    let indexed_flags = || -> u32 {
-        match (index, id) {
-            (Some(ix), Some(id)) if ix.node(id).is_dir() => ix
-                .db()
-                .query_row("SELECT flags FROM dirs WHERE id = ?1", [id], |row| {
-                    row.get(0)
-                })
-                .unwrap_or(0),
-            _ => 0,
-        }
+    let flags: u32 = match id {
+        Some(id) if index.node(id).is_dir() => index
+            .db()
+            .query_row("SELECT flags FROM dirs WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0),
+        _ => 0,
     };
-    let flags = indexed_flags();
     // Before the mount point: a firmlink leads into the Data volume, so its
     // device is not its parent's either.
     if duscope_walk::is_firmlink(path) || flags & FIRMLINK != 0 {
@@ -196,13 +253,118 @@ fn refusal(
     if path.parent().is_none() || id == Some(0) {
         return Some("root");
     }
-    if index.is_some() && id.is_none() {
-        return Some("outside_root");
-    }
     if duscope_walk::read_only_volume(path).unwrap_or(false) {
         return Some("read_only_volume");
     }
+    if !under_root {
+        return Some("outside_root");
+    }
     None
+}
+
+/// What each item the plan moves frees: its bytes, less those of each link
+/// group or clone group charged under it that has a link or member outside
+/// the plan. `explain` counts a sharer outside the item; the plan counts
+/// only those outside every item it moves, so two links both in the plan
+/// free their bytes once. An upper bound stays one; a group with a sharer
+/// outside the plan makes the figure a lower bound. A refused item, one the
+/// scan does not hold and one whose contents it did not read keep
+/// `explain`'s figures.
+fn plan_frees(
+    index: &Index,
+    ids: &[Option<u32>],
+    planned: &mut [PlanItem],
+) -> Result<(), CoreError> {
+    let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
+        file: index.file().display().to_string(),
+        message: e.to_string(),
+    };
+    let moving: Vec<(usize, u32, u32)> = ids
+        .iter()
+        .zip(planned.iter())
+        .enumerate()
+        .filter_map(|(i, (id, item))| {
+            let id = (*id).filter(|_| item.action == "trash")?;
+            Some((i, id, index.node(id).last_id))
+        })
+        .collect();
+    let db = index.db();
+    let mut members = db
+        .prepare("SELECT link_first, clone_first FROM shared_members WHERE id BETWEEN ?1 AND ?2")
+        .map_err(corrupt)?;
+    // The items' ranges never overlap, so a group's links in the plan are
+    // the sum of its links in each.
+    let (mut links_in, mut clones_in) = (BTreeMap::<u32, u64>::new(), BTreeMap::<u32, u64>::new());
+    let mut groups: Vec<BTreeSet<u32>> = Vec::with_capacity(moving.len());
+    for &(_, first, last) in &moving {
+        let mut under = BTreeSet::new();
+        let rows = members
+            .query_map([first, last], |row| {
+                Ok((row.get::<_, Option<u32>>(0)?, row.get::<_, Option<u32>>(1)?))
+            })
+            .map_err(corrupt)?;
+        for row in rows {
+            let (link, clone) = row.map_err(corrupt)?;
+            if let Some(g) = link {
+                *links_in.entry(g).or_default() += 1;
+                under.insert(g);
+            }
+            if let Some(g) = clone {
+                *clones_in.entry(g).or_default() += 1;
+                under.insert(g);
+            }
+        }
+        groups.push(under);
+    }
+    let count = |sql: &str, g: u32| -> Result<u64, CoreError> {
+        let n: i64 = db.query_row(sql, [g], |row| row.get(0)).map_err(corrupt)?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    };
+    let mut outside = BTreeSet::new();
+    for (&g, &n) in &links_in {
+        if count(
+            "SELECT COALESCE(MAX(nlink), 0) FROM hardlinks WHERE first_id = ?1",
+            g,
+        )? > n
+        {
+            outside.insert(g);
+        }
+    }
+    for (&g, &n) in &clones_in {
+        if count(
+            "SELECT COUNT(*) FROM shared_members WHERE clone_first = ?1",
+            g,
+        )? > n
+        {
+            outside.insert(g);
+        }
+    }
+    for (&(i, first, last), under) in moving.iter().zip(&groups) {
+        let item = &mut planned[i];
+        if item.frees_bytes.is_none() {
+            continue;
+        }
+        let node = index.node(first);
+        let total = if node.is_dir() || node.charged {
+            node.allocated
+        } else {
+            0
+        };
+        let kept: u64 = under
+            .iter()
+            .filter(|&&g| outside.contains(&g) && (first..=last).contains(&g))
+            .map(|&g| index.node(g).allocated)
+            .sum();
+        item.frees_bytes = Some(total.saturating_sub(kept));
+        item.frees_kind = Some(if item.frees_kind == Some("upper_bound") {
+            "upper_bound"
+        } else if under.iter().any(|g| outside.contains(g)) {
+            "lower_bound"
+        } else {
+            "exact"
+        });
+    }
+    Ok(())
 }
 
 /// The plan's row for `path`: its facts, and its action.
