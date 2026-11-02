@@ -44,14 +44,23 @@ name: Release
 
 on:
   # Pull requests run verify-tag (nothing to verify), `dist plan`, which checks
-  # dist-workspace.toml against the workspace, and the three .deb jobs.
+  # dist-workspace.toml against the workspace, and the three .deb jobs; those
+  # after verify-tag where ci.yml runs its full set (DEV-73), and the labels
+  # rerun them as they rerun ci.yml.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+*"
 
 permissions:
   contents: read
+
+concurrency:
+  # As in ci.yml: a new push to a pull request replaces its running release
+  # checks; a tag's run has a group of its own commit and is never cancelled.
+  group: release-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # The task runner, at ci.yml's pin.
@@ -119,6 +128,7 @@ jobs:
   plan:
     needs:
       - verify-tag
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: "ubuntu-24.04"
     timeout-minutes: 10
     outputs:
