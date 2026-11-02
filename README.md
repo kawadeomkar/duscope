@@ -1,23 +1,28 @@
 # duscope
 
 > [!NOTE]
-> **v0.1.0, the first usable release.** duscope scans, answers `top`, `tree`,
-> `by-type` and `stale` from the scan, prints one JSON envelope and draws a
-> treemap in the terminal. The index and its history, the MCP server and the
-> interactive treemap arrive in later releases, as the list below marks.
+> **v0.2.0, saved scans.** duscope scans, saves each scan as a SQLite index and
+> answers `top`, `tree`, `by-type`, `stale`, `caches`, `summary` and `explain`
+> from it in milliseconds, compares two scans (`diff`) and takes read-only SQL
+> (`query --sql`); it prints one JSON envelope, exports to and imports from
+> ncdu, GrandPerspective and QDirStat, and renders the treemap in the terminal,
+> as SVG or as PNG. The MCP server and the interactive treemap arrive in later
+> releases, as the list below marks.
 
 duscope is a disk-usage analyzer for macOS and Linux. It scans a directory tree
 once, in parallel, and:
 
 - draws the tree as a coloured treemap in the terminal (static now; interactive
-  later);
+  later), or renders it as SVG or PNG;
 - answers the questions that free space: the largest directories and files,
-  large files untouched for months, bytes by file type;
+  large files untouched for months, bytes by file type, regenerable caches, and
+  what deleting a path would free;
+- keeps each scan in a SQLite index with precomputed subtree totals, answers
+  from it in milliseconds, compares two scans and takes read-only SQL;
 - prints one versioned JSON envelope, sized to fit the output limits of scripts
   and AI agents;
-- will keep each scan in a SQLite index with precomputed subtree totals, answer
-  from it in milliseconds, compare two scans and take read-only SQL (v0.2), and
-  serve the same read-only operations to agents as a stdio MCP server (v0.3).
+- will serve the same read-only operations to agents as a stdio MCP server
+  (v0.3).
 
 Its sizes are what deleting would free: hard links count once on every
 filesystem, and it accounts for APFS clones and firmlinks on macOS and for btrfs
@@ -26,12 +31,19 @@ first-class, with one binary, one set of commands and one JSON format.
 
 ## A tour
 
-Each command scans the tree it is given and answers from that scan. The output
-below is from the fixture tree duscope's tests build (`just fixtures`), a
-made-up home directory, on macOS (APFS); a terminal shows it in colour. On Linux
-some allocated sizes differ, and the thread count at the end of the summary
-line is the machine's default. Paths in the home directory are shortened to `~`
-here; duscope prints them in full.
+The first command scans the tree and saves the scan in the index directory
+(`~/Library/Caches/duscope` on macOS, `~/.cache/duscope` elsewhere); the summary
+line names it. The commands after it answer from that saved scan, as every
+command does when a saved scan holds its path: an answer then takes
+milliseconds, however large the tree. `--no-save` scans without saving, `--scan`
+names another saved scan, and `scan` (or `duscope` alone) always scans afresh.
+
+The output below is from the fixture tree duscope's tests build (`just
+fixtures`), a made-up home directory, on macOS (APFS); a terminal shows it in
+colour. On Linux some allocated sizes differ, the thread count at the end of the
+first summary line is the machine's default, and the scan's id is another.
+Paths in the home directory are shortened to `~` here; duscope prints them in
+full.
 
 `top` lists the largest directories. A directory holding 80% of its parent's
 bytes is cut through to the child that holds them, so the row says where the
@@ -46,7 +58,7 @@ $ duscope top ~ --limit 6
 10.5 MiB   4.8%     250  ~/Music
 10.0 MiB   4.5%   2,001  ~/Documents
  7.9 MiB   3.6%   4,000  ~/.cache
-220.6 MiB allocated · 43,137 files · 8,129 dirs · 0.1 s, 16 threads
+220.6 MiB allocated · 43,137 files · 8,129 dirs · 0.1 s, 16 threads, saved as 1fd3
 ```
 
 `tree` shows each entry's share of its parent, here only those of at least 10%:
@@ -57,7 +69,7 @@ $ duscope tree ~/Projects --depth 1 --min-pct 10
 5.9 MiB  100.0%  ~/Projects
 3.5 MiB   59.0%    rust-cli/
 1.1 MiB   17.9%    npm-app/
-5.9 MiB allocated · 94 files · 137 dirs · 0.0 s, 16 threads
+5.9 MiB allocated · 94 files · 137 dirs · saved scan 1fd3 from 2037-01-01 00:00
 ```
 
 `by-type` adds bytes up by class; a directory rule wins over the extensions
@@ -73,7 +85,7 @@ $ duscope by-type ~
 15.1 MiB   6.8%   4,932  docs
  7.4 MiB   3.3%     197  archives
 23.9 MiB  10.9%   6,983  other
-220.6 MiB allocated · 43,137 files · 8,129 dirs · 0.1 s, 16 threads
+220.6 MiB allocated · 43,137 files · 8,129 dirs · saved scan 1fd3 from 2037-01-01 00:00
 ```
 
 `stale` finds large files neither modified nor changed for a while:
@@ -87,7 +99,7 @@ $ duscope stale ~ --older-than 1y --min-size 1M
 4.0 MiB  2035-01-02  ~/Movies/lecture-02.mkv
 3.0 MiB  2035-01-02  ~/Downloads/Xcode_16.1.xip
 1.5 MiB  2034-10-24  ~/Downloads/ubuntu-24.04.1-live-server-arm64.iso
-220.6 MiB allocated · 43,137 files · 8,129 dirs · 0.2 s, 16 threads
+220.6 MiB allocated · 43,137 files · 8,129 dirs · saved scan 1fd3 from 2037-01-01 00:00
 ```
 
 Scripts take `--plain` (tab-separated, sizes in bytes) or `--json`, the
@@ -111,17 +123,58 @@ $ duscope top ~ --files --limit 2 --json | jq -c '.entries[] | {path, kind, allo
 {"path":"~/Movies/wedding.mp4","kind":"file","allocated_bytes":6291456}
 ```
 
+`scans` lists the saved scans; here the one the first command saved:
+
+```console
+$ duscope scans --json | jq -c '.entries[] | {root, entry_count, source}'
+{"root":"~","entry_count":51266,"source":"scan"}
+```
+
+`explain` says what one path is and what deleting it would free, here a
+`node_modules` directory, with the command that builds it again:
+
+```console
+$ duscope explain ~/dev/node_modules --json | jq -c '.result | {kind, allocated_bytes, freeable_now_bytes, regenerable_by, confidence}'
+{"kind":"dir","allocated_bytes":18247680,"freeable_now_bytes":18247680,"regenerable_by":"npm install","confidence":"high"}
+```
+
+`query --sql` runs one read-only `SELECT` over the saved scan's tables
+([docs/index-format.md](docs/index-format.md); `duscope schema` lists them),
+here the extensions holding the most data:
+
+```console
+$ duscope query ~ --plain --sql "SELECT human_size(sum(apparent)) AS size, count(*) AS files, ext FROM files WHERE ext != '' GROUP BY ext ORDER BY sum(apparent) DESC, ext LIMIT 4"
+size	files	ext
+17.1 MiB	147	mov
+8.0 MiB	2	mkv
+7.1 MiB	129	mp4
+3.0 MiB	1	xip
+```
+
+`diff` compares two saved scans of one tree, by id: what appeared, went, grew
+and shrank, the largest change first. After a week's work on the home
+directory, for example:
+
+```sh
+duscope scan ~ --save          # saved as 7a2c
+duscope diff 1fd3 7a2c
+```
+
 `duscope` alone, or `duscope scan ~`, draws the treemap: a box per folder, a
 tile per file, coloured by class, with the legend and the next commands below.
-`duscope man` prints the manual page, and `duscope completions bash` (or zsh,
-fish, elvish, powershell) the completion script.
+`duscope render ~ -o home.svg` writes it as SVG (`--format png` for PNG), and
+`duscope export ~ --format ncdu -o home.json` writes the scan for ncdu (or
+GrandPerspective's `.gpscan`, QDirStat's cache or CSV), which `duscope import`
+reads back. `duscope man` prints the manual page, and `duscope completions bash`
+(or zsh, fish, elvish, powershell) the completion script.
 
 ## What it never does
 
 - It never follows a symbolic link, unless given `--follow-symlinks`.
 - It never reads a file's contents, only names and metadata (and, for `--exclude-caches`, the 43-byte signature of a `CACHEDIR.TAG`). It does read the system's own description of the disk's layout: `/usr/share/firmlinks` on macOS, `/proc/self/mountinfo` on Linux.
 - It never writes inside the tree it scans.
-- It never deletes without being told: v0.1.0 has no command that deletes, and the `clean` of a later release is a dry run unless given `--yes`, and moves files to the Trash by default.
+- It never deletes without being told: no release yet has a command that deletes, and the `clean` of a later release is a dry run unless given `--yes`, and moves files to the Trash by default.
+- It never reads an index file from outside its index directory unless `--trust` names it: an index file may come from anyone ([SECURITY.md](SECURITY.md)).
 - It never opens a network connection: no telemetry, no update checks.
 
 ## Install
