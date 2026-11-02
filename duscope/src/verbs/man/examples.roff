@@ -15,5 +15,33 @@ Bytes by file class, with the three largest files of each.
 .B duscope scan ~ \-\-exclude\-caches \-\-json
 The JSON envelope of a scan that leaves out regenerable caches.
 .TP
+.B duscope scans
+The saved scans, newest first: each scan's id, start, entries, sizes and root.
+.TP
+.B duscope explain ~/dev/app/node_modules
+What the directory is, what deleting it would free, and the command that
+builds it again.
+.TP
+.B duscope diff 1fd3 7a2c
+What changed between two saved scans of one tree, the largest change first.
+.TP
+.B duscope query ~ \-\-sql \(dqSELECT path(id), human_size(allocated) FROM files ORDER BY allocated DESC LIMIT 5\(dq
+The five largest files, by SQL over the saved scan's tables.
+.TP
+.B duscope rescan ~/src
+Scan the tree a saved scan holds again, with the options it was taken with.
+.TP
+.B duscope render ~ \-o home.svg
+The treemap as an SVG file;
+.B \-\-format png
+writes a PNG.
+.TP
+.B duscope export ~ \-\-format ncdu \-o home.json
+The scan in ncdu's format, which
+.B ncdu \-f home.json
+opens and
+.B duscope import home.json
+reads back.
+.TP
 .B duscope completions zsh > _duscope
 Write the zsh completion script.
