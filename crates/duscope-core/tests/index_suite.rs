@@ -12,7 +12,7 @@
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -97,30 +97,34 @@ fn listing(dir: &Path) -> Vec<String> {
 fn p2_test_01_a_reader_never_sees_half_a_write() {
     let env = TestEnv::new();
     let dir = env.tmp_dir();
-    let done = AtomicBool::new(false);
+    // What every file holds whole.
+    let whole = Index::open(&write(&env.tmp_dir().join("whole"), 1)).unwrap();
+    let (len, allocated) = (whole.len(), whole.node(0).allocated);
     let opened = thread::scope(|scope| {
-        scope.spawn(|| {
+        let writer = scope.spawn(|| {
             for n in 0..40 {
                 write(&dir, 1_700_000_000_000_000_000 + n);
             }
-            done.store(true, Ordering::Release);
         });
         // Every file the listing shows opens whole, however far the writer
-        // is through the next one.
+        // is through the next one; a writer that fails ends the loop, and
+        // its panic fails the test.
         let mut opened = 0;
         loop {
-            let finished = done.load(Ordering::Acquire);
+            let finished = writer.is_finished();
             for (id, file) in index_files(&dir) {
                 let index =
                     Index::open(&file).unwrap_or_else(|e| panic!("{id} opened half written: {e}"));
                 assert_eq!(index.meta().scan_id, id);
-                assert!(index.len() > 0);
+                assert_eq!((index.len(), index.node(0).allocated), (len, allocated));
                 opened += 1;
             }
             if finished {
-                break opened;
+                break;
             }
         }
+        writer.join().unwrap();
+        opened
     });
     assert!(opened >= 40);
     assert_eq!(index_files(&dir).len(), 40);
@@ -264,22 +268,28 @@ fn p2_test_01_a_newer_minor_opens_and_another_major_is_refused() {
 }
 
 /// A statement built from parts the sandbox allows, weighted so that
-/// about half the statements are answered, and parts it must not allow.
-fn statement() -> impl Strategy<Value = String> {
+/// about half the statements are answered, and parts it must not allow;
+/// and whether it must be refused whatever else it holds: it writes, or is
+/// more than one statement. `{vacuum}` stands for a file the test checks
+/// is never made.
+fn statement() -> impl Strategy<Value = (String, bool)> {
     let verb = prop_oneof![
-        12 => Just("SELECT"),
-        2 => Just("SELECT DISTINCT"),
-        1 => Just("PRAGMA"),
-        1 => Just("INSERT INTO dirs SELECT"),
-        1 => Just("UPDATE dirs SET name = x'00' WHERE 1 OR"),
-        1 => Just("DELETE FROM dirs WHERE"),
-        1 => Just("ATTACH DATABASE ':memory:' AS"),
-        1 => Just("CREATE TABLE t AS SELECT"),
-        1 => Just("CREATE TEMP VIEW v AS SELECT"),
-        1 => Just("DROP TABLE"),
-        1 => Just("VACUUM INTO '/tmp/x.db' --"),
-        1 => Just("BEGIN; SELECT"),
-        2 => Just("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT"),
+        12 => Just(("SELECT", false)),
+        2 => Just(("SELECT DISTINCT", false)),
+        1 => Just(("PRAGMA", true)),
+        1 => Just(("INSERT INTO dirs SELECT", true)),
+        1 => Just(("UPDATE dirs SET name = x'00' WHERE 1 OR", true)),
+        1 => Just(("DELETE FROM dirs WHERE", true)),
+        1 => Just(("ATTACH DATABASE ':memory:' AS", true)),
+        1 => Just(("CREATE TABLE t AS SELECT", true)),
+        1 => Just(("CREATE TEMP VIEW v AS SELECT", true)),
+        1 => Just(("DROP TABLE", true)),
+        1 => Just(("VACUUM INTO '{vacuum}' --", true)),
+        1 => Just(("BEGIN; SELECT", true)),
+        2 => Just((
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT",
+            false
+        )),
     ];
     let expr = prop_oneof![
         4 => Just("*"),
@@ -310,16 +320,18 @@ fn statement() -> impl Strategy<Value = String> {
         1 => Just("dirs a, dirs b, dirs c, dirs d"),
     ];
     let tail = prop_oneof![
-        4 => Just(""),
-        3 => Just("LIMIT 5"),
-        2 => Just("WHERE id = :root_id"),
-        1 => Just("; DROP TABLE dirs"),
-        1 => Just("UNION ALL SELECT sql FROM sqlite_schema"),
-        1 => Just("-- a comment"),
-        1 => Just("/* unclosed"),
-        2 => Just("ORDER BY 1 DESC LIMIT 100000"),
+        4 => Just(("", false)),
+        3 => Just(("LIMIT 5", false)),
+        2 => Just(("WHERE id = :root_id", false)),
+        1 => Just(("; DROP TABLE dirs", true)),
+        1 => Just(("UNION ALL SELECT sql FROM sqlite_schema", false)),
+        1 => Just(("-- a comment", false)),
+        1 => Just(("/* unclosed", false)),
+        2 => Just(("ORDER BY 1 DESC LIMIT 100000", false)),
     ];
-    (verb, expr, object, tail).prop_map(|(v, e, o, t)| format!("{v} {e} FROM {o} {t}"))
+    (verb, expr, object, tail).prop_map(|((v, writes), e, o, (t, more))| {
+        (format!("{v} {e} FROM {o} {t}"), writes || more)
+    })
 }
 
 #[test]
@@ -329,31 +341,40 @@ fn p2_test_01_the_sandbox_answers_or_refuses_and_changes_nothing() {
     let bytes = fs::read(&file).unwrap();
     let before = listing(file.parent().unwrap());
     let index = Index::open(&file).unwrap();
+    let vacuumed = env.tmp_dir().join("vacuumed.db");
     let (answered, refused) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(400));
+    let any_text = ".{0,80}".prop_map(|text| (text, false));
     runner
-        .run(&prop_oneof![4 => statement(), 1 => ".{0,80}"], |text| {
-            let q = SqlQuery {
-                sql: &text,
-                max_rows: 50,
-                timeout: Duration::from_secs(1),
-                root_id: 0,
-            };
-            match sql(&index, &q) {
-                Ok(answer) => {
-                    prop_assert!(answer.rows.len() <= 50, "{text}");
-                    prop_assert_eq!(answer.row_count, answer.rows.len() as u64);
-                    answered.fetch_add(1, Ordering::Relaxed);
+        .run(
+            &prop_oneof![4 => statement(), 1 => any_text],
+            |(text, must_refuse)| {
+                let text = text.replace("{vacuum}", vacuumed.to_str().unwrap());
+                let q = SqlQuery {
+                    sql: &text,
+                    max_rows: 50,
+                    timeout: Duration::from_secs(1),
+                    root_id: 0,
+                };
+                match sql(&index, &q) {
+                    Ok(answer) => {
+                        prop_assert!(!must_refuse, "answered: {text}");
+                        prop_assert!(answer.rows.len() <= 50, "{text}");
+                        prop_assert_eq!(answer.row_count, answer.rows.len() as u64);
+                        answered.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(
+                        CoreError::SqlDenied(_)
+                        | CoreError::SqlTimeout(_)
+                        | CoreError::SqlInvalid(_),
+                    ) => {
+                        refused.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(other) => prop_assert!(false, "{text}: {other:?}"),
                 }
-                Err(
-                    CoreError::SqlDenied(_) | CoreError::SqlTimeout(_) | CoreError::SqlInvalid(_),
-                ) => {
-                    refused.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(other) => prop_assert!(false, "{text}: {other:?}"),
-            }
-            Ok(())
-        })
+                Ok(())
+            },
+        )
         .unwrap();
     // The parts make both: statements it answers, and ones it refuses.
     let (answered, refused) = (answered.into_inner(), refused.into_inner());
@@ -368,4 +389,5 @@ fn p2_test_01_the_sandbox_answers_or_refuses_and_changes_nothing() {
         "the sandbox changed the file"
     );
     assert_eq!(listing(file.parent().unwrap()), before);
+    assert!(!vacuumed.exists(), "VACUUM INTO wrote a file");
 }

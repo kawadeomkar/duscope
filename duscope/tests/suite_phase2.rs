@@ -123,13 +123,10 @@ fn p2_test_01_plain_goldens_of_the_phase_2_verbs() {
         &format!("summary_plain_tree@{os}.snap"),
         &plain(&["summary", r, "--plain"]),
     );
-    golden(
-        &format!("schema_plain_tree@{os}.snap"),
-        &plain(&["schema", r, "--plain"]),
-    );
+    golden("schema_plain_tree.snap", &plain(&["schema", r, "--plain"]));
     let file = root.join("docs/a.bin");
     golden(
-        &format!("explain_plain_file@{os}.snap"),
+        "explain_plain_file.snap",
         &plain(&["explain", file.to_str().unwrap(), "--plain"]),
     );
     // The scan exported as ncdu's JSON, and imported back.

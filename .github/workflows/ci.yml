@@ -420,17 +420,27 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just@${{ env.JUST_VERSION }}
+      # Before cargo-fuzz's install: the cache holds ~/.cargo/bin, so a cached
+      # cargo-fuzz of the pinned version is not built again.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install the dated nightly toolchain and cargo-fuzz pinned in the justfile
         run: |
           nightly=$(just --evaluate fuzz_toolchain)
           rustup toolchain install "$nightly" --profile minimal
           rustup run "$nightly" rustc --version
           cargo install --locked "cargo-fuzz@$(just --evaluate cargo_fuzz_version)"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Start from the nightly corpus
+        # Read only: nightly-fuzz.yml grows the corpus on main, and a pull
+        # request may read main's caches.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          workspaces: fuzz
-          key: ${{ matrix.target }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-none
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: just fuzz ${{ matrix.target }} (60 s)
         env:
           TARGET: ${{ matrix.target }}
