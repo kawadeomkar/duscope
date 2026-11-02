@@ -1,0 +1,2 @@
+### Added
+- `duscope agent` prints a briefing for AI agents, in Markdown: when to reach for duscope, the rules that keep it safe (sizes are bytes, `clean` is a dry run unless `--yes`, never pass `--yes` without a person's word), the flow from `explain` to a handle to `clean`, which command answers which question, every verb, exit code and error code of the binary that prints it, and SQL examples over a saved scan.

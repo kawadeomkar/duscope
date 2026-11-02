@@ -169,6 +169,8 @@ pub enum Verb {
     Import(ImportArgs),
     /// Draw the treemap as a picture, --format svg or png, at any size
     Render(RenderArgs),
+    /// Print the briefing an AI agent reads before it uses duscope
+    Agent,
     /// Print the manual page, in roff, to stdout
     Man,
     /// Print the completion script for a shell to stdout
@@ -1155,6 +1157,7 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             | Verb::Rescan(_)
             | Verb::Import(_)
             | Verb::Schema(_)
+            | Verb::Agent
             | Verb::Man
             | Verb::Completions(_),
         ) => {}
