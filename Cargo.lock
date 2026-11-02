@@ -401,6 +401,7 @@ dependencies = [
  "cargo_metadata",
  "duscope-testkit",
  "duscope-walk",
+ "gix-ignore",
  "globset",
  "jiff",
  "proptest",

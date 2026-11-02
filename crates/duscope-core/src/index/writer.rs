@@ -9,7 +9,7 @@
 //! its roll-up, which numbered the entries and charged the hard links and
 //! clones (DEV-36).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -201,8 +201,14 @@ fn rows(
             .min()
             .unwrap_or_default()
     };
+    // Each member's groups, for shared_members: (link_first, clone_first).
+    let mut members: BTreeMap<u32, (Option<u32>, Option<u32>)> = BTreeMap::new();
     let mut link = tx.prepare("INSERT INTO hardlinks VALUES (?1, ?2, ?3, ?4, ?5)")?;
     for group in charges.hardlinks(arena) {
+        let lowest = first(&group.sites);
+        for &site in &group.sites {
+            members.entry(rollup.id_of(site)).or_default().0 = Some(lowest);
+        }
         link.execute(params![
             signed(group.dev),
             signed(group.ino),
@@ -213,11 +219,19 @@ fn rows(
     }
     let mut clone = tx.prepare("INSERT INTO clones VALUES (?1, ?2, ?3)")?;
     for group in charges.clones(arena) {
+        let lowest = first(&group.members);
+        for &member in &group.members {
+            members.entry(rollup.id_of(member)).or_default().1 = Some(lowest);
+        }
         clone.execute(params![
             signed(group.dev),
             signed(group.clone_id),
             first(&group.members)
         ])?;
+    }
+    let mut member = tx.prepare("INSERT INTO shared_members VALUES (?1, ?2, ?3)")?;
+    for (id, (link_first, clone_first)) in members {
+        member.execute(params![id, link_first, clone_first])?;
     }
     let mut error = tx.prepare("INSERT OR IGNORE INTO scan_errors VALUES (?1, ?2, ?3)")?;
     for e in arena.errors() {

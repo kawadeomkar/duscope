@@ -121,12 +121,46 @@ pub enum Verb {
     ByType(ByTypeArgs),
     /// Large files not modified (or accessed) since a date
     Stale(StaleArgs),
+    /// Facts about one path: links, clones, what deleting it frees, caches, git
+    Explain(ExplainArgs),
     /// List, prune or check the saved scans
     Scans(ScansArgs),
     /// Print the manual page, in roff, to stdout
     Man,
     /// Print the completion script for a shell to stdout
     Completions(CompletionsArgs),
+}
+
+/// `explain`'s arguments.
+#[derive(Debug, Clone, Args)]
+pub struct ExplainArgs {
+    /// The path (default: the current directory)
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
+    /// List the directories and entries a saved scan could not read
+    #[arg(long, value_name = "SCAN", conflicts_with = "path")]
+    pub errors: Option<String>,
+
+    /// The saved scan to read: latest, an id prefix, or an index file
+    ///
+    /// Default: the newest saved scan that holds the path, else a fresh stat
+    #[arg(long, value_name = "SCAN", help_heading = "Saved scans")]
+    pub scan: Option<String>,
+
+    /// How old a saved scan may be before a warning (h, d, w, y; default 7d)
+    #[arg(long, value_name = "AGE", help_heading = "Saved scans")]
+    pub max_age: Option<String>,
+
+    /// The instant "now" is, for tests
+    // test-only
+    #[arg(long, hide = true, value_name = "RFC3339")]
+    pub test_now: Option<String>,
+
+    /// The configuration file's `[caches] extra`, merged over the vendored
+    /// cache rules.
+    #[arg(skip)]
+    pub caches_extra: Option<PathBuf>,
 }
 
 /// `scans`' arguments.
@@ -680,6 +714,12 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         Some(Verb::Stale(args)) => {
             walk_defaults(&mut args.walk)?;
             query_defaults(&mut args.query, &mut args.index);
+        }
+        Some(Verb::Explain(args)) => {
+            if args.max_age.is_none() {
+                args.max_age = d.max_age.as_ref().map(|age| age.value.clone());
+            }
+            args.caches_extra.clone_from(&config.caches_extra);
         }
         Some(Verb::Scans(_) | Verb::Man | Verb::Completions(_)) => {}
     }
