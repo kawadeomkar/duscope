@@ -18,8 +18,8 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use duscope_core::envelope::{
-    ByTypeEntry, CacheEntry, CheckedEntry, DiffEntry, DiffEnvelope, DiffTotals, Envelope,
-    ErrorEnvelope, Listing, ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry,
+    ByTypeEntry, CacheEntry, CheckedEntry, CleanEnvelope, DiffEntry, DiffEnvelope, DiffTotals,
+    Envelope, ErrorEnvelope, Listing, ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry,
     ScanErrorEntry, SqlQueryBlock, SqlResult, SqlValue, StaleEntry, TopEntry, TreeEntry, Warning,
 };
 use serde::Serialize;
@@ -693,6 +693,87 @@ impl Output {
         written
     }
 
+    /// Writes `clean`'s answer: the envelope under `--json` and `--format
+    /// ndjson`; one line per item under `--plain` (action, refusal reason,
+    /// bytes on disk, bytes freed, outcome, path); under the table format the
+    /// plan as a table (`table` false leaves it out, when the prompt showed
+    /// it already), each item that failed, and `footer`, which the machine
+    /// formats write to stderr. Warnings go in the envelope under JSON, on
+    /// stderr otherwise.
+    pub fn clean(
+        &self,
+        envelope: &CleanEnvelope,
+        footer: &str,
+        table: bool,
+    ) -> Result<(), Failure> {
+        let items = &envelope.result.plan.items;
+        let written = match self.format {
+            Format::Json | Format::Ndjson => self.sink(|out| format::json(out, envelope)),
+            Format::Plain => self.sink(|out| {
+                let rows = items.iter().map(|item| {
+                    vec![
+                        Cow::Borrowed(item.action.as_bytes()),
+                        Cow::Borrowed(item.reason.unwrap_or_default().as_bytes()),
+                        Cow::Owned(item.allocated_bytes.to_string().into_bytes()),
+                        Cow::Owned(
+                            item.frees_bytes
+                                .map_or_else(Vec::new, |n| n.to_string().into_bytes()),
+                        ),
+                        Cow::Borrowed(item.outcome.unwrap_or_default().as_bytes()),
+                        Cow::Borrowed(item.path_bytes.as_slice()),
+                    ]
+                });
+                let fields = [
+                    "action",
+                    "reason",
+                    "allocated_bytes",
+                    "frees_bytes",
+                    "outcome",
+                    "path",
+                ];
+                format::plain(out, &fields, rows, self.null, self.header)
+            }),
+            Format::Table | Format::Treemap => self.sink(|out| {
+                if table {
+                    let cells: Vec<Vec<String>> = items
+                        .iter()
+                        .map(|item| {
+                            let action = match (item.reason, item.outcome) {
+                                (Some(reason), _) => {
+                                    format!("refused: {}", reason.replace('_', " "))
+                                }
+                                (None, Some(outcome)) => outcome.to_owned(),
+                                (None, None) => item.action.to_owned(),
+                            };
+                            vec![
+                                action,
+                                self.units.size(item.allocated_bytes),
+                                item.frees_bytes
+                                    .map_or_else(|| "-".to_owned(), |n| self.units.size(n)),
+                                printable(&item.path).into_owned(),
+                            ]
+                        })
+                        .collect();
+                    let columns = ["action", "size", "frees", "path"];
+                    write!(out, "{}", table::grid(&columns, &cells, self.color))?;
+                }
+                for item in items {
+                    if let Some(error) = &item.error {
+                        writeln!(out, "failed: {}: {}", printable(&item.path), error.message)?;
+                    }
+                }
+                writeln!(out, "{footer}")
+            }),
+        };
+        if self.is_machine() {
+            stderr_line(footer);
+        }
+        if !self.is_json() && !self.quiet {
+            warn(&envelope.warnings);
+        }
+        written
+    }
+
     /// Writes `query`'s answer: the envelope under `--json` and `--format
     /// ndjson` (spilled past `--max-chars` like a list's), tab-separated
     /// values with a heading line under `--plain`, a table under the table
@@ -1075,6 +1156,33 @@ pub fn warn(warnings: &[Warning]) {
 pub fn stderr_line(line: &str) {
     let mut err = std::io::stderr().lock();
     let _ = writeln!(err, "{line}");
+}
+
+/// The conventions' error object of `failure`, as the error envelope holds
+/// it: for a verb that writes its failure in its own answer.
+pub fn error_object(failure: &Failure) -> duscope_core::envelope::ErrorObject {
+    format::error_envelope(failure).error
+}
+
+/// Whether a person can answer a question: stdin and stderr are both
+/// terminals.
+pub fn interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Asks `question` on stderr and reads the answer, one line of stdin;
+/// `None` at the end of the input or when it cannot be read.
+pub fn ask(question: &str) -> Option<String> {
+    {
+        let mut err = std::io::stderr().lock();
+        let _ = write!(err, "{question}");
+        let _ = err.flush();
+    }
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line.trim_end_matches(['\n', '\r']).to_owned()),
+    }
 }
 
 /// A failure for people, on stderr.

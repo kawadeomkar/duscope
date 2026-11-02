@@ -641,6 +641,10 @@ pub fn core_failure(error: CoreError) -> Failure {
             Failure::new(Exit::Runtime, "handle_expired", error.to_string())
                 .hint("Run duscope explain --json again for a fresh handle")
         }
+        CoreError::PathChanged(_) => Failure::new(Exit::Runtime, "path_changed", error.to_string())
+            .hint("Run duscope explain --json again for a handle of what is there now"),
+        CoreError::CleanOverlap(_) => Failure::new(Exit::Usage, "usage", error.to_string())
+            .hint("Rerun duscope clean naming each item once, and none inside another"),
         CoreError::ImportInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())
             .hint("Rerun duscope import with --format naming the tool that wrote the file"),
         CoreError::UntrustedIndex(ref file) => {

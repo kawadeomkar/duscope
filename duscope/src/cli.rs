@@ -151,6 +151,8 @@ pub enum Verb {
     Diff(DiffArgs),
     /// Facts about one path: links, clones, what deleting it frees, caches, git
     Explain(ExplainArgs),
+    /// Move paths to the Trash: a plan first, and nothing moves without --yes
+    Clean(CleanArgs),
     /// One read-only SQL statement over a saved scan's tables
     Query(SqlArgs),
     /// The treemap in the interactive viewer, on a saved scan or a new one
@@ -187,6 +189,59 @@ pub struct ExplainArgs {
     /// The saved scan to read: latest, an id prefix, or an index file
     ///
     /// Default: the newest saved scan that holds the path, else a fresh stat
+    #[arg(long, value_name = "SCAN", help_heading = "Saved scans")]
+    pub scan: Option<String>,
+
+    /// How old a saved scan may be before a warning (h, d, w, y; default 7d)
+    #[arg(long, value_name = "AGE", help_heading = "Saved scans")]
+    pub max_age: Option<String>,
+
+    /// Read this index file although it is outside the index directory (repeatable)
+    ///
+    /// Outside the index directory, only the files --trust names are read
+    #[arg(long, value_name = "FILE", help_heading = "Saved scans")]
+    pub trust: Vec<PathBuf>,
+
+    /// The instant "now" is, for tests
+    // test-only
+    #[arg(long, hide = true, value_name = "RFC3339")]
+    pub test_now: Option<String>,
+
+    /// The configuration file's `[caches] extra`, merged over the vendored
+    /// cache rules.
+    #[arg(skip)]
+    pub caches_extra: Option<PathBuf>,
+}
+
+/// `clean`'s arguments: what to move to the Trash, named by path or by a
+/// handle from `explain --json`, and whether to move it.
+#[derive(Debug, Clone, Args)]
+pub struct CleanArgs {
+    /// The paths to move to the Trash
+    #[arg(value_name = "PATH", required_unless_present = "from")]
+    pub paths: Vec<PathBuf>,
+
+    /// An entry explain --json examined, by its handle (repeatable)
+    ///
+    /// Valid for fifteen minutes, while the path holds the same entry
+    #[arg(long = "from", value_name = "HANDLE")]
+    pub from: Vec<String>,
+
+    /// Move the items to the Trash; without it the plan is only shown
+    #[arg(long, help_heading = "Clean")]
+    pub yes: bool,
+
+    /// Never ask: without --yes, answer confirmation_required
+    #[arg(long, help_heading = "Clean")]
+    pub no_input: bool,
+
+    /// Move what is not refused, rather than nothing
+    #[arg(long, help_heading = "Clean")]
+    pub skip_refused: bool,
+
+    /// The saved scan the sizes come from: latest, an id prefix or an index file
+    ///
+    /// Default: the newest saved scan that holds the first path, else a fresh stat
     #[arg(long, value_name = "SCAN", help_heading = "Saved scans")]
     pub scan: Option<String>,
 
@@ -1086,6 +1141,10 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             limit_default(config, &mut args.limit);
         }
         Some(Verb::Explain(args)) => {
+            max_age_default(&mut args.max_age);
+            args.caches_extra.clone_from(&config.caches_extra);
+        }
+        Some(Verb::Clean(args)) => {
             max_age_default(&mut args.max_age);
             args.caches_extra.clone_from(&config.caches_extra);
         }

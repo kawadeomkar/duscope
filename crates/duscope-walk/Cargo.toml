@@ -19,6 +19,7 @@ globset.workspace = true
 libc.workspace = true
 log.workspace = true
 thiserror.workspace = true
+trash.workspace = true
 
 [dev-dependencies]
 duscope-testkit.workspace = true

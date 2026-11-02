@@ -98,10 +98,11 @@ platform-tests:
       p2_qry_01_macos_an_apfs_image_folds_case_and_nfc
       p2_qry_03_linux_a_mounted_image_has_unaccounted_bytes
       p2_qry_03_macos_a_mounted_image_has_unaccounted_bytes
+      p4_core_01_macos_a_trashed_file_round_trips_on_an_image
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Five are built on Linux and five on macOS; a renamed test must not drop out unnoticed.
-    expected=5
+    # Five are built on Linux and six on macOS; a renamed test must not drop out unnoticed.
+    expected=$([[ $(uname -s) == Darwin ]] && echo 6 || echo 5)
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
     [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
     cargo_test -- --ignored --exact "${tests[@]}"

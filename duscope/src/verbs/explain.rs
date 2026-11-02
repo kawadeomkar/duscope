@@ -263,7 +263,7 @@ fn next(scan: Option<&ScanBlock>, file: Option<&Path>, path: &str, kind: &str) -
 /// `given`, absolute, with every symbolic link above its last component
 /// resolved and the last one kept: `explain` speaks of a link, not of what
 /// it leads to.
-fn unresolved_last(cwd: &Path, given: &Path) -> PathBuf {
+pub(super) fn unresolved_last(cwd: &Path, given: &Path) -> PathBuf {
     let absolute: PathBuf = cwd.join(given).components().collect();
     match (absolute.parent(), absolute.file_name()) {
         (Some(parent), Some(name)) => resolve_path(cwd, parent).real.join(name),

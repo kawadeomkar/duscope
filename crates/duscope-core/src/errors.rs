@@ -107,6 +107,13 @@ pub enum CoreError {
         /// What is wrong with it.
         message: String,
     },
+    /// What is at a path is not what its handle names: another device and
+    /// inode, so not the entry `explain` examined.
+    #[error("{0} is not the entry its handle names: it has been replaced since explain read it")]
+    PathChanged(String),
+    /// `clean` was given an item twice, or one inside another.
+    #[error("{0}")]
+    CleanOverlap(String),
     /// An index file outside the index directory that `--trust` does not
     /// name.
     #[error("the index {0} is outside the index directory, and --trust does not name it")]

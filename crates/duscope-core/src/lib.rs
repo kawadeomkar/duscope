@@ -9,6 +9,7 @@
 
 pub mod accounting;
 pub mod arena;
+pub mod clean;
 pub mod config;
 pub mod envelope;
 mod errors;

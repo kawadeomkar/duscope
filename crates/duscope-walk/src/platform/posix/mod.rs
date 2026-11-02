@@ -305,7 +305,6 @@ fn parked(mut open: impl FnMut() -> libc::c_int) -> io::Result<OwnedFd> {
 }
 
 /// `statvfs(3)` of the filesystem holding `path`.
-#[cfg(target_os = "linux")]
 pub(crate) fn statvfs(path: &CStr) -> io::Result<libc::statvfs> {
     let mut buf = MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: `path` is NUL-terminated and `buf` is writable for one
@@ -315,6 +314,24 @@ pub(crate) fn statvfs(path: &CStr) -> io::Result<libc::statvfs> {
     }
     // SAFETY: statvfs succeeded, so it filled the struct.
     Ok(unsafe { buf.assume_init() })
+}
+
+/// Whether this process may create entries in the directory `path`
+/// (`access(2)` with `W_OK`): whether the Linux Trash can make a volume's
+/// own Trash in its top directory.
+#[cfg(target_os = "linux")]
+pub(crate) fn writable(path: &Path) -> bool {
+    let Ok(c_path) = c_path(path) else {
+        return false;
+    };
+    // SAFETY: `c_path` is NUL-terminated and lives across the call.
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// Whether the volume holding `path` is mounted read-only.
+pub(crate) fn read_only(path: &Path) -> io::Result<bool> {
+    let vfs = statvfs(&c_path(path)?)?;
+    Ok(vfs.f_flag & libc::ST_RDONLY != 0)
 }
 
 /// Retries a call that returns -1 with `errno` on `EINTR`.

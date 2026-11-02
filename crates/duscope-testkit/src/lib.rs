@@ -3,7 +3,8 @@
 //! [`TestEnv`] gives a test a private temporary `HOME`, XDG directories,
 //! index directory and `TMPDIR`, and pins what output may depend on:
 //! `TZ=UTC`, `LC_ALL=C.UTF-8`, an 80x24 terminal (`COLUMNS`, `LINES`) and
-//! `DUSCOPE_TEST_NOW`, the fixture manifest's instant. Every other variable
+//! `DUSCOPE_TEST_NOW`, the fixture manifest's instant; `DUSCOPE_TEST_TRASH`
+//! keeps `clean`'s Trash to what the test owns. Every other variable
 //! is cleared (so `NO_COLOR`, `TERM`, `COLORTERM`, `CLICOLOR_FORCE`,
 //! `FORCE_COLOR`, `LS_COLORS`, `CI`, `CLAUDECODE` and the rest of the
 //! caller's environment never leak into output); `PATH` is kept, and the
@@ -407,6 +408,10 @@ impl TestEnv {
             ("COLUMNS".into(), COLUMNS.to_string().into()),
             ("LINES".into(), LINES.to_string().into()),
             ("DUSCOPE_TEST_NOW".into(), instant().into()),
+            // clean's Trash takes only what it can move into a Trash of the
+            // test's own: on macOS nothing of the startup volume, whose items
+            // go to the account's Trash whatever HOME says.
+            ("DUSCOPE_TEST_TRASH".into(), "guard".into()),
         ];
         if let Some(p) = std::env::var_os("PATH") {
             vars.push(("PATH".into(), p));
