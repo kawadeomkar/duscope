@@ -54,17 +54,19 @@ under [Auditing](#auditing) read it again.
   Applied with 20 checks, `schemas` included, on 2026-10-25. On 2026-10-27
   `intel-mac`, `size-comment`, `plan` and `verify-tag` were added, and, once
   phase 1 had merged, `platform`, `bench-regression` and the `.deb` jobs. On
-  2026-10-28 `intel-mac` was made optional again, leaving 36 checks. DEV-73,
-  with P2-IDX-03, folds macOS's `clippy` and both its `test` legs into
-  `checks (macos-26)`, 34 in all below, once it merges.
+  2026-10-28 `intel-mac` was made optional again, leaving 36 checks. On
+  2026-11-02, with P2-IDX-03, DEV-73 folded macOS's `clippy` and both its
+  `test` legs into `checks (macos-26)`, leaving the 34 checks below.
 
   These checks run on a pull request into `main`, and on one labelled
-  `full-ci`. A pull request into another branch, the middle of a stack, runs
-  `fmt`, `deny`, `changelog` and `quick` (clippy and the tests on
-  `ubuntu-24.04`) alone (DEV-73): no protection applies to it, and before it
-  merges `strict` makes it take `main`, which runs the full set on its new
-  head. The top of a stack carries `full-ci`, so the whole stack's code runs
-  the full set once per push.
+  `full-ci`. GitHub's stacked pull requests run as if into `main`: the pull
+  requests of a stack it recognises take `main`'s protection and run these
+  checks too. Any other pull request into another branch, the middle of a
+  longer stack, runs `fmt`, `deny`, `changelog` and `quick` (clippy and the
+  tests on `ubuntu-24.04`) alone (DEV-73): no protection applies to it, and
+  before it merges `strict` makes it take `main`, which runs the full set on
+  its new head. The top of a stack carries `full-ci`, so the whole stack's
+  code runs the full set once per push.
 
   ```sh
   gh api -X PUT repos/kawadeomkar/duscope/branches/main/protection --input - <<'EOF'
