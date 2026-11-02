@@ -26,17 +26,87 @@ use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde_json::Value;
 
-use crate::envelope::PlaceholderEnvelope;
+use crate::envelope::{
+    ByTypeEntry, CacheEntry, CheckedEntry, DiffEntry, DiffEnvelope, Envelope, ErrorEnvelope,
+    Explain, Listing, ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry, ScanErrorEntry,
+    SpilledEnvelope, SqlQueryBlock, SqlResult, StaleEntry, Summary, TopEntry, TreeEntry,
+};
 
 /// Each envelope schema file: its path under `schemas/`, and the schema derived
-/// from its type now. P2-CLI-01 replaces the placeholder with the envelope
-/// types, one file per verb. MCP tool output files need no entry here: each
-/// is checked against its verb's envelope (`tool_output_schemas`).
+/// from its type now: one file per verb, the error envelope, and the stub
+/// `--max-chars` prints. MCP tool output files need no entry here: each is
+/// checked against its verb's envelope (`tool_output_schemas`).
 fn derived_schemas() -> Vec<(&'static str, Value)> {
-    vec![(
-        "envelope/placeholder.schema.json",
-        derive::<PlaceholderEnvelope>(),
-    )]
+    vec![
+        ("envelope/scan.schema.json", derive::<Envelope<TopEntry>>()),
+        ("envelope/top.schema.json", derive::<Envelope<TopEntry>>()),
+        ("envelope/tree.schema.json", derive::<Envelope<TreeEntry>>()),
+        (
+            "envelope/by-type.schema.json",
+            derive::<Envelope<ByTypeEntry>>(),
+        ),
+        (
+            "envelope/stale.schema.json",
+            derive::<Envelope<StaleEntry>>(),
+        ),
+        (
+            "envelope/caches.schema.json",
+            derive::<Envelope<CachesRow>>(),
+        ),
+        (
+            "envelope/summary.schema.json",
+            derive::<ObjectEnvelope<Summary>>(),
+        ),
+        (
+            "envelope/diff.schema.json",
+            derive::<DiffEnvelope<'static, Envelope<DiffEntry>>>(),
+        ),
+        ("envelope/explain.schema.json", derive::<ExplainOutput>()),
+        (
+            "envelope/query.schema.json",
+            derive::<ObjectEnvelope<SqlResult, SqlQueryBlock>>(),
+        ),
+        ("envelope/scans.schema.json", derive::<Listing<ScansRow>>()),
+        ("envelope/error.schema.json", derive::<ErrorEnvelope>()),
+        (
+            "envelope/spilled.schema.json",
+            derive::<SpilledEnvelope<Value>>(),
+        ),
+    ]
+}
+
+// The verbs that print more than one shape, as their schemas list them: a
+// row of either type, or an envelope of either kind. Plain comments, not doc
+// comments, which would become the schemas' descriptions.
+
+// `caches`: a cache, or with `--by-project` a project.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code, clippy::large_enum_variant)]
+enum CachesRow {
+    Cache(CacheEntry),
+    Project(ProjectEntry),
+}
+
+// `explain`: one path's facts, or with `--errors` what a scan could not
+// read.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code, clippy::large_enum_variant)]
+enum ExplainOutput {
+    Facts(ObjectEnvelope<Explain>),
+    Errors(Envelope<ScanErrorEntry>),
+}
+
+// `scans`: the saved scans, or with `--prune` the files removed, or with
+// `--check` the scans found sound.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code, clippy::large_enum_variant)]
+enum ScansRow {
+    Saved(SavedScanEntry),
+    Pruned(PrunedEntry),
+    Checked(CheckedEntry),
 }
 
 /// The envelope file an MCP tool output file must equal, apart from `$id`. A
@@ -423,5 +493,30 @@ fn p0_repo_05_strip_removes_only_extension_keywords() {
             "default": { "x-data": 1 },
             "examples": [{ "x-data": 2 }]
         })
+    );
+}
+
+#[test]
+fn p2_cli_01_a_field_added_to_an_envelope_type_fails_the_drift_test() {
+    let name = "envelope/top.schema.json";
+    let text = fs::read_to_string(schemas_dir().join(name)).unwrap();
+    assert_eq!(
+        drift(name, &text, &derive::<Envelope<TopEntry>>()),
+        Vec::<String>::new()
+    );
+    // The schema `TopEntry` would derive with one more field.
+    let mut changed = derive::<Envelope<TopEntry>>();
+    let row = &mut changed["$defs"]["TopEntry"];
+    row["properties"]["added_bytes"] = serde_json::json!({"type": "integer"});
+    row["required"]
+        .as_array_mut()
+        .unwrap()
+        .push(Value::from("added_bytes"));
+    let lines = drift(name, &text, &changed);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "/$defs/TopEntry/properties/added_bytes: only in the derived schema"),
+        "{lines:#?}"
     );
 }

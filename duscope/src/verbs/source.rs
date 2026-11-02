@@ -175,6 +175,19 @@ pub(super) fn stale_index(index: &Index, max_age: &str) -> Warning {
 }
 
 impl Source {
+    /// The index file the scan is in, or will be once saved; `None` for a
+    /// scan not to be saved.
+    pub fn index_file(&self) -> Option<PathBuf> {
+        match self {
+            Source::Saved { index, .. } => Some(index.file().to_owned()),
+            Source::Fresh {
+                save: Some((id, dir)),
+                ..
+            } => Some(duscope_core::index::index_path(dir, id)),
+            Source::Fresh { save: None, .. } => None,
+        }
+    }
+
     /// The rows' view: the arena, or the saved scan at the path.
     pub fn view(&self) -> Box<dyn TreeView + '_> {
         match self {
