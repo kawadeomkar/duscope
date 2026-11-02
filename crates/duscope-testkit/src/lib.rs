@@ -402,6 +402,44 @@ impl TestEnv {
         cmd
     }
 
+    /// Runs macOS's `hdiutil` with `args` under this environment, trying
+    /// three times, two seconds apart: on GitHub's macOS runners a `create`
+    /// or an `attach` now and then fails with "Resource busy" and passes on
+    /// the next try. A `create` that may run again passes `-ov`, so a
+    /// half-made image from a failed try is overwritten.
+    ///
+    /// # Panics
+    ///
+    /// When every try fails, with the last one's output.
+    pub fn hdiutil(&self, args: &[&dyn AsRef<OsStr>]) {
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let out = self
+                .command("hdiutil")
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("duscope-testkit: run hdiutil: {e}"));
+            if out.status.success() {
+                return;
+            }
+            if tries == 3 {
+                let shown: Vec<String> = args
+                    .iter()
+                    .map(|a| a.as_ref().to_string_lossy().into_owned())
+                    .collect();
+                panic!(
+                    "hdiutil {} failed {tries} times ({}): {}{}",
+                    shown.join(" "),
+                    out.status,
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+
     /// A command for the duscope binary under this environment.
     ///
     /// # Panics
