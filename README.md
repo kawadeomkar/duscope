@@ -4,9 +4,9 @@
 > **v0.2.0, saved scans.** duscope scans, saves each scan as a SQLite index and
 > answers `top`, `tree`, `by-type`, `stale`, `caches`, `summary` and `explain`
 > from it in milliseconds, compares two scans (`diff`) and takes read-only SQL
-> (`query --sql`); it prints one JSON envelope, exports to and imports from
-> ncdu, GrandPerspective and QDirStat, and renders the treemap in the terminal,
-> as SVG or as PNG. The MCP server and the interactive treemap arrive in later
+> (`query --sql`); it prints one JSON envelope, exports to ncdu, GrandPerspective
+> and QDirStat, imports ncdu's, gdu's and GrandPerspective's files, and renders
+> the treemap in the terminal, as SVG or as PNG. The MCP server and the interactive treemap arrive in later
 > releases, as the list below marks.
 
 duscope is a disk-usage analyzer for macOS and Linux. It scans a directory tree
@@ -32,16 +32,18 @@ first-class, with one binary, one set of commands and one JSON format.
 ## A tour
 
 The first command scans the tree and saves the scan in the index directory
-(`~/Library/Caches/duscope` on macOS, `~/.cache/duscope` elsewhere); the summary
-line names it. The commands after it answer from that saved scan, as every
+(`$XDG_CACHE_HOME/duscope`, else `~/Library/Caches/duscope` on macOS and
+`~/.cache/duscope` elsewhere; `--index-dir` names another); the summary line
+names it. The commands after it answer from that saved scan, as every
 command does when a saved scan holds its path: an answer then takes
 milliseconds, however large the tree. `--no-save` scans without saving, `--scan`
 names another saved scan, and `scan` (or `duscope` alone) always scans afresh.
 
 The output below is from the fixture tree duscope's tests build (`just
 fixtures`), a made-up home directory, on macOS (APFS); a terminal shows it in
-colour. On Linux some allocated sizes differ, the thread count at the end of the
-first summary line is the machine's default, and the scan's id is another.
+colour. On Linux some allocated sizes differ, and the thread count at the end of
+the first summary line is the machine's default. Every scan gets an id of its
+own, so yours is not `1fd3`.
 Paths in the home directory are shortened to `~` here; duscope prints them in
 full.
 
@@ -164,8 +166,8 @@ duscope diff 1fd3 7a2c
 tile per file, coloured by class, with the legend and the next commands below.
 `duscope render ~ -o home.svg` writes it as SVG (`--format png` for PNG), and
 `duscope export ~ --format ncdu -o home.json` writes the scan for ncdu (or
-GrandPerspective's `.gpscan`, QDirStat's cache or CSV), which `duscope import`
-reads back. `duscope man` prints the manual page, and `duscope completions bash`
+GrandPerspective's `.gpscan`, QDirStat's cache or CSV), and `duscope import`
+saves a tree that ncdu, gdu or GrandPerspective wrote. `duscope man` prints the manual page, and `duscope completions bash`
 (or zsh, fish, elvish, powershell) the completion script.
 
 ## What it never does

@@ -349,11 +349,14 @@ duscope opens every index file the same way, trusted or not ([SECURITY.md](../SE
 - **Switched off.** Views, triggers and attached databases. A view is never
   read, even one named as a table, and no trigger fires.
 - **Limits.** No statement, the schema's own included, may be longer than
-  64 KiB, and no string or BLOB longer than 1 MB.
-- **Refused files.** A file is refused (`index_corrupt`, exit 5) when:
-  - its schema has a virtual table, or more than 256 tables and indexes;
-  - its major `index_version` is another;
-  - `tool_version` is not a version.
+  64 KiB, and no string or BLOB longer than 1 MB. (`query --sql` runs its
+  statement in a sandbox, a connection of its own with limits of its own.)
+- **Refused files.** A file is refused, with exit 5, when:
+  - its schema has a virtual table, or more than 256 objects (tables, indexes,
+    views and triggers together): `index_corrupt`;
+  - `scan_id` is not 12 lowercase hex digits, or `tool_version` is not a
+    version: `index_corrupt`;
+  - its major `index_version` is another: `index_version_mismatch`.
 
 A program that writes index files for duscope to read keeps within these.
 
