@@ -502,6 +502,12 @@ pub fn core_failure(error: CoreError) -> Failure {
             Failure::new(Exit::Usage, "invalid_cursor", error.to_string())
                 .hint("Rerun the command without --cursor for the first page")
         }
+        CoreError::SqlDenied(_) => Failure::new(Exit::Runtime, "sql_denied", error.to_string())
+            .hint("Rerun duscope query with one SELECT of the tables duscope schema lists"),
+        CoreError::SqlTimeout(_) => Failure::new(Exit::Runtime, "sql_timeout", error.to_string())
+            .hint("Rerun duscope query with a narrower statement, or a --timeout up to 60"),
+        CoreError::SqlInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())
+            .hint("Run duscope schema to list the tables and their columns"),
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
     }
 }
