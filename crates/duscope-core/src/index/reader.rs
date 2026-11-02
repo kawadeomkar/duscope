@@ -6,8 +6,8 @@
 //! change it or run outside plain reads. Any index file may have been made
 //! by someone else (SECURITY.md), so its views and triggers are switched
 //! off rather than trusted, and a schema no duscope writes is refused: a
-//! virtual table, a statement longer than [`SQL_LENGTH`], or more than
-//! [`SCHEMA_OBJECTS`] objects, where loading stops early. The version is
+//! virtual table, a statement longer than 64 KiB, or more than 256
+//! objects, where loading stops early. The version is
 //! checked first: a reader opens every minor of its major and refuses the
 //! others; `tool_version` must name a duscope version.
 //!
@@ -1090,10 +1090,11 @@ fn check_schema(db: &Connection) -> Result<(), String> {
 
 /// The schema's objects, counted up to one past [`SCHEMA_OBJECTS`], and
 /// the first virtual table among them. A virtual table is told from its
-/// text, since asking `SQLite` about one (`pragma_table_list`,
+/// statement, whatever its row's type says (`SQLite` reads `TABLE` as
+/// `table`), since asking `SQLite` about one (`pragma_table_list`,
 /// `table_info`) connects it, which runs its module on the file's data.
 fn schema_objects(db: &Connection) -> rusqlite::Result<(i64, Option<String>)> {
-    let mut stmt = db.prepare("SELECT type, name, sql FROM sqlite_schema")?;
+    let mut stmt = db.prepare("SELECT name, sql FROM sqlite_schema")?;
     let mut rows = stmt.query([])?;
     let mut objects = 0;
     let mut virtual_table = None;
@@ -1102,12 +1103,9 @@ fn schema_objects(db: &Connection) -> rusqlite::Result<(i64, Option<String>)> {
         if objects > SCHEMA_OBJECTS {
             break;
         }
-        let sql: Option<String> = row.get(2)?;
-        if virtual_table.is_none()
-            && row.get::<_, String>(0)? == "table"
-            && sql.as_deref().is_some_and(creates_virtual_table)
-        {
-            virtual_table = Some(row.get::<_, String>(1)?);
+        let sql: Option<String> = row.get(1)?;
+        if virtual_table.is_none() && sql.as_deref().is_some_and(creates_virtual_table) {
+            virtual_table = Some(row.get::<_, String>(0)?);
         }
     }
     Ok((objects, virtual_table))

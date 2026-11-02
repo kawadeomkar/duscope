@@ -36,16 +36,14 @@ fn ok(out: &Output) -> Value {
     envelope(out)
 }
 
-fn untrusted(out: &Output, file: &Path) {
+/// A refusal of `file`, whose path the hint gives as the shell takes it.
+fn untrusted(out: &Output, file: &str) {
     assert_eq!(out.status.code(), Some(1));
     let error = &envelope(out)["error"];
     assert_eq!(error["code"], "untrusted_index");
     assert_eq!(
         error["hint"],
-        format!(
-            "Rerun the command with --trust {} if you trust the file",
-            file.display()
-        )
+        format!("Rerun the command with --trust {file} if you trust the file")
     );
 }
 
@@ -65,48 +63,41 @@ fn saved(env: &TestEnv) -> (PathBuf, PathBuf) {
     (root, file)
 }
 
+fn s(path: &Path) -> String {
+    path.to_str().unwrap().to_owned()
+}
+
 #[test]
 fn p2_sec_01_an_index_outside_the_index_directory_needs_trust() {
     let env = TestEnv::new();
     let (root, inside) = saved(&env);
     let root = root.to_str().unwrap();
-    let s = |p: &Path| p.to_str().unwrap().to_owned();
+    let top = |scan: &Path, trust: &[&Path]| {
+        let mut args = vec!["top".to_owned(), root.to_owned(), "--json".to_owned()];
+        for file in trust {
+            args.extend(["--trust".to_owned(), s(file)]);
+        }
+        args.extend(["--scan".to_owned(), s(scan)]);
+        env.cmd().args(&args).output().unwrap()
+    };
     // In the index directory, a path needs no --trust.
-    ok(&run(&env, &["top", root, "--scan", &s(&inside), "--json"]));
+    ok(&top(&inside, &[]));
     // A copy elsewhere is refused before it is opened.
     let copy = env.tmp_dir().join("copy.db");
     fs::copy(&inside, &copy).unwrap();
-    untrusted(
-        &run(&env, &["top", root, "--scan", &s(&copy), "--json"]),
-        &copy,
-    );
+    let copy = fs::canonicalize(copy).unwrap();
+    untrusted(&top(&copy, &[]), &s(&copy));
+    // The hint quotes a path the shell would split.
+    let spaced = env.tmp_dir().join("my scans");
+    fs::create_dir_all(&spaced).unwrap();
+    let spaced = spaced.join("copy.db");
+    fs::copy(&inside, &spaced).unwrap();
+    untrusted(&top(&spaced, &[]), &format!("'{}'", spaced.display()));
     // --trust names it, by any path to it.
-    let trusted = ok(&run(
-        &env,
-        &[
-            "top",
-            root,
-            "--trust",
-            &s(&copy),
-            "--scan",
-            &s(&copy),
-            "--json",
-        ],
-    ));
+    let trusted = ok(&top(&copy, &[&copy]));
     let link = env.tmp_dir().join("link.db");
     symlink(&copy, &link).unwrap();
-    ok(&run(
-        &env,
-        &[
-            "top",
-            root,
-            "--trust",
-            &s(&link),
-            "--scan",
-            &s(&copy),
-            "--json",
-        ],
-    ));
+    ok(&top(&copy, &[&link]));
     // The next commands name the file trusted, as this one did.
     let next = trusted["next"].as_array().unwrap();
     assert!(!next.is_empty());
@@ -121,44 +112,42 @@ fn p2_sec_01_an_index_outside_the_index_directory_needs_trust() {
     // Trusting one file trusts no other.
     let other = env.tmp_dir().join("other.db");
     fs::copy(&inside, &other).unwrap();
-    untrusted(
-        &run(
-            &env,
-            &[
-                "top",
-                root,
-                "--trust",
-                &s(&copy),
-                "--scan",
-                &s(&other),
-                "--json",
-            ],
-        ),
-        &other,
-    );
-    // A link in the index directory to a file outside it is outside.
+    untrusted(&top(&other, &[&copy]), &s(&other));
+    // A link in the index directory to a file outside it is outside, and,
+    // named as a saved scan, no saved scan: neither an id nor latest finds
+    // it, nor does scans list it.
     let planted = env.index_dir().join("scans/planted.db");
     symlink(&other, &planted).unwrap();
-    untrusted(
-        &run(&env, &["top", root, "--scan", &s(&planted), "--json"]),
-        &planted,
-    );
+    untrusted(&top(&planted, &[]), &s(&planted));
+    fs::remove_file(&planted).unwrap();
+    let planted = env.index_dir().join("scans/aaaaaaaaaaaa.db");
+    symlink(&other, &planted).unwrap();
+    let out = run(&env, &["top", root, "--scan", "aaaa", "--json"]);
+    assert_eq!(envelope(&out)["error"]["code"], "scan_not_found");
+    let scans = ok(&run(&env, &["scans", "--json"]));
+    assert_eq!(scans["entries"].as_array().unwrap().len(), 1, "{scans}");
+    fs::remove_file(&planted).unwrap();
     // Each file diff reads is trusted, or in the index directory.
-    untrusted(
-        &run(&env, &["diff", &s(&inside), &s(&copy), "--json"]),
-        &copy,
-    );
-    ok(&run(
-        &env,
-        &[
-            "diff",
-            &s(&inside),
-            &s(&copy),
-            "--trust",
-            &s(&copy),
-            "--json",
-        ],
-    ));
+    let diff = |trust: &[&str]| {
+        let mut args = vec!["diff", "--json"];
+        args.extend(trust);
+        let (inside, copy) = (s(&inside), s(&copy));
+        env.cmd().args(&args).args([inside, copy]).output().unwrap()
+    };
+    untrusted(&diff(&[]), &s(&copy));
+    ok(&diff(&["--trust", &s(&copy)]));
+    // With no index directory to be in, a file is outside it, wherever the
+    // command runs.
+    let out = env
+        .cmd()
+        .args(["top", root, "--scan", "./copy.db", "--json"])
+        .current_dir(copy.parent().unwrap())
+        .env_remove("DUSCOPE_INDEX_DIR")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("HOME")
+        .output()
+        .unwrap();
+    untrusted(&out, &s(&copy.parent().unwrap().join("./copy.db")));
 }
 
 #[test]

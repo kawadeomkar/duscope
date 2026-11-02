@@ -35,6 +35,8 @@ struct Lookup {
     cwd: PathBuf,
     /// The index directory, when one can be found.
     dir: Option<PathBuf>,
+    /// `--trust`.
+    trust: Vec<PathBuf>,
 }
 
 impl Lookup {
@@ -67,12 +69,14 @@ impl Lookup {
             now,
             cwd,
             dir,
+            trust: args.trust.clone(),
         })
     }
 
     /// The saved scan `selector` names for `path`: `None` when latest finds
     /// none. Without an index directory latest has nothing to find and a
-    /// prefix nowhere to look; an index file needs none.
+    /// prefix nowhere to look; an index file needs none, though without one
+    /// it is outside it, so --trust must name it.
     fn resolve(
         &self,
         selector: &ScanSelector,
@@ -80,7 +84,7 @@ impl Lookup {
     ) -> Result<Option<Resolved>, Failure> {
         let dir = match (&self.dir, selector) {
             (Some(dir), _) => dir.as_path(),
-            (None, ScanSelector::File(_)) => self.cwd.as_path(),
+            (None, ScanSelector::File(_)) => Path::new(""),
             (None, ScanSelector::Latest) => return Ok(None),
             (None, ScanSelector::Prefix(_)) => {
                 return Err(Failure::new(
@@ -98,7 +102,7 @@ impl Lookup {
             cwd: &self.cwd,
             max_age_ns: self.max_age_ns,
             now: self.now,
-            trust: super::trusted(),
+            trust: &self.trust,
         };
         resolve_scan(selector, &q, scanned).map_err(core_failure)
     }

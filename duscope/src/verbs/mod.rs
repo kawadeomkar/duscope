@@ -21,8 +21,6 @@ mod treemap;
 pub use scan::report_interrupt;
 
 use std::fmt;
-use std::path::PathBuf;
-use std::sync::OnceLock;
 
 use crate::cli::{Cli, Verb};
 use crate::out::Output;
@@ -92,18 +90,8 @@ impl fmt::Display for Failure {
     }
 }
 
-/// `--trust`: the index files outside the index directory the command may
-/// read. Set once, before the verb runs.
-static TRUSTED: OnceLock<Vec<PathBuf>> = OnceLock::new();
-
-/// The index files `--trust` names.
-fn trusted() -> &'static [PathBuf] {
-    TRUSTED.get().map_or(&[], Vec::as_slice)
-}
-
 /// Runs the verb `cli` names, writing as `output` says.
 pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
-    let _ = TRUSTED.set(cli.global.trust.clone());
     let index_dir = cli.global.index_dir.as_deref();
     match cli.verb {
         None => scan::run(&cli.scan, index_dir, output),
