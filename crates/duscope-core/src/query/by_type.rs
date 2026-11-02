@@ -14,7 +14,6 @@
 //! file; name), and `other` is always the last row.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -275,12 +274,12 @@ fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Ve
                 q.classes.of_ext(suffix).unwrap_or(Class::Other)
             }
         };
-        let (_, above) = root_dirs(q.classes, view.root_path());
         let ranges = rule_ranges(view, q.classes)?;
         if base != 0 {
             let last = view.node(0).last_id;
             return subtree_tallies(saved, base, last, &ranges, q, class_of_ext).map(Some);
         }
+        let (_, above) = root_dirs(q.classes, view.root_path());
         let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
         let mut add = |class: Class, files: i64, allocated: i64, apparent: i64, sign: i64| {
             let tally = &mut tallies[index(class)];
@@ -328,13 +327,8 @@ fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Ve
         if q.examples == 0 {
             return Ok(Some(tallies));
         }
-        let class_at = |id: u32, suffix: &str| {
-            let at = ranges.partition_point(|&(first, _, _)| first <= id);
-            match at.checked_sub(1).map(|i| ranges[i]) {
-                Some((_, last, class)) if id <= last => class,
-                _ => class_of_ext(suffix),
-            }
-        };
+        let class_at =
+            |id: u32, suffix: &str| rule_class(&ranges, id).unwrap_or_else(|| class_of_ext(suffix));
         let settled = largest_by_class(saved, q.examples, &mut tallies, class_at)?;
         Ok(settled.then_some(tallies))
     };
@@ -362,10 +356,6 @@ fn subtree_tallies(
     class_of_ext: impl Fn(&str) -> Class,
 ) -> rusqlite::Result<Vec<Tally>> {
     let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
-    // A subtree holds few extensions: each is looked up in the table once.
-    let mut ext_classes: HashMap<String, Class> = HashMap::new();
-    // The first rule range not wholly before the current id.
-    let mut range = 0;
     let mut stmt = saved.db().prepare(&format!(
         "SELECT id, ext, flags & {LATER_LINK}, charged, allocated, apparent FROM files \
          WHERE id BETWEEN ?1 AND ?2 ORDER BY id"
@@ -376,21 +366,9 @@ fn subtree_tallies(
             continue;
         }
         let id = row.get::<_, u32>(0)?.saturating_sub(base);
-        while ranges.get(range).is_some_and(|&(_, end, _)| id > end) {
-            range += 1;
-        }
-        let class = match ranges.get(range) {
-            Some(&(first, _, class)) if id >= first => class,
-            _ => {
-                let suffix = row.get_ref(1)?.as_str()?;
-                if let Some(&class) = ext_classes.get(suffix) {
-                    class
-                } else {
-                    let class = class_of_ext(suffix);
-                    ext_classes.insert(suffix.to_owned(), class);
-                    class
-                }
-            }
+        let class = match rule_class(ranges, id) {
+            Some(class) => class,
+            None => class_of_ext(row.get_ref(1)?.as_str()?),
         };
         let allocated = if row.get::<_, bool>(3)? {
             unsigned(row.get(4)?)
@@ -404,6 +382,15 @@ fn subtree_tallies(
         keep_largest(&mut tally.largest, q.examples, allocated, id);
     }
     Ok(tallies)
+}
+
+/// The class of the rule range, of [`rule_ranges`], that holds `id`.
+fn rule_class(ranges: &[(u32, u32, Class)], id: u32) -> Option<Class> {
+    let at = ranges.partition_point(|&(first, _, _)| first <= id);
+    match ranges.get(at.checked_sub(1)?) {
+        Some(&(_, last, class)) if id <= last => Some(class),
+        _ => None,
+    }
 }
 
 /// Each class's `examples` largest files, ranked as the walk ranks them:

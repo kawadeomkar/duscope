@@ -41,8 +41,16 @@ fn meta(root: &Path) -> ScanMeta {
 }
 
 fn index_of(tree: &MemProvider, dir: &Path) -> Index {
-    let mut arena = Arena::new(Attrs::Basic);
-    walk_with(tree, tree.root_path(), &WalkOptions::default(), |e| {
+    index_with(tree, dir, Attrs::Basic)
+}
+
+fn index_with(tree: &MemProvider, dir: &Path, attrs: Attrs) -> Index {
+    let mut arena = Arena::new(attrs);
+    let opts = WalkOptions {
+        attrs,
+        ..WalkOptions::default()
+    };
+    walk_with(tree, tree.root_path(), &opts, |e| {
         arena.push(e).unwrap();
     })
     .unwrap();
@@ -179,6 +187,31 @@ fn p2_qry_09_every_subtree_answers_from_the_tables_as_the_walk() {
         .link("src/logo-copy.png", "app/node_modules/x/logo.png");
     let index = index_of(&tree, &env.tmp_dir());
     every_subtree_answers_as_the_walk(&index, &[0, 1, 3, 10]).unwrap();
+    // What the tables cannot answer walks, in a subtree as in the whole
+    // scan: a filter, the newest file, apparent sizes, a scan with modes.
+    let classes = Classes::vendored();
+    let sub = Subtree::new(&index, index.child_dirs(0)[0].0);
+    let filtered = ByTypeQuery {
+        filters: Filters {
+            min_size: Some(1),
+            ..Filters::default()
+        },
+        ..query(&classes, 3)
+    };
+    let newest = ByTypeQuery {
+        sort: SortKey::Mtime,
+        ..query(&classes, 3)
+    };
+    let apparent = ByTypeQuery {
+        size: SizeKind::Apparent,
+        ..query(&classes, 3)
+    };
+    for q in [filtered, newest, apparent] {
+        assert!(from_index(&sub, &q).is_none(), "{q:?}");
+    }
+    let full = index_with(&tree, &env.tmp_dir().join("full"), Attrs::Full);
+    let sub = Subtree::new(&full, full.child_dirs(0)[0].0);
+    assert!(from_index(&sub, &query(&classes, 3)).is_none());
 }
 
 /// The reference tree holds what a `MemProvider` cannot: hard links, whose

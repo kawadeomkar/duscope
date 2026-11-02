@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::ops::Range;
+use std::sync::OnceLock;
 
 use globset::{Glob, GlobMatcher, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
@@ -164,11 +165,11 @@ pub struct Classes {
     /// In precedence order: a user table's rules come before the vendored
     /// ones.
     dir: Vec<(DirPattern, Class)>,
-    /// Every directory rule's last component, as one set: a directory whose
-    /// name matches none of them matches no rule, which one pass over the
-    /// set tells. `None` when the set could not be built: every rule is
-    /// tried.
-    last: Option<GlobSet>,
+    /// Every directory rule's last component, as one set built when first
+    /// asked: a directory whose name matches none of them matches no rule,
+    /// and one pass over the set names the rules worth trying. `None` when
+    /// the set could not be built: every rule is tried.
+    last: OnceLock<Option<GlobSet>>,
 }
 
 /// A classes table as read, every key with its place in the text so an
@@ -219,21 +220,11 @@ impl Classes {
         // The most specific rule is tried first: more path components, then
         // fewer globbed ones; the sort is stable, so keys break ties.
         dir.sort_by_key(|(pattern, _)| pattern.specificity());
-        Ok(Classes::new(ext_map, dir))
-    }
-
-    fn new(ext: BTreeMap<String, Class>, dir: Vec<(DirPattern, Class)>) -> Classes {
-        let mut last = GlobSetBuilder::new();
-        for (pattern, _) in &dir {
-            if let Some(matcher) = pattern.components.last() {
-                last.add(matcher.glob().clone());
-            }
-        }
-        Classes {
-            ext,
+        Ok(Classes {
+            ext: ext_map,
             dir,
-            last: last.build().ok(),
-        }
+            last: OnceLock::new(),
+        })
     }
 
     /// This table with `user` merged over it: the user's extensions replace
@@ -243,7 +234,11 @@ impl Classes {
         self.ext.extend(user.ext);
         let mut dir = user.dir;
         dir.append(&mut self.dir);
-        Classes::new(self.ext, dir)
+        Classes {
+            ext: self.ext,
+            dir,
+            last: OnceLock::new(),
+        }
     }
 
     /// The class of an extension, as [`ext`] returns it; `None` when the
@@ -255,17 +250,26 @@ impl Classes {
     /// The class of a directory whose path, as components, is `path`; `None`
     /// when no directory rule matches.
     pub fn of_dir<C: AsRef<[u8]>>(&self, path: &[C]) -> Option<Class> {
-        let name = String::from_utf8_lossy(path.last()?.as_ref());
-        if self
-            .last
-            .as_ref()
-            .is_some_and(|set| !set.is_match(name.as_ref()))
-        {
-            return None;
-        }
-        self.dir
-            .iter()
-            .find(|(pattern, _)| pattern.matches(path))
+        let found = |(pattern, _): &&(DirPattern, Class)| pattern.matches(path);
+        let last = self.last.get_or_init(|| {
+            let mut set = GlobSetBuilder::new();
+            for (pattern, _) in &self.dir {
+                if let Some(matcher) = pattern.components.last() {
+                    set.add(matcher.glob().clone());
+                }
+            }
+            set.build().ok()
+        });
+        let Some(last) = last else {
+            return self.dir.iter().find(found).map(|&(_, class)| class);
+        };
+        // The rules whose last component matches, in precedence order.
+        let mut tried = last.matches(String::from_utf8_lossy(path.last()?.as_ref()).as_ref());
+        tried.sort_unstable();
+        tried
+            .into_iter()
+            .filter_map(|i| self.dir.get(i))
+            .find(found)
             .map(|&(_, class)| class)
     }
 
