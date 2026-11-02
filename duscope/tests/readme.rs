@@ -54,12 +54,7 @@ fn tour() -> Vec<Block> {
             }
             None => (command, None),
         };
-        let args = duscope
-            .strip_prefix("duscope ")
-            .unwrap()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
+        let args = words(duscope.strip_prefix("duscope ").unwrap());
         blocks.push(Block {
             command: command.to_owned(),
             args,
@@ -68,6 +63,28 @@ fn tour() -> Vec<Block> {
         });
     }
     blocks
+}
+
+/// `text`'s words as a shell splits them: at blanks, but not inside single
+/// or double quotes, which go.
+fn words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote: Option<char> = None;
+    for c in text.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.get_or_insert_with(String::new).push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                word.get_or_insert_with(String::new);
+            }
+            (None, c) if c.is_whitespace() => words.extend(word.take()),
+            (None, c) => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(word);
+    words
 }
 
 /// What the block's command prints on this machine, as the README shows it:
