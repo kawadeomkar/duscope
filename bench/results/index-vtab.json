@@ -1,0 +1,29 @@
+{
+  "package": "P2-IDX-04",
+  "date": "2026-11-01",
+  "rule": "Load the index's rows by INSERT ... SELECT from a virtual table over the arena (rusqlite's vtab) and compare with the prepared-statement writer on T2; keep whichever wins by more than 10%. Without such a winner the prepared-statement writer stands and the gate checklist records undecided, default kept. The rule is read against the whole index write, the writer the load is compared with.",
+  "method": "Out of the tree, against duscope-core at this commit: one warm scan of T2 into an arena and its roll-up, and the dirs and files tables' rows (all 24 and 17 columns) built from it once. Per run, on a fresh file with the writer's connection setup (journal_mode OFF, synchronous OFF, exclusive locking, temp_store MEMORY, a 64 MiB cache) and its tables: (a) the load by one prepared INSERT per table, executed per row, in one transaction, as IndexWriter::entry_rows does; (b) the load by INSERT INTO dirs SELECT * FROM arena_dirs; INSERT INTO files SELECT * FROM arena_files, from two eponymous virtual tables whose cursors read the same rows; (c) IndexWriter::write whole. The rows are built before the clock starts, so (a) and (b) differ in the insertion alone. The bundled SQLite at -O1 with the repository's LIBSQLITE3_FLAGS, a release build with LTO. Median of 9 runs per measurement, the measurement repeated three times; the figures below are the median repeat's.",
+  "measurements": [
+    {
+      "platform": "macos",
+      "arch": "arm64",
+      "machine": "Apple M5 Pro, APFS, macOS 26.7",
+      "tree": "T2",
+      "entries": 1000001,
+      "runs": 9,
+      "repeats": [
+        { "prepared_load_s": 0.3745, "vtab_load_s": 0.3277, "writer_s": 1.1023 },
+        { "prepared_load_s": 0.3756, "vtab_load_s": 0.3298, "writer_s": 1.1020 },
+        { "prepared_load_s": 0.3759, "vtab_load_s": 0.3278, "writer_s": 1.1018 }
+      ],
+      "prepared_load_us_per_entry": 0.376,
+      "vtab_load_us_per_entry": 0.328,
+      "writer_us_per_entry": 1.102,
+      "load_gain_pct": 12.7,
+      "write_gain_pct": 4.3
+    }
+  ],
+  "decision": "undecided, default kept: the prepared-statement writer stands",
+  "why": "The virtual tables load the rows 12.7% faster (0.328 against 0.376 us per entry), but the load is a third of the write: its 48 ms are 4.3% of the 1.10 s the writer takes, short of the 10% the rule asks of a winner on the writer. A virtual table also needs unsafe impls of rusqlite's VTab and VTabCursor (repr(C) structs over SQLite's own), which duscope-core's forbid(unsafe_code) rules out. Linux was not measured: alpha has no T2 tree, and a write that costs more per entry there (1.74 to 1.93 us on the bench runner) leaves the load a share no larger than a third.",
+  "code": "The experiment is not kept (it needs unsafe); crates/duscope-core/src/index/vtab.rs was never added. The method above reruns it."
+}
