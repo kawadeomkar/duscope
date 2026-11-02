@@ -4,8 +4,9 @@
 //!
 //! The README shows macOS's output (APFS): on macOS each block must be what
 //! the command prints, stdout then the summary line on stderr (stdout alone
-//! for `--plain` and `--json`), with only the scan's elapsed time and thread
-//! count masked. Allocated sizes differ on
+//! for `--plain` and `--json`), with only the summary line's last part masked:
+//! the scan's elapsed time and thread count, and the saved scan's id (and,
+//! when the scan is read, its time). Allocated sizes differ on
 //! Linux, so there the blocks are held to `golden/readme_tour@linux.snap`
 //! (regenerated as every golden is), and the README's own rows to the paths
 //! or classes Linux prints.
@@ -45,13 +46,7 @@ fn tour() -> Vec<Block> {
         let mut lines = body.lines();
         let command = lines.next().unwrap().strip_prefix("$ ").unwrap();
         let (duscope, jq) = match command.split_once(" | jq ") {
-            // `jq [flags] '<filter>'`
-            Some((duscope, jq)) => {
-                let (flags, filter) = jq.split_once('\'').unwrap();
-                let mut args: Vec<String> = flags.split_whitespace().map(str::to_owned).collect();
-                args.push(filter.strip_suffix('\'').unwrap().to_owned());
-                (duscope, Some(args))
-            }
+            Some((duscope, jq)) => (duscope, Some(words(jq))),
             None => (command, None),
         };
         let args = words(duscope.strip_prefix("duscope ").unwrap());
@@ -140,17 +135,18 @@ fn masked(line: &str) -> String {
 }
 
 /// What a line shows besides numbers: its last column (a path, a class or a
-/// header), or nothing for the summary line and a JSON row's sizes.
+/// header), a JSON row's path or else its keys, or nothing for the summary
+/// line.
 fn shown(line: &str) -> Option<String> {
     if line.contains(" allocated · ") {
         return None;
     }
     if line.starts_with('{') {
-        return line
-            .split("\"path\":\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .map(str::to_owned);
+        let row: serde_json::Map<String, serde_json::Value> = serde_json::from_str(line).unwrap();
+        return Some(match row.get("path") {
+            Some(path) => path.as_str().unwrap().to_owned(),
+            None => row.keys().cloned().collect::<Vec<_>>().join(","),
+        });
     }
     let last = line
         .split(['\t'])
