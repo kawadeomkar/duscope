@@ -33,13 +33,15 @@ def result(
     cpu: Optional[str] = "Apple M5 Pro",
     cpus: int = 18,
     ratios: Optional[Dict[str, float]] = None,
+    competitor_p50: Optional[Dict[str, float]] = None,
 ) -> dict:
     """A result file with `tool`'s p50 on `tree` in each mode of `p50`, and for
     each `mode/competitor` in `ratios` the competitor's entry with that
-    `subject_ratio_p50`, trimmed to the fields compare.py reads."""
+    `subject_ratio_p50` and its p50 from `competitor_p50` (1 s by default),
+    trimmed to the fields compare.py reads."""
     pairs = [
         {"tree": tree, "mode": key.split("/")[0], "tool": key.split("/")[1], "paired_with": tool,
-         "p50_s": 1.0, "subject_ratio_p50": value}
+         "p50_s": (competitor_p50 or {}).get(key, 1.0), "subject_ratio_p50": value}
         for key, value in (ratios or {}).items()
     ]
     return {
@@ -151,6 +153,35 @@ class Compare(unittest.TestCase):
         code, out = self.run_compare([current, *linux])
         self.assertEqual(code, 0, out)
         self.assertIn("T1 warm du/diskus: no baseline", out)
+
+    def test_p0_bench_02_a_slower_machine_warns_and_the_ratio_decides(self):
+        """A competitor that slowed as much in the same rounds excuses the
+        tool's p50; the ratio is still checked."""
+        def run(competitor_now: float, ratio_now: float) -> "tuple[int, str]":
+            base = [
+                self.write(result({"warm": 1.0}, started_at=f"2026-10-{10 + i:02d}T10:00:00Z",
+                                  ratios={"warm/diskus": 0.66}, competitor_p50={"warm/diskus": 1.5}))
+                for i in range(5)
+            ]
+            current = self.write(result({"warm": 1.3}, started_at="2026-10-20T10:00:00Z",
+                                        ratios={"warm/diskus": ratio_now},
+                                        competitor_p50={"warm/diskus": competitor_now}))
+            return self.run_compare([current, *base], github=True)
+
+        # diskus slowed by 40% too, and the ratio held: a warning, exit 0.
+        status, out = run(2.1, 0.62)
+        self.assertEqual(status, 0, out)
+        self.assertIn("diskus slowed +40.0% in the same rounds", out)
+        self.assertIn("::warning title=bench-regression::", out)
+        self.assertNotIn("::error", out)
+        # diskus held its time: the tool's p50 is a regression.
+        status, out = run(1.5, 0.87)
+        self.assertEqual(status, 1, out)
+        self.assertIn("regression beyond 15%", out)
+        # diskus slowed, but the tool slowed more: the ratio fails.
+        status, out = run(2.1, 0.9)
+        self.assertEqual(status, 1, out)
+        self.assertIn("warm du/diskus: ratio 0.900", out)
 
     def test_p0_bench_02_each_mode_is_checked(self):
         base = [
