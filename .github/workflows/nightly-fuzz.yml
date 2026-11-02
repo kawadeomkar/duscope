@@ -71,7 +71,9 @@ jobs:
           nightly=$(just --evaluate fuzz_toolchain)
           rustup toolchain install "$nightly" --profile minimal
           rustup run "$nightly" rustc --version
-          cargo install --locked "cargo-fuzz@$(just --evaluate cargo_fuzz_version)"
+          # Built with the nightly: cargo-fuzz's locked dependencies need a
+          # newer rustc than the pinned 1.88 (`just setup` builds it with stable).
+          cargo +"$nightly" install --locked "cargo-fuzz@$(just --evaluate cargo_fuzz_version)"
       - name: Restore the corpus
         # The newest earlier corpus of the target.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
