@@ -87,6 +87,10 @@ pub enum Incoming {
     /// none (duscope sends no requests): the transport logs it and goes on,
     /// since answering it could start an exchange of errors without end.
     Response(Option<Id>),
+    /// A notification, by its method, whose params are positional, which no
+    /// MCP method takes. A notification is never answered, not even with
+    /// this error: the transport logs it and goes on.
+    PositionalNotification(String),
 }
 
 /// A JSON-RPC error object.
@@ -138,9 +142,11 @@ impl RpcError {
     }
 }
 
+/// One line for a log: the message, whose text may come from the client,
+/// with its control characters escaped, then the code.
 impl fmt::Display for RpcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.message, self.code)
+        write!(f, "{} ({})", self.message.escape_debug(), self.code)
     }
 }
 
@@ -168,8 +174,9 @@ impl Rejection {
 /// `error` and no `method`, and never answered; a present `id` is a string or
 /// an integer, `jsonrpc` is `"2.0"`, `method` is a string and `params`, when
 /// present and not null, is an object (else `-32600`, with the id once it
-/// was read; `-32602` for positional parameters, which no MCP method takes).
-/// A request has an `id`; a notification has none. Other members are ignored.
+/// was read; `-32602` for a request's positional parameters, which no MCP
+/// method takes, while a notification with them is never answered). A
+/// request has an `id`; a notification has none. Other members are ignored.
 pub fn parse(line: &[u8]) -> Result<Incoming, Rejection> {
     let value: Value = serde_json::from_slice(line).map_err(|e| {
         Rejection::without_id(RpcError::new(PARSE_ERROR, format!("parse error: {e}")))
@@ -219,6 +226,9 @@ pub fn parse(line: &[u8]) -> Result<Incoming, Rejection> {
     let params = match object.remove("params") {
         None | Some(Value::Null) => None,
         Some(Value::Object(params)) => Some(params),
+        Some(Value::Array(_)) if id.is_none() => {
+            return Ok(Incoming::PositionalNotification(method));
+        }
         Some(Value::Array(_)) => {
             return Err(refuse(RpcError::invalid_params(
                 "params must be an object of named parameters",

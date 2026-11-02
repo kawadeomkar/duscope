@@ -11,7 +11,7 @@
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
 use log::{debug, warn};
@@ -94,8 +94,18 @@ impl Outbox {
         Ok(())
     }
 
+    /// The sink, locked. A thread that panicked holding it may have left part
+    /// of a line on the stream, so the sink then counts as failed.
+    fn sink(&self) -> MutexGuard<'_, Sink> {
+        self.sink.lock().unwrap_or_else(|poisoned| {
+            let mut sink = poisoned.into_inner();
+            sink.failed.get_or_insert(io::ErrorKind::Other);
+            sink
+        })
+    }
+
     fn write(&self, line: &[u8]) -> io::Result<()> {
-        let mut guard = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.sink();
         let sink = &mut *guard;
         if let Some(kind) = sink.failed {
             return Err(io::Error::new(
@@ -111,10 +121,7 @@ impl Outbox {
     }
 
     fn failed(&self) -> Option<io::ErrorKind> {
-        self.sink
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .failed
+        self.sink().failed
     }
 }
 
@@ -308,6 +315,12 @@ pub fn run<R: BufRead, H: Handler>(
                 Ok(Incoming::Response(id)) => {
                     let id = id.map_or_else(|| "no id".to_owned(), |id| format!("id {id}"));
                     warn!("ignored a response from the client ({id}): duscope sends no requests");
+                }
+                Ok(Incoming::PositionalNotification(method)) => {
+                    warn!(
+                        "ignored notification {}: its params are positional, not named",
+                        method.escape_debug()
+                    );
                 }
                 Err(rejection) => {
                     warn!("refused a message: {}", rejection.error);

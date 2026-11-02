@@ -298,6 +298,9 @@ fn p3_mcp_01_interleaved_requests_and_notifications_are_answered_in_order() {
         r#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_owned(),
         r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"x"}}"#.to_owned(),
         r#"{"jsonrpc":"2.0","method":"notifications/two","params":{"k":"v"}}"#.to_owned(),
+        // Positional params, which no MCP method takes: a notification is
+        // still never answered.
+        r#"{"jsonrpc":"2.0","method":"notifications/three","params":[1]}"#.to_owned(),
         request(&json!(3), "missing", &json!({})),
         request(&json!(4), "echo", &json!({"n": 4})),
     ];
@@ -556,6 +559,31 @@ fn p3_mcp_01_a_failed_write_stops_the_reader() {
     assert_eq!(cursor.position(), u64::try_from(first.len() + 1).unwrap());
 }
 
+/// A stream whose write panics, partway through a line.
+struct Panicking;
+
+impl Write for Panicking {
+    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        panic!("the stream broke mid-line");
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn p3_mcp_01_a_panic_mid_write_fails_every_later_write() {
+    let outbox = Outbox::new(Panicking);
+    let writer = outbox.clone();
+    let panicked = thread::spawn(move || writer.notify("notifications/x", None)).join();
+    assert!(panicked.is_err());
+    // The stream may hold part of a line: nothing more is written to it (a
+    // write would panic again).
+    let after = outbox.notify("notifications/x", None).unwrap_err();
+    assert_eq!(after.kind(), io::ErrorKind::Other);
+}
+
 #[test]
 fn p3_mcp_01_the_transport_reads_on_a_thread_of_its_own() {
     let input = format!(
@@ -587,6 +615,10 @@ fn p3_mcp_01_the_transport_reads_on_a_thread_of_its_own() {
 const CHILD: &str = "p3_mcp_01_stdio_child_process";
 const CHILD_VAR: &str = "DUSCOPE_TEST_MCP_STDIO_CHILD";
 
+/// The line the child test writes just before it starts the transport: the
+/// test harness's own output comes before it, the transport's after.
+const STARTS: &str = "-- the transport starts here --\n";
+
 #[test]
 fn p3_mcp_01_stdout_is_byte_clean_at_debug_level() {
     let env = TestEnv::new();
@@ -617,10 +649,15 @@ fn p3_mcp_01_stdout_is_byte_clean_at_debug_level() {
             .expect("no line on stdout in 60 s");
         String::from_utf8(line).unwrap()
     };
-    // The test harness prints its own first line before the child test
-    // starts; everything after it is the transport's.
-    assert_eq!(next(), "\n");
-    assert_eq!(next(), "running 1 test\n");
+    let mut harness = Vec::new();
+    loop {
+        let line = next();
+        if line == STARTS {
+            break;
+        }
+        harness.push(line);
+        assert!(harness.len() < 10, "no start line: {harness:?}");
+    }
     let mut stdin = child.stdin.take().unwrap();
     let mut send = |line: &str| {
         stdin.write_all(line.as_bytes()).unwrap();
@@ -638,7 +675,8 @@ fn p3_mcp_01_stdout_is_byte_clean_at_debug_level() {
     send("{oops");
     let refused: Value = serde_json::from_str(&next()).unwrap();
     assert_eq!(error_code(&refused, None), -32700);
-    send(&request(&json!("two"), "nope", &json!({})));
+    // A method name cannot forge a log line: its newline is logged escaped.
+    send(&request(&json!("two"), "nope\nWARN forged", &json!({})));
     let missing: Value = serde_json::from_str(&next()).unwrap();
     assert_eq!(error_code(&missing, Some(&json!("two"))), -32601);
     // End of input: the server exits, and wrote nothing more.
@@ -664,6 +702,8 @@ fn p3_mcp_01_stdout_is_byte_clean_at_debug_level() {
         "DEBUG duscope_mcp::transport: sent the result for request 1",
         "DEBUG duscope_mcp::transport: received notification notifications/initialized",
         "WARN duscope_mcp::transport: refused a message: parse error",
+        "DEBUG duscope_mcp::transport: received request \"two\" nope\\nWARN forged",
+        "DEBUG duscope_mcp::transport: sent an error for request \"two\": method not found: nope\\nWARN forged",
         "DEBUG duscope_mcp::transport: the input ended",
     ] {
         assert!(
@@ -671,6 +711,10 @@ fn p3_mcp_01_stdout_is_byte_clean_at_debug_level() {
             "no `{record}` in stderr:\n{stderr}"
         );
     }
+    assert!(
+        !stderr.lines().any(|line| line.starts_with("WARN forged")),
+        "{stderr}"
+    );
 }
 
 /// Logs every record at debug level and above to stderr, as `duscope mcp
@@ -704,6 +748,7 @@ fn p3_mcp_01_stdio_child_process() {
     }
     log::set_logger(&Stderr).unwrap();
     log::set_max_level(log::LevelFilter::Debug);
+    io::stdout().write_all(STARTS.as_bytes()).unwrap();
     Transport::start(io::stdin(), io::stdout(), Echo::default())
         .unwrap()
         .wait()
