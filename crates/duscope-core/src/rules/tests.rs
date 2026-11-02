@@ -505,3 +505,57 @@ fn p1_core_04_the_most_specific_directory_rule_wins() {
         Some(Class::Media)
     );
 }
+
+/// P2-QRY-09: the set of last components only skips rules that could not
+/// match: a directory's class is the one trying every rule in turn gives.
+mod last_components {
+    use proptest::prelude::*;
+
+    use super::super::{Class, Classes};
+
+    /// The class trying every rule in precedence order gives.
+    fn every_rule<C: AsRef<[u8]>>(classes: &Classes, path: &[C]) -> Option<Class> {
+        classes
+            .dir
+            .iter()
+            .find(|(pattern, _)| pattern.matches(path))
+            .map(|&(_, class)| class)
+    }
+
+    fn classes() -> Classes {
+        let user = Classes::parse(
+            "[dir]\n\"{lib,out}*\" = \"data\"\n\"?x\" = \"code\"\n\"[ab]c/target\" = \"binaries\"\n\
+             \"node_modules/*.app\" = \"media\"\n",
+            "user",
+        )
+        .unwrap();
+        Classes::vendored().merged(user)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn p2_qry_09_the_set_of_last_components_skips_only_rules_that_cannot_match(
+            picks in prop::collection::vec(any::<u8>(), 0..5),
+            raw in prop::collection::vec(any::<u8>(), 0..4),
+        ) {
+            const NAMES: [&[u8]; 16] = [
+                b"node_modules", b".venv", b"site-packages", b".git", b"objects", b"IndexedDB",
+                b"DerivedData", b"Sparkle.framework", b".framework", b"x.FRAMEWORK", b"A.dSYM",
+                b"Tool.app", b"Contents", b"MacOS", b"libfoo", b"ac",
+            ];
+            let mut path: Vec<Vec<u8>> = picks
+                .iter()
+                .map(|&p| NAMES[usize::from(p) % NAMES.len()].to_vec())
+                .collect();
+            // Now and then a name that is not UTF-8.
+            if raw.len() == 3 {
+                path.push(raw);
+            }
+            for classes in [Classes::vendored(), classes()] {
+                prop_assert_eq!(classes.of_dir(&path), every_rule(&classes, &path), "{:?}", path);
+            }
+        }
+    }
+}

@@ -14,6 +14,7 @@
 //! file; name), and `other` is always the last row.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -225,34 +226,40 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
             tally.newest_mtime_ns.max(node.mtime_ns)
         };
         tally.files += 1;
-        if q.examples > 0 {
-            let size = node.counted(q.size);
-            let at = tally
-                .largest
-                .partition_point(|&(s, other)| s > size || (s == size && other < id));
-            if at < q.examples {
-                tally.largest.insert(at, (size, id));
-                tally.largest.truncate(q.examples);
-            }
-        }
+        keep_largest(&mut tally.largest, q.examples, node.counted(q.size), id);
     });
     tallies
 }
 
-/// The tallies of a whole saved scan read without a filter, from its own
-/// tables: `type_stats` for each extension's files; the outermost
-/// directories a directory rule matches, read from `dirs` in pre-order as
-/// [`classify`] reads them, their files' tallies moved to the rule's class;
-/// and each class's largest files from one pass down `files_allocated`,
-/// whose order (allocated bytes down, ids up among equals) is the walk's.
-/// `None` where the walk is needed: a subtree, a filter, a scan with modes
-/// (an extensionless file's class reads its execute bit), `--sort mtime`
-/// (the newest file is not in the tables), apparent sizes, or a class whose
+/// Keeps file `id`, counting `size`, among a class's `examples` largest:
+/// bytes counted, down, then ids, up.
+fn keep_largest(largest: &mut Vec<(u64, u32)>, examples: usize, size: u64, id: u32) {
+    if examples == 0 {
+        return;
+    }
+    let at = largest.partition_point(|&(s, other)| s > size || (s == size && other < id));
+    if at < examples {
+        largest.insert(at, (size, id));
+        largest.truncate(examples);
+    }
+}
+
+/// The tallies of a saved scan read without a filter, from its own tables.
+/// For the whole scan: `type_stats` for each extension's files; the
+/// outermost directories a directory rule matches, read from `dirs` in
+/// pre-order as [`classify`] reads them, their files' tallies moved to the
+/// rule's class; and each class's largest files from one pass down
+/// `files_allocated`, whose order (allocated bytes down, ids up among
+/// equals) is the walk's. For a subtree, whose ids are one range: the
+/// rules' directories from that range of `dirs`, and everything else from
+/// one pass over that range of `files` ([`subtree_tallies`]). `None` where
+/// the walk is needed: a filter, a scan with modes (an extensionless file's
+/// class reads its execute bit), `--sort mtime` (the newest file is not in
+/// the tables), apparent sizes, or, for the whole scan, a class whose
 /// examples would include a file that counts no bytes.
 fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Vec<Tally>> {
     let (saved, base) = view.as_index()?;
-    if base != 0
-        || !q.filters.is_empty()
+    if !q.filters.is_empty()
         || view.full_attrs()
         || q.sort == SortKey::Mtime
         || q.size != SizeKind::Allocated
@@ -270,6 +277,10 @@ fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Ve
         };
         let (_, above) = root_dirs(q.classes, view.root_path());
         let ranges = rule_ranges(view, q.classes)?;
+        if base != 0 {
+            let last = view.node(0).last_id;
+            return subtree_tallies(saved, base, last, &ranges, q, class_of_ext).map(Some);
+        }
         let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
         let mut add = |class: Class, files: i64, allocated: i64, apparent: i64, sign: i64| {
             let tally = &mut tallies[index(class)];
@@ -336,6 +347,65 @@ fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Ve
     })
 }
 
+/// The tallies of the subtree at id `base` of a saved scan, `last` ids
+/// long, from one pass over its files in id order: each one's class that
+/// of the rule range (in the subtree's ids) holding it, else its
+/// extension's, counted as the walk counts it (a later link not at all,
+/// allocated bytes only where charged) and ranked among its class's largest
+/// as the walk ranks it.
+fn subtree_tallies(
+    saved: &crate::index::Index,
+    base: u32,
+    last: u32,
+    ranges: &[(u32, u32, Class)],
+    q: &ByTypeQuery<'_>,
+    class_of_ext: impl Fn(&str) -> Class,
+) -> rusqlite::Result<Vec<Tally>> {
+    let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
+    // A subtree holds few extensions: each is looked up in the table once.
+    let mut ext_classes: HashMap<String, Class> = HashMap::new();
+    // The first rule range not wholly before the current id.
+    let mut range = 0;
+    let mut stmt = saved.db().prepare(&format!(
+        "SELECT id, ext, flags & {LATER_LINK}, charged, allocated, apparent FROM files \
+         WHERE id BETWEEN ?1 AND ?2 ORDER BY id"
+    ))?;
+    let mut rows = stmt.query([base, base.saturating_add(last)])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, i64>(2)? != 0 {
+            continue;
+        }
+        let id = row.get::<_, u32>(0)?.saturating_sub(base);
+        while ranges.get(range).is_some_and(|&(_, end, _)| id > end) {
+            range += 1;
+        }
+        let class = match ranges.get(range) {
+            Some(&(first, _, class)) if id >= first => class,
+            _ => {
+                let suffix = row.get_ref(1)?.as_str()?;
+                if let Some(&class) = ext_classes.get(suffix) {
+                    class
+                } else {
+                    let class = class_of_ext(suffix);
+                    ext_classes.insert(suffix.to_owned(), class);
+                    class
+                }
+            }
+        };
+        let allocated = if row.get::<_, bool>(3)? {
+            unsigned(row.get(4)?)
+        } else {
+            0
+        };
+        let tally = &mut tallies[index(class)];
+        tally.files += 1;
+        tally.allocated = tally.allocated.saturating_add(allocated);
+        tally.apparent = tally.apparent.saturating_add(unsigned(row.get(5)?));
+        keep_largest(&mut tally.largest, q.examples, allocated, id);
+    }
+    Ok(tallies)
+}
+
 /// Each class's `examples` largest files, ranked as the walk ranks them:
 /// bytes counted, down, then ids, up. The files charged with their bytes
 /// come from one pass down `files_allocated` that stops once every class
@@ -353,9 +423,11 @@ fn largest_by_class(
     let db = saved.db();
     // Each class's uncharged files, by id.
     let mut uncharged: Vec<Vec<u32>> = vec![Vec::new(); tallies.len()];
+    // CROSS JOIN keeps `shared_members` the outer table: without statistics
+    // SQLite would read every file to have them in id order.
     let mut stmt = db.prepare(&format!(
-        "SELECT f.id, f.ext FROM shared_members AS s JOIN files AS f ON f.id = s.id \
-         WHERE NOT f.charged AND f.flags & {LATER_LINK} = 0 ORDER BY f.id"
+        "SELECT s.id, f.ext FROM shared_members AS s CROSS JOIN files AS f ON f.id = s.id \
+         WHERE NOT f.charged AND f.flags & {LATER_LINK} = 0 ORDER BY s.id"
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
@@ -420,50 +492,59 @@ fn largest_by_class(
     Ok(true)
 }
 
-/// The outermost directories of a whole saved scan that a directory rule
-/// matches, as (first id, last id, class), in id order, read from `dirs` in
-/// pre-order as [`classify`] reads the tree; a rule matching a directory
-/// above the root covers everything.
+/// The outermost directories under the root of a saved scan's view that a
+/// directory rule matches, as (first id, last id, class) in the view's ids,
+/// in id order, read from the view's range of `dirs` in pre-order as
+/// [`classify`] reads the tree; a rule matching a directory above the root
+/// covers everything.
 fn rule_ranges(
     view: &(impl TreeView + ?Sized),
     classes: &Classes,
 ) -> rusqlite::Result<Vec<(u32, u32, Class)>> {
     let (above_root, above) = root_dirs(classes, view.root_path());
+    let view_last = view.node(0).last_id;
     if let Some(class) = above {
-        return Ok(vec![(0, view.node(0).last_id, class)]);
+        return Ok(vec![(0, view_last, class)]);
     }
-    let Some((saved, _)) = view.as_index() else {
+    let Some((saved, base)) = view.as_index() else {
         return Ok(Vec::new());
     };
     let mut ranges = Vec::new();
+    // The path's components: those above the root, then the open
+    // directories' names. Only the first `above_root.len() + open.len()`
+    // are the path; the buffers past them are kept for the next names.
     let mut components: Vec<Vec<u8>> = above_root.iter().map(|c| c.to_vec()).collect();
     let mut open: Vec<u32> = Vec::new();
     let mut stmt = saved
         .db()
-        .prepare("SELECT id, last_id, name FROM dirs ORDER BY id")?;
-    let mut rows = stmt.query([])?;
+        .prepare("SELECT id, last_id, name FROM dirs WHERE id BETWEEN ?1 AND ?2 ORDER BY id")?;
+    let mut rows = stmt.query([base, base.saturating_add(view_last)])?;
     let mut inside: Option<u32> = None;
     while let Some(row) = rows.next()? {
-        let id: u32 = row.get(0)?;
-        let last: u32 = row.get(1)?;
+        let id = row.get::<_, u32>(0)?.saturating_sub(base);
+        let last = row.get::<_, u32>(1)?.saturating_sub(base);
         while open.last().is_some_and(|&l| id > l) {
             open.pop();
-            components.pop();
         }
         if inside.is_some_and(|l| id > l) {
             inside = None;
         }
-        // The root's row holds its whole path; the rules read its last
-        // component, as the walk names it.
-        let name = if id == 0 {
-            view.name(0).into_owned()
+        let depth = above_root.len() + open.len();
+        if components.len() <= depth {
+            components.push(Vec::new());
+        }
+        let name = &mut components[depth];
+        name.clear();
+        // The scan root's row holds its whole path; the rules read the
+        // view's root by its last component, as the walk names it.
+        if id == 0 {
+            name.extend_from_slice(&view.name(0));
         } else {
-            row.get(2)?
-        };
-        components.push(name);
+            name.extend_from_slice(row.get_ref(2)?.as_bytes()?);
+        }
         open.push(last);
         if inside.is_none()
-            && let Some(class) = classes.of_dir(&components)
+            && let Some(class) = classes.of_dir(&components[..=depth])
         {
             ranges.push((id, last, class));
             inside = Some(last);

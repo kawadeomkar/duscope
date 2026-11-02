@@ -13,7 +13,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::ops::Range;
 
-use globset::{Glob, GlobMatcher};
+use globset::{Glob, GlobMatcher, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 
 use crate::CoreError;
@@ -164,6 +164,11 @@ pub struct Classes {
     /// In precedence order: a user table's rules come before the vendored
     /// ones.
     dir: Vec<(DirPattern, Class)>,
+    /// Every directory rule's last component, as one set: a directory whose
+    /// name matches none of them matches no rule, which one pass over the
+    /// set tells. `None` when the set could not be built: every rule is
+    /// tried.
+    last: Option<GlobSet>,
 }
 
 /// A classes table as read, every key with its place in the text so an
@@ -214,7 +219,21 @@ impl Classes {
         // The most specific rule is tried first: more path components, then
         // fewer globbed ones; the sort is stable, so keys break ties.
         dir.sort_by_key(|(pattern, _)| pattern.specificity());
-        Ok(Classes { ext: ext_map, dir })
+        Ok(Classes::new(ext_map, dir))
+    }
+
+    fn new(ext: BTreeMap<String, Class>, dir: Vec<(DirPattern, Class)>) -> Classes {
+        let mut last = GlobSetBuilder::new();
+        for (pattern, _) in &dir {
+            if let Some(matcher) = pattern.components.last() {
+                last.add(matcher.glob().clone());
+            }
+        }
+        Classes {
+            ext,
+            dir,
+            last: last.build().ok(),
+        }
     }
 
     /// This table with `user` merged over it: the user's extensions replace
@@ -224,8 +243,7 @@ impl Classes {
         self.ext.extend(user.ext);
         let mut dir = user.dir;
         dir.append(&mut self.dir);
-        self.dir = dir;
-        self
+        Classes::new(self.ext, dir)
     }
 
     /// The class of an extension, as [`ext`] returns it; `None` when the
@@ -237,6 +255,14 @@ impl Classes {
     /// The class of a directory whose path, as components, is `path`; `None`
     /// when no directory rule matches.
     pub fn of_dir<C: AsRef<[u8]>>(&self, path: &[C]) -> Option<Class> {
+        let name = String::from_utf8_lossy(path.last()?.as_ref());
+        if self
+            .last
+            .as_ref()
+            .is_some_and(|set| !set.is_match(name.as_ref()))
+        {
+            return None;
+        }
         self.dir
             .iter()
             .find(|(pattern, _)| pattern.matches(path))
