@@ -272,6 +272,41 @@ jobs:
           exit 1
         env:
           STATUS: ${{ steps.harness.outputs.status }}
+      # P2-BENCH-01: a saved scan's write, queries and size on T2, and the D34
+      # comparison with dua's and fdu's snapshots (bench/README.md, "Index
+      # measurements"). The warm runs on the internal disk, as the harness's;
+      # the cold ones on the image the cold command remounts, their saved scan
+      # beside the trees there, so it is read cold too. The result goes to
+      # bench-results beside the harness's; Gate 2 -> 3 reads its numbers.
+      - name: Index measurements
+        id: index
+        if: ${{ !cancelled() && env.SWEEP != 'true' }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          image="$home/trees.sparsebundle"
+          volume="$home/trees-volume"
+          cold="$PWD/bench/drop-caches.sh --remount $(printf %q "$image") $(printf %q "$volume")"
+          status=0
+          file=$(caffeinate -is bench/run.sh index --duscope "$DUSCOPE_BIN" --trees T2 --mode "$MODE" \
+            --scale "$SCALE" --trees-dir "$home/trees" --cold-trees-dir "$volume/trees" --tools-dir "$home/tools" \
+            --cold-cmd "$cold" \
+            --results-dir "$RUNNER_TEMP/index-results") || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [[ -n $file && -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.index.outputs.file != '' }}
+        with:
+          name: bench-macos-index
+          path: ${{ steps.index.outputs.file }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Fail when the index measurements did
+        if: ${{ !cancelled() && steps.index.outputs.status != '' && steps.index.outputs.status != '0' }}
+        run: |
+          echo "::error title=nightly-bench::bench/run.sh index exited $STATUS; the job log and the result file say why"
+          exit 1
+        env:
+          STATUS: ${{ steps.index.outputs.status }}
       # P1-BENCH-01: duscope at each thread count, on a dispatch that asks for
       # it. The result is an artifact for the author to commit, not a nightly
       # result: the publish job leaves it out.
@@ -394,6 +429,34 @@ jobs:
           exit 1
         env:
           STATUS: ${{ steps.harness.outputs.status }}
+      # P2-BENCH-01: a saved scan's write, queries and size on T2, and the D34
+      # comparison with dua's and fdu's snapshots (bench/README.md, "Index
+      # measurements"). The result goes to bench-results beside the harness's;
+      # Gate 2 -> 3 reads its numbers.
+      - name: Index measurements
+        id: index
+        if: ${{ !cancelled() && env.SWEEP != 'true' }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          status=0
+          file=$(bench/run.sh index --duscope "$DUSCOPE_BIN" --trees T2 --mode "$MODE" --scale "$SCALE" \
+            --trees-dir "$home/trees" --tools-dir "$home/tools" --results-dir "$RUNNER_TEMP/index-results") || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [[ -n $file && -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.index.outputs.file != '' }}
+        with:
+          name: bench-linux-index
+          path: ${{ steps.index.outputs.file }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Fail when the index measurements did
+        if: ${{ !cancelled() && steps.index.outputs.status != '' && steps.index.outputs.status != '0' }}
+        run: |
+          echo "::error title=nightly-bench::bench/run.sh index exited $STATUS; the job log and the result file say why"
+          exit 1
+        env:
+          STATUS: ${{ steps.index.outputs.status }}
       # P1-BENCH-01: duscope at each thread count, on a dispatch that asks for
       # it. The result is an artifact for the author to commit, not a nightly
       # result: the publish job leaves it out.
