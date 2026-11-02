@@ -195,7 +195,9 @@ fn show(
         now,
         &classes,
     );
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from);
     let mut app = App::new(view, opts, style.depth(), home.as_deref(), summary, warning);
     duscope_tui::run(tui.terminal(), &mut app, || {
         assert!(

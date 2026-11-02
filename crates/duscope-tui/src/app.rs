@@ -9,6 +9,7 @@
 //! The selection starts at the largest file, reached through the largest
 //! child at every level, as the canvas opens.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -25,7 +26,7 @@ use ratatui_core::terminal::Terminal;
 use unicode_width::UnicodeWidthChar;
 
 use crate::layout::{Panes, inner, layout};
-use crate::panes::{self, Context, LegendRow};
+use crate::panes::{self, Context, LegendRow, Ranks};
 use crate::term::MIN_SIZE;
 use crate::widgets::{Canvas, Message, Notice, border};
 
@@ -54,10 +55,14 @@ pub struct App<'a> {
     warning: Option<String>,
     /// The root's path as the header writes it: `~` for the home folder.
     root: String,
+    /// The folder the root is in, written the same way.
+    root_parent: String,
     /// Each entry's class, by id.
     class_of: Vec<Class>,
-    /// Each top-level folder's `--color-by folder` index.
-    ranks: HashMap<u32, usize>,
+    /// The class of most of each folder's bytes, as the panes meet them.
+    dominant: RefCell<HashMap<u32, Class>>,
+    /// The `--color-by folder` places of the root's tiles.
+    ranks: Ranks,
     /// The legend's title and rows.
     legend: (&'static str, Vec<LegendRow>),
     /// The selected entry.
@@ -92,12 +97,19 @@ impl<'a> App<'a> {
         let class_of = classes_of(view, opts.classes);
         let ranks = panes::ranks(view, &opts);
         let root = root_label(view.root_path(), home);
+        let root_parent = view
+            .root_path()
+            .parent()
+            .map_or_else(|| root.clone(), |parent| root_label(parent, home));
+        let dominant = RefCell::new(HashMap::new());
         let legend = panes::legend_rows(&Context {
             view,
             opts: &opts,
             class_of: &class_of,
+            dominant: &dominant,
             ranks: &ranks,
             root: &root,
+            root_parent: &root_parent,
         });
         App {
             view,
@@ -105,7 +117,9 @@ impl<'a> App<'a> {
             summary,
             warning,
             root,
+            root_parent,
             class_of,
+            dominant,
             ranks,
             legend,
             opts,
@@ -158,8 +172,10 @@ impl<'a> App<'a> {
             view: self.view,
             opts: &self.opts,
             class_of: &self.class_of,
+            dominant: &self.dominant,
             ranks: &self.ranks,
             root: &self.root,
+            root_parent: &self.root_parent,
         };
 
         // The header: the badge, the path, the tabs, the status.
@@ -193,7 +209,13 @@ impl<'a> App<'a> {
         };
         let title = format!("treemap · {} · color: {mode}", self.root);
         canvas.pane(at.map_pane, &title, border(pack, true));
-        let map = paint_unlabelled(self.view, &self.opts, at.map.width, at.map.height);
+        let map = paint_unlabelled(
+            self.view,
+            &self.opts,
+            at.map.width,
+            at.map.height,
+            &self.class_of,
+        );
         for my in 0..map.height() {
             for mx in 0..map.width() {
                 if let (Some(&cell), Some(slot)) = (
@@ -289,7 +311,9 @@ impl<'a> App<'a> {
 }
 
 /// The root's path as the header writes it: under `home`, `~` and the rest.
+/// A home of `/`, or empty, abbreviates nothing.
 fn root_label(root: &Path, home: Option<&Path>) -> String {
+    let home = home.filter(|home| !home.as_os_str().is_empty() && *home != Path::new("/"));
     if let Some(rest) = home.and_then(|home| root.strip_prefix(home).ok()) {
         let rest = rest.to_string_lossy();
         return if rest.is_empty() {
@@ -477,4 +501,26 @@ pub fn snapshot(buf: &Buffer) -> String {
         let _ = writeln!(out, "{}: {}", y - area.top(), line.join(" | "));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::root_label;
+
+    #[test]
+    fn p4_tui_02_the_root_is_written_from_home() {
+        let home = Some(Path::new("/Users/alex"));
+        assert_eq!(root_label(Path::new("/Users/alex"), home), "~");
+        assert_eq!(
+            root_label(Path::new("/Users/alex/Library"), home),
+            "~/Library"
+        );
+        assert_eq!(root_label(Path::new("/Users"), home), "/Users");
+        assert_eq!(root_label(Path::new("/var/log"), None), "/var/log");
+        // A home of `/` or empty abbreviates nothing.
+        assert_eq!(root_label(Path::new("/usr"), Some(Path::new("/"))), "/usr");
+        assert_eq!(root_label(Path::new("/usr"), Some(Path::new(""))), "/usr");
+    }
 }

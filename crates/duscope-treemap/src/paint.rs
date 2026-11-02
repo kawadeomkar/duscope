@@ -35,6 +35,8 @@
 //! The viewer's map ([`paint_unlabelled`]) carries no labels below the
 //! depth-1 titles: its panes name whatever the cursor is on.
 
+use std::borrow::Cow;
+
 use duscope_core::query::{Node, SizeKind, TreeView, children, classify};
 use duscope_core::rules::{Class, Classes};
 
@@ -137,7 +139,7 @@ struct Unit {
 
 /// The painter's state: the units, the overlay of border and label cells,
 /// and each entry's class.
-struct Painter<'v, 'o, V: TreeView + ?Sized> {
+struct Painter<'v, 'o, 'c, V: TreeView + ?Sized> {
     view: &'v V,
     opts: &'o PaintOpts<'o>,
     w: u16,
@@ -145,7 +147,7 @@ struct Painter<'v, 'o, V: TreeView + ?Sized> {
     units: Vec<Unit>,
     overlay: Vec<Option<Cell>>,
     /// Each entry's class, by pre-order id.
-    class_of: Vec<Class>,
+    class_of: Cow<'c, [Class]>,
     /// Whether tiles are labelled; the depth-1 titles are drawn either way.
     labels: bool,
 }
@@ -156,34 +158,38 @@ struct Painter<'v, 'o, V: TreeView + ?Sized> {
 pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u16) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
     let mut buffer = CellBuffer::new(w, h);
-    paint_into(view, opts, h, &mut buffer, true);
+    paint_into(view, opts, h, &mut buffer, None);
     buffer
 }
 
 /// Paints the scan as [`paint`] does, without labels on its tiles: the
 /// viewer's map, whose panes carry each tile's name and size. Folders keep
-/// their outlines and the depth-1 boxes their titles.
+/// their outlines and the depth-1 boxes their titles. `class_of` is
+/// [`classes_of`]'s answer for `view` and `opts.classes`, which the viewer
+/// works out once rather than for every frame.
 #[must_use]
 pub fn paint_unlabelled(
     view: &(impl TreeView + ?Sized),
     opts: &PaintOpts<'_>,
     w: u16,
     h: u16,
+    class_of: &[Class],
 ) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
     let mut buffer = CellBuffer::new(w, h);
-    paint_into(view, opts, h, &mut buffer, false);
+    paint_into(view, opts, h, &mut buffer, Some(class_of));
     buffer
 }
 
 /// Paints the map into the top `h` rows of `buffer` (at most 32767), as
-/// wide as the buffer, its tiles labelled when `labels`.
+/// wide as the buffer: labelled, or without labels given each entry's class
+/// (`unlabelled`).
 fn paint_into(
     view: &(impl TreeView + ?Sized),
     opts: &PaintOpts<'_>,
     h: u16,
     buffer: &mut CellBuffer,
-    labels: bool,
+    unlabelled: Option<&[Class]>,
 ) {
     let (w, h) = (buffer.width(), h.min(u16::MAX / 2).min(buffer.height()));
     let h_units = h * 2;
@@ -200,8 +206,9 @@ fn paint_into(
             usize::from(w) * usize::from(h_units)
         ],
         overlay: vec![None; usize::from(w) * usize::from(h)],
-        class_of: classes_of(view, opts.classes),
-        labels,
+        class_of: unlabelled
+            .map_or_else(|| Cow::Owned(classes_of(view, opts.classes)), Cow::Borrowed),
+        labels: unlabelled.is_none(),
     };
     if !view.is_empty() && w > 0 && h > 0 {
         let root = view.node(0);
@@ -233,7 +240,7 @@ enum Item {
     Files(u32, u64),
 }
 
-impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
+impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
     /// Lays out `dir`'s children in `area` (units) and paints each; `depth`
     /// is `dir`'s, `folder` the index of the top-level folder above.
     fn block(&mut self, dir: &Node, area: Rect, depth: u32, folder: Option<usize>) {
@@ -828,7 +835,7 @@ pub fn frame(
     }
     let map_rows = rows - 5;
     let mut buffer = CellBuffer::new(w, map_rows + 4);
-    paint_into(view, opts, map_rows, &mut buffer, true);
+    paint_into(view, opts, map_rows, &mut buffer, None);
     // The legend: `■ code 61%` per class, the swatch in its colour.
     let mut x = 2u16;
     let y = map_rows;

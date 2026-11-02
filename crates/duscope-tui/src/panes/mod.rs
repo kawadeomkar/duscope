@@ -14,13 +14,17 @@
 //!
 //! Everything is read from the view, as the map is.
 
+use std::cell::RefCell;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use duscope_core::query::timegrammar::iso8601;
 use duscope_core::query::{Node, TreeView, children};
 use duscope_core::rules::{Class, ext};
 use duscope_treemap::cells::Color;
-use duscope_treemap::paint::{ColorBy, PaintOpts, age_step, compact, dominant, tile_color};
+use duscope_treemap::paint::{
+    ColorBy, LsColors, PaintOpts, age_step, compact, dominant, tile_color,
+};
 use ratatui_core::layout::Rect;
 
 use crate::layout::inner;
@@ -44,11 +48,25 @@ pub struct Context<'a> {
     pub opts: &'a PaintOpts<'a>,
     /// Each entry's class, by id.
     pub class_of: &'a [Class],
-    /// Each top-level folder's place among the root's children, by size:
-    /// the index of its `--color-by folder` colour.
-    pub ranks: &'a HashMap<u32, usize>,
+    /// The class of most of each folder's bytes, worked out the first time
+    /// a pane shows the folder: the scan does not change.
+    pub dominant: &'a RefCell<HashMap<u32, Class>>,
+    /// The `--color-by folder` places of the root's tiles.
+    pub ranks: &'a Ranks,
     /// The root's path as the header shows it (`~/Library`).
     pub root: &'a str,
+    /// The folder the root is in, written the same way.
+    pub root_parent: &'a str,
+}
+
+/// The places of the root's tiles in the order the map lays them out,
+/// largest first: each one's `--color-by folder` colour.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ranks {
+    /// A child of the root with a tile of its own, by id.
+    pub by_id: HashMap<u32, usize>,
+    /// Under `--pool-files`, the one tile of the root's files.
+    pub files: Option<usize>,
 }
 
 /// One row of the legend.
@@ -71,7 +89,13 @@ impl Context<'_> {
     /// A file's class, or the class of most of a folder's bytes.
     pub fn class(&self, node: &Node) -> Class {
         if node.is_dir() {
-            dominant(self.view, self.class_of, self.opts.size, node.id, false)
+            *self
+                .dominant
+                .borrow_mut()
+                .entry(node.id)
+                .or_insert_with(|| {
+                    dominant(self.view, self.class_of, self.opts.size, node.id, false)
+                })
         } else {
             self.class_of
                 .get(node.id as usize)
@@ -87,7 +111,7 @@ impl Context<'_> {
             top = self.view.node(top.parent);
         }
         let folder = (top.depth == 1)
-            .then(|| self.ranks.get(&top.id).copied())
+            .then(|| self.ranks.by_id.get(&top.id).copied())
             .flatten();
         tile_color(
             self.view,
@@ -380,49 +404,32 @@ pub fn siblings(canvas: &mut Canvas<'_>, pane: Rect, ctx: &Context<'_>, id: u32)
     } else {
         vec![parent]
     };
-    kids.sort_by_key(|kid| std::cmp::Reverse(ctx.size(kid)));
+    kids.sort_by_key(|kid| Reverse(ctx.size(kid)));
     let whole = ctx.size(&parent);
-    let rows: Vec<(ListRow<'_>, String, String)> = kids
-        .iter()
-        .map(|kid| {
-            (
-                ListRow {
-                    current: Some(kid.id == id),
-                    color: ctx.color(kid),
-                    name: "",
-                    name_color: None,
-                    size: "",
-                    share: Context::share(ctx.size(kid), whole),
-                },
-                ctx.name(kid.id, true),
-                compact(ctx.size(kid)),
-            )
-        })
-        .collect();
     let name_width = area.width.saturating_sub(23).min(16);
-    let shown = list_rows(rows.len(), SIBLINGS, usize::from(area.height));
-    for (row, (list, name, size)) in rows.iter().take(shown).enumerate() {
+    let shown = list_rows(kids.len(), SIBLINGS, usize::from(area.height));
+    for (row, kid) in kids.iter().take(shown).enumerate() {
         let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
+        let (name, size) = (ctx.name(kid.id, true), compact(ctx.size(kid)));
         canvas.list_row(
             area.x,
             y,
             area.right(),
             &ListRow {
-                name,
-                size,
-                ..list.clone()
+                current: Some(kid.id == id),
+                color: ctx.color(kid),
+                name: &name,
+                name_color: None,
+                size: &size,
+                share: Context::share(ctx.size(kid), whole),
             },
             name_width,
             SIBLING_BAR,
         );
     }
-    if shown < rows.len() {
+    if shown < kids.len() {
         let bytes: u64 = kids[shown..].iter().map(|k| ctx.size(k)).sum();
-        let (label, size, share) = (
-            format!("… {} more", kids.len() - shown),
-            compact(bytes),
-            Context::share(bytes, whole),
-        );
+        let (label, size) = (format!("… {} more", kids.len() - shown), compact(bytes));
         let y = area.y + u16::try_from(shown).unwrap_or(u16::MAX);
         canvas.list_row(
             area.x,
@@ -434,7 +441,7 @@ pub fn siblings(canvas: &mut Canvas<'_>, pane: Rect, ctx: &Context<'_>, id: u32)
                 name: &label,
                 name_color: Some(roles.overlay1),
                 size: &size,
-                share,
+                share: Context::share(bytes, whole),
             },
             name_width,
             SIBLING_BAR,
@@ -443,14 +450,13 @@ pub fn siblings(canvas: &mut Canvas<'_>, pane: Rect, ctx: &Context<'_>, id: u32)
 }
 
 /// How many of `count` rows a list shows in `room` rows when it shows at
-/// most `most` before a `… n more` row: all that fit, or one fewer and the
-/// `more` row.
+/// most `most` before a `… n more` row: all when they fit, else `most`, or
+/// as many as leave room for the `more` row.
 fn list_rows(count: usize, most: usize, room: usize) -> usize {
-    let fit = most.min(room);
-    if count <= fit {
+    if count <= most.min(room) {
         count
     } else {
-        fit.saturating_sub(1)
+        most.min(room.saturating_sub(1))
     }
 }
 
@@ -495,136 +501,196 @@ pub fn legend(canvas: &mut Canvas<'_>, pane: Rect, title: &str, rows: &[LegendRo
     }
 }
 
-/// The legend's title and rows for the colours `opts` paints with: the
-/// classes' bytes for `type` and `lscolors`, the top-level folders' for
-/// `folder`, the bytes at each depth for `level`, at each age for `age`;
-/// largest first.
+/// The legend's title and rows for the colours `opts` paints with,
+/// largest first: the classes' bytes for `type`; the files' `LS_COLORS`
+/// colours (the class colour where it gives none) for `lscolors`; the root's
+/// tiles' bytes for `folder`; the bytes at each depth for `level` and at
+/// each age for `age`, a file below the `--depth` cap counted with the
+/// folder the map draws whole.
 pub fn legend_rows(ctx: &Context<'_>) -> (&'static str, Vec<LegendRow>) {
     let pack = ctx.opts.pack;
     let view = ctx.view;
+    let size = ctx.opts.size;
     let files = || {
         (0..view.len())
             .map(|id| view.node(id))
             .filter(|n| !n.is_dir())
     };
-    let size = ctx.opts.size;
-    let (title, mut rows): (&'static str, Vec<LegendRow>) = match &ctx.opts.color_by {
-        ColorBy::Type | ColorBy::LsColors(_) => {
-            let mut bytes = [0u64; 7];
+    // The entry whose tile holds a file: the file, or above the `--depth`
+    // cap the folder drawn as one tile.
+    let cap = ctx.opts.depth.map(|d| d.max(1));
+    let shown = |node: Node| {
+        let mut at = node;
+        while cap.is_some_and(|cap| at.depth > cap) {
+            at = view.node(at.parent);
+        }
+        at
+    };
+    // Bytes by label, in the order labels first appear.
+    let mut tally: Vec<LegendRow> = Vec::new();
+    let mut add = |label: String, color: Color, bytes: u64| {
+        if let Some(row) = tally.iter_mut().find(|r| r.label == label) {
+            row.bytes += bytes;
+        } else {
+            tally.push(LegendRow {
+                label,
+                bytes,
+                color,
+            });
+        }
+    };
+    let title = match &ctx.opts.color_by {
+        ColorBy::Type => {
             for node in files() {
                 let class = ctx.class(&node);
-                let i = Class::ALL.iter().position(|&c| c == class).unwrap_or(6);
-                bytes[i] += node.counted(size);
+                add(
+                    class.as_str().to_owned(),
+                    pack.class(class),
+                    node.counted(size),
+                );
             }
-            let rows = Class::ALL
-                .iter()
-                .zip(bytes)
-                .filter(|&(_, b)| b > 0)
-                .map(|(&class, bytes)| LegendRow {
-                    label: class.as_str().to_owned(),
-                    bytes,
-                    color: pack.class(class),
-                })
-                .collect();
-            ("by type", rows)
+            "by type"
+        }
+        ColorBy::LsColors(table) => {
+            for node in files() {
+                let (label, color) =
+                    ls_key(table, &view.name(node.id), node.mode).unwrap_or_else(|| {
+                        let class = ctx.class(&node);
+                        (class.as_str().to_owned(), pack.class(class))
+                    });
+                add(label, color, node.counted(size));
+            }
+            "by LS_COLORS"
         }
         ColorBy::Folder => {
-            let root = view.node(0);
-            let mut rows: Vec<(usize, LegendRow)> = if root.is_dir() {
-                children(view, &root)
-                    .map(|id| {
-                        let node = view.node(id);
-                        let rank = ctx.ranks.get(&id).copied().unwrap_or(0);
-                        (
-                            rank,
-                            LegendRow {
-                                label: String::from_utf8_lossy(&view.name(id)).into_owned(),
-                                bytes: node.counted(size),
-                                color: pack.cycle[rank % pack.cycle.len()],
-                            },
-                        )
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            rows.sort_by_key(|&(rank, _)| rank);
-            ("by top folder", rows.into_iter().map(|(_, r)| r).collect())
+            tally = folder_rows(ctx);
+            "by top folder"
         }
         ColorBy::Level => {
-            let mut bytes: Vec<u64> = Vec::new();
             for node in files() {
-                let depth = node.depth as usize;
-                if bytes.len() <= depth {
-                    bytes.resize(depth + 1, 0);
-                }
-                bytes[depth] += node.counted(size);
+                let depth = shown(node).depth;
+                add(
+                    format!("depth {depth}"),
+                    pack.cycle[depth as usize % pack.cycle.len()],
+                    node.counted(size),
+                );
             }
-            let rows = bytes
-                .iter()
-                .enumerate()
-                .filter(|&(_, &b)| b > 0)
-                .map(|(depth, &bytes)| LegendRow {
-                    label: format!("depth {depth}"),
-                    bytes,
-                    color: pack.cycle[depth % pack.cycle.len()],
-                })
-                .collect();
-            ("by depth", rows)
+            "by depth"
         }
         ColorBy::Age => {
             const AGES: [&str; 5] = ["< 1 day", "< 1 week", "< 1 month", "< 1 year", "older"];
-            let mut bytes = [0u64; 5];
             for node in files() {
-                bytes[age_step(ctx.opts.now, node.max_mtime_ns)] += node.counted(size);
+                let step = age_step(ctx.opts.now, shown(node).max_mtime_ns);
+                add(AGES[step].to_owned(), pack.age[step], node.counted(size));
             }
-            let rows = AGES
-                .iter()
-                .zip(bytes)
-                .enumerate()
-                .filter(|&(_, (_, b))| b > 0)
-                .map(|(step, (label, bytes))| LegendRow {
-                    label: (*label).to_owned(),
-                    bytes,
-                    color: pack.age[step],
-                })
-                .collect();
-            ("by age", rows)
+            "by age"
         }
     };
+    let mut rows: Vec<LegendRow> = tally.into_iter().filter(|r| r.bytes > 0).collect();
     // Stable: equal sizes keep their order.
-    rows.sort_by_key(|row| std::cmp::Reverse(row.bytes));
+    rows.sort_by_key(|row| Reverse(row.bytes));
     (title, rows)
 }
 
-/// Each top-level folder's place among the root's children by the size
-/// the map weighs them by, largest first, equals in their order: the order
-/// the map lays them out in, and so the index of each one's `--color-by
-/// folder` colour.
-pub fn ranks(view: &dyn TreeView, opts: &PaintOpts<'_>) -> HashMap<u32, usize> {
+/// The legend's rows under `--color-by folder`: the root's tiles in the
+/// order the map lays them out, each in its colour of the cycle; under
+/// `--pool-files` the root's files as one tile in the colour of most of
+/// their bytes.
+fn folder_rows(ctx: &Context<'_>) -> Vec<LegendRow> {
+    let (pack, view, size) = (ctx.opts.pack, ctx.view, ctx.opts.size);
+    let root = view.node(0);
+    let mut ranked: Vec<(usize, LegendRow)> = Vec::new();
+    let mut pooled = 0u64;
+    if root.is_dir() {
+        for id in children(view, &root) {
+            let node = view.node(id);
+            if let Some(&rank) = ctx.ranks.by_id.get(&id) {
+                ranked.push((
+                    rank,
+                    LegendRow {
+                        label: String::from_utf8_lossy(&view.name(id)).into_owned(),
+                        bytes: node.counted(size),
+                        color: pack.cycle[rank % pack.cycle.len()],
+                    },
+                ));
+            } else if !node.is_dir() {
+                pooled += node.counted(size);
+            }
+        }
+    }
+    if let Some(rank) = ctx.ranks.files {
+        let class = dominant(view, ctx.class_of, size, 0, true);
+        ranked.push((
+            rank,
+            LegendRow {
+                label: "files".to_owned(),
+                bytes: pooled,
+                color: pack.class(class),
+            },
+        ));
+    }
+    ranked.sort_by_key(|&(rank, _)| rank);
+    ranked.into_iter().map(|(_, row)| row).collect()
+}
+
+/// The `LS_COLORS` entry that colours a file named `name` with `mode`, as
+/// [`LsColors::of`] picks it: `ex` for an executable, else the last suffix
+/// it ends with; with its colour.
+fn ls_key(table: &LsColors, name: &[u8], mode: Option<u32>) -> Option<(String, Color)> {
+    if let Some(color) = table.executable
+        && mode.is_some_and(|m| m & 0o111 != 0)
+    {
+        return Some(("executable".to_owned(), color));
+    }
+    let name = name.to_ascii_lowercase();
+    table
+        .suffixes
+        .iter()
+        .rev()
+        .find(|(suffix, _)| name.ends_with(suffix.as_bytes()))
+        .map(|(suffix, color)| (format!("*{suffix}"), *color))
+}
+
+/// The places of the root's tiles as the map lays them out: its children,
+/// under `--pool-files` its folders and one tile for its files, by the size
+/// the map weighs them by, largest first, equals in their order.
+pub fn ranks(view: &dyn TreeView, opts: &PaintOpts<'_>) -> Ranks {
     let root = view.node(0);
     if view.is_empty() || !root.is_dir() {
-        return HashMap::new();
+        return Ranks::default();
     }
-    let mut kids: Vec<(u64, u32)> = children(view, &root)
-        .map(|id| (view.node(id).counted(opts.size), id))
-        .collect();
-    kids.sort_by_key(|&(bytes, _)| std::cmp::Reverse(bytes));
-    kids.iter()
-        .enumerate()
-        .map(|(rank, &(_, id))| (id, rank))
-        .collect()
+    let mut items: Vec<(u64, Option<u32>)> = Vec::new();
+    let (mut pooled, mut any) = (0u64, false);
+    for id in children(view, &root) {
+        let node = view.node(id);
+        if opts.pool_files && !node.is_dir() {
+            pooled += node.counted(opts.size);
+            any = true;
+        } else {
+            items.push((node.counted(opts.size), Some(id)));
+        }
+    }
+    if any {
+        items.push((pooled, None));
+    }
+    items.sort_by_key(|&(bytes, _)| Reverse(bytes));
+    let mut ranks = Ranks::default();
+    for (rank, &(_, id)) in items.iter().enumerate() {
+        match id {
+            Some(id) => {
+                ranks.by_id.insert(id, rank);
+            }
+            None => ranks.files = Some(rank),
+        }
+    }
+    ranks
 }
 
 /// The path of `node`'s parent, as the header writes the root's; for the
 /// root, the folder it is in.
 fn parent_path(ctx: &Context<'_>, node: &Node) -> String {
     if node.id == 0 {
-        return match ctx.root.rsplit_once('/') {
-            Some(("", _)) => "/".to_owned(),
-            Some((parent, _)) => parent.to_owned(),
-            None => ctx.root.to_owned(),
-        };
+        return ctx.root_parent.to_owned();
     }
     ctx.path(node.parent)
 }

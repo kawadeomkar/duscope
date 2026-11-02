@@ -522,22 +522,23 @@ pub fn thousands(n: u64) -> String {
 pub fn full_size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
     let mut unit = 0;
-    let mut divisor = 1u64;
-    while bytes / divisor >= 1024 && unit + 1 < UNITS.len() {
+    let mut divisor = 1u128;
+    // The value in a unit, rounded as printed: hundredths from GiB up.
+    let rounded = |unit: usize, divisor: u128| -> u128 {
+        let scale = if unit >= 3 { 100 } else { 1 };
+        (u128::from(bytes) * scale + divisor / 2) / divisor
+    };
+    // The next unit up once the value, rounded, would print as 1024.
+    while unit + 1 < UNITS.len() && rounded(unit, divisor) >= if unit >= 3 { 102_400 } else { 1024 }
+    {
         divisor *= 1024;
         unit += 1;
     }
+    let value = rounded(unit, divisor);
     if unit >= 3 {
-        let hundredths = (u128::from(bytes) * 100 + u128::from(divisor) / 2) / u128::from(divisor);
-        format!(
-            "{}.{:02} {}",
-            hundredths / 100,
-            hundredths % 100,
-            UNITS[unit]
-        )
+        format!("{}.{:02} {}", value / 100, value % 100, UNITS[unit])
     } else {
-        let whole = (u128::from(bytes) + u128::from(divisor) / 2) / u128::from(divisor);
-        format!("{whole} {}", UNITS[unit])
+        format!("{value} {}", UNITS[unit])
     }
 }
 
@@ -777,6 +778,11 @@ mod tests {
         assert_eq!(full_size(12 << 10), "12 KiB");
         assert_eq!(full_size(512), "512 B");
         assert_eq!(full_size(3 << 40), "3.00 TiB");
+        // A value just under a unit prints in that unit, not as 1024.
+        assert_eq!(full_size((1 << 30) - 1024), "1.00 GiB");
+        assert_eq!(full_size(1_048_064), "1 MiB");
+        assert_eq!(full_size(1_048_000), "1023 KiB");
+        assert_eq!(full_size(1023), "1023 B");
         assert_eq!(thousands(1_284_310), "1,284,310");
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(0), "0");

@@ -660,7 +660,8 @@ fn p4_tui_02_a_list_shows_what_fits_then_n_more() {
     // fewer and `… n more`.
     assert_eq!(list_rows(5, 9, 18), 5);
     assert_eq!(list_rows(9, 9, 18), 9);
-    assert_eq!(list_rows(14, 9, 18), 8);
+    assert_eq!(list_rows(14, 9, 18), 9);
+    assert_eq!(list_rows(10, 9, 10), 9);
     assert_eq!(list_rows(14, 9, 4), 3);
     assert_eq!(list_rows(3, 9, 3), 3);
 }
@@ -673,4 +674,164 @@ fn p4_tui_02_the_mode_reads_as_ls_writes_it() {
     assert_eq!(mode_text(Some(0o2644), false), "-rw-r-Sr--");
     assert_eq!(mode_text(Some(0o1777), true), "drwxrwxrwt");
     assert_eq!(mode_text(None, false), "—");
+}
+
+/// A small tree from `(path, MiB)` files, scanned from `root`.
+fn small(root: &str, files: &[(&str, u64)]) -> (Arena, RollUp) {
+    let mut dir = Dir::default();
+    for &(path, mib) in files {
+        let parts: Vec<&str> = path.split('/').collect();
+        let (file, dirs) = parts.split_last().unwrap();
+        dir.at(dirs).files.push(((*file).to_owned(), mib << 20));
+    }
+    let mut json = format!(r#"[1,2,{{"progname":"ncdu"}},[{{"name":"{root}"}}"#);
+    dir.json(&mut json);
+    json.push_str("]]");
+    let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
+        .unwrap()
+        .arena;
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
+/// The legend `opts` gives `view`.
+fn legend_of(
+    view: &ArenaView<'_>,
+    opts: &PaintOpts<'_>,
+    classes: &Classes,
+) -> (&'static str, Vec<(String, u64)>) {
+    use super::{Context, legend_rows, ranks};
+    use std::cell::RefCell;
+    let class_of = duscope_treemap::paint::classes_of(view, classes);
+    let ranks = ranks(view, opts);
+    let dominant = RefCell::default();
+    let (title, rows) = legend_rows(&Context {
+        view,
+        opts,
+        class_of: &class_of,
+        dominant: &dominant,
+        ranks: &ranks,
+        root: "/r",
+        root_parent: "/",
+    });
+    (
+        title,
+        rows.into_iter().map(|r| (r.label, r.bytes >> 20)).collect(),
+    )
+}
+
+#[test]
+fn p4_tui_02_folder_colours_follow_the_maps_tiles_under_pool_files() {
+    use super::ranks;
+    use duscope_core::query::{TreeView, children};
+    let tree = small(
+        "/r",
+        &[("a/x.bin", 10), ("b/y.bin", 5), ("f1", 3), ("f2", 3)],
+    );
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/r"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
+    let id = |name: &str| {
+        children(&view, &view.node(0))
+            .find(|&id| view.name(id).as_ref() == name.as_bytes())
+            .unwrap()
+    };
+    // Each child a tile: a, b, then the files, by size.
+    let plain = ranks(&view, &opts(&mocha, &classes, ColorBy::Folder));
+    assert_eq!((plain.by_id[&id("a")], plain.by_id[&id("b")]), (0, 1));
+    assert_eq!(plain.files, None);
+    // Under --pool-files the files are one tile of 6 MiB, between a and b,
+    // and the legend lists it as the map draws it.
+    let pooled_opts = PaintOpts {
+        pool_files: true,
+        ..opts(&mocha, &classes, ColorBy::Folder)
+    };
+    let pooled = ranks(&view, &pooled_opts);
+    assert_eq!((pooled.by_id[&id("a")], pooled.by_id[&id("b")]), (0, 2));
+    assert_eq!(pooled.files, Some(1));
+    assert!(!pooled.by_id.contains_key(&id("f1")));
+    let (title, rows) = legend_of(&view, &pooled_opts, &classes);
+    assert_eq!(title, "by top folder");
+    assert_eq!(
+        rows,
+        [
+            ("a".to_owned(), 10),
+            ("files".to_owned(), 6),
+            ("b".to_owned(), 5)
+        ]
+    );
+}
+
+#[test]
+fn p4_tui_02_the_legend_shows_the_colours_ls_colors_gives() {
+    use duscope_treemap::cells::Color;
+    use duscope_treemap::paint::LsColors;
+    let tree = small("/r", &[("a.dmg", 8), ("b.dmg", 2), ("c.txt", 4)]);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/r"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
+    let table = LsColors {
+        executable: None,
+        suffixes: vec![(".dmg".to_owned(), Color::Ansi(1))],
+    };
+    let ls = opts(&mocha, &classes, ColorBy::LsColors(table));
+    let (title, rows) = legend_of(&view, &ls, &classes);
+    assert_eq!(title, "by LS_COLORS");
+    // The .dmg files in LS_COLORS' red, the text file in its class colour.
+    assert_eq!(rows, [("*.dmg".to_owned(), 10), ("docs".to_owned(), 4)]);
+}
+
+#[test]
+fn p4_tui_02_the_depth_legend_counts_below_the_cap_with_the_folder() {
+    let tree = small(
+        "/r",
+        &[("a/b/c/deep.bin", 6), ("a/top.bin", 2), ("x.bin", 1)],
+    );
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/r"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
+    let level = opts(&mocha, &classes, ColorBy::Level);
+    let (_, rows) = legend_of(&view, &level, &classes);
+    assert_eq!(
+        rows,
+        [
+            ("depth 4".to_owned(), 6),
+            ("depth 2".to_owned(), 2),
+            ("depth 1".to_owned(), 1)
+        ]
+    );
+    // At --depth 2 the folder b is drawn whole, in the depth-2 colour.
+    let capped = PaintOpts {
+        depth: Some(2),
+        ..level
+    };
+    let (_, rows) = legend_of(&view, &capped, &classes);
+    assert_eq!(rows, [("depth 2".to_owned(), 8), ("depth 1".to_owned(), 1)]);
+}
+
+#[test]
+fn p4_tui_02_the_roots_parent_is_the_folder_it_is_in() {
+    use super::{Context, ranks, selected};
+    use crate::widgets::Canvas;
+    use ratatui_core::layout::Rect;
+    use std::cell::RefCell;
+    let tree = small("/Users/alex", &[("a.txt", 1)]);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/Users/alex"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
+    let opts = opts(&mocha, &classes, ColorBy::Type);
+    let class_of = duscope_treemap::paint::classes_of(&view, &classes);
+    let ranks = ranks(&view, &opts);
+    let dominant = RefCell::default();
+    let ctx = Context {
+        view: &view,
+        opts: &opts,
+        class_of: &class_of,
+        dominant: &dominant,
+        ranks: &ranks,
+        root: "~",
+        root_parent: "/Users",
+    };
+    let mut canvas = Canvas::new(43, 10, &mocha, Glyphs::Unicode);
+    selected(&mut canvas, Rect::new(0, 0, 43, 10), &ctx, 0);
+    let row: String = (0..43)
+        .filter_map(|x| canvas.cells.get(x, 1).map(|c| c.ch))
+        .collect();
+    assert_eq!(row.trim_end(), "/Users");
 }
