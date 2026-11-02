@@ -381,7 +381,10 @@ fn p4_core_01_linux_a_trashed_file_round_trips() {
     assert_eq!(value["result"]["plan"]["confirmation_required"], false);
     assert_eq!(value["warnings"][0]["code"], "index_untouched");
     assert_eq!(value["next"][0], format!("duscope rescan {id}"));
-    assert!(!file.exists() && !dir.exists() && root.join("link").exists());
+    // The link itself stays; it dangles now that a.bin, which it names, is
+    // in the Trash, so `exists` (which follows it) cannot tell.
+    assert!(!file.exists() && !dir.exists());
+    assert!(fs::symlink_metadata(root.join("link")).is_ok());
     // In the test's home Trash, with what the specification asks beside it.
     let trash = env.xdg_data_home().join("Trash");
     let info = fs::read_to_string(trash.join("info/a.bin.trashinfo")).unwrap();
