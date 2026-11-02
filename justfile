@@ -21,6 +21,9 @@ cargo_dist_version := "0.33.1"
 # The commit of dist's v0.33.1 tag: a tag can move, a commit cannot.
 cargo_dist_rev := "665cb7d48902a30386857f8f679e1b1942876f06"
 hyperfine_version := "2.0.0"
+# The nightly toolchain cargo fuzz runs on: a dated one, so a fuzz run reproduces (P2-TEST-01).
+# `just setup` installs it; ci.yml's fuzz-smoke and nightly-fuzz.yml read it here.
+fuzz_toolchain := "nightly-2026-10-23"
 
 default:
     @just --list
@@ -33,8 +36,9 @@ setup:
     # The pinned toolchain from rust-toolchain.toml, plus llvm-tools for coverage.
     rustup toolchain install
     rustup component add rustfmt clippy llvm-tools-preview
-    # stable builds the tools below and runs the msrv job's second leg; nightly runs cargo fuzz.
-    rustup toolchain install stable nightly --profile minimal
+    # stable builds the tools below and runs the msrv job's second leg; the dated nightly runs
+    # `just fuzz`, and plain nightly `cargo +nightly fuzz`.
+    rustup toolchain install stable nightly {{fuzz_toolchain}} --profile minimal
     case "$(uname -s)" in
       Darwin)
         # GNU du (installed as gdu) for the du parity checks, and bash 4 or later for the test
@@ -104,6 +108,12 @@ fmt:
 
 clippy:
     cargo clippy --workspace --all-targets -- -D clippy::all
+
+# Run one fuzz target for `seconds` (60: CI's fuzz-smoke; nightly-fuzz.yml runs 600) on the
+# pinned nightly. The corpus grows in fuzz/corpus/<target>/ and a crash lands in
+# fuzz/artifacts/<target>/, both ignored by git; an input slower than 30 s fails the run.
+fuzz target seconds="60":
+    cd fuzz && cargo +{{fuzz_toolchain}} fuzz run {{target}} -- -max_total_time={{seconds}} -timeout=30
 
 # cargo deny over the given checks; the bans leave dev-dependencies out (deny.toml says why)
 deny *checks="licenses bans sources":

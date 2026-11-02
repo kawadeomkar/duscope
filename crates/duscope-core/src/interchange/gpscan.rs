@@ -98,7 +98,9 @@ pub fn write(
             open.pop();
         }
         if let Some(dir) = row.dir {
-            if size(row) == 0 {
+            // GrandPerspective leaves out an empty folder; the root stays,
+            // or the file would hold no tree.
+            if size(row) == 0 && row.id != base {
                 skip_until = Some(dir.last_id);
                 return Ok(());
             }
