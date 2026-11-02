@@ -47,3 +47,10 @@ path = "fuzz_targets/gpscan.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "args"
+path = "fuzz_targets/args.rs"
+test = false
+doc = false
+bench = false

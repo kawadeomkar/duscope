@@ -1,0 +1,10 @@
+path	<root>/docs/a.bin
+kind	file
+allocated_bytes	3145728
+apparent_bytes	3145728
+nlink	1
+links_outside_subtree	0
+freeable_now_bytes	3145728
+freeable_kind	exact
+regenerable_by	
+confidence	high
