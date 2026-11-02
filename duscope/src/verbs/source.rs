@@ -202,6 +202,47 @@ impl Source {
         }
     }
 
+    /// When the scan started, Unix nanoseconds.
+    pub fn started_ns(&self) -> i64 {
+        match self {
+            Source::Fresh { scanned, .. } => scanned.started_ns,
+            Source::Saved { index, .. } => index.meta().started_at,
+        }
+    }
+
+    /// The scan an incremental scan updated.
+    pub fn parent_scan_id(&self) -> Option<String> {
+        match self {
+            Source::Fresh { .. } => None,
+            Source::Saved { index, .. } => index
+                .meta()
+                .parent_scan_id
+                .as_ref()
+                .map(ToString::to_string),
+        }
+    }
+
+    /// The directories under the path the scan could not read, and the
+    /// entries they listed but could not examine.
+    pub fn errors_under(&self) -> u64 {
+        match self {
+            Source::Fresh { scanned, .. } => {
+                scanned.summary.unreadable_dirs + scanned.summary.entry_errors
+            }
+            Source::Saved { index, base, .. } => {
+                index.errors_under(*base, index.node(*base).last_id)
+            }
+        }
+    }
+
+    /// Whether the rows' root is the scan's own root.
+    pub fn at_root(&self) -> bool {
+        match self {
+            Source::Fresh { .. } => true,
+            Source::Saved { base, .. } => *base == 0,
+        }
+    }
+
     /// Directories under the path the scan could not read.
     pub fn unreadable_dirs(&self) -> u64 {
         match self {
@@ -400,6 +441,8 @@ pub(super) fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
                 read_only: v.read_only,
                 total_bytes: v.total_bytes.unwrap_or(0),
                 free_bytes: v.free_bytes.unwrap_or(0),
+                dev: v.dev,
+                options: v.options.clone(),
             })
             .collect(),
         excluded_count: meta.excluded_count,

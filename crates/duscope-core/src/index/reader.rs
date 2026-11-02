@@ -79,6 +79,8 @@ pub type ScanErrorRow = (u32, Option<Vec<u8>>, i32);
 /// A volume the scan met, as its index records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexVolume {
+    /// Its device.
+    pub dev: u64,
     /// Where it is mounted.
     pub mount_point: Vec<u8>,
     /// The filesystem type.
@@ -259,11 +261,12 @@ impl Index {
         let read = || -> rusqlite::Result<Vec<IndexVolume>> {
             let mut stmt = self.db.prepare(
                 "SELECT mount_point, fs_type, read_only, entered, reason, total_bytes, \
-                 free_bytes, options FROM scan_volumes ORDER BY rowid",
+                 free_bytes, options, dev FROM scan_volumes ORDER BY rowid",
             )?;
             let rows = stmt.query_map([], |row| {
                 let options: Option<String> = row.get(7)?;
                 Ok(IndexVolume {
+                    dev: unsigned(row.get(8)?),
                     mount_point: row.get(0)?,
                     fs_type: row.get(1)?,
                     read_only: row.get(2)?,
@@ -334,6 +337,29 @@ impl Index {
                 },
                 unsigned,
             )
+    }
+
+    /// The directories with ids from `first` to `last` that could not be
+    /// read, and the entries they listed but could not examine.
+    pub fn errors_under(&self, first: u32, last: u32) -> u64 {
+        if self.meta.error_count == 0 {
+            return 0;
+        }
+        let entries = self
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM scan_errors WHERE dir_id BETWEEN ?1 AND ?2",
+                [first, last],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_or_else(
+                |e| {
+                    self.fail(&e);
+                    0
+                },
+                unsigned,
+            );
+        self.unreadable_dirs(first, last) + entries
     }
 
     /// What the scan could not read: each unreadable directory (its id, no
@@ -732,6 +758,56 @@ impl TreeView for Index {
 
     fn as_index(&self) -> Option<(&Index, u32)> {
         Some((self, 0))
+    }
+
+    /// From `dirs.dev`: a directory on another device than its parent's.
+    fn volume_roots(&self, dir: u32) -> Vec<crate::query::VolumeRoot> {
+        let last = self.node(dir).last_id;
+        let read = || -> rusqlite::Result<Vec<crate::query::VolumeRoot>> {
+            let mut stmt = self.db.prepare(
+                "SELECT d.id, d.last_id, d.dev, d.cum_allocated, d.cum_apparent, \
+                 d.cum_du_compatible FROM dirs AS d LEFT JOIN dirs AS p ON p.id = d.parent_id \
+                 WHERE d.id BETWEEN ?1 AND ?2 AND (d.id = ?1 OR p.dev IS NOT d.dev) ORDER BY d.id",
+            )?;
+            stmt.query_map([dir, last], |row| {
+                Ok(crate::query::VolumeRoot {
+                    id: row.get(0)?,
+                    last: row.get(1)?,
+                    dev: unsigned(row.get(2)?),
+                    allocated: unsigned(row.get(3)?),
+                    apparent: unsigned(row.get(4)?),
+                    du_compatible: unsigned(row.get(5)?),
+                })
+            })?
+            .collect()
+        };
+        read().unwrap_or_else(|e| {
+            self.fail(&e);
+            Vec::new()
+        })
+    }
+
+    /// Through the partial index `files_dataless`, whose condition the query
+    /// spells as it is; a later link of a dataless file counts once.
+    fn dataless_bytes(&self, dir: u32) -> u64 {
+        const _: () = assert!(Flags::DATALESS.bits() == 4);
+        let last = self.node(dir).last_id;
+        self.db
+            .query_row(
+                &format!(
+                    "SELECT COALESCE(SUM(apparent), 0) FROM files \
+                     WHERE id BETWEEN ?1 AND ?2 AND flags & 4 != 0 AND flags & {LATER_LINK} = 0"
+                ),
+                rusqlite::params![dir, last],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_or_else(
+                |e| {
+                    self.fail(&e);
+                    0
+                },
+                unsigned,
+            )
     }
 
     /// From `dirs_parent_name`: a directory's subdirectories are rows that

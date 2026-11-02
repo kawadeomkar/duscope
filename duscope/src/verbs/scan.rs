@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use duscope_core::arena::Arena;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
 use duscope_core::index::{IndexWriter, ScanId, ScanMeta, index_path, random_bytes};
-use duscope_core::query::{ArenaView, SizeKind, TreeView, clock, timegrammar};
+use duscope_core::query::{self, ArenaView, SizeKind, TreeView, clock, timegrammar};
 use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::{RollUp, roll_up};
 use duscope_core::rules::Caches;
@@ -50,6 +50,38 @@ pub struct Scanned {
     pub started_ns: i64,
     /// When it finished.
     pub finished_ns: i64,
+}
+
+/// What the volume mounted at the root uses that the scan did not find,
+/// when the root is a mount point ([`query::unaccounted`]).
+pub fn unaccounted(scanned: &Scanned) -> Option<u64> {
+    let volumes = scanned.arena.volumes();
+    let root = volumes
+        .iter()
+        .find(|v| v.entered() && v.mount_point == scanned.root)?;
+    let unentered: Vec<u64> = volumes
+        .iter()
+        .filter(|v| !v.entered())
+        .map(|v| v.dev)
+        .collect();
+    let view = scanned.view();
+    let shares = query::shares(&view.volume_roots(0), &unentered);
+    let uses: Vec<query::VolumeUse<'_>> = volumes
+        .iter()
+        .map(|v| query::VolumeUse {
+            mount_point: &v.mount_point,
+            fs_type: &v.fs_type,
+            total: Some(v.total_bytes).filter(|&t| t > 0),
+            free: Some(v.free_bytes).filter(|_| v.total_bytes > 0),
+            entered: v.entered(),
+            options: &v.options,
+            found: shares
+                .iter()
+                .find(|s| s.dev == v.dev)
+                .map_or(0, |s| s.allocated),
+        })
+        .collect();
+    query::unaccounted(&root.mount_point, &uses)
 }
 
 /// `scan`: the root's largest entries, as `top` lists them, under the
@@ -119,6 +151,8 @@ pub fn scan_block(scanned: &Scanned, walk_args: &WalkArgs, size: SizeKind) -> Sc
                 read_only: v.read_only,
                 total_bytes: v.total_bytes,
                 free_bytes: v.free_bytes,
+                dev: v.dev,
+                options: v.options.clone(),
             })
             .collect(),
         excluded_count: summary.excluded,
@@ -225,7 +259,7 @@ pub fn save(
         size_kind: size_kind(walk).as_str(),
         volume_total: root_volume.map_or(0, |v| v.total_bytes),
         volume_free: root_volume.map_or(0, |v| v.free_bytes),
-        unaccounted_bytes: None,
+        unaccounted_bytes: unaccounted(scanned),
         error_count: scanned.summary.unreadable_dirs + scanned.summary.entry_errors,
         vanished_count: scanned.arena.vanished(),
         excluded_count: scanned.summary.excluded,
