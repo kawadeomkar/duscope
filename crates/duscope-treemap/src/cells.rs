@@ -70,6 +70,17 @@ impl Color {
         Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
     }
 
+    /// The nearest of the eight basic ANSI colours, as the static map writes
+    /// an RGB colour on a 16-colour terminal; `None` for [`Color::Reset`].
+    #[must_use]
+    pub fn to_ansi8(self) -> Option<u8> {
+        match self {
+            Color::Reset => None,
+            Color::Ansi(n) => Some(n),
+            rgb @ Color::Rgb(..) => Some(ansi16(rgb)),
+        }
+    }
+
     /// The nearest of the 256 xterm colours: the 6×6×6 cube or the grey
     /// ramp, whichever is closer.
     #[must_use]

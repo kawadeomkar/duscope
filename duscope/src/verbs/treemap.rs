@@ -246,36 +246,21 @@ pub fn draw(
     output: &Output,
     style: &Style,
 ) -> Result<(), Failure> {
+    // The static map reads stdout's size, so a pipe under --treemap always
+    // gets the default; the viewer reads the terminal's through crossterm,
+    // which its frames are drawn at.
     let (columns, rows) = duscope_walk::terminal_size().unwrap_or(DEFAULT_SIZE);
-    let Style {
-        pack,
-        depth,
-        glyphs,
-        ls_colors,
-    } = style;
     let classes = super::query::classes(args.walk.classes_extra.as_deref(), "[classes] extra")?;
     let size = scan::size_kind(&args.walk);
-    let opts = PaintOpts {
-        pack,
-        color_by: match args.color_by {
-            None | Some(ColorByArg::Type) => ColorBy::Type,
-            Some(ColorByArg::Folder) => ColorBy::Folder,
-            Some(ColorByArg::Level) => ColorBy::Level,
-            Some(ColorByArg::Age) => ColorBy::Age,
-            Some(ColorByArg::Lscolors) => ColorBy::LsColors(ls_colors.clone()),
-        },
-        glyphs: *glyphs,
-        depth: args.depth,
-        min_tile: match args.min_tile {
-            None | Some(MinTile::One) => 1,
-            Some(MinTile::Two) => 2,
-            Some(MinTile::Four) => 4,
-        },
-        pool_files: args.pool_files,
+    let opts = style.paint_opts(
+        args.color_by,
+        args.depth,
+        args.min_tile,
+        args.pool_files,
         size,
-        now: timegrammar::now(),
-        classes: &classes,
-    };
+        timegrammar::now(),
+        &classes,
+    );
     let view = scanned.view();
     let block = scan::scan_block(scanned, &args.walk, size);
     // The next commands name the tree as it was given, unless it is the
@@ -297,7 +282,7 @@ pub fn draw(
         next: next_line(root.as_deref(), dot, columns),
     };
     let buffer = frame(&view, &opts, &footer, columns, rows);
-    output.bytes(buffer.to_ansi(*depth).as_bytes())?;
+    output.bytes(buffer.to_ansi(style.depth).as_bytes())?;
     // The frame has room for one warning; the others follow on stderr, as
     // every other format writes them.
     for warning in warnings.iter().skip(1) {
@@ -311,7 +296,7 @@ pub fn draw(
 
 /// The frame's warning row: the first warning, and how many more follow
 /// on stderr.
-fn frame_warning(warnings: &[Warning]) -> Option<String> {
+pub(super) fn frame_warning(warnings: &[Warning]) -> Option<String> {
     let first = warnings.first()?;
     Some(match warnings.len() - 1 {
         0 => format!("warning: {}", first.message),

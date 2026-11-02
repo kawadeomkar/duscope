@@ -249,3 +249,74 @@ fn p4_tui_01_the_device_attributes_answer_ends_the_wait() {
     assert!(!answered_da1(b"\x1b]11;rgb:0/0/0\x07"));
     assert!(!answered_da1(b"\x1b[?62;22R"));
 }
+
+#[test]
+fn p4_tui_01_without_utf_8_the_frame_keeps_to_ascii() {
+    let (tree, classes) = (tree(), Classes::vendored());
+    let view = view(&tree);
+    let mocha = Pack::named("mocha").unwrap();
+    let opts = PaintOpts {
+        glyphs: Glyphs::Ascii,
+        ..opts(&mocha, &classes)
+    };
+    let app = App::new(
+        &view,
+        opts,
+        Depth::TrueColor,
+        Vec::new(),
+        "175 MiB · 5 files · 6 dirs".to_owned(),
+        Some("warning: a · b".to_owned()),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|f| app.draw(f.area(), f.buffer_mut()))
+        .unwrap();
+    let text = snapshot(terminal.backend().buffer());
+    let screen = text.split("--- styles").next().unwrap();
+    assert!(screen.is_ascii(), "{screen}");
+    assert!(screen.contains("175 MiB - 5 files - 6 dirs"), "{screen}");
+    assert!(screen.contains("warning: a - b"), "{screen}");
+    terminal.backend_mut().resize(79, 24);
+    terminal
+        .draw(|f| app.draw(f.area(), f.buffer_mut()))
+        .unwrap();
+    let text = snapshot(terminal.backend().buffer());
+    assert!(text.starts_with("duscope view needs at least 80x24; this terminal is 79x24"));
+}
+
+#[test]
+fn p4_tui_01_a_wide_character_is_drawn_only_whole() {
+    use duscope_treemap::cells::CellBuffer;
+    use ratatui_core::buffer::Buffer;
+    use ratatui_core::layout::Rect;
+    // 写 whole at 0–1; at 2 a 写 whose right half a border painted over.
+    let mut cells = CellBuffer::new(4, 1);
+    for (x, ch) in [(0, '写'), (1, '\0'), (2, '写'), (3, '│')] {
+        cells.get_mut(x, 0).unwrap().ch = ch;
+    }
+    let area = Rect::new(0, 0, 4, 1);
+    let mut buf = Buffer::empty(area);
+    crate::app::copy(&cells, Depth::TrueColor, area, &mut buf);
+    let symbols: Vec<&str> = (0..4).map(|x| buf[(x, 0)].symbol()).collect();
+    assert_eq!(symbols, ["写", " ", " ", "│"]);
+}
+
+#[test]
+fn p4_tui_01_colours_follow_the_static_maps_depths() {
+    use crate::app::color;
+    use duscope_treemap::cells::Color;
+    use ratatui_core::style::Color as Shown;
+    let red = Color::Rgb(0xf3, 0x8b, 0xa8);
+    assert_eq!(color(red, Depth::TrueColor), Shown::Rgb(0xf3, 0x8b, 0xa8));
+    assert_eq!(
+        color(red, Depth::Ansi256),
+        Shown::Indexed(red.to_256().unwrap())
+    );
+    // On 16 colours the nearest of the eight basic ones, as the static map
+    // writes it (`31`, red; `37`, white for a light grey).
+    assert_eq!(color(Color::Rgb(200, 30, 40), Depth::Ansi16), Shown::Red);
+    assert_eq!(color(Color::Rgb(200, 200, 200), Depth::Ansi16), Shown::Gray);
+    assert_eq!(color(Color::Ansi(12), Depth::Ansi16), Shown::LightBlue);
+    assert_eq!(color(red, Depth::None), Shown::Reset);
+    assert_eq!(color(Color::Reset, Depth::TrueColor), Shown::Reset);
+}

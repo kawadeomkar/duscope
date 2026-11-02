@@ -12,10 +12,10 @@ use std::io::{self, IsTerminal};
 use std::path::Path;
 
 use duscope_core::envelope::Warning;
-use duscope_core::query::{ScanSelector, TreeView};
+use duscope_core::query::{self, ScanSelector, TreeView};
 use duscope_tui::{App, Background, MIN_SIZE, Tui};
 
-use super::{Exit, Failure, query, scan, source, treemap};
+use super::{Exit, Failure, scan, source, treemap};
 use crate::cli::{ColorBy, IndexArgs, MinTile, ScanArgs, ViewArgs, WalkArgs};
 use crate::out::{Format, Output};
 
@@ -27,7 +27,7 @@ pub fn run(args: &ViewArgs, index_dir: Option<&Path>, output: &Output) -> Result
     refused(output)?;
     // The colours are settled first: a theme the map refuses costs no scan.
     treemap::viewer_style(args.theme.as_ref(), output.color, None)?;
-    let (walk, index) = named_scan(&args.walk, &args.index);
+    let (walk, index) = named_scan(&args.walk, &args.index, index_dir);
     let source = source::source(&walk, &index, index_dir)?;
     source.check()?;
     // A scan run for the viewer is saved before the terminal is taken, so
@@ -56,7 +56,9 @@ pub fn run(args: &ViewArgs, index_dir: Option<&Path>, output: &Output) -> Result
 /// `scan -i`: the scan, saved with `--save`, then the viewer on it.
 pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     refused(output)?;
-    treemap::viewer_style(args.theme.as_ref(), output.color, None)?;
+    // The map's flags as scan refuses them (`--treemap pixels`, a bad
+    // theme), before the scan.
+    treemap::style(args, output)?;
     let scanned = scan::scan(&args.walk, &args.exclude)?;
     if args.save {
         let id = scan::scan_id(&scanned)?;
@@ -125,17 +127,34 @@ fn refused(output: &Output) -> Result<(), Failure> {
     Ok(())
 }
 
-/// `view a3f9`: an argument that names no path but reads as a saved scan
-/// (`latest` or an id prefix) is `--scan`, unless `--scan` is given.
-fn named_scan(walk: &WalkArgs, index: &IndexArgs) -> (WalkArgs, IndexArgs) {
+/// `view a3f9`: an argument that names no path but names a saved scan
+/// (`latest`, or the leading digits of a saved scan's id) is `--scan`,
+/// unless `--scan` is given. A word that only looks like an id (`cafe`)
+/// stays a path, and fails as one.
+fn named_scan(
+    walk: &WalkArgs,
+    index: &IndexArgs,
+    index_dir: Option<&Path>,
+) -> (WalkArgs, IndexArgs) {
     let (mut walk, mut index) = (walk.clone(), index.clone());
+    let saved = |prefix: &str| {
+        index_dir
+            .map(Path::to_owned)
+            .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)))
+            .is_some_and(|dir| {
+                query::index_files(&dir)
+                    .iter()
+                    .any(|(id, _)| id.as_str().starts_with(prefix))
+            })
+    };
     if index.scan.is_none()
         && let Some(arg) = walk.path.as_ref().and_then(|p| p.to_str())
         && !Path::new(arg).exists()
-        && matches!(
-            ScanSelector::parse(arg),
-            Ok(ScanSelector::Latest | ScanSelector::Prefix(_))
-        )
+        && match ScanSelector::parse(arg) {
+            Ok(ScanSelector::Latest) => true,
+            Ok(ScanSelector::Prefix(prefix)) => saved(&prefix),
+            _ => false,
+        }
     {
         index.scan = Some(arg.to_owned());
         walk.path = None;
@@ -155,14 +174,11 @@ fn show(
     warnings: &[Warning],
     output: &Output,
 ) -> Result<(), Failure> {
-    let classes = query::classes(walk.classes_extra.as_deref(), "[classes] extra")?;
+    let classes = super::query::classes(walk.classes_extra.as_deref(), "[classes] extra")?;
     let size = scan::size_kind(walk);
     let now = scan::now(walk)?;
     let legend = treemap::legend(view, &classes, size);
-    let warning = warnings.first().map(|w| match warnings.len() - 1 {
-        0 => format!("warning: {}", w.message),
-        more => format!("warning: {} (+{more} more below)", w.message),
-    });
+    let warning = treemap::frame_warning(warnings);
     // test-only: DUSCOPE_TEST_PANIC=1 panics once the first frame is drawn,
     // in debug builds alone, for the tests of the panic hook.
     let test_panic =

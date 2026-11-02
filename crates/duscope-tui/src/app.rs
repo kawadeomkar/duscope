@@ -8,12 +8,13 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use duscope_core::query::TreeView;
 use duscope_treemap::cells::{CellBuffer, Color, Depth};
-use duscope_treemap::paint::{Footer, PaintOpts, frame};
+use duscope_treemap::paint::{Footer, Glyphs, PaintOpts, frame};
 use ratatui_core::backend::Backend;
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::style::{Color as Shown, Modifier};
 use ratatui_core::terminal::Terminal;
+use unicode_width::UnicodeWidthChar;
 
 use crate::term::MIN_SIZE;
 
@@ -63,15 +64,20 @@ impl<'a> App<'a> {
         summary: String,
         warning: Option<String>,
     ) -> App<'a> {
+        // A terminal without UTF-8 gets ASCII separators, as the static map.
+        let ascii = |text: String| match opts.glyphs {
+            Glyphs::Unicode => text,
+            Glyphs::Ascii => text.replace('·', "-"),
+        };
         App {
             view,
-            opts,
             footer: Footer {
                 legend,
-                summary,
-                warning,
+                summary: ascii(summary),
+                warning: warning.map(ascii),
                 next: KEYS.to_owned(),
             },
+            opts,
             depth,
             answer: false,
         }
@@ -81,11 +87,12 @@ impl<'a> App<'a> {
     /// [`MIN_SIZE`] (a terminal made smaller while the viewer runs) one
     /// line asking for more room.
     pub fn draw(&self, area: Rect, buf: &mut Buffer) {
-        let ascii = self.opts.glyphs == duscope_treemap::paint::Glyphs::Ascii;
+        let ascii = self.opts.glyphs == Glyphs::Ascii;
         let cells = if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
             let mut cells = CellBuffer::new(area.width, area.height.min(1));
+            let by = if ascii { 'x' } else { '×' };
             let line = format!(
-                "duscope view needs at least {}×{}; this terminal is {}×{}",
+                "duscope view needs at least {}{by}{}; this terminal is {}{by}{}",
                 MIN_SIZE.0, MIN_SIZE.1, area.width, area.height
             );
             cells.text(
@@ -173,7 +180,7 @@ where
 }
 
 /// Copies `cells` into `area` of `buf`, in colours of `depth`.
-fn copy(cells: &CellBuffer, depth: Depth, area: Rect, buf: &mut Buffer) {
+pub(crate) fn copy(cells: &CellBuffer, depth: Depth, area: Rect, buf: &mut Buffer) {
     let mut symbol = String::new();
     for y in 0..cells.height().min(area.height) {
         for x in 0..cells.width().min(area.width) {
@@ -184,10 +191,15 @@ fn copy(cells: &CellBuffer, depth: Depth, area: Rect, buf: &mut Buffer) {
                 continue;
             };
             target.reset();
-            // The right half of a wide character: the terminal prints the
-            // character from the cell to its left, and the frame diff skips
-            // this one.
-            if cell.ch == '\0' {
+            // A wide character is whole when its right half follows it, a
+            // `'\0'` cell, which the frame diff skips while the terminal
+            // prints the character from the cell to its left. Either half
+            // without the other (the other painted over) is a space, as the
+            // static map prints it.
+            let wide = UnicodeWidthChar::width(cell.ch) == Some(2);
+            let whole = cell.ch != '\0'
+                && (!wide || cells.get(x + 1, y).is_some_and(|next| next.ch == '\0'));
+            if !whole {
                 target.set_char(' ');
             } else if cell.marks == ['\0'; 2] {
                 target.set_char(cell.ch);
@@ -209,9 +221,10 @@ fn copy(cells: &CellBuffer, depth: Depth, area: Rect, buf: &mut Buffer) {
 }
 
 /// `color` as the terminal shows it at `depth`: 24-bit colours as they
-/// are, or the nearest of the 256 xterm colours; the 16 ANSI colours by
-/// name, which writes the same escapes the static map writes.
-fn color(color: Color, depth: Depth) -> Shown {
+/// are, or the nearest of the 256 xterm colours, or of the eight basic
+/// ones on a 16-colour terminal; the 16 ANSI colours by name. Each is the
+/// colour the static map writes at that depth.
+pub(crate) fn color(color: Color, depth: Depth) -> Shown {
     const ANSI: [Shown; 16] = [
         Shown::Black,
         Shown::Red,
@@ -234,9 +247,8 @@ fn color(color: Color, depth: Depth) -> Shown {
         (Color::Reset, _) | (_, Depth::None) => Shown::Reset,
         (Color::Ansi(n), _) => ANSI[usize::from(n % 16)],
         (Color::Rgb(r, g, b), Depth::TrueColor) => Shown::Rgb(r, g, b),
-        (rgb @ Color::Rgb(..), Depth::Ansi256 | Depth::Ansi16) => {
-            Shown::Indexed(rgb.to_256().unwrap_or(16))
-        }
+        (rgb @ Color::Rgb(..), Depth::Ansi256) => Shown::Indexed(rgb.to_256().unwrap_or(16)),
+        (rgb @ Color::Rgb(..), Depth::Ansi16) => ANSI[usize::from(rgb.to_ansi8().unwrap_or(7))],
     }
 }
 

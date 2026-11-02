@@ -262,3 +262,55 @@ fn p4_tui_01_the_terminal_background_picks_dark_or_light() {
     let colours = colours_drawn(&env, (0, 0, 0), &[("COLORFGBG", "0;15")]);
     assert!(drawn_in(&colours, &light, &mocha));
 }
+
+/// `duscope view <arg>` in an 100×30 pseudo-terminal, from the work
+/// directory, run by the shell as [`viewer`] runs it.
+fn viewer_of(env: &TestEnv, arg: &str) -> Terminal {
+    let script = format!(
+        "'{}' view '{arg}'; echo \"exit=$?\"; stty -a",
+        duscope_bin().display()
+    );
+    Terminal::builder()
+        .size(100, 30)
+        .timeout(Duration::from_secs(60))
+        .env_clear()
+        .envs(env.vars())
+        .current_dir(env.work_dir())
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap()
+}
+
+#[test]
+fn p4_tui_01_view_opens_a_saved_scan_by_its_id() {
+    let env = TestEnv::new();
+    let tree = env.fixtures().case_root(CASE);
+    let out = env
+        .cmd()
+        .args(["scan", "--save", "--json"])
+        .arg(&tree)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = envelope["scan"]["id"].as_str().unwrap().to_owned();
+    // The leading digits of the saved scan's id, and latest, name it.
+    for arg in [&id[..6], "latest"] {
+        let mut terminal = viewer_of(&env, arg);
+        terminal.wait_until(up).unwrap();
+        terminal.send(Key::Char('q')).unwrap();
+        assert_eq!(exited(&mut terminal), 0, "{arg}");
+        assert_restored(&terminal);
+    }
+    // A word that only looks like an id, naming neither a path nor a saved
+    // scan, fails as the path it is.
+    let mut terminal = viewer_of(&env, "cafe");
+    let status = exited(&mut terminal);
+    let text = terminal.screen().full_text();
+    assert_eq!(status, 3, "{text}");
+    assert!(
+        text.contains("cafe") && !text.contains("scan_not_found"),
+        "{text}"
+    );
+    assert_restored(&terminal);
+}
