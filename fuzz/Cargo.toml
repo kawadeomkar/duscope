@@ -1,7 +1,8 @@
 # The fuzz targets: a crate of its own outside the workspace, as cargo-fuzz
 # lays it out, built and run on nightly only (`cargo +nightly fuzz run
 # <target>`). libfuzzer-sys is the libFuzzer runtime cargo-fuzz builds the
-# targets against; nothing here reaches the binary.
+# targets against, and serde_json reads back what the jsonrpc target writes;
+# nothing here reaches the binary.
 [package]
 name = "duscope-fuzz"
 version = "0.0.0"
@@ -13,8 +14,10 @@ cargo-fuzz = true
 
 [dependencies]
 duscope-core = { path = "../crates/duscope-core" }
+duscope-mcp = { path = "../crates/duscope-mcp" }
 duscope-walk = { path = "../crates/duscope-walk" }
 libfuzzer-sys = "=0.4.13"
+serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 
 # Not a member of the repository's workspace.
 [workspace]
@@ -51,6 +54,13 @@ bench = false
 [[bin]]
 name = "args"
 path = "fuzz_targets/args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jsonrpc"
+path = "fuzz_targets/jsonrpc.rs"
 test = false
 doc = false
 bench = false

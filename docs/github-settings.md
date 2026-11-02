@@ -26,7 +26,8 @@ under [Auditing](#auditing) read it again.
   - `platform` and `bench-regression` on the three runners
   - `msrv (pinned)` and `msrv (stable)`
   - `deny`
-  - `fuzz-smoke` for each fuzz target (`sql`, `ncdu`, `gdu`, `gpscan`, `args`)
+  - `fuzz-smoke` for each fuzz target (`sql`, `ncdu`, `gdu`, `gpscan`, `args`,
+    `jsonrpc`)
   - `docs`
   - `schemas`
   - `size` on `macos-26` and `ubuntu-24.04`, and `size-comment`
@@ -58,7 +59,8 @@ under [Auditing](#auditing) read it again.
   2026-10-28 `intel-mac` was made optional again, leaving 36 checks. On
   2026-11-02, with P2-IDX-03, DEV-73 folded macOS's `clippy` and both its
   `test` legs into `checks (macos-26)`, leaving 34. P2-TEST-01 adds the five
-  `fuzz-smoke` checks, 39 in all below, once it merges.
+  `fuzz-smoke` checks, 39, and P3-MCP-01 `fuzz-smoke (jsonrpc)`, 40 in all
+  below, once they merge.
 
   These checks run on a pull request into `main`, and on one labelled
   `full-ci`. GitHub's stacked pull requests run as if into `main`: the pull
@@ -98,6 +100,7 @@ under [Auditing](#auditing) read it again.
         { "context": "fuzz-smoke (gdu)", "app_id": 15368 },
         { "context": "fuzz-smoke (gpscan)", "app_id": 15368 },
         { "context": "fuzz-smoke (args)", "app_id": 15368 },
+        { "context": "fuzz-smoke (jsonrpc)", "app_id": 15368 },
         { "context": "docs", "app_id": 15368 },
         { "context": "schemas", "app_id": 15368 },
         { "context": "size (macos-26)", "app_id": 15368 },
