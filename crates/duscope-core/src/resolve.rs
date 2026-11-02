@@ -1,11 +1,12 @@
 //! The one place a path from a user or an agent becomes the path duscope
-//! reads: relative to the working directory, symbolic links resolved. No
-//! other code calls `canonicalize`.
-//!
-//! The index adds a lookup with case and normalisation folding in phase 2
-//! (P2-QRY-01); until then a path resolves on the filesystem alone.
+//! reads: relative to the working directory, symbolic links resolved (no
+//! other code calls `canonicalize`); and, in a saved scan, the entry at that
+//! path, found downwards from the root with the case and normalisation
+//! folding of the volume each directory is on (P2-QRY-01).
 
 use std::path::{Path, PathBuf};
+
+use crate::index::Index;
 
 /// A path as it was given, and the path it leads to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,13 @@ pub fn resolve_path(cwd: &Path, given: &Path) -> ResolvedPath {
         real,
         as_given: given.to_owned(),
     }
+}
+
+/// The entry of `index` at `path`, absolute and resolved: `None` when the
+/// scan's root does not contain it, or the scan holds no such entry. The
+/// root and each name below it match as their volume compares names.
+pub fn resolve_in_index(index: &Index, path: &Path) -> Option<u32> {
+    index.lookup(index.below_root(path)?)
 }
 
 #[cfg(test)]
