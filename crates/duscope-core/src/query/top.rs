@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use crate::envelope::{TopEntry, name_fields};
 
 use super::{
-    Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, kind_name, pct, ranked,
-    timegrammar::iso8601,
+    After, Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, kind_name,
+    next_after, page_of, pct, ranked_after, ranked_files, remain, timegrammar::iso8601,
 };
 
 /// A child holding at least this share of its directory replaces it.
@@ -42,6 +42,8 @@ pub struct TopQuery {
     pub limit: Option<usize>,
     /// The size rows are ranked and shown by.
     pub size: SizeKind,
+    /// `--cursor`: the page after this row.
+    pub after: Option<After>,
 }
 
 /// The largest entries under the root of `view`.
@@ -50,12 +52,34 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
         return Page {
             entries: Vec::new(),
             total_count: 0,
+            next: None,
+            truncated: false,
         };
     }
     let root = view.node(0);
+    let after = q.after.as_ref();
+    let seen = after.map_or(0, |a| a.seen);
     // The ids each row was cut through, for the rows that were.
     let mut vias: HashMap<u32, Vec<u32>> = HashMap::new();
-    let (ids, total_count) = if q.files {
+    let size_of = |node: &Node| node.size(q.size);
+    // The largest files as the whole view's are, without a filter: from
+    // the view's own ranking where it has one (the index's plans).
+    let from_view = (q.files
+        && root.is_dir()
+        && q.depth.is_none()
+        && q.filters.is_empty()
+        && q.sort == SortKey::Size
+        && !q.reverse
+        && q.size == SizeKind::Allocated)
+        .then_some(q.limit)
+        .flatten()
+        .and_then(|limit| {
+            let first = usize::try_from(seen).ok()?.checked_add(limit)?;
+            page_of(ranked_files(view, 0, first, None)?, after)
+        });
+    let (ids, total_count) = if let Some(from_view) = from_view {
+        (from_view.ids, from_view.total_count)
+    } else if q.files {
         // A root that is a file is its own one row. The files are ranked
         // as they are found, so only the rows --limit can keep are held.
         let max = q.depth.unwrap_or(u32::MAX);
@@ -63,7 +87,7 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
             let n = view.node(id);
             !n.is_dir() && n.depth <= max && q.filters.keeps(view, &n, q.size)
         });
-        ranked(view, candidates, q.sort, q.size, q.reverse, q.limit)
+        ranked_after(view, candidates, q.sort, q.reverse, q.limit, size_of, after)
     } else if root.is_dir() {
         let mut rows: Vec<u32> = Vec::new();
         let depth = q.depth.unwrap_or(1).max(1);
@@ -93,12 +117,13 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
                 stack.extend(subdirs(id));
             }
         }
-        ranked(view, rows, q.sort, q.size, q.reverse, q.limit)
+        ranked_after(view, rows, q.sort, q.reverse, q.limit, size_of, after)
     } else {
         (Vec::new(), 0)
     };
+    let next = next_after(view, &ids, q.sort, q.size, seen, total_count);
     let root_total = root.size(q.size);
-    let entries = ids
+    let entries: Vec<_> = ids
         .into_iter()
         .map(|id| {
             let via = vias.get(&id).map(Vec::as_slice).unwrap_or_default();
@@ -106,8 +131,10 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
         })
         .collect();
     Page {
+        truncated: remain(seen, entries.len(), total_count),
         entries,
         total_count,
+        next,
     }
 }
 

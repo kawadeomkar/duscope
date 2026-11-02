@@ -293,7 +293,6 @@ mod tests {
         for flag in [
             "--provider",
             "--test-now",
-            "--cursor",
             "--interactive",
             "-i",
             "--skip-containers",

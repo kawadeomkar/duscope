@@ -17,10 +17,12 @@ use std::borrow::Cow;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use crate::CoreError;
 use crate::envelope::{ByTypeEntry, Example, name_fields};
+use crate::index::writer::LATER_LINK;
 use crate::rules::{Class, Classes, ext};
 
-use super::{Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, pct};
+use super::{Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, pct, remain};
 
 /// What `by-type` was asked.
 #[derive(Debug, Clone)]
@@ -42,7 +44,7 @@ pub struct ByTypeQuery<'c> {
 }
 
 /// What one class adds up to.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Tally {
     allocated: u64,
     apparent: u64,
@@ -59,10 +61,12 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
         return Page {
             entries: Vec::new(),
             total_count: 0,
+            next: None,
+            truncated: false,
         };
     }
     let root = view.node(0);
-    let tallies = tally(view, q);
+    let tallies = from_index(view, q).unwrap_or_else(|| tally(view, q));
     let root_total = root.size(q.size);
     let mut classes: Vec<Class> = Class::ALL
         .into_iter()
@@ -99,7 +103,7 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
     if let Some(limit) = q.limit {
         classes.truncate(limit);
     }
-    let entries = classes
+    let entries: Vec<_> = classes
         .into_iter()
         .map(|class| {
             let tally = &tallies[index(class)];
@@ -128,8 +132,10 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
         })
         .collect();
     Page {
+        truncated: remain(0, entries.len(), total_count),
         entries,
         total_count,
+        next: None,
     }
 }
 
@@ -233,7 +239,248 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
     tallies
 }
 
+/// The tallies of a whole saved scan read without a filter, from its own
+/// tables: `type_stats` for each extension's files; the outermost
+/// directories a directory rule matches, read from `dirs` in pre-order as
+/// [`classify`] reads them, their files' tallies moved to the rule's class;
+/// and each class's largest files from one pass down `files_allocated`,
+/// whose order (allocated bytes down, ids up among equals) is the walk's.
+/// `None` where the walk is needed: a subtree, a filter, a scan with modes
+/// (an extensionless file's class reads its execute bit), `--sort mtime`
+/// (the newest file is not in the tables), apparent sizes, or a class whose
+/// examples would include a file that counts no bytes.
+fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Vec<Tally>> {
+    let (saved, base) = view.as_index()?;
+    if base != 0
+        || !q.filters.is_empty()
+        || view.full_attrs()
+        || q.sort == SortKey::Mtime
+        || q.size != SizeKind::Allocated
+    {
+        return None;
+    }
+    let read = || -> rusqlite::Result<Option<Vec<Tally>>> {
+        let db = saved.db();
+        let class_of_ext = |suffix: &str| {
+            if suffix.is_empty() {
+                Class::Other
+            } else {
+                q.classes.of_ext(suffix).unwrap_or(Class::Other)
+            }
+        };
+        let (_, above) = root_dirs(q.classes, view.root_path());
+        let ranges = rule_ranges(view, q.classes)?;
+        let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
+        let mut add = |class: Class, files: i64, allocated: i64, apparent: i64, sign: i64| {
+            let tally = &mut tallies[index(class)];
+            let apply = |total: &mut u64, n: i64| {
+                *total = total.saturating_add_signed(sign.saturating_mul(n));
+            };
+            apply(&mut tally.files, files);
+            apply(&mut tally.allocated, allocated);
+            apply(&mut tally.apparent, apparent);
+        };
+        if above.is_none() {
+            let mut stmt = db.prepare("SELECT ext, n, allocated, apparent FROM type_stats")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let suffix: String = row.get(0)?;
+                add(
+                    class_of_ext(&suffix),
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    1,
+                );
+            }
+        }
+        // Counted as `type_stats` counts: a later link not at all, a
+        // clone's bytes on disk at the member charged with them.
+        let mut stmt = db.prepare(&format!(
+            "SELECT ext, SUM(flags & {LATER_LINK} = 0), \
+             SUM(CASE WHEN flags & {LATER_LINK} = 0 AND charged THEN allocated ELSE 0 END), \
+             SUM(CASE WHEN flags & {LATER_LINK} = 0 THEN apparent ELSE 0 END) \
+             FROM files WHERE id BETWEEN ?1 AND ?2 GROUP BY ext"
+        ))?;
+        for &(first, last, class) in &ranges {
+            let mut rows = stmt.query([first, last])?;
+            while let Some(row) = rows.next()? {
+                let suffix: String = row.get(0)?;
+                let (files, allocated, apparent): (i64, i64, i64) =
+                    (row.get(1)?, row.get(2)?, row.get(3)?);
+                if above.is_none() {
+                    add(class_of_ext(&suffix), files, allocated, apparent, -1);
+                }
+                add(class, files, allocated, apparent, 1);
+            }
+        }
+        if q.examples == 0 {
+            return Ok(Some(tallies));
+        }
+        let class_at = |id: u32, suffix: &str| {
+            let at = ranges.partition_point(|&(first, _, _)| first <= id);
+            match at.checked_sub(1).map(|i| ranges[i]) {
+                Some((_, last, class)) if id <= last => class,
+                _ => class_of_ext(suffix),
+            }
+        };
+        let settled = largest_by_class(saved, q.examples, &mut tallies, class_at)?;
+        Ok(settled.then_some(tallies))
+    };
+    read().unwrap_or_else(|e| {
+        saved.record(&CoreError::IndexCorrupt {
+            file: saved.file().display().to_string(),
+            message: e.to_string(),
+        });
+        None
+    })
+}
+
+/// Each class's `examples` largest files, ranked as the walk ranks them:
+/// bytes counted, down, then ids, up. The files charged with their bytes
+/// come from one pass down `files_allocated` that stops once every class
+/// is full; the files that count no bytes though they count (an uncharged
+/// clone member, a file of `shared_members`) rank after them, by id among
+/// the empty files the pass found. `class_at` gives a file's class from
+/// its id and extension. `false` when the pass did not find what the
+/// tallies count (the walk decides).
+fn largest_by_class(
+    saved: &crate::index::Index,
+    examples: usize,
+    tallies: &mut [Tally],
+    class_at: impl Fn(u32, &str) -> Class,
+) -> rusqlite::Result<bool> {
+    let db = saved.db();
+    // Each class's uncharged files, by id.
+    let mut uncharged: Vec<Vec<u32>> = vec![Vec::new(); tallies.len()];
+    let mut stmt = db.prepare(&format!(
+        "SELECT f.id, f.ext FROM shared_members AS s JOIN files AS f ON f.id = s.id \
+         WHERE NOT f.charged AND f.flags & {LATER_LINK} = 0 ORDER BY f.id"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: u32 = row.get(0)?;
+        let suffix: String = row.get(1)?;
+        uncharged[index(class_at(id, &suffix))].push(id);
+    }
+    // A class is full at its examples, or at its every charged file.
+    let target = |t: &Tally, uncharged: &[u32]| {
+        let charged = t.files.saturating_sub(uncharged.len() as u64);
+        u64::try_from(examples).map_or(charged, |n| n.min(charged))
+    };
+    let targets: Vec<u64> = tallies
+        .iter()
+        .zip(&uncharged)
+        .map(|(t, u)| target(t, u))
+        .collect();
+    let wanted = targets.iter().filter(|&&n| n > 0).count();
+    let mut full = 0;
+    let mut stmt = db.prepare(&format!(
+        "SELECT id, allocated, ext FROM files INDEXED BY files_allocated \
+         WHERE charged AND flags & {LATER_LINK} = 0 ORDER BY allocated DESC, id"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while full < wanted
+        && let Some(row) = rows.next()?
+    {
+        let id: u32 = row.get(0)?;
+        let size = unsigned(row.get(1)?);
+        let suffix: String = row.get(2)?;
+        let at = index(class_at(id, &suffix));
+        let largest = &mut tallies[at].largest;
+        if (largest.len() as u64) < targets[at] {
+            largest.push((size, id));
+            if largest.len() as u64 == targets[at] {
+                full += 1;
+            }
+        }
+    }
+    if full < wanted {
+        return Ok(false);
+    }
+    for (tally, uncharged) in tallies.iter_mut().zip(uncharged) {
+        if tally.largest.len() >= examples || uncharged.is_empty() {
+            continue;
+        }
+        // The empty files the pass kept, and the uncharged ones, by id.
+        let mut empty: Vec<u32> = tally
+            .largest
+            .iter()
+            .filter(|&&(size, _)| size == 0)
+            .map(|&(_, id)| id)
+            .chain(uncharged)
+            .collect();
+        empty.sort_unstable();
+        tally.largest.retain(|&(size, _)| size > 0);
+        let room = examples - tally.largest.len();
+        tally
+            .largest
+            .extend(empty.into_iter().take(room).map(|id| (0, id)));
+    }
+    Ok(true)
+}
+
+/// The outermost directories of a whole saved scan that a directory rule
+/// matches, as (first id, last id, class), in id order, read from `dirs` in
+/// pre-order as [`classify`] reads the tree; a rule matching a directory
+/// above the root covers everything.
+fn rule_ranges(
+    view: &(impl TreeView + ?Sized),
+    classes: &Classes,
+) -> rusqlite::Result<Vec<(u32, u32, Class)>> {
+    let (above_root, above) = root_dirs(classes, view.root_path());
+    if let Some(class) = above {
+        return Ok(vec![(0, view.node(0).last_id, class)]);
+    }
+    let Some((saved, _)) = view.as_index() else {
+        return Ok(Vec::new());
+    };
+    let mut ranges = Vec::new();
+    let mut components: Vec<Vec<u8>> = above_root.iter().map(|c| c.to_vec()).collect();
+    let mut open: Vec<u32> = Vec::new();
+    let mut stmt = saved
+        .db()
+        .prepare("SELECT id, last_id, name FROM dirs ORDER BY id")?;
+    let mut rows = stmt.query([])?;
+    let mut inside: Option<u32> = None;
+    while let Some(row) = rows.next()? {
+        let id: u32 = row.get(0)?;
+        let last: u32 = row.get(1)?;
+        while open.last().is_some_and(|&l| id > l) {
+            open.pop();
+            components.pop();
+        }
+        if inside.is_some_and(|l| id > l) {
+            inside = None;
+        }
+        // The root's row holds its whole path; the rules read its last
+        // component, as the walk names it.
+        let name = if id == 0 {
+            view.name(0).into_owned()
+        } else {
+            row.get(2)?
+        };
+        components.push(name);
+        open.push(last);
+        if inside.is_none()
+            && let Some(class) = classes.of_dir(&components)
+        {
+            ranges.push((id, last, class));
+            inside = Some(last);
+        }
+    }
+    Ok(ranges)
+}
+
+/// A count or size read from a signed column.
+fn unsigned(n: i64) -> u64 {
+    u64::try_from(n).unwrap_or(0)
+}
+
 /// A class's place in [`Class::ALL`].
 fn index(class: Class) -> usize {
     Class::ALL.iter().position(|&c| c == class).unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests;

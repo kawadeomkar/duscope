@@ -11,7 +11,7 @@ use crate::envelope::{TreeEntry, name_fields};
 
 use super::{
     Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, children, flag_names, kind_name,
-    pct, sort_ids_by, timegrammar::iso8601,
+    pct, remain, sort_ids_by, timegrammar::iso8601,
 };
 
 /// What `tree` was asked.
@@ -43,6 +43,8 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
         return Page {
             entries: Vec::new(),
             total_count: 0,
+            next: None,
+            truncated: false,
         };
     }
     let depth = q.depth.unwrap_or(2);
@@ -82,7 +84,7 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
     }
     let mut rows = kept.into_vec();
     rows.sort_unstable_by_key(|&(_, order, _, _)| order);
-    let entries = rows
+    let entries: Vec<_> = rows
         .into_iter()
         .map(|(_, _, id, parent_total)| {
             let node = view.node(id);
@@ -91,8 +93,10 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
         })
         .collect();
     Page {
+        truncated: remain(0, entries.len(), total_count),
         entries,
         total_count,
+        next: None,
     }
 }
 
