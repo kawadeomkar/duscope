@@ -208,6 +208,9 @@ proptest! {
         };
         gpscan::write(&scan, 0, &opts, &mut file).unwrap();
         let imported = import(file.as_slice(), Some(ImportFormat::Gpscan)).unwrap();
+        // The top folder is named below the volume, which the import joins
+        // back on.
+        prop_assert_eq!(&imported.root, b"/r");
         let back = saved(imported.arena, b"/r", "import:gpscan", &env.tmp_dir().join("back"));
         // The files that take space, by path and size; the folders' totals
         // are theirs added up.
