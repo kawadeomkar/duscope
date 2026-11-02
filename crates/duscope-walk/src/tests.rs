@@ -329,7 +329,7 @@ proptest! {
                 clones_unavailable: false,
                 threads,
                 workers: Vec::new(),
-                listing_and_stat: None,
+                phases: None,
             });
         }
     }
@@ -1327,7 +1327,7 @@ fn p1_test_01_a_cancel_during_a_streamed_read_ends_the_walk() {
 }
 
 /// P5-WALK-04: P1-WALK-03's wide directory, read by four workers.
-fn wide_walk(counters: bool) -> (MemProvider, WalkSummary) {
+fn wide_walk(counters: Counters) -> (MemProvider, WalkSummary) {
     let mut tree = MemProvider::new("/mem");
     for i in 0..20_000 {
         tree.file(format!("wide/f{i}"), 10);
@@ -1351,14 +1351,14 @@ fn wide_walk(counters: bool) -> (MemProvider, WalkSummary) {
 
 #[test]
 fn p5_walk_04_a_default_walk_counts_nothing() {
-    let (_, summary) = wide_walk(false);
+    let (_, summary) = wide_walk(Counters::Off);
     assert_eq!(summary.workers, []);
-    assert_eq!(summary.listing_and_stat, None);
+    assert_eq!(summary.phases, None);
 }
 
 #[test]
 fn p5_walk_04_each_worker_counts_the_entries_it_delivered() {
-    let (tree, summary) = wide_walk(true);
+    let (tree, summary) = wide_walk(Counters::Workers);
     assert_eq!(summary.workers.len(), 4, "one figure a worker");
     let delivered: u64 = summary.workers.iter().map(|w| w.entries).sum();
     // The root is read by the walk itself, before the workers start.
@@ -1369,7 +1369,14 @@ fn p5_walk_04_each_worker_counts_the_entries_it_delivered() {
         summary.workers
     );
     // MemProvider cannot tell listing from reading attributes.
-    assert_eq!(summary.listing_and_stat, None);
+    assert_eq!(summary.phases, None);
+}
+
+#[test]
+fn p5_walk_04_listing_times_alone_count_nothing_where_the_provider_cannot_tell() {
+    let (_, summary) = wide_walk(Counters::Listing);
+    assert_eq!(summary.workers, []);
+    assert_eq!(summary.phases, None);
 }
 
 /// Adds a listing time and a stat time for every directory it reads, as
@@ -1389,7 +1396,7 @@ impl Provider for Phased<'_> {
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
         thread::sleep(self.pause);
-        if opts.counters {
+        if opts.counters != Counters::Off {
             self.asked.store(true, Ordering::Relaxed);
             counters::add(|tally| {
                 tally.listing += Duration::from_micros(10);
@@ -1428,25 +1435,28 @@ fn p5_walk_04_a_provider_that_times_listing_reports_both_times() {
         ..WalkOptions::default()
     };
     let summary = walk_with(&provider, tree.root_path(), &opts, |_| {}).unwrap();
-    assert_eq!(summary.listing_and_stat, None, "not asked for");
+    assert_eq!(summary.phases, None, "not asked for");
     assert!(!provider.asked.load(Ordering::Relaxed));
 
-    opts.counters = true;
-    let summary = walk_with(&provider, tree.root_path(), &opts, |_| {}).unwrap();
     // The root and its forty directories, each read once.
-    let reads = u32::try_from(summary.dirs).unwrap();
-    assert_eq!(reads, 41);
-    assert_eq!(
-        summary.listing_and_stat,
-        Some((
-            Duration::from_micros(10) * reads,
-            Duration::from_micros(30) * reads
-        ))
-    );
+    let reads = 41;
+    let phases = Some(WalkPhases {
+        listing: Duration::from_micros(10) * reads,
+        stat: Duration::from_micros(30) * reads,
+    });
+    opts.counters = Counters::Listing;
+    let summary = walk_with(&provider, tree.root_path(), &opts, |_| {}).unwrap();
+    assert_eq!(summary.dirs, u64::from(reads));
+    assert_eq!(summary.phases, phases);
+    assert_eq!(summary.workers, [], "-v's counters leave the workers out");
+
+    opts.counters = Counters::Workers;
+    let summary = walk_with(&provider, tree.root_path(), &opts, |_| {}).unwrap();
+    assert_eq!(summary.phases, phases);
+    assert_eq!(summary.workers.len(), 3);
     // Busy time is the time inside the reads, each of which pauses.
     let busy: Duration = summary.workers.iter().map(|w| w.busy).sum();
     assert!(busy >= Duration::from_millis(2) * reads, "{busy:?}");
-    assert_eq!(summary.workers.len(), 3);
 }
 
 #[test]

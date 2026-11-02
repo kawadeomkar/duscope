@@ -20,7 +20,8 @@ use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::{RollUp, roll_up};
 use duscope_core::rules::Caches;
 use duscope_walk::{
-    Attrs, DirId, IgnoreRules, NameRef, ScanEvent, Skip, WalkError, WalkOptions, WalkSummary, walk,
+    Attrs, Counters, DirId, IgnoreRules, NameRef, ScanEvent, Skip, WalkError, WalkOptions,
+    WalkPhases, WalkSummary, walk,
 };
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
 
@@ -578,18 +579,16 @@ fn phases(scanned: &Scanned, walk_time: Duration, rollup_time: Duration) {
         let per_second = (n as f64 / secs.max(1e-6)) as u64;
         thousands(per_second)
     };
-    if let Some((listing, stat)) = summary.listing_and_stat {
-        let busy = (listing + stat).as_secs_f64();
-        let listing_secs = if busy > 0.0 {
-            secs * listing.as_secs_f64() / busy
-        } else {
-            0.0
-        };
+    if let Some(WalkPhases { listing, stat }) = summary.phases {
+        // The walk reports no phases that sum to nothing.
+        let listing_secs = secs * listing.as_secs_f64() / (listing + stat).as_secs_f64();
         let stat_secs = secs - listing_secs;
+        // Directories the walk did not enter were never listed.
+        let listed = summary.dirs.saturating_sub(summary.skipped_dirs);
         log::info!(
             "listing: {} directories in {listing_secs:.3} s: {} directories/s",
-            thousands(summary.dirs),
-            rate(summary.dirs, listing_secs),
+            thousands(listed),
+            rate(listed, listing_secs),
         );
         log::info!(
             "stat: {} entries, {} MB in {stat_secs:.3} s: {} entries/s, {} MB/s",
@@ -777,7 +776,13 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
         cancel: Arc::new(AtomicBool::new(false)),
         fallback: args.provider == Some(ProviderArg::Fallback),
         // What `-v` and `-vv` print beside the walk's own figures.
-        counters: log::log_enabled!(log::Level::Info),
+        counters: if log::log_enabled!(target: crate::log::DETAIL, log::Level::Debug) {
+            Counters::Workers
+        } else if log::log_enabled!(log::Level::Info) {
+            Counters::Listing
+        } else {
+            Counters::Off
+        },
     })
 }
 

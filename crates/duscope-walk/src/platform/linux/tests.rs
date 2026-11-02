@@ -18,8 +18,8 @@ use super::mounts::{Mount, parse_mountinfo};
 use super::{LinuxProvider, dents};
 use crate::tests::Gate;
 use crate::{
-    DirHandle, DirId, Entry, Kind, NameRef, Provider, STAT_BATCH, ScanError, ScanEvent, VolumeInfo,
-    WalkOptions, walk_with,
+    Counters, DirHandle, DirId, Entry, Kind, NameRef, Provider, STAT_BATCH, ScanError, ScanEvent,
+    VolumeInfo, WalkOptions, walk_with,
 };
 
 /// Every entry of a walk by its path.
@@ -434,21 +434,29 @@ fn p5_walk_04_listing_is_timed_apart_from_statx() {
         ..WalkOptions::default()
     };
     let summary = walk_with(&LinuxProvider::new(), &root, &opts, |_| {}).unwrap();
-    assert_eq!(
-        summary.listing_and_stat, None,
-        "a default walk reads no clock"
-    );
+    assert_eq!(summary.phases, None, "a default walk reads no clock");
     assert!(summary.workers.is_empty());
 
-    opts.counters = true;
+    opts.counters = Counters::Listing;
     let summary = walk_with(&LinuxProvider::new(), &root, &opts, |_| {}).unwrap();
-    let (listing, stat) = summary.listing_and_stat.expect("Linux times listing apart");
-    assert!(listing > Duration::ZERO, "{listing:?}");
-    assert!(stat > Duration::ZERO, "{stat:?}");
+    let phases = summary.phases.expect("Linux times listing apart");
+    assert!(phases.listing > Duration::ZERO, "{phases:?}");
+    assert!(phases.stat > Duration::ZERO, "{phases:?}");
+    assert!(
+        summary.workers.is_empty(),
+        "-v's counters leave the workers out"
+    );
+
+    opts.counters = Counters::Workers;
+    let summary = walk_with(&LinuxProvider::new(), &root, &opts, |_| {}).unwrap();
+    let phases = summary.phases.expect("Linux times listing apart");
     assert_eq!(summary.workers.len(), 4);
     let delivered: u64 = summary.workers.iter().map(|w| w.entries).sum();
     assert_eq!(delivered, 100_000, "every file; the walk reads the root");
     // Both are timed inside the reads that the busy time covers.
     let busy: Duration = summary.workers.iter().map(|w| w.busy).sum();
-    assert!(listing + stat <= busy, "{listing:?} + {stat:?} > {busy:?}");
+    assert!(
+        phases.listing + phases.stat <= busy,
+        "{phases:?} > {busy:?}"
+    );
 }

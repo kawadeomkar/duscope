@@ -22,8 +22,8 @@ use dents::DentBuf;
 use crate::counters::{self, Timer};
 use crate::platform::posix;
 use crate::{
-    DirHandle, Entry, Flags, Flush, Kind, NameRef, Provider, STAT_BATCH, STREAM_CHUNK, ScanError,
-    VolumeInfo, WalkOptions,
+    Counters, DirHandle, Entry, Flags, Flush, Kind, NameRef, Provider, STAT_BATCH, STREAM_CHUNK,
+    ScanError, VolumeInfo, WalkOptions,
 };
 
 thread_local! {
@@ -140,7 +140,8 @@ impl Provider for LinuxProvider {
         later: &mut Vec<NameRef>,
         flush: &mut Flush<'_>,
     ) -> io::Result<()> {
-        let listing = opts.counters.then(Timer::start);
+        let timed = opts.counters != Counters::Off;
+        let listing = timed.then(Timer::start);
         let fd = posix::open_handle(dir)?;
         let mut names = Vec::new();
         let listed = DENTS.with_borrow_mut(|buf| {
@@ -158,7 +159,7 @@ impl Provider for LinuxProvider {
             counters::add(|tally| tally.listing += took);
         }
         listed?;
-        let stat = opts.counters.then(Timer::start);
+        let stat = timed.then(Timer::start);
         self.read_names(fd.as_fd(), dir, names, opts, out, errs);
         if let Some(stat) = stat {
             let took = stat.elapsed();
@@ -175,7 +176,7 @@ impl Provider for LinuxProvider {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
-        let stat = opts.counters.then(Timer::start);
+        let stat = (opts.counters != Counters::Off).then(Timer::start);
         let fd = posix::reopen(dir)?;
         self.read_names(fd.as_fd(), dir, names.iter().cloned(), opts, out, errs);
         if let Some(stat) = stat {

@@ -1,5 +1,5 @@
 //! What each worker does, counted only under [`WalkOptions::counters`]
-//! (`-v`), so a plain walk reads no clock and touches no counter.
+//! (`-v`, `-vv`), so a plain walk reads no clock and touches no counter.
 //!
 //! A job adds to its thread's own tally ([`add`]); the provider adds its
 //! listing and attribute times to the same tally, the walk its busy time and
@@ -22,6 +22,16 @@ pub struct WorkerCounts {
     /// Time inside the provider's reads, less the time the walk spent taking
     /// a streaming read's chunks in between.
     pub busy: Duration,
+}
+
+/// The workers' total time in the two halves of a directory read, with a
+/// provider that times them apart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalkPhases {
+    /// Opening and listing directories.
+    pub listing: Duration,
+    /// Reading entries' attributes.
+    pub stat: Duration,
 }
 
 /// A job's figures so far, on its worker's thread.
@@ -131,10 +141,10 @@ impl Slot {
     }
 
     /// The worker's time listing directories and reading attributes.
-    pub(crate) fn phases(&self) -> (Duration, Duration) {
-        (
-            Duration::from_nanos(self.listing.load(Ordering::Relaxed)),
-            Duration::from_nanos(self.stat.load(Ordering::Relaxed)),
-        )
+    pub(crate) fn phases(&self) -> WalkPhases {
+        WalkPhases {
+            listing: Duration::from_nanos(self.listing.load(Ordering::Relaxed)),
+            stat: Duration::from_nanos(self.stat.load(Ordering::Relaxed)),
+        }
     }
 }
