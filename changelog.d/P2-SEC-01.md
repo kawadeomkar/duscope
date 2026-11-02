@@ -1,5 +1,5 @@
 ### Added
-- `--trust FILE` reads an index file outside the index directory. Without it, `--scan FILE` naming one is refused with `untrusted_index` (exit 1), since an index file may come from anyone; the next commands an envelope suggests for such a file carry the `--trust` it needs.
+- `--trust FILE`, beside every `--scan` (and for `diff`'s scans, `explain --errors` and `scans --check`), reads an index file outside the index directory. Without it, `--scan FILE` naming one is refused with `untrusted_index` (exit 1), since an index file may come from anyone; the next commands an envelope suggests for such a file carry the `--trust` it needs. A link in the index directory's `scans` is no longer read as a saved scan.
 - `SECURITY.md` gives the threat model: the four untrusted inputs (SQL, agent paths and handles, index files, the scanned tree) and the rule for each, the supported versions and the security-release procedure.
 
 ### Changed

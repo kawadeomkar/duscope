@@ -75,7 +75,7 @@ pub fn run(args: &ScansArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     if args.prune {
         prune(&dir, now, output)
     } else if let Some(selector) = &args.check {
-        check(&dir, selector, now, output)
+        check(&dir, selector, &args.trust, now, output)
     } else {
         list(&dir, output)
     }
@@ -283,7 +283,13 @@ fn older_than(entry: &fs::DirEntry, age: Duration) -> bool {
 }
 
 /// `--check`.
-fn check(dir: &Path, selector: &str, now: i64, output: &Output) -> Result<(), Failure> {
+fn check(
+    dir: &Path,
+    selector: &str,
+    trust: &[PathBuf],
+    now: i64,
+    output: &Output,
+) -> Result<(), Failure> {
     let selector = ScanSelector::parse(selector).map_err(core_failure)?;
     let cwd = std::env::current_dir().map_err(|e| {
         Failure::new(
@@ -298,7 +304,7 @@ fn check(dir: &Path, selector: &str, now: i64, output: &Output) -> Result<(), Fa
         cwd: &cwd,
         max_age_ns: i64::MAX,
         now,
-        trust: super::trusted(),
+        trust,
     };
     let Some(resolved) = resolve_scan(&selector, &q, scanned).map_err(core_failure)? else {
         return Err(Failure::new(
