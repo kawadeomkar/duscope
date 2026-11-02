@@ -26,6 +26,7 @@ under [Auditing](#auditing) read it again.
   - `platform` and `bench-regression` on the three runners
   - `msrv (pinned)` and `msrv (stable)`
   - `deny`
+  - `fuzz-smoke` for each fuzz target (`sql`, `ncdu`, `gdu`, `gpscan`, `args`)
   - `docs`
   - `schemas`
   - `size` on `macos-26` and `ubuntu-24.04`, and `size-comment`
@@ -52,7 +53,8 @@ under [Auditing](#auditing) read it again.
   Applied with 20 checks, `schemas` included, on 2026-10-25. On 2026-10-27
   `intel-mac`, `size-comment`, `plan` and `verify-tag` were added, and, once
   phase 1 had merged, `platform`, `bench-regression` and the `.deb` jobs. On
-  2026-10-28 `intel-mac` was made optional again, leaving the 36 checks below.
+  2026-10-28 `intel-mac` was made optional again, leaving 36 checks. P2-TEST-01
+  adds the five `fuzz-smoke` checks, 41 in all below, once it merges.
 
   ```sh
   gh api -X PUT repos/kawadeomkar/duscope/branches/main/protection --input - <<'EOF'
@@ -79,6 +81,11 @@ under [Auditing](#auditing) read it again.
         { "context": "msrv (pinned)", "app_id": 15368 },
         { "context": "msrv (stable)", "app_id": 15368 },
         { "context": "deny", "app_id": 15368 },
+        { "context": "fuzz-smoke (sql)", "app_id": 15368 },
+        { "context": "fuzz-smoke (ncdu)", "app_id": 15368 },
+        { "context": "fuzz-smoke (gdu)", "app_id": 15368 },
+        { "context": "fuzz-smoke (gpscan)", "app_id": 15368 },
+        { "context": "fuzz-smoke (args)", "app_id": 15368 },
         { "context": "docs", "app_id": 15368 },
         { "context": "schemas", "app_id": 15368 },
         { "context": "size (macos-26)", "app_id": 15368 },
