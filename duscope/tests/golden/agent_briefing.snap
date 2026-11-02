@@ -24,15 +24,19 @@ question from it in milliseconds, one JSON envelope per command.
   `freeable_now_bytes` and its `freeable_kind`, cache rules, git state, each
   with its `evidence` and a `confidence`. Report what it found; do not turn
   `"confidence": "high"` into "safe to delete".
-- **Answers come from a saved scan.** A verb reads the newest saved scan holding
-  its path, else scans and saves one; the envelope's `scan` block says which
-  scan and when. `--max-age 1h` scans again past that age, `--no-save` scans
-  without saving, `--scan ID` names a saved scan (`duscope scans` lists them).
+- **Answers come from a saved scan.** The list verbs (`top`, `tree`, `by-type`,
+  `stale`, `caches`) read the newest saved scan holding their path, else scan
+  and save one; the envelope's `scan` block says which scan and when.
+  `--max-age 1h` warns (`stale_index`) when that scan is older;
+  `duscope rescan PATH` scans its root again, `--no-save` scans without
+  saving, and `--scan ID` names a saved scan (`duscope scans` lists them).
+  `explain` on a path no saved scan holds reports what it can see without one.
 - **Ask for `--json`** and read one envelope: `ok`, then `entries` (the list
   verbs) or `result` (`summary`, `explain`, `schema`), `warnings`, and `next`
   (commands that follow on). A failure is `{"ok": false, "error": {"code",
   "message", "hint", "retryable", "fixable_by"}}`: fix the command when
-  `fixable_by` is `agent`, ask the person when it is `human`.
+  `fixable_by` is `agent`, ask the person when it is `user`, and report it
+  when it is `none`.
 - **Large answers spill.** An envelope over `--max-chars` (24,000 characters) is
   written to a file, and stdout holds its path and the first rows (`spilled`).
   `--limit` (25 rows, at most 100), `--fields a,b` and `--cursor` keep answers
@@ -42,7 +46,9 @@ question from it in milliseconds, one JSON envelope per command.
 
 1. `duscope explain PATH --json`: read the facts, and keep `result.handle`. A
    handle names the path, its device and inode, its size and the scan, and
-   expires after 15 minutes.
+   expires after 15 minutes. It is null when the path changed since the scan,
+   or no handle key can be kept in the index directory: scan again, then
+   explain again.
 2. `duscope clean --from HANDLE --json`: the plan, still a dry run. A handle
    past its 15 minutes, or naming a path that changed since the scan, is
    refused (`handle_expired`, `path_changed`).
@@ -79,6 +85,7 @@ question from it in milliseconds, one JSON envelope per command.
 | `duscope summary` | A scan's totals: per volume, as du counts them, and what it left unfound |
 | `duscope diff` | What changed between two saved scans of one tree |
 | `duscope explain` | Facts about one path: links, clones, what deleting it frees, caches, git |
+| `duscope clean` | Move paths to the Trash: a plan first, and nothing moves without --yes |
 | `duscope query` | One read-only SQL statement over a saved scan's tables |
 | `duscope view` | The treemap in the interactive viewer, on a saved scan or a new one |
 | `duscope schema` | The index's tables and columns, and each verb's envelope schema |

@@ -1,8 +1,8 @@
 //! `agent`: the briefing an AI agent reads before it uses duscope, as
 //! Markdown on stdout. The text is `briefing.md.tmpl`; when it runs, the
-//! binary fills in its own verbs from the command line, the exit codes, and
-//! the error codes with the exit code of each, so the briefing names what
-//! this binary does. The MCP server's `instructions` are the briefing's first
+//! binary fills in its own verbs from the command line, its exit codes, and
+//! the envelope's error codes (the conventions' `ERROR_CODES`) with the exit
+//! code of each, so those lists cannot drift from the code. The MCP server's `instructions` are the briefing's first
 //! 4,096 characters (P3-MCP-03), which is why the template opens with the
 //! words that should bring duscope to mind, the invariants and the handle
 //! flow.
@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use clap::CommandFactory;
 use duscope_core::envelope::{ERROR_CODES, SCHEMA_VERSION};
 
-use crate::cli::Cli;
+use crate::cli::{Cli, visible_verbs};
 use crate::out::emit_bytes;
 use crate::verbs::{Exit, Failure};
 
@@ -69,10 +69,7 @@ fn verbs() -> String {
     let mut command = Cli::command();
     command.build();
     let mut out = String::from("| Command | What it does |\n| --- | --- |\n");
-    for verb in command
-        .get_subcommands()
-        .filter(|verb| !verb.is_hide_set() && verb.get_name() != "help")
-    {
+    for verb in visible_verbs(&command) {
         let about = verb
             .get_about()
             .map(|about| about.to_string().replace('|', "\\|"))
@@ -112,11 +109,68 @@ fn error_codes() -> String {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use duscope_core::envelope::ERROR_CODES;
 
-    use super::{EXITS, briefing};
-    use crate::cli::Cli;
+    use super::{EXITS, TEMPLATE, briefing};
+    use crate::cli::{Cli, visible_verbs};
+
+    /// The `duscope …` commands the template's prose and tables name, split
+    /// as a shell splits them (double quotes kept together), with PATH,
+    /// HANDLE, the scan ids and the elided statement filled in as an agent
+    /// would fill them.
+    fn template_commands() -> Vec<Vec<String>> {
+        let prose: String = TEMPLATE
+            .split("```")
+            .step_by(2)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut commands = Vec::new();
+        for span in prose.split('`').skip(1).step_by(2) {
+            if span != "duscope" && !span.starts_with("duscope ") {
+                continue;
+            }
+            let span = span.replace("\"SELECT …\"", "\"SELECT 1\"");
+            let mut words = Vec::new();
+            let mut word = String::new();
+            let mut quoted = false;
+            for c in span.chars() {
+                match c {
+                    '"' => quoted = !quoted,
+                    c if c.is_whitespace() && !quoted => {
+                        if !word.is_empty() {
+                            words.push(std::mem::take(&mut word));
+                        }
+                    }
+                    c => word.push(c),
+                }
+            }
+            words.push(word);
+            let filled = words
+                .into_iter()
+                .map(|w| match w.as_str() {
+                    "PATH" => "/tmp".to_owned(),
+                    "HANDLE" => "aGFuZGxl".to_owned(),
+                    "OLD" | "ID" => "1fd3".to_owned(),
+                    "NEW" => "7a2c".to_owned(),
+                    _ => w,
+                })
+                .collect();
+            commands.push(filled);
+        }
+        commands
+    }
+
+    #[test]
+    fn p3_agt_01_every_command_in_the_text_parses() {
+        let commands = template_commands();
+        assert!(commands.len() > 15, "{commands:?}");
+        for words in commands {
+            if let Err(e) = Cli::try_parse_from(&words) {
+                panic!("{}: {e}", words.join(" "));
+            }
+        }
+    }
 
     #[test]
     fn p3_agt_01_every_placeholder_is_filled() {
@@ -128,14 +182,12 @@ mod tests {
         let text = briefing();
         let mut command = Cli::command();
         command.build();
-        for verb in command.get_subcommands().filter(|v| !v.is_hide_set()) {
-            if verb.get_name() != "help" {
-                assert!(
-                    text.contains(&format!("| `duscope {}` |", verb.get_name())),
-                    "{}",
-                    verb.get_name()
-                );
-            }
+        for verb in visible_verbs(&command) {
+            assert!(
+                text.contains(&format!("| `duscope {}` |", verb.get_name())),
+                "{}",
+                verb.get_name()
+            );
         }
         for (name, exit) in ERROR_CODES {
             assert!(
