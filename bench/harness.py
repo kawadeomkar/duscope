@@ -30,6 +30,7 @@ if sys.version_info < (3, 9):  # pragma: no cover - the message is the point
     sys.exit("bench: Python 3.9 or later is needed")
 
 import measure
+import indexbench
 import sweep
 import tools
 import trees
@@ -142,6 +143,20 @@ def parser() -> argparse.ArgumentParser:
     swept.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
     swept.add_argument("--out", help="the result file (default <results-dir>/thread-sweep-<platform>-<arch>.json)")
     swept.add_argument("--hyperfine", default="hyperfine", help="the hyperfine command (default hyperfine on PATH)")
+
+    index = sub.add_parser("index", help="measure a saved scan's write, queries and size, and the D34 comparison (P2-BENCH-01)")
+    _tree_options(index)
+    index.set_defaults(trees="T2")
+    _jobs_option(index)
+    index.add_argument("--duscope", required=True, metavar="PATH", help="the duscope executable to measure")
+    _tool_options(index, ",".join(indexbench.COMPETITORS))
+    index.add_argument("--mode", choices=("warm", "cold", "both"), default="both", help="warm caches, cold caches, or both (default both)")
+    index.add_argument("--cold-cmd", default=shlex.quote(os.path.join(BENCH, "drop-caches.sh")), help="the command that drops the caches before each cold run (default bench/drop-caches.sh)")
+    index.add_argument("--runs", type=int, default=20, help="measured runs of each write, query and pair (default 20)")
+    index.add_argument("--warmup", type=int, default=2, help="warm-up runs before each warm measurement (default 2)")
+    index.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
+    index.add_argument("--out", help="the result file (default <results-dir>/<date>-<platform>-index.json)")
+    index.add_argument("--hyperfine", default="hyperfine", help="the hyperfine command (default hyperfine on PATH)")
     return top
 
 
@@ -525,6 +540,7 @@ def write_result(result: Dict[str, object], out: str) -> None:
 
 COMMANDS = {
     "sweep": lambda args: sweep.cmd_sweep(args, sys.modules[__name__]),
+    "index": lambda args: indexbench.cmd_index(args, sys.modules[__name__]),
     "run": cmd_run,
     "build": cmd_build,
     "install": cmd_install,
