@@ -18,9 +18,9 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use duscope_core::envelope::{
-    ByTypeEntry, CacheEntry, CheckedEntry, Envelope, ErrorEnvelope, Listing, ObjectEnvelope,
-    ProjectEntry, PrunedEntry, SavedScanEntry, ScanErrorEntry, StaleEntry, TopEntry, TreeEntry,
-    Warning,
+    ByTypeEntry, CacheEntry, CheckedEntry, DiffEntry, DiffTotals, Envelope, ErrorEnvelope, Listing,
+    ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry, ScanErrorEntry, StaleEntry,
+    TopEntry, TreeEntry, Warning,
 };
 use serde::Serialize;
 
@@ -449,6 +449,46 @@ impl Row for CacheEntry {
     }
 }
 
+impl Row for DiffEntry {
+    const FIELDS: &'static [&'static str] = &[
+        "change",
+        "bytes_delta",
+        "old_bytes",
+        "new_bytes",
+        "collapsed_count",
+        "kind",
+        "path",
+    ];
+    const COLUMNS: &'static [&'static str] = &["Change", "Delta", "Path"];
+
+    fn plain(&self) -> Vec<Cow<'_, [u8]>> {
+        let number =
+            |n: Option<u64>| Cow::Owned(n.map(|n| n.to_string()).unwrap_or_default().into_bytes());
+        vec![
+            Cow::Borrowed(self.change.as_bytes()),
+            Cow::Owned(self.bytes_delta.to_string().into_bytes()),
+            number(self.old_bytes),
+            number(self.new_bytes),
+            number(self.collapsed_count),
+            Cow::Borrowed(self.kind.as_bytes()),
+            Cow::Borrowed(&self.path_bytes),
+        ]
+    }
+
+    fn cells(&self, units: Units, _size_kind: &str) -> Vec<String> {
+        let sign = if self.bytes_delta < 0 { "-" } else { "+" };
+        let path = match self.collapsed_count {
+            Some(n) => format!("{} ({} entries)", printable(&self.path), thousands(n)),
+            None => printable(&self.path).into_owned(),
+        };
+        vec![
+            self.change.to_owned(),
+            format!("{sign}{}", units.size(self.bytes_delta.unsigned_abs())),
+            path,
+        ]
+    }
+}
+
 impl Row for ProjectEntry {
     const FIELDS: &'static [&'static str] = &[
         "allocated_bytes",
@@ -685,6 +725,33 @@ impl Output {
     /// one line for people: after the table, or on stderr in the machine
     /// formats. Warnings go in the envelope under JSON, on stderr otherwise.
     pub fn list<T: Row>(&self, envelope: &Envelope<T>, footer: &str) -> Result<(), Failure> {
+        self.list_with(envelope, None, footer)
+    }
+
+    /// [`Output::list`] of `diff`, whose JSON envelope carries its totals
+    /// as `diff` after the shared fields.
+    pub fn list_diff<T: Row>(
+        &self,
+        envelope: &Envelope<T>,
+        totals: &DiffTotals,
+        footer: &str,
+    ) -> Result<(), Failure> {
+        self.list_with(envelope, Some(totals), footer)
+    }
+
+    fn list_with<T: Row>(
+        &self,
+        envelope: &Envelope<T>,
+        totals: Option<&DiffTotals>,
+        footer: &str,
+    ) -> Result<(), Failure> {
+        /// An envelope and `diff`'s totals, as one JSON object.
+        #[derive(Serialize)]
+        struct WithDiff<'a, V> {
+            #[serde(flatten)]
+            envelope: &'a V,
+            diff: &'a DiffTotals,
+        }
         let verb = envelope.query.command;
         let chosen = self.chosen::<T>(verb)?;
         if let Some(chosen) = &chosen {
@@ -695,11 +762,30 @@ impl Output {
         let written = match (self.format, &chosen) {
             (Format::Json, Some(chosen)) => {
                 let selected = fields::select(envelope, chosen);
-                self.json(&selected, &selected.entries, &envelope.warnings, scan, verb)
+                match totals {
+                    Some(diff) => self.json(
+                        &WithDiff {
+                            envelope: &selected,
+                            diff,
+                        },
+                        &selected.entries,
+                        &envelope.warnings,
+                        scan,
+                        verb,
+                    ),
+                    None => self.json(&selected, &selected.entries, &envelope.warnings, scan, verb),
+                }
             }
-            (Format::Json, None) => {
-                self.json(envelope, &envelope.entries, &envelope.warnings, scan, verb)
-            }
+            (Format::Json, None) => match totals {
+                Some(diff) => self.json(
+                    &WithDiff { envelope, diff },
+                    &envelope.entries,
+                    &envelope.warnings,
+                    scan,
+                    verb,
+                ),
+                None => self.json(envelope, &envelope.entries, &envelope.warnings, scan, verb),
+            },
             (Format::Ndjson, Some(chosen)) => {
                 self.sink(|out| format::ndjson(out, &fields::select(envelope, chosen)))
             }

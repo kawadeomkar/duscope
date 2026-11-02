@@ -1,6 +1,7 @@
 //! The verbs, and the failures they report.
 
 mod completions;
+mod diff;
 mod explain;
 mod man;
 mod query;
@@ -94,6 +95,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::Stale(args)) => query::stale(&args, index_dir, output),
         Some(Verb::Caches(args)) => query::caches(&args, index_dir, output),
         Some(Verb::Summary(args)) => summary::run(&args, index_dir, output),
+        Some(Verb::Diff(args)) => diff::run(&args, index_dir, output),
         Some(Verb::Explain(args)) => explain::run(&args, index_dir, output),
         Some(Verb::Scans(args)) => scans::run(&args, index_dir, output),
         Some(Verb::Man) => man::run(),
