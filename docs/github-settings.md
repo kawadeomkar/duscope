@@ -21,8 +21,8 @@ under [Auditing](#auditing) read it again.
   nothing merges until they all pass. The checks are the jobs of
   [ci.yml](../.github/workflows/ci.yml):
   - `fmt`
-  - `clippy` on the three runners
-  - `test` on the three runners, plus its locale leg on each
+  - `clippy` and `test`, with its locale leg, on `ubuntu-24.04` and
+    `ubuntu-24.04-arm`, and on `macos-26` in one job, `checks (macos-26)`
   - `platform` and `bench-regression` on the three runners
   - `msrv (pinned)` and `msrv (stable)`
   - `deny`
@@ -41,8 +41,10 @@ under [Auditing](#auditing) read it again.
 
   release.yml's other jobs (`build-local-artifacts`, `build-global-artifacts`,
   `host`, `publish-crates`, `homebrew` and `announce`) run only for a tag, and
-  pull requests report them skipped. `intel-mac` runs on every pull request but
-  is not required: it builds on GitHub's best-effort Intel macOS runner, which
+  pull requests report them skipped. `intel-mac` runs on pushes to `main`, the
+  schedule and a dispatch, and on no pull request, where it would take one of
+  the five macOS runners (DEV-73). It is not required: it builds on GitHub's
+  best-effort Intel macOS runner, which
   would otherwise hold up every merge while it is unavailable, and once GitHub
   retires it. release.yml builds the x86_64 macOS archive again for a tag, so a
   broken Intel build still stops a release. This PUT replaces the whole
@@ -52,7 +54,17 @@ under [Auditing](#auditing) read it again.
   Applied with 20 checks, `schemas` included, on 2026-10-25. On 2026-10-27
   `intel-mac`, `size-comment`, `plan` and `verify-tag` were added, and, once
   phase 1 had merged, `platform`, `bench-regression` and the `.deb` jobs. On
-  2026-10-28 `intel-mac` was made optional again, leaving the 36 checks below.
+  2026-10-28 `intel-mac` was made optional again, leaving 36 checks. DEV-73,
+  with P2-IDX-03, folds macOS's `clippy` and both its `test` legs into
+  `checks (macos-26)`, 34 in all below, once it merges.
+
+  These checks run on a pull request into `main`, and on one labelled
+  `full-ci`. A pull request into another branch, the middle of a stack, runs
+  `fmt`, `deny`, `changelog` and `quick` (clippy and the tests on
+  `ubuntu-24.04`) alone (DEV-73): no protection applies to it, and before it
+  merges `strict` makes it take `main`, which runs the full set on its new
+  head. The top of a stack carries `full-ci`, so the whole stack's code runs
+  the full set once per push.
 
   ```sh
   gh api -X PUT repos/kawadeomkar/duscope/branches/main/protection --input - <<'EOF'
@@ -61,13 +73,11 @@ under [Auditing](#auditing) read it again.
       "strict": true,
       "checks": [
         { "context": "fmt", "app_id": 15368 },
-        { "context": "clippy (macos-26)", "app_id": 15368 },
+        { "context": "checks (macos-26)", "app_id": 15368 },
         { "context": "clippy (ubuntu-24.04)", "app_id": 15368 },
         { "context": "clippy (ubuntu-24.04-arm)", "app_id": 15368 },
-        { "context": "test (macos-26, default)", "app_id": 15368 },
         { "context": "test (ubuntu-24.04, default)", "app_id": 15368 },
         { "context": "test (ubuntu-24.04-arm, default)", "app_id": 15368 },
-        { "context": "test (macos-26, locale)", "app_id": 15368 },
         { "context": "test (ubuntu-24.04, locale)", "app_id": 15368 },
         { "context": "test (ubuntu-24.04-arm, locale)", "app_id": 15368 },
         { "context": "platform (macos-26)", "app_id": 15368 },
@@ -174,6 +184,14 @@ under [Auditing](#auditing) read it again.
 
   ```sh
   gh label create no-changelog --repo kawadeomkar/duscope --color cfd3d7 --description "Nothing user-visible: no changelog.d fragment needed"
+  ```
+
+- [x] The `full-ci` label (DEV-73). The author sets it on the top pull request of
+  a stack, which then runs the full set of checks though it is not a pull request
+  into `main`.
+
+  ```sh
+  gh label create full-ci --repo kawadeomkar/duscope --color 0e8a16 --description "Run every CI job on a pull request into another branch than main (the top of a stack)"
   ```
 
 ## Owned by other packages

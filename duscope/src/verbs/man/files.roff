@@ -18,9 +18,11 @@ sets the defaults of
 .BR format ,
 .BR limit ,
 .BR size ,
-.B attrs
-and
+.BR attrs ,
 .BR clones ,
+.B index_dir
+and
+.BR max_age ,
 under the flags' names; a flag or its environment variable wins over it.
 .B [excludes] patterns
 lists
@@ -35,8 +37,9 @@ directory's. A
 inside a scanned tree is never read.
 .TP
 .I $XDG_CACHE_HOME/duscope/scans/<id>.db
-A scan saved with
-.BR "scan \-\-save" :
+A saved scan, written by
+.B scan \-\-save
+or by a list verb that found none holding its path:
 one SQLite file, mode 0600, written once and never changed
 .RI ( ~/Library/Caches/duscope
 on macOS and
@@ -47,7 +50,13 @@ is unset;
 .B \-\-index\-dir
 or
 .B DUSCOPE_INDEX_DIR
-names another directory). Its tables are described in
+names another directory).
+.B scans
+lists them,
+.B scans \-\-prune
+removes the old ones, and
+.B \-\-scan
+names one. Its tables are described in
 .I docs/index-format.md
 in the source distribution.
 .TP

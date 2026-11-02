@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use duscope_testkit::TestEnv;
 use duscope_walk::{cancel_on_interrupt, stand_down_interrupt, wait_for_interrupt};
@@ -32,9 +33,22 @@ fn p1_walk_08_sigint_and_the_stand_down_wake_the_waiting_thread() {
     stand_down_interrupt();
     assert!(!waiter.join().unwrap(), "woken by the stand-down");
     // A SIGINT no thread waited for does not wake the waiter of the next
-    // installation: installing empties the pipe.
+    // installation: installing empties the pipe. `kill` returns once the
+    // signal is sent, perhaps before the handler has run, so the test waits
+    // for the handler to set the flag, which it does just before it writes
+    // to the pipe, and then a moment for the write.
+    flag.store(false, Ordering::SeqCst);
     let killed = env.command("kill").args(["-INT", &pid]).status().unwrap();
     assert!(killed.success());
+    let sent = Instant::now();
+    while !flag.load(Ordering::SeqCst) {
+        assert!(
+            sent.elapsed() < Duration::from_secs(10),
+            "the SIGINT was not handled"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    thread::sleep(Duration::from_millis(50));
     assert!(cancel_on_interrupt(&flag).unwrap());
     let waiter = thread::spawn(wait_for_interrupt);
     stand_down_interrupt();

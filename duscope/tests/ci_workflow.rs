@@ -25,13 +25,11 @@ const JOB_BUDGET_MINUTES: u32 = 20;
 /// ci.yml, then the jobs of release.yml that are not [`TAG_ONLY_JOBS`].
 const REQUIRED_CHECKS: &[&str] = &[
     "fmt",
-    "clippy (macos-26)",
+    "checks (macos-26)",
     "clippy (ubuntu-24.04)",
     "clippy (ubuntu-24.04-arm)",
-    "test (macos-26, default)",
     "test (ubuntu-24.04, default)",
     "test (ubuntu-24.04-arm, default)",
-    "test (macos-26, locale)",
     "test (ubuntu-24.04, locale)",
     "test (ubuntu-24.04-arm, locale)",
     "platform (macos-26)",
@@ -62,9 +60,11 @@ const REQUIRED_CHECKS: &[&str] = &[
     "deb-install (ubuntu:22.04, arm64)",
 ];
 
-/// Jobs of ci.yml that run on every pull request but do not gate a merge:
-/// intel-mac builds on GitHub's best-effort Intel macOS runner.
-const OPTIONAL_JOBS: &[&str] = &["intel-mac"];
+/// Jobs of ci.yml that do not gate a merge: intel-mac builds on GitHub's
+/// best-effort Intel macOS runner, on pushes to main, the schedule and a
+/// dispatch; quick runs only on a pull request into another branch than main,
+/// which no branch protection covers (DEV-73).
+const OPTIONAL_JOBS: &[&str] = &["intel-mac", "quick"];
 
 /// The jobs of release.yml that run only for a tag: pull requests report them
 /// skipped, so they are not required.
@@ -90,6 +90,10 @@ const RECIPES: &[(&str, &str)] = &[
     ("fmt", "fmt"),
     ("clippy", "clippy"),
     ("test", "test"),
+    ("checks", "clippy"),
+    ("checks", "test"),
+    ("quick", "clippy"),
+    ("quick", "test"),
     ("msrv", "test"),
     ("deny", "deny"),
     ("docs", "docs"),
@@ -457,6 +461,46 @@ fn p0_ci_01_jobs_run_on_the_spec_runners() {
                 job.id
             );
         }
+    }
+}
+
+/// DEV-73: the full set runs where it decides a merge (a pull request into main
+/// or labelled `full-ci`, a push, the schedule, a dispatch); a pull request into
+/// another branch runs fmt, deny, changelog and quick alone, and intel-mac runs
+/// on no pull request. release.yml's pull-request jobs after verify-tag hang off
+/// `plan`, which takes the same scope.
+#[test]
+fn p0_ci_01_a_pull_request_into_another_branch_runs_the_quick_set() {
+    const SCOPE: &str =
+        "github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')";
+    let full = format!("github.event_name != 'pull_request' || {SCOPE}");
+    for job in jobs(&read(WORKFLOW)) {
+        let condition = job_key(&job, "if").unwrap_or_default();
+        match job.id.as_str() {
+            "fmt" | "deny" | "changelog" => assert!(
+                !condition.contains("base_ref"),
+                "job `{}` is one of the quick set: {condition}",
+                job.id
+            ),
+            "quick" => assert_eq!(
+                condition,
+                "github.event_name == 'pull_request' && github.base_ref != 'main' \
+                 && !contains(github.event.pull_request.labels.*.name, 'full-ci')"
+            ),
+            "intel-mac" => assert_eq!(condition, "github.event_name != 'pull_request'"),
+            "size-comment" => assert!(condition.contains(&format!("&& ({SCOPE})")), "{condition}"),
+            id => assert_eq!(condition, full, "job `{id}`"),
+        }
+    }
+    let release = jobs(&read(RELEASE_WORKFLOW));
+    let plan = release.iter().find(|job| job.id == "plan").unwrap();
+    assert_eq!(job_key(plan, "if"), Some(full.as_str()));
+    // A label reruns both workflows, so adding full-ci runs the full set.
+    for workflow in [WORKFLOW, RELEASE_WORKFLOW] {
+        assert!(
+            read(workflow).contains("types: [opened, synchronize, reopened, labeled, unlabeled]"),
+            "{workflow}"
+        );
     }
 }
 

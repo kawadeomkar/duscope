@@ -10,10 +10,23 @@
 # is pinned to a full commit SHA with its version in a comment.
 #
 # Required checks (branch protection on main, applied from docs/github-settings.md):
-# fmt; clippy, test, platform and bench-regression on the three runners; the test
-# locale leg on the three runners; msrv (pinned) and msrv (stable); deny; docs;
-# schemas; size on macos-26 and ubuntu-24.04; build-time; repro; changelog. Not
-# required: intel-mac (best effort) and size-comment (it only posts the size).
+# fmt; clippy, test (default and locale legs), platform and bench-regression on
+# ubuntu-24.04 and ubuntu-24.04-arm; checks (macos-26), which is macOS's clippy
+# and both test legs, and platform and bench-regression on macos-26; msrv (pinned)
+# and msrv (stable); deny; docs; schemas; size on macos-26 and ubuntu-24.04, and
+# size-comment; build-time; repro; changelog. Not required: intel-mac (best
+# effort) and quick.
+#
+# Scope (DEV-73): a stack of pull requests runs every job of each of them again
+# at each push, and a macOS runner is the scarce one (five at a time on this
+# account, of twenty jobs). The full set runs where it decides a merge: a pull
+# request into main, a push to main, the schedule, a dispatch, and a pull
+# request labelled `full-ci`, which the top of a stack carries, since it holds
+# the whole stack's code. A pull request into another branch runs fmt, deny,
+# changelog and quick (clippy and the tests on ubuntu-24.04, in one job): no
+# branch protection applies to it, and branch protection requires it to be
+# updated with main before it merges, which runs the full set on its new head.
+# intel-mac runs on pushes to main, the schedule and a dispatch.
 
 name: CI
 
@@ -92,12 +105,45 @@ jobs:
           tool: just@${{ env.JUST_VERSION }}
       - run: just fmt
 
+  quick:
+    # A pull request into another branch than main, the middle of a stack
+    # (DEV-73, above): clippy and the tests on ubuntu-24.04 in one job. The full
+    # set runs on its new head once it is updated with main, and on a pull
+    # request labelled full-ci.
+    name: quick (ubuntu-24.04)
+    if: github.event_name == 'pull_request' && github.base_ref != 'main' && !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --profile minimal && rustc --version
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check that Cargo.lock is current
+        run: cargo fetch --locked
+      - name: Install zsh, fish and mandoc
+        # P1-CLI-04's tests load the completions in zsh and fish and lint the man
+        # page with mandoc; in CI a missing one fails them.
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zsh fish mandoc
+      - run: just clippy
+      - run: just test
+
   clippy:
     name: clippy (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -118,10 +164,11 @@ jobs:
 
   test:
     name: test (${{ matrix.os }}, ${{ matrix.leg }})
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
         # default: the runner's environment. locale: TZ=America/Los_Angeles and
         # LC_ALL=fr_FR.UTF-8, which the testkit must shield every test from.
         leg: [default, locale]
@@ -144,17 +191,6 @@ jobs:
       - name: Generate the fr_FR.UTF-8 locale
         if: matrix.leg == 'locale' && runner.os == 'Linux'
         run: sudo locale-gen fr_FR.UTF-8
-      - name: Install bash 4 or later and fish
-        # macOS ships bash 3.2, and the test that runs the changelog job needs 4 or
-        # later; `just setup` installs it the same way. fish loads the completions
-        # in P1-CLI-04's test (macOS ships zsh and mandoc).
-        if: runner.os == 'macOS'
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: |
-          brew install bash fish
-          "$(brew --prefix)/bin/bash" --version
       - name: Install zsh, fish and mandoc
         # P1-CLI-04's tests load the completions in zsh and fish and lint the man
         # page with mandoc; in CI a missing one fails them.
@@ -203,6 +239,7 @@ jobs:
     # trees' RSS run in nightly-bench.yml, on the bench runners, not on pull
     # requests.
     name: platform (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     strategy:
       fail-fast: false
       matrix:
@@ -232,6 +269,70 @@ jobs:
           export "CARGO_TARGET_${host}_RUNNER=sudo -E"
           just platform-tests
 
+  checks:
+    # macOS's clippy and both legs of its tests in one job (DEV-73): a macOS
+    # runner is the scarce one, and as three jobs each waited for one, then
+    # paid for its own checkout and cache, and the locale leg built the tests
+    # again. Each step runs whatever failed before it, so one run reports
+    # every failure. The platform tests stay a job of their own: their release
+    # build and root runs take about 13 minutes, which would take this one past
+    # the 20-minute budget.
+    name: checks (macos-26)
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --profile minimal && rustc --version
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check that Cargo.lock is current
+        run: cargo fetch --locked
+      - name: Install bash 4 or later and fish
+        # macOS ships bash 3.2, and the test that runs the changelog job needs 4 or
+        # later; `just setup` installs it the same way. fish loads the completions
+        # in P1-CLI-04's test (macOS ships zsh and mandoc).
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew install bash fish
+          "$(brew --prefix)/bin/bash" --version
+      - name: just clippy
+        run: just clippy
+      - name: just test
+        id: test
+        if: ${{ !cancelled() }}
+        run: just test
+      - name: just test under TZ=America/Los_Angeles LC_ALL=fr_FR.UTF-8
+        if: ${{ !cancelled() }}
+        env:
+          TZ: America/Los_Angeles
+          LC_ALL: fr_FR.UTF-8
+        run: |
+          # Not `locale -a | grep -q`: grep exits at the first match, and macOS's
+          # locale then fails to flush, which pipefail reports as a failure.
+          locales=$(locale -a)
+          grep -Eiq '^fr_FR\.utf-?8$' <<<"$locales" || { echo "::error::fr_FR.UTF-8 is not available on this runner"; exit 1; }
+          date
+          just test
+      - name: Regenerate the goldens after a failure
+        if: failure() && steps.test.outcome == 'failure'
+        run: just golden || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure() && steps.test.outcome == 'failure'
+        with:
+          name: goldens-macos-26
+          path: duscope/tests/golden/
+          retention-days: 14
+
   bench-regression:
     # The harness on T1 against this job's results on pushes to main (DEV-20,
     # bench/compare.py): duscope's p50 and its ratio to diskus, each against the
@@ -243,6 +344,7 @@ jobs:
     # pull requests only until main's own results make up most of each CPU model's
     # five.
     name: bench-regression (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     strategy:
       fail-fast: false
       matrix:
@@ -329,6 +431,7 @@ jobs:
 
   msrv:
     name: msrv (${{ matrix.toolchain }})
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     strategy:
       fail-fast: false
       matrix:
@@ -400,6 +503,7 @@ jobs:
 
   docs:
     name: docs
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -449,6 +553,7 @@ jobs:
 
   schemas:
     name: schemas
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -478,6 +583,7 @@ jobs:
 
   size:
     name: size (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     strategy:
       fail-fast: false
       matrix:
@@ -536,7 +642,7 @@ jobs:
     name: size-comment
     needs: size
     # Pull requests from this repository only: a fork's token cannot comment.
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -574,6 +680,7 @@ jobs:
 
   build-time:
     name: build-time
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -628,6 +735,7 @@ jobs:
 
   repro:
     name: repro
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -663,7 +771,10 @@ jobs:
 
   intel-mac:
     name: intel-mac
-    # Best effort and not required: Intel macOS builds without the test suite.
+    # Best effort and not required: Intel macOS builds without the test suite,
+    # on pushes to main, the schedule and a dispatch. Not on pull requests, where
+    # it would take one of the five macOS runners (DEV-73).
+    if: github.event_name != 'pull_request'
     runs-on: macos-26-intel
     timeout-minutes: 20
     steps:

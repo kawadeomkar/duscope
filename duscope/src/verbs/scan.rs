@@ -188,9 +188,9 @@ pub fn scan_id(scanned: &Scanned) -> Result<ScanId, Failure> {
 }
 
 /// `--save`: the scan's index, written under the index directory once the
-/// output is out, then its id on stderr for people (the envelope carries it
-/// already). A failure is `index_write_failed` (exit 1), which `main`
-/// reports on stderr alone: the output already written stands.
+/// output is out, then, when `announce`, its id on stderr for people (the
+/// envelope carries it already). A failure is `index_write_failed` (exit 1),
+/// which `main` reports on stderr alone: the output already written stands.
 pub fn save(
     scanned: &Scanned,
     walk: &WalkArgs,
@@ -198,6 +198,7 @@ pub fn save(
     id: &ScanId,
     index_dir: Option<&Path>,
     output: &Output,
+    announce: bool,
 ) -> Result<(), Failure> {
     let failed = |message: String| {
         Failure::new(Exit::Runtime, "index_write_failed", message)
@@ -220,12 +221,15 @@ pub fn save(
         options: saved_options(walk, excludes),
         platform: duscope_walk::system(),
         scanning_uid: duscope_walk::effective_uid(),
+        thread_count: scanned.summary.threads as u64,
         size_kind: size_kind(walk).as_str(),
         volume_total: root_volume.map_or(0, |v| v.total_bytes),
         volume_free: root_volume.map_or(0, |v| v.free_bytes),
         unaccounted_bytes: None,
         error_count: scanned.summary.unreadable_dirs + scanned.summary.entry_errors,
         vanished_count: scanned.arena.vanished(),
+        excluded_count: scanned.summary.excluded,
+        clones_unavailable: scanned.summary.clones_unavailable,
         incremental: false,
         parent_scan_id: None,
         source: "scan".to_owned(),
@@ -242,7 +246,7 @@ pub fn save(
         "write: {} entries in {secs:.3} s: {per_entry:.2} µs/entry",
         thousands(entries as u64)
     );
-    if !output.is_json() {
+    if announce && !output.is_json() {
         crate::out::stderr_line(&format!(
             "saved as {id} ({})",
             index_path(&dir, id).display()
@@ -255,7 +259,7 @@ pub fn save(
 /// `excludes` holds `--exclude`'s patterns and the configuration's,
 /// `exclude_files` and `ignore_files` the files `--exclude-from` and
 /// `--ignore-from` named.
-fn saved_options(walk: &WalkArgs, excludes: &[String]) -> String {
+pub(super) fn saved_options(walk: &WalkArgs, excludes: &[String]) -> String {
     let excludes: Vec<&str> = excludes
         .iter()
         .chain(&walk.config_excludes)
@@ -269,6 +273,7 @@ fn saved_options(walk: &WalkArgs, excludes: &[String]) -> String {
         "excludes": excludes,
         "exclude_files": walk.exclude_from,
         "ignore_files": walk.ignore_from,
+        "exclude_caches": walk.exclude_caches,
         "threads": walk.threads.unwrap_or(0),
         "size_kind": size_kind(walk).as_str(),
     })
@@ -278,69 +283,90 @@ fn saved_options(walk: &WalkArgs, excludes: &[String]) -> String {
 /// The scan's warnings.
 pub fn warnings(scanned: &Scanned) -> Vec<Warning> {
     let summary = &scanned.summary;
-    let upper_bound = scanned.view().node(0).upper_bound;
+    let mut warnings = quality_warnings(
+        summary.unreadable_dirs,
+        summary.mounts_excluded,
+        scanned.arena.vanished(),
+    );
+    warnings.extend(clones_unavailable(
+        scanned.clones_asked && summary.clones_unavailable,
+    ));
+    warnings.extend(upper_bound(scanned.view().node(0).upper_bound));
+    warnings
+}
+
+/// `clones_unavailable`, when `--clones` was asked of a filesystem without
+/// clone ids.
+pub fn clones_unavailable(unavailable: bool) -> Option<Warning> {
+    unavailable.then(|| Warning {
+        code: "clones_unavailable",
+        message: "--clones was asked of a filesystem without clone ids; its clones count \
+                  in full, as du counts them"
+            .to_owned(),
+        count: None,
+        hint: Some(
+            "Only APFS reports clone ids; rerun duscope without --clones elsewhere".to_owned(),
+        ),
+    })
+}
+
+/// What a scan says of its own totals, in a fresh scan or a saved one:
+/// directories it could not read, volumes it did not enter, and entries
+/// that vanished while it read them.
+pub fn quality_warnings(unreadable_dirs: u64, mounts_excluded: u64, vanished: u64) -> Vec<Warning> {
     let mut warnings = Vec::new();
-    if summary.unreadable_dirs > 0 {
+    if unreadable_dirs > 0 {
         warnings.push(Warning {
             code: "partial_read",
             message: format!(
                 "{} directories could not be read; the totals are a lower bound",
-                thousands(summary.unreadable_dirs)
+                thousands(unreadable_dirs)
             ),
-            count: Some(summary.unreadable_dirs),
+            count: Some(unreadable_dirs),
             hint: Some(
                 "Rerun duscope as a user who can read them, or with --strict to fail instead"
                     .to_owned(),
             ),
         });
     }
-    if summary.mounts_excluded > 0 {
+    if mounts_excluded > 0 {
         warnings.push(Warning {
             code: "mounts_excluded",
             message: format!(
                 "{} mounted filesystems were not entered (scan.volumes says why)",
-                thousands(summary.mounts_excluded)
+                thousands(mounts_excluded)
             ),
-            count: Some(summary.mounts_excluded),
+            count: Some(mounts_excluded),
             hint: Some(
                 "Rerun duscope scan with --include-network, or without -x, to enter them"
                     .to_owned(),
             ),
         });
     }
-    if scanned.arena.vanished() > 0 {
+    if vanished > 0 {
         warnings.push(Warning {
             code: "vanished",
             message: format!(
                 "{} entries disappeared while the scan read them",
-                thousands(scanned.arena.vanished())
+                thousands(vanished)
             ),
-            count: Some(scanned.arena.vanished()),
+            count: Some(vanished),
             hint: Some("Rerun duscope scan once the tree is quiet".to_owned()),
         });
     }
-    if scanned.clones_asked && summary.clones_unavailable {
-        warnings.push(Warning {
-            code: "clones_unavailable",
-            message: "--clones was asked of a filesystem without clone ids; its clones count \
-                      in full, as du counts them"
-                .to_owned(),
-            count: None,
-            hint: Some(
-                "Only APFS reports clone ids; rerun duscope without --clones elsewhere".to_owned(),
-            ),
-        });
-    }
-    if upper_bound {
-        warnings.push(Warning {
-            code: "upper_bound",
-            message: "some files may share blocks with others; the totals are an upper bound"
-                .to_owned(),
-            count: None,
-            hint: None,
-        });
-    }
     warnings
+}
+
+/// `upper_bound`, when the root's totals may count shared blocks more than
+/// once.
+pub fn upper_bound(upper_bound: bool) -> Option<Warning> {
+    upper_bound.then(|| Warning {
+        code: "upper_bound",
+        message: "some files may share blocks with others; the totals are an upper bound"
+            .to_owned(),
+        count: None,
+        hint: None,
+    })
 }
 
 /// The one line for people: the root's total, counts, and time.
@@ -975,8 +1001,12 @@ mod tests {
             header: false,
             quiet: false,
         };
+        let fresh = super::super::source::Source::Fresh {
+            scanned: Box::new(scanned),
+            save: None,
+        };
         let (envelope, _, _) =
-            top_envelope(scanned, &args.walk, None, "scan", true, true, &output).unwrap();
+            top_envelope(fresh, &args.walk, None, "scan", true, true, &output).unwrap();
         assert_eq!(envelope.scan.vanished_count, 1);
         assert_eq!(envelope.scan.error_count, 0);
         let warning = envelope

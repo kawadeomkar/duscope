@@ -68,7 +68,9 @@ fn platform_tests() -> bool {
     on
 }
 
-/// Runs a command of the test environment, failing the test on an error.
+/// Runs a command of the test environment, failing the test on an error
+/// (macOS's tests run `hdiutil` through [`TestEnv::hdiutil`]).
+#[cfg(target_os = "linux")]
 fn run(env: &TestEnv, program: &str, args: &[&dyn AsRef<std::ffi::OsStr>]) {
     let out = env.command(program).args(args).output().unwrap();
     assert!(
@@ -270,37 +272,28 @@ fn p1_walk_06_macos_an_exfat_image_is_crossed_and_confined() {
     fs::create_dir_all(root.join("exfat")).unwrap();
     fs::write(root.join("plain"), b"plain").unwrap();
     let image = work.join("exfat.dmg");
-    run(
-        &env,
-        "hdiutil",
-        &[
-            &"create",
-            &"-quiet",
-            &"-size",
-            &"16m",
-            &"-fs",
-            &"ExFAT",
-            &"-volname",
-            &"DUSCOPE",
-            &image,
-        ],
-    );
+    env.hdiutil(&[
+        &"create",
+        &"-ov",
+        &"-size",
+        &"16m",
+        &"-fs",
+        &"ExFAT",
+        &"-volname",
+        &"DUSCOPE",
+        &image,
+    ]);
     let mut mounted = Mounted {
         env: &env,
         points: Vec::new(),
     };
-    run(
-        &env,
-        "hdiutil",
-        &[
-            &"attach",
-            &"-quiet",
-            &"-nobrowse",
-            &"-mountpoint",
-            &root.join("exfat"),
-            &image,
-        ],
-    );
+    env.hdiutil(&[
+        &"attach",
+        &"-nobrowse",
+        &"-mountpoint",
+        &root.join("exfat"),
+        &image,
+    ]);
     mounted.points.push(root.join("exfat"));
     fs::write(root.join("exfat/inside"), b"foreign").unwrap();
 

@@ -29,7 +29,10 @@ CREATE TABLE scan_volumes (
     normalization     TEXT    NOT NULL,
     fsevents_uuid     TEXT,
     fsevents_event_id INTEGER,
-    os_build          TEXT
+    os_build          TEXT,
+    total_bytes       INTEGER,
+    free_bytes        INTEGER,
+    options           TEXT
 );
 
 -- Directories, with their own sizes and their subtree totals.
@@ -52,7 +55,12 @@ CREATE TABLE dirs (
     max_mtime         INTEGER NOT NULL,
     dev               INTEGER NOT NULL,
     flags             INTEGER NOT NULL,
-    errors            INTEGER
+    errors            INTEGER,
+    atime             INTEGER,
+    btime             INTEGER,
+    mode              INTEGER,
+    uid               INTEGER,
+    gid               INTEGER
 );
 
 -- Every entry that is not a directory.

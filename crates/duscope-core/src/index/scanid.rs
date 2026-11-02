@@ -31,6 +31,13 @@ impl ScanId {
         ScanId(id)
     }
 
+    /// The id `text` spells: 12 lowercase hex digits; `None` for anything
+    /// else.
+    pub fn parse(text: &str) -> Option<ScanId> {
+        let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+        (text.len() == LEN && text.bytes().all(hex)).then(|| ScanId(text.to_owned()))
+    }
+
     /// The id's hex digits.
     pub fn as_str(&self) -> &str {
         &self.0

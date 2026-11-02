@@ -490,6 +490,12 @@ pub fn effective_uid() -> u32 {
     platform::effective_uid()
 }
 
+/// Whether the process with id `pid` is running (`scans --prune` keeps the
+/// temporary file of a write still in progress).
+pub fn process_alive(pid: u32) -> bool {
+    platform::process_alive(pid)
+}
+
 /// The user's cache directory under `home` when `XDG_CACHE_HOME` is unset:
 /// `~/Library/Caches` on macOS, `~/.cache` elsewhere.
 pub fn cache_dir(home: &Path) -> PathBuf {

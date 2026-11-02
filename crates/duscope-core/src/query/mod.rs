@@ -8,6 +8,7 @@
 //! rows with the count before `--limit` ([`Page`]).
 
 mod by_type;
+pub mod resolve;
 mod stale;
 pub mod timegrammar;
 mod top;
@@ -35,6 +36,9 @@ use crate::rollup::RollUp;
 pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
 /// The regular expressions `--regex` takes, matched against path bytes.
 pub use regex::bytes::Regex;
+pub use resolve::{
+    Resolved, ScanQuery, ScanSelector, index_files, resolve_scan, short_id, shortest_prefix,
+};
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
 pub use top::{TopQuery, top};
 pub use tree::{TreeQuery, tree};
@@ -43,15 +47,13 @@ pub use tree::{TreeQuery, tree};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // Independent facts of one entry, as the index stores them.
 #[allow(clippy::struct_excessive_bools)]
-pub struct Node<'a> {
+pub struct Node {
     /// Its pre-order id; the root is 0.
     pub id: u32,
     /// Its parent's pre-order id; the root is its own parent.
     pub parent: u32,
     /// How far below the root it is; the root is 0.
     pub depth: u32,
-    /// Its name's bytes.
-    pub name: &'a [u8],
     /// What it is.
     pub kind: Kind,
     /// Bytes on disk: a directory's subtree, hard links and clones counted
@@ -95,7 +97,7 @@ pub struct Node<'a> {
     pub last_id: u32,
 }
 
-impl Node<'_> {
+impl Node {
     /// Its size in `size`.
     pub fn size(&self, size: SizeKind) -> u64 {
         match size {
@@ -124,11 +126,12 @@ impl Node<'_> {
 
 /// A scan the queries can read.
 ///
-/// [`TreeView::node`] answers an entry's scalar columns. Names, paths and
-/// a directory's subdirectories have methods of their own, which the
-/// queries call where they need them: their defaults read them through
-/// `node`, which suits the arena, and a view that does not keep every name
-/// in memory (the index) answers each from its own storage in one step.
+/// [`TreeView::node`] answers an entry's scalar columns and
+/// [`TreeView::name`] its name. Paths and a directory's subdirectories have
+/// methods of their own, which the queries call where they need them: their
+/// defaults read them through `node` and `name`, which suits the arena, and
+/// a view that does not keep every entry in memory (the index) answers each
+/// from its own storage in one step.
 pub trait TreeView {
     /// The number of entries.
     fn len(&self) -> u32;
@@ -137,16 +140,14 @@ pub trait TreeView {
         self.len() == 0
     }
     /// The entry with pre-order id `id`.
-    fn node(&self, id: u32) -> Node<'_>;
+    fn node(&self, id: u32) -> Node;
     /// The root's path, absolute.
     fn root_path(&self) -> &Path;
     /// Whether `--attrs full` was collected (atime, btime, mode).
     fn full_attrs(&self) -> bool;
 
     /// The name of entry `id`, as bytes.
-    fn name(&self, id: u32) -> Cow<'_, [u8]> {
-        Cow::Borrowed(self.node(id).name)
-    }
+    fn name(&self, id: u32) -> Cow<'_, [u8]>;
 
     /// The path of `id` relative to the root, `/`-separated; empty for the
     /// root.
@@ -154,9 +155,8 @@ pub trait TreeView {
         let mut names = Vec::new();
         let mut at = id;
         while at != 0 {
-            let node = self.node(at);
-            names.push(node.name);
-            at = node.parent;
+            names.push(self.name(at));
+            at = self.node(at).parent;
         }
         let mut path = Vec::new();
         for name in names.iter().rev() {
@@ -207,7 +207,7 @@ impl TreeView for ArenaView<'_> {
         u32::try_from(self.rollup.len()).unwrap_or(u32::MAX)
     }
 
-    fn node(&self, id: u32) -> Node<'_> {
+    fn node(&self, id: u32) -> Node {
         let idx = self.rollup.entry_at(id);
         let view = self.arena.entry(idx);
         let full = self.arena.full(idx);
@@ -227,7 +227,6 @@ impl TreeView for ArenaView<'_> {
             id,
             parent,
             depth,
-            name: view.name,
             kind: view.kind,
             allocated: view.allocated,
             apparent: view.apparent,
@@ -271,6 +270,97 @@ impl TreeView for ArenaView<'_> {
     fn full_attrs(&self) -> bool {
         self.arena.attrs() == duscope_walk::Attrs::Full
     }
+
+    fn name(&self, id: u32) -> Cow<'_, [u8]> {
+        Cow::Borrowed(self.arena.entry(self.rollup.entry_at(id)).name)
+    }
+}
+
+/// The subtree of a view at one of its directories, as a view of its own:
+/// that directory is id 0 at depth 0 and its path is the root path, so a
+/// query reads it as a scan of that directory alone. A verb asked about a
+/// path inside a saved scan's root reads the scan this way.
+#[derive(Debug)]
+pub struct Subtree<'v, V: TreeView + ?Sized> {
+    view: &'v V,
+    base: u32,
+    last: u32,
+    depth: u32,
+    /// The length of the base's path relative to the view's root, and its
+    /// `/`: what the base's descendants' paths start with.
+    prefix: usize,
+    root: PathBuf,
+}
+
+impl<'v, V: TreeView + ?Sized> Subtree<'v, V> {
+    /// The subtree of `view` at entry `base`.
+    pub fn new(view: &'v V, base: u32) -> Subtree<'v, V> {
+        let node = view.node(base);
+        let rel = view.path(base);
+        let mut root = view.root_path().to_path_buf();
+        if !rel.is_empty() {
+            root.push(std::ffi::OsStr::from_bytes(&rel));
+        }
+        Subtree {
+            view,
+            base,
+            last: node.last_id,
+            depth: node.depth,
+            prefix: if rel.is_empty() { 0 } else { rel.len() + 1 },
+            root,
+        }
+    }
+}
+
+impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
+    fn len(&self) -> u32 {
+        self.last - self.base + 1
+    }
+
+    fn node(&self, id: u32) -> Node {
+        // Saturating: an entry an index could not read is empty, at depth 0
+        // under the root, and the verb reports the failed read.
+        let mut node = self.view.node(id + self.base);
+        node.id = id;
+        node.parent = if id == 0 {
+            0
+        } else {
+            node.parent.saturating_sub(self.base)
+        };
+        node.depth = node.depth.saturating_sub(self.depth);
+        node.files_end = node.files_end.saturating_sub(self.base);
+        node.last_id = node.last_id.saturating_sub(self.base);
+        node
+    }
+
+    fn root_path(&self) -> &Path {
+        &self.root
+    }
+
+    fn full_attrs(&self) -> bool {
+        self.view.full_attrs()
+    }
+
+    fn name(&self, id: u32) -> Cow<'_, [u8]> {
+        self.view.name(id + self.base)
+    }
+
+    fn path(&self, id: u32) -> Vec<u8> {
+        if id == 0 {
+            return Vec::new();
+        }
+        let mut path = self.view.path(id + self.base);
+        path.drain(..self.prefix.min(path.len()));
+        path
+    }
+
+    fn child_dirs(&self, dir: u32) -> Vec<(u32, u32)> {
+        self.view
+            .child_dirs(dir + self.base)
+            .into_iter()
+            .map(|(id, last)| (id.saturating_sub(self.base), last.saturating_sub(self.base)))
+            .collect()
+    }
 }
 
 /// The size the rows are ranked and shown by.
@@ -297,7 +387,7 @@ impl SizeKind {
 /// subdirectory's subtree ([`TreeView::child_dirs`]).
 pub fn children<'v>(
     view: &'v (impl TreeView + ?Sized),
-    dir: &Node<'_>,
+    dir: &Node,
 ) -> impl Iterator<Item = u32> + 'v {
     let files = (dir.id + 1)..=dir.files_end;
     let dirs = if dir.is_dir() {
@@ -337,7 +427,7 @@ pub fn pct(part: u64, whole: u64) -> f64 {
 }
 
 /// The storage and directory flags a row names.
-pub fn flag_names(node: &Node<'_>) -> Vec<&'static str> {
+pub fn flag_names(node: &Node) -> Vec<&'static str> {
     const NAMES: [(Flags, &str); 8] = [
         (Flags::SPARSE, "sparse"),
         (Flags::COMPRESSED, "compressed"),
@@ -391,7 +481,7 @@ pub enum TimeField {
 
 impl TimeField {
     /// The field's value for `node`; `None` when not collected.
-    pub fn of(self, node: &Node<'_>) -> Option<i64> {
+    pub fn of(self, node: &Node) -> Option<i64> {
         match self {
             TimeField::Mtime => Some(node.max_mtime_ns),
             TimeField::Atime => node.atime_ns,
@@ -448,7 +538,7 @@ impl Filters {
     }
 
     /// Whether `node` is kept, its size read in `size`.
-    pub fn keeps(&self, view: &(impl TreeView + ?Sized), node: &Node<'_>, size: SizeKind) -> bool {
+    pub fn keeps(&self, view: &(impl TreeView + ?Sized), node: &Node, size: SizeKind) -> bool {
         if !self.kinds.is_empty() && !self.kinds.contains(&kind_name(node.kind)) {
             return false;
         }
@@ -486,7 +576,7 @@ impl Filters {
 
     /// Whether `--exclude` leaves out `node`: it, or a directory above it,
     /// matches.
-    pub fn excludes(&self, view: &(impl TreeView + ?Sized), node: &Node<'_>) -> bool {
+    pub fn excludes(&self, view: &(impl TreeView + ?Sized), node: &Node) -> bool {
         self.exclude.is_some() && self.excluded(&rel_path(view, node.id))
     }
 
@@ -586,7 +676,7 @@ pub fn sort_ids_by(
     ids: &mut [u32],
     key: SortKey,
     reverse: bool,
-    size_of: impl Fn(&Node<'_>) -> u64,
+    size_of: impl Fn(&Node) -> u64,
 ) {
     let mut keyed: Vec<(i128, Vec<u8>, u32)> = ids
         .iter()
@@ -610,12 +700,7 @@ pub fn sort_ids_by(
 }
 
 /// Where `node` sorts under `key`, smallest first; paths break ties.
-fn sort_value(
-    node: &Node<'_>,
-    key: SortKey,
-    reverse: bool,
-    size_of: &impl Fn(&Node<'_>) -> u64,
-) -> i128 {
+fn sort_value(node: &Node, key: SortKey, reverse: bool, size_of: &impl Fn(&Node) -> u64) -> i128 {
     let value = match key {
         SortKey::Size => -i128::from(size_of(node)),
         SortKey::Count => -i128::from(node.file_count),
@@ -654,7 +739,7 @@ pub fn ranked_by(
     key: SortKey,
     reverse: bool,
     limit: Option<usize>,
-    size_of: impl Fn(&Node<'_>) -> u64,
+    size_of: impl Fn(&Node) -> u64,
 ) -> (Vec<u32>, u64) {
     let Some(limit) = limit else {
         let mut ids: Vec<u32> = candidates.into_iter().collect();

@@ -13,7 +13,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 
 use duscope_core::envelope::{
-    Envelope, ErrorEnvelope, ErrorObject, NdjsonLine, SCHEMA_VERSION, Tool,
+    Envelope, ErrorEnvelope, ErrorObject, Listing, NdjsonLine, SCHEMA_VERSION, Tool,
 };
 use serde::Serialize;
 
@@ -120,6 +120,24 @@ pub fn ndjson<T: Serialize>(out: &mut dyn Write, envelope: &Envelope<T>) -> io::
     })
 }
 
+/// The `ndjson` lines of a listing of saved scans.
+pub fn ndjson_listing<T: Serialize>(out: &mut dyn Write, listing: &Listing<T>) -> io::Result<()> {
+    let mut line = |value: &NdjsonLine<'_, T>| json(out, value);
+    line(&NdjsonLine::Listing {
+        schema_version: listing.schema_version,
+        tool: listing.tool,
+        query: &listing.query,
+    })?;
+    for entry in &listing.entries {
+        line(&NdjsonLine::Entry(entry))?;
+    }
+    line(&NdjsonLine::End {
+        returned_count: listing.returned_count,
+        total_count: listing.total_count,
+        warnings: &listing.warnings,
+    })
+}
+
 /// `--plain`: one record per row, fields tab-separated, each record ended
 /// by a newline or, with `-0`, a NUL.
 pub fn plain<'a>(
@@ -155,7 +173,9 @@ pub fn error_envelope(failure: &Failure) -> ErrorEnvelope {
         | "confirmation_required"
         | "trash_unavailable"
         | "untrusted_index"
-        | "not_compiled" => (false, "user"),
+        | "not_compiled"
+        | "index_corrupt"
+        | "index_version_mismatch" => (false, "user"),
         "not_available" => (false, "none"),
         _ => (false, "agent"),
     };

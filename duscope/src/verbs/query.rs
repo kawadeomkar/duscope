@@ -1,6 +1,7 @@
-//! The list verbs on a fresh scan: `top`, `tree`, `by-type`, `stale`, and
-//! the rows `scan` prints. Each turns its flags into a query of
-//! `duscope_core::query`, runs it on the arena, and writes the envelope.
+//! The list verbs: `top`, `tree`, `by-type`, `stale`, and the rows `scan`
+//! prints. Each turns its flags into a query of `duscope_core::query`, runs
+//! it on its source (a saved scan, or a scan run for it), and writes the
+//! envelope.
 
 use std::path::Path;
 
@@ -10,12 +11,13 @@ use duscope_core::envelope::{
 };
 use duscope_core::query::{
     self, ByTypeQuery, DEFAULT_MIN_SIZE, Filters, Page, Regex, SizeKind, StaleQuery, TimeField,
-    TopQuery, TreeQuery, TreeView, timegrammar,
+    TopQuery, TreeQuery, timegrammar,
 };
 use duscope_core::rules::Classes;
 use duscope_walk::VolumeInfo;
 
-use super::scan::{self, Scanned};
+use super::scan;
+use super::source::{self, Source, core_failure};
 use super::{Exit, Failure};
 use crate::cli::{
     ByTypeArgs, KindArg, QueryArgs, ScanArgs, SortKey, StaleArgs, TimeField as TimeArg, TopArgs,
@@ -33,7 +35,7 @@ const DEFAULT_STALE_AGE: &str = "180d";
 
 /// What every list verb settles before it runs its query.
 struct Prepared {
-    scanned: Scanned,
+    source: Source,
     size: SizeKind,
     now: i64,
     filters: Filters,
@@ -70,24 +72,40 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         super::treemap::draw(&scanned, args, output, style)?;
         scanned
     } else {
-        let (mut envelope, footer, scanned) =
-            top_envelope(scanned, &args.walk, None, "scan", false, true, output)?;
+        // scan saves its own scan below, with its excludes and its line.
+        let fresh = Source::Fresh {
+            scanned: Box::new(scanned),
+            save: None,
+        };
+        let (mut envelope, footer, fresh) =
+            top_envelope(fresh, &args.walk, None, "scan", false, true, output)?;
         envelope.scan.id = id.as_ref().map(ToString::to_string);
         output.list(&envelope, &footer)?;
-        scanned
+        match fresh {
+            Source::Fresh { scanned, .. } => *scanned,
+            Source::Saved { .. } => return Ok(()),
+        }
     };
     match &id {
-        Some(id) => scan::save(&scanned, &args.walk, &args.exclude, id, index_dir, output),
+        Some(id) => scan::save(
+            &scanned,
+            &args.walk,
+            &args.exclude,
+            id,
+            index_dir,
+            output,
+            true,
+        ),
         None => Ok(()),
     }
 }
 
 /// `top`.
-pub fn top(args: &TopArgs, output: &Output) -> Result<(), Failure> {
+pub fn top(args: &TopArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     limit(Some(&args.query), output)?;
-    let scanned = scan::scan(&args.walk, &[])?;
-    let (envelope, footer, _) = top_envelope(
-        scanned,
+    let source = source::source(&args.walk, &args.index, index_dir)?;
+    let (envelope, footer, source) = top_envelope(
+        source,
         &args.walk,
         Some(&args.query),
         "top",
@@ -95,21 +113,23 @@ pub fn top(args: &TopArgs, output: &Output) -> Result<(), Failure> {
         !args.no_cut_through,
         output,
     )?;
-    output.list(&envelope, &footer)
+    source.check()?;
+    output.list(&envelope, &footer)?;
+    source.finish(&args.walk, output)
 }
 
 /// The envelope and footer of `top` (or `scan`, whose `query` is `None`:
-/// the defaults) on a scan, and the scan back for `--save`.
+/// the defaults) on a source, and the source back for saving.
 pub(super) fn top_envelope(
-    scanned: Scanned,
+    source: Source,
     walk: &WalkArgs,
     query: Option<&QueryArgs>,
     verb: &'static str,
     files: bool,
     cut_through: bool,
     output: &Output,
-) -> Result<(Envelope<TopEntry>, String, Scanned), Failure> {
-    let prepared = prepare(scanned, walk, query, output, DepthUse::Lists, false)?;
+) -> Result<(Envelope<TopEntry>, String, Source), Failure> {
+    let prepared = prepare(source, walk, query, output, DepthUse::Lists, false)?;
     let depth = query.and_then(|q| q.depth);
     let q = TopQuery {
         depth,
@@ -121,7 +141,7 @@ pub(super) fn top_envelope(
         limit: prepared.limit,
         size: prepared.size,
     };
-    let page = query::top(&prepared.scanned.view(), &q);
+    let page = query::top(&*prepared.source.view(), &q);
     // The depth the rows were listed at: --depth 0 lists depth 1.
     let listed = if files {
         depth
@@ -140,11 +160,11 @@ pub(super) fn top_envelope(
 }
 
 /// `tree`.
-pub fn tree(args: &TreeArgs, output: &Output) -> Result<(), Failure> {
+pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     limit(Some(&args.query), output)?;
-    let scanned = scan::scan(&args.walk, &[])?;
+    let source = source::source(&args.walk, &args.index, index_dir)?;
     let prepared = prepare(
-        scanned,
+        source,
         &args.walk,
         Some(&args.query),
         output,
@@ -160,9 +180,9 @@ pub fn tree(args: &TreeArgs, output: &Output) -> Result<(), Failure> {
         limit: prepared.limit,
         size: prepared.size,
     };
-    let page = query::tree(&prepared.scanned.view(), &q);
+    let page = query::tree(&*prepared.source.view(), &q);
     let depth = Some(args.query.depth.unwrap_or(2));
-    let (envelope, footer, _) = envelope(
+    let (envelope, footer, source) = envelope(
         prepared,
         &args.walk,
         "tree",
@@ -171,7 +191,9 @@ pub fn tree(args: &TreeArgs, output: &Output) -> Result<(), Failure> {
         Vec::new(),
         output,
     );
-    output.list(&envelope, &footer)
+    source.check()?;
+    output.list(&envelope, &footer)?;
+    source.finish(&args.walk, output)
 }
 
 /// The file classes: the vendored ones, with the table `file` names (from
@@ -193,7 +215,11 @@ pub fn classes(file: Option<&Path>, label: &str) -> Result<Classes, Failure> {
 }
 
 /// `by-type`.
-pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
+pub fn by_type(
+    args: &ByTypeArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+) -> Result<(), Failure> {
     // --classes, else the configuration's [classes] extra.
     let label = if args.classes == args.walk.classes_extra {
         "[classes] extra"
@@ -202,9 +228,9 @@ pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
     };
     let classes = classes(args.classes.as_deref(), label)?;
     limit(Some(&args.query), output)?;
-    let scanned = scan::scan(&args.walk, &[])?;
+    let source = source::source(&args.walk, &args.index, index_dir)?;
     let prepared = prepare(
-        scanned,
+        source,
         &args.walk,
         Some(&args.query),
         output,
@@ -220,8 +246,8 @@ pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
         sort: prepared.sort,
         reverse: prepared.reverse,
     };
-    let page: Page<ByTypeEntry> = query::by_type(&prepared.scanned.view(), &q);
-    let (envelope, footer, _) = envelope(
+    let page: Page<ByTypeEntry> = query::by_type(&*prepared.source.view(), &q);
+    let (envelope, footer, source) = envelope(
         prepared,
         &args.walk,
         "by-type",
@@ -230,11 +256,13 @@ pub fn by_type(args: &ByTypeArgs, output: &Output) -> Result<(), Failure> {
         Vec::new(),
         output,
     );
-    output.list(&envelope, &footer)
+    source.check()?;
+    output.list(&envelope, &footer)?;
+    source.finish(&args.walk, output)
 }
 
 /// `stale`.
-pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
+pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     let older = args
         .query
         .older_than
@@ -243,9 +271,9 @@ pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
     let older_than = timegrammar::parse_age(older)
         .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--older-than {e}")))?;
     limit(Some(&args.query), output)?;
-    let scanned = scan::scan(&args.walk, &[])?;
+    let source = source::source(&args.walk, &args.index, index_dir)?;
     let mut prepared = prepare(
-        scanned,
+        source,
         &args.walk,
         Some(&args.query),
         output,
@@ -276,18 +304,18 @@ pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
         size: prepared.size,
     };
     let page: Page<StaleEntry> =
-        query::stale(&prepared.scanned.view(), &q).map_err(core_failure)?;
+        query::stale(&*prepared.source.view(), &q).map_err(core_failure)?;
     let mut warnings = Vec::new();
     warnings.extend(scan_age(
         prepared.now,
-        prepared.scanned.finished_ns,
+        prepared.source.finished_ns(),
         older_than,
         older,
     ));
     if args.atime {
-        warnings.extend(atime_unreliable(prepared.scanned.arena.volumes()));
+        warnings.extend(prepared.source.atime_unreliable());
     }
-    let (envelope, footer, _) = envelope(
+    let (envelope, footer, source) = envelope(
         prepared,
         &args.walk,
         "stale",
@@ -296,26 +324,28 @@ pub fn stale(args: &StaleArgs, output: &Output) -> Result<(), Failure> {
         warnings,
         output,
     );
-    output.list(&envelope, &footer)
+    source.check()?;
+    output.list(&envelope, &footer)?;
+    source.finish(&args.walk, output)
 }
 
 /// Scans' common preparation: the size kind, now, the filters, the limit
 /// and the sort; `--strict` turns unreadable directories into exit 4.
 fn prepare(
-    scanned: Scanned,
+    source: Source,
     walk: &WalkArgs,
     args: Option<&QueryArgs>,
     output: &Output,
     depth: DepthUse,
     stale: bool,
 ) -> Result<Prepared, Failure> {
-    if args.is_some_and(|a| a.strict) && scanned.summary.unreadable_dirs > 0 {
+    let unreadable = source.unreadable_dirs();
+    if args.is_some_and(|a| a.strict) && unreadable > 0 {
         return Err(Failure::new(
             Exit::Permission,
             "permission_denied",
             format!(
-                "{} directories could not be read, and --strict asks for all of them",
-                scanned.summary.unreadable_dirs
+                "{unreadable} directories could not be read, and --strict asks for all of them"
             ),
         )
         .hint("Run without --strict to accept totals that leave them out"));
@@ -325,7 +355,7 @@ fn prepare(
         Some(args) => filters(args, now, depth, stale)?,
         None => (Filters::default(), false),
     };
-    if filters.needs_full() && !scanned.view().full_attrs() {
+    if filters.needs_full() && !source.view().full_attrs() {
         return Err(core_failure(CoreError::AttrsNotCollected(
             "--time atime or btime",
         )));
@@ -354,7 +384,7 @@ fn prepare(
         },
         reverse: args.is_some_and(|a| a.reverse),
         warnings,
-        scanned,
+        source,
     })
 }
 
@@ -481,7 +511,8 @@ fn filters(
     Ok((f, tz_unavailable))
 }
 
-/// The envelope of a verb's page, the footer for people, and the scan back.
+/// The envelope of a verb's page, the footer for people, and the source
+/// back.
 fn envelope<T>(
     prepared: Prepared,
     walk: &WalkArgs,
@@ -490,9 +521,9 @@ fn envelope<T>(
     page: Page<T>,
     extra: Vec<Warning>,
     output: &Output,
-) -> (Envelope<T>, String, Scanned) {
+) -> (Envelope<T>, String, Source) {
     let Prepared {
-        scanned,
+        source,
         size,
         filters,
         limit,
@@ -501,13 +532,15 @@ fn envelope<T>(
         warnings: flag_warnings,
         ..
     } = prepared;
-    let block = scan::scan_block(&scanned, walk, size);
-    let footer = scan::footer(&block, &scanned, output);
-    let mut warnings = scan::warnings(&scanned);
+    let block = source.scan_block(walk, size);
+    let footer = source.footer(&block, output);
+    let mut warnings = source.warnings(walk);
     warnings.extend(flag_warnings);
     warnings.extend(extra);
     let returned_count = page.entries.len() as u64;
-    let path = block.root.clone();
+    // The path the rows are under: the scan's root, or the path inside a
+    // saved scan's root.
+    let path = source.view().root_path().to_string_lossy().into_owned();
     let envelope = Envelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
@@ -529,7 +562,7 @@ fn envelope<T>(
         warnings,
         next: Vec::new(),
     };
-    (envelope, footer, scanned)
+    (envelope, footer, source)
 }
 
 /// `scan_age`: the scan finished longer ago than a tenth of the window
@@ -550,24 +583,33 @@ fn scan_age(now: i64, finished_ns: i64, older_than: i64, older: &str) -> Option<
 
 /// `atime_unreliable`: the volumes the scan entered that are mounted
 /// `noatime`, `relatime` or `lazytime`, whose access times lag reads.
-fn atime_unreliable(volumes: &[VolumeInfo]) -> Option<Warning> {
-    let lagging: Vec<(&VolumeInfo, &str)> = volumes
-        .iter()
-        .filter(|v| v.entered())
-        .filter_map(|v| {
-            let option = v
-                .options
-                .iter()
+pub(super) fn atime_unreliable(volumes: &[VolumeInfo]) -> Option<Warning> {
+    lagging_atime(
+        volumes
+            .iter()
+            .filter(|v| v.entered())
+            .map(|v| (v.mount_point.display().to_string(), v.options.clone())),
+    )
+}
+
+/// `atime_unreliable` from the volumes a scan entered: each one's mount
+/// point and mount options.
+pub(super) fn lagging_atime(
+    entered: impl Iterator<Item = (String, Vec<String>)>,
+) -> Option<Warning> {
+    let lagging: Vec<(String, String)> = entered
+        .filter_map(|(mount_point, options)| {
+            let option = options
+                .into_iter()
                 .find(|o| matches!(o.as_str(), "noatime" | "relatime" | "lazytime"))?;
-            Some((v, option.as_str()))
+            Some((mount_point, option))
         })
         .collect();
     let message = match lagging.as_slice() {
         [] => return None,
-        [(volume, option)] => format!(
-            "{} is mounted {option}, so its access times lag reads",
-            volume.mount_point.display()
-        ),
+        [(mount_point, option)] => {
+            format!("{mount_point} is mounted {option}, so its access times lag reads")
+        }
         more => format!(
             "{} volumes the scan entered are mounted noatime, relatime or lazytime, so their access times lag reads",
             more.len()
@@ -582,17 +624,6 @@ fn atime_unreliable(volumes: &[VolumeInfo]) -> Option<Warning> {
                 .to_owned(),
         ),
     })
-}
-
-/// The failure an engine error is.
-fn core_failure(error: CoreError) -> Failure {
-    match error {
-        CoreError::AttrsNotCollected(_) => {
-            Failure::new(Exit::Runtime, "attrs_not_collected", error.to_string())
-                .hint("Rerun the command with --attrs full")
-        }
-        other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
-    }
 }
 
 #[cfg(test)]

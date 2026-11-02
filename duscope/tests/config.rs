@@ -64,7 +64,7 @@ fn p2_core_02_the_precedence_matrix() {
     let root = root.to_str().unwrap();
     let builtin = json(&run(
         &env,
-        &["top", root, "--json", "--config", "none"],
+        &["top", root, "--json", "--config", "none", "--no-save"],
         &[],
     ));
     let builtin = builtin["scan"]["thread_count"].as_u64().unwrap();
@@ -79,7 +79,9 @@ fn p2_core_02_the_precedence_matrix() {
                         ""
                     },
                 );
-                let mut args = vec!["top", root, "--json"];
+                // Each case scans: a saved scan would answer with the
+                // thread count it was taken with (P2-IDX-03).
+                let mut args = vec!["top", root, "--json", "--no-save"];
                 if flag {
                     args.extend(["--threads", "7"]);
                 }

@@ -40,6 +40,30 @@ pub enum CoreError {
         /// What failed.
         message: String,
     },
+    /// A saved scan could not be read: not an index, or damaged.
+    #[error("cannot read the index {file}: {message}")]
+    IndexCorrupt {
+        /// The index file's path.
+        file: String,
+        /// What failed.
+        message: String,
+    },
+    /// A saved scan was written in an index version this build cannot
+    /// read.
+    #[error("the index {file} is version {found}, which this duscope cannot read")]
+    IndexVersion {
+        /// The index file's path.
+        file: String,
+        /// The version it records.
+        found: String,
+    },
+    /// No saved scan answers `--scan`.
+    #[error("{0}")]
+    ScanNotFound(String),
+    /// `--scan` was given something that is not a scan selector, or an id
+    /// prefix more than one scan has.
+    #[error("{0}")]
+    Selector(String),
     /// The scan does not fit the arena's record fields.
     #[error("the scan is too large for the arena: {0}")]
     ArenaFull(&'static str),

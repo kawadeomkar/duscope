@@ -4,6 +4,8 @@ mod completions;
 mod man;
 mod query;
 mod scan;
+mod scans;
+mod source;
 mod treemap;
 
 pub use scan::report_interrupt;
@@ -26,6 +28,8 @@ pub enum Exit {
     NotFound = 3,
     /// Permission denied on the root, or partial reads under `--strict`.
     Permission = 4,
+    /// A saved scan of another index version, or a damaged one.
+    Index = 5,
     /// Interrupted (SIGINT).
     Interrupted = 130,
 }
@@ -82,10 +86,11 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
     match cli.verb {
         None => scan::run(&cli.scan, index_dir, output),
         Some(Verb::Scan(args)) => scan::run(&args, index_dir, output),
-        Some(Verb::Top(args)) => query::top(&args, output),
-        Some(Verb::Tree(args)) => query::tree(&args, output),
-        Some(Verb::ByType(args)) => query::by_type(&args, output),
-        Some(Verb::Stale(args)) => query::stale(&args, output),
+        Some(Verb::Top(args)) => query::top(&args, index_dir, output),
+        Some(Verb::Tree(args)) => query::tree(&args, index_dir, output),
+        Some(Verb::ByType(args)) => query::by_type(&args, index_dir, output),
+        Some(Verb::Stale(args)) => query::stale(&args, index_dir, output),
+        Some(Verb::Scans(args)) => scans::run(&args, index_dir, output),
         Some(Verb::Man) => man::run(),
         Some(Verb::Completions(args)) => completions::run(args.shell),
     }

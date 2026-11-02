@@ -15,7 +15,11 @@ and tree (equal `trees[].digest`), by `started_at`, and each regresses beyond
 `--tolerance`:
 
 - the tool's p50, since an absolute time is only comparable on the hardware
-  that measured it;
+  that measured it. A shared runner of one CPU model still runs faster on some
+  days than on others: when a competitor paired with the tool in CURRENT slowed
+  beyond the tolerance too, against its own p50 on the same machine, the
+  machine was slower, and the tool's p50 beyond the tolerance is a warning, not
+  a regression; the ratio check below still holds the tool to the competitor;
 - for each competitor CURRENT paired with the tool, the pair's
   `subject_ratio_p50` (the tool's time over the competitor's). A ratio cancels
   a machine's speed only in part: duscope's parallel walk and a competitor
@@ -55,6 +59,9 @@ class Check(NamedTuple):
     value: float  # the p50 in seconds, or the pair's ratio
     median: Optional[float]
     count: int
+    # For the tool's p50: each paired competitor's own p50 change against
+    # its baseline median on the same machine, where it has one.
+    machine: Tuple[Tuple[str, float], ...] = ()
 
     @property
     def change(self) -> Optional[float]:
@@ -136,7 +143,15 @@ def compare(current: dict, baselines: List[dict], tree: str, tool: str, last: in
         if not isinstance(now, (int, float)) or now <= 0:
             raise InputError(f"the {tool} p50 on {tree} {mode} is not a positive time: {now!r}")
         prior = [(b["started_at"], p50(b, tree, mode, tool)) for b in same_machine if p50(b, tree, mode, tool)]
-        checks.append(Check(mode, None, now, *baseline(prior, last)))
+        median, count = baseline(prior, last)
+        slowed = []
+        for competitor in sorted(ratios(current, tree, mode, tool)):
+            theirs = p50(current, tree, mode, competitor)
+            before = [(b["started_at"], p50(b, tree, mode, competitor)) for b in same_machine if p50(b, tree, mode, competitor)]
+            their_median, _ = baseline(before, last)
+            if isinstance(theirs, (int, float)) and their_median:
+                slowed.append((competitor, theirs / their_median - 1))
+        checks.append(Check(mode, None, now, median, count, tuple(slowed)))
         for competitor, ratio in sorted(ratios(current, tree, mode, tool).items()):
             prior = [
                 (b["started_at"], ratios(b, tree, mode, tool)[competitor])
@@ -207,16 +222,25 @@ def main(argv: List[str]) -> int:
             continue
         change = c.change or 0.0
         verdict = "ok"
+        annotation = None
         if change > args.tolerance:
-            verdict = f"regression beyond {args.tolerance:.0%}"
-            regressed = True
+            slower = [(name, their) for name, their in c.machine if their > args.tolerance]
+            if slower:
+                verdict = f"beyond {args.tolerance:.0%}, but " + ", ".join(
+                    f"{name} slowed {their:+.1%}" for name, their in slower
+                ) + " in the same rounds: the machine was slower, and the ratio decides"
+                annotation = "warning"
+            else:
+                verdict = f"regression beyond {args.tolerance:.0%}"
+                annotation = "error"
+                regressed = True
         line = (
             f"{what}: {now} against a median of {c.median:.3f}{unit} over {c.count} results "
             f"({change:+.1%}): {verdict}"
         )
         print(line)
-        if verdict != "ok" and in_github_actions():
-            print(f"::error title=bench-regression::{line}")
+        if annotation and in_github_actions():
+            print(f"::{annotation} title=bench-regression::{line}")
     return 1 if regressed else 0
 
 
