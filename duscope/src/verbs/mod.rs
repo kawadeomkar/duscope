@@ -91,6 +91,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::Tree(args)) => query::tree(&args, index_dir, output),
         Some(Verb::ByType(args)) => query::by_type(&args, index_dir, output),
         Some(Verb::Stale(args)) => query::stale(&args, index_dir, output),
+        Some(Verb::Caches(args)) => query::caches(&args, index_dir, output),
         Some(Verb::Explain(args)) => explain::run(&args, index_dir, output),
         Some(Verb::Scans(args)) => scans::run(&args, index_dir, output),
         Some(Verb::Man) => man::run(),

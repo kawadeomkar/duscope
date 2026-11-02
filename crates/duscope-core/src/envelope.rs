@@ -436,6 +436,69 @@ pub fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// A cache directory, as `caches` lists it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CacheEntry {
+    /// Its path, absolute, as lossy UTF-8.
+    pub path: String,
+    /// Its path's bytes, for `--plain`.
+    #[serde(skip)]
+    pub path_bytes: Vec<u8>,
+    /// Its name.
+    pub name: String,
+    /// The name's bytes in base64 when they are not UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_raw: Option<String>,
+    /// The rule that names it: a name or glob, or `CACHEDIR.TAG`.
+    pub rule: String,
+    /// The command that regenerates it.
+    pub regenerable_by: &'static str,
+    /// The directory holding the marker that confirms it (the project);
+    /// null when a `CACHEDIR.TAG`, an ancestor path or nothing (`--loose`)
+    /// confirms it.
+    pub project_root: Option<String>,
+    /// The project root's bytes, for `--plain`; empty when it has none.
+    #[serde(skip)]
+    pub project_bytes: Vec<u8>,
+    /// Whether its marker, ancestor path or `CACHEDIR.TAG` confirms it;
+    /// false only under `--loose`.
+    pub confirmed: bool,
+    /// Whether it holds a valid `CACHEDIR.TAG`.
+    pub cachedir_tag: bool,
+    /// Bytes on disk under it, hard links and clones counted once.
+    pub allocated_bytes: u64,
+    /// Apparent bytes under it.
+    pub apparent_bytes: u64,
+    /// Its share of the root's total, in percent.
+    pub pct_of_root: f64,
+    /// Non-directories under it.
+    pub file_count: u64,
+    /// The newest modification time under it.
+    pub max_mtime: String,
+}
+
+/// A project's caches, as `caches --by-project` lists them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ProjectEntry {
+    /// The directory holding the marker; null for the caches no marker
+    /// confirms.
+    pub project_root: Option<String>,
+    /// The project root's bytes, for `--plain`; empty when it has none.
+    #[serde(skip)]
+    pub path_bytes: Vec<u8>,
+    /// Bytes on disk in its caches.
+    pub allocated_bytes: u64,
+    /// Apparent bytes in its caches.
+    pub apparent_bytes: u64,
+    /// Its caches.
+    pub cache_count: u64,
+    /// The newest modification time in the project, caches included.
+    pub max_mtime: String,
+    /// Its largest caches' paths, largest first, at most ten;
+    /// `cache_count` counts them all.
+    pub caches: Vec<String>,
+}
+
 /// What a verb that answers with one object (`explain`; `summary` and
 /// `schema` to come) prints under `--json`: the shared fields, the scan it
 /// read (null when none was), and the object as `result`.

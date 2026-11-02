@@ -1,0 +1,29 @@
+allocated_bytes	apparent_bytes	file_count	max_mtime	regenerable_by	confirmed	cachedir_tag	project_root	path
+39727104	30848841	3800	2036-12-31T22:58:28Z	cargo build	true	false	<root>/dev	<root>/dev/target
+25624576	11784159	4800	2036-12-30T23:57:38Z	npm install	true	false	<root>/dev	<root>/dev/node_modules
+15142912	13553208	752	2036-12-31T22:48:49Z	xcodebuild	true	false		<root>/Library/Developer/Xcode/DerivedData
+3657728	3650613	6	2036-12-02T00:00:00Z	cargo build	true	true	<root>/Projects/rust-cli	<root>/Projects/rust-cli/target
+618496	601163	8	2036-12-02T00:00:00Z	npm install	true	false	<root>/Projects/npm-app	<root>/Projects/npm-app/node_modules
+348160	348160	2	2036-12-02T00:00:00Z	npm install	true	false	<root>/Projects/npm-app	<root>/Projects/npm-app/.next
+331776	330752	2	2036-12-02T00:00:00Z	gradle build	true	false	<root>/Projects/gradle-app	<root>/Projects/gradle-app/build
+270336	270336	1	2036-12-02T00:00:00Z	cargo build	true	false	<root>/Projects/rust-workspace	<root>/Projects/rust-workspace/target
+163840	161792	3	2036-12-02T00:00:00Z	pod install	true	false	<root>/Projects/ios-app	<root>/Projects/ios-app/Pods
+135168	135168	1	2036-12-02T00:00:00Z	npm install	true	false	<root>/Projects/npm-app	<root>/Projects/npm-app/.parcel-cache
+102400	100352	1	2036-12-02T00:00:00Z	npm install	true	false	<root>/Projects/nuxt-app	<root>/Projects/nuxt-app/node_modules
+98304	87250	7	2036-12-02T00:00:00Z	pip install	true	false	<root>/Projects/py-pyproject	<root>/Projects/py-pyproject/.venv
+94208	92160	3	2036-12-02T00:00:00Z	cmake --build	true	false	<root>/Projects/cmake-app	<root>/Projects/cmake-app/build
+90112	90112	1	2036-12-02T00:00:00Z	npm install	true	false	<root>/Projects/monorepo/packages/web	<root>/Projects/monorepo/packages/web/node_modules
+57344	57344	1	2036-12-02T00:00:00Z	npm install	true	false	<root>/Projects/nuxt-app	<root>/Projects/nuxt-app/.nuxt
+53248	53248	1	2036-12-02T00:00:00Z	gradle build	true	false	<root>/Projects/gradle-app	<root>/Projects/gradle-app/.gradle
+45056	41160	2	2036-12-02T00:00:00Z	composer install	true	false	<root>/Projects/php-app	<root>/Projects/php-app/vendor
+36864	32968	2	2036-12-02T00:00:00Z	pip install	true	false	<root>/Projects/py-setup	<root>/Projects/py-setup/venv
+32768	32768	1	2036-12-02T00:00:00Z	gradle build	true	false	<root>/Projects/gradle-kts	<root>/Projects/gradle-kts/build
+28672	26624	1	2036-12-02T00:00:00Z	pip install	true	false	<root>/Projects/py-pyproject	<root>/Projects/py-pyproject/.tox
+16384	16384	1	2036-12-02T00:00:00Z	npm install	true	false	<root>/Projects/monorepo	<root>/Projects/monorepo/tools/scratch/node_modules
+16384	14336	1	2036-12-02T00:00:00Z	pip install	true	false	<root>/Projects/py-pyproject	<root>/Projects/py-pyproject/.mypy_cache
+16384	12338	1	2036-12-02T00:00:00Z	pip install	true	false	<root>/Projects/py-pyproject	<root>/Projects/py-pyproject/.pytest_cache
+12288	10240	1	2036-12-02T00:00:00Z	npm install	true	false	<root>/Projects/monorepo	<root>/Projects/monorepo/.turbo
+12288	8292	1	2036-12-02T00:00:00Z	npm install	true	false	<root>/Projects/npm-app	<root>/Projects/npm-app/.turbo
+12288	9216	1	2036-12-02T00:00:00Z	pip install	true	false	<root>/Projects/py-pyproject	<root>/Projects/py-pyproject/.ruff_cache
+8192	4296	1	2036-12-02T00:00:00Z	pip install	true	false	<root>/Projects/py-pyproject	<root>/Projects/py-pyproject/src/pkg/__pycache__
+8192	8192	1	2036-12-02T00:00:00Z	pip install	true	false	<root>/Projects/py-requirements	<root>/Projects/py-requirements/app/__pycache__
