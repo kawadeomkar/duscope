@@ -9,12 +9,14 @@
 //!   for 2026-07-28 (`-32602`), but for `ping`, which 2025-11-25 allows ahead
 //!   of the handshake.
 //!
-//! Both revisions are served side by side in one process; the only state is
-//! the version an `initialize` answered. `server/discover` and `ping` are the
-//! methods so far; the tools come with the registry.
+//! Every method is looked up in one table whichever revision asks; the
+//! revision only shapes the result (2026-07-28 marks it complete and names
+//! the server). Both revisions are served side by side in one process; the
+//! only state is the version an `initialize` answered. `server/discover` and
+//! `ping` are the methods so far; the tools come with the registry.
 
 use log::debug;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 use crate::discover::{self, ServerConfig};
 use crate::jsonrpc::{Notification, Request, RpcError};
@@ -28,6 +30,15 @@ pub struct Server {
     /// The version an `initialize` answered, for the requests that carry
     /// none.
     session: Option<&'static str>,
+}
+
+/// The revision a request speaks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Revision {
+    /// It names its version in `_meta` (2026-07-28).
+    PerRequest,
+    /// It belongs to an `initialize` session (2025-11-25).
+    Session,
 }
 
 impl Server {
@@ -47,36 +58,37 @@ impl Server {
             debug!("initialized at {}", discover::LEGACY);
             return Ok(result);
         }
-        match discover::request_version(params) {
-            Some(Ok(version)) => self.modern(version, request),
-            Some(Err(error)) => Err(error),
-            None => self.in_session(request),
-        }
+        let (revision, version) = match discover::request_version(params) {
+            Some(Ok(version)) => (Revision::PerRequest, version),
+            Some(Err(error)) => return Err(error),
+            None => match self.session {
+                Some(version) => (Revision::Session, version),
+                None if request.method == "ping" => (Revision::Session, discover::LEGACY),
+                None => {
+                    return Err(RpcError::invalid_params(
+                        "_meta[\"io.modelcontextprotocol/protocolVersion\"] is missing: send \
+                         it, with the client's capabilities, on every request (2026-07-28), or \
+                         call initialize first (2025-11-25)",
+                    ));
+                }
+            },
+        };
+        debug!("{} at {version}", request.method.escape_debug());
+        let fields = self.call(revision, &request.method)?;
+        Ok(match revision {
+            Revision::PerRequest => discover::complete(&self.config, fields),
+            Revision::Session => Value::Object(fields),
+        })
     }
 
-    /// A request carrying its version: answered on its own.
-    fn modern(&self, version: &str, request: &Request) -> Result<Value, RpcError> {
-        debug!(
-            "{} at {version}, from its _meta",
-            request.method.escape_debug()
-        );
-        match request.method.as_str() {
-            "server/discover" => Ok(discover::discover_result(&self.config)),
-            "ping" => Ok(discover::complete(&self.config, Map::new())),
-            method => Err(RpcError::method_not_found(method)),
-        }
-    }
-
-    /// A request carrying no version: one of an `initialize` session's.
-    fn in_session(&self, request: &Request) -> Result<Value, RpcError> {
-        match (request.method.as_str(), self.session) {
-            ("ping", _) => Ok(json!({})),
-            (method, Some(_)) => Err(RpcError::method_not_found(method)),
-            (_, None) => Err(RpcError::invalid_params(
-                "_meta[\"io.modelcontextprotocol/protocolVersion\"] is missing: send it, with \
-                 the client's capabilities, on every request (2026-07-28), or call initialize \
-                 first (2025-11-25)",
-            )),
+    /// Every method: the fields of its result.
+    fn call(&self, revision: Revision, method: &str) -> Result<Map<String, Value>, RpcError> {
+        match (method, revision) {
+            ("ping", _) => Ok(Map::new()),
+            ("server/discover", Revision::PerRequest) => {
+                Ok(discover::discover_fields(&self.config))
+            }
+            (method, _) => Err(RpcError::method_not_found(method)),
         }
     }
 }

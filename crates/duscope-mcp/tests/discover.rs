@@ -32,17 +32,21 @@ impl Write for Buffer {
 /// `lines` through the transport to a server with the placeholder
 /// instructions: every message it wrote.
 fn serve(lines: &[Value]) -> Vec<Value> {
+    serve_with(ServerConfig::new(PLACEHOLDER_INSTRUCTIONS), lines)
+}
+
+/// `lines` through the transport to a server described by `config`.
+fn serve_with(config: ServerConfig, lines: &[Value]) -> Vec<Value> {
     let mut input = String::new();
     for line in lines {
         input.push_str(&line.to_string());
         input.push('\n');
     }
     let out = Buffer::default();
-    let mut server = Server::new(ServerConfig::new(PLACEHOLDER_INSTRUCTIONS));
     transport::run(
         Reader::new(input.as_bytes()),
         &Outbox::new(out.clone()),
-        &mut server,
+        &mut Server::new(config),
     )
     .unwrap();
     let bytes = out.0.lock().unwrap().clone();
@@ -167,9 +171,15 @@ fn p3_mcp_02_an_unknown_version_in_meta_gets_the_revisions_error_with_the_list()
     let answers = serve(&[
         modern(1, "server/discover", "1900-01-01"),
         modern(2, "ping", "2024-11-05"),
-        modern(3, "server/discover", "2026-07-28"),
+        // 2025-11-25 is served over initialize alone.
+        modern(3, "server/discover", "2025-11-25"),
+        modern(4, "server/discover", "2026-07-28"),
     ]);
-    for (answer, (id, requested)) in answers.iter().zip([(1, "1900-01-01"), (2, "2024-11-05")]) {
+    for (answer, (id, requested)) in
+        answers
+            .iter()
+            .zip([(1, "1900-01-01"), (2, "2024-11-05"), (3, "2025-11-25")])
+    {
         assert_eq!(
             error(answer, id),
             (
@@ -180,8 +190,8 @@ fn p3_mcp_02_an_unknown_version_in_meta_gets_the_revisions_error_with_the_list()
         );
         assert_eq!(answer["error"]["message"], "Unsupported protocol version");
     }
-    // The refusal changed nothing: the next request is served.
-    assert_eq!(answers[2]["result"]["resultType"], "complete");
+    // The refusals changed nothing: the next request is served.
+    assert_eq!(answers[3]["result"]["resultType"], "complete");
 }
 
 #[test]
@@ -261,15 +271,28 @@ fn p3_mcp_02_a_client_sending_2024_11_05_is_refused_with_the_list() {
 
 #[test]
 fn p3_mcp_02_instructions_are_cut_to_4096_characters() {
-    let long = "é".repeat(MAX_INSTRUCTIONS_CHARS + 100);
-    let config = ServerConfig::new(&long);
-    assert_eq!(
-        config.instructions().chars().count(),
-        MAX_INSTRUCTIONS_CHARS
-    );
     assert_eq!(MAX_INSTRUCTIONS_CHARS, 4096);
-    let short = ServerConfig::new("a few words");
-    assert_eq!(short.instructions(), "a few words");
+    let utf16 = |text: &str| text.encode_utf16().count();
+    // Characters as a JavaScript client counts them: UTF-16 code units, so a
+    // character outside the BMP counts two, and none is split.
+    for (text, kept) in [
+        ("é".repeat(5000), 4096),
+        ("😀".repeat(3000), 2048),
+        (format!("a{}", "😀".repeat(2048)), 2048),
+    ] {
+        let config = ServerConfig::new(&text);
+        assert_eq!(
+            config.instructions().chars().count(),
+            kept,
+            "{}",
+            &text[..8]
+        );
+        assert!(utf16(config.instructions()) <= MAX_INSTRUCTIONS_CHARS);
+    }
+    assert_eq!(
+        ServerConfig::new("a few words").instructions(),
+        "a few words"
+    );
 }
 
 #[test]
@@ -277,24 +300,13 @@ fn p3_mcp_02_capabilities_are_the_servers_to_set() {
     let capabilities = json!({"tools": {}});
     let config =
         ServerConfig::new("x").with_capabilities(capabilities.as_object().unwrap().clone());
-    let input = format!(
-        "{}\n{}\n",
-        modern(1, "server/discover", "2026-07-28"),
-        initialize(2, "2025-11-25")
+    let answers = serve_with(
+        config,
+        &[
+            modern(1, "server/discover", "2026-07-28"),
+            initialize(2, "2025-11-25"),
+        ],
     );
-    let out = Buffer::default();
-    transport::run(
-        Reader::new(input.as_bytes()),
-        &Outbox::new(out.clone()),
-        &mut Server::new(config),
-    )
-    .unwrap();
-    let bytes = out.0.lock().unwrap().clone();
-    let answers: Vec<Value> = bytes
-        .split(|&b| b == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_slice(line).unwrap())
-        .collect();
     assert_eq!(answers[0]["result"]["capabilities"], capabilities);
     assert_eq!(answers[1]["result"]["capabilities"], capabilities);
 }

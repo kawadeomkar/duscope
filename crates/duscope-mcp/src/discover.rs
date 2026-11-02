@@ -6,8 +6,8 @@
 //! `params._meta["io.modelcontextprotocol/protocolVersion"]`, beside the
 //! client's capabilities, and is answered on its own: nothing a request says
 //! carries over to the next. A version the server does
-//! not serve gets the revision's `UnsupportedProtocolVersionError`, which
-//! lists the versions it does ([`unsupported_version`]).
+//! not serve this way gets the revision's `UnsupportedProtocolVersionError`,
+//! which lists the versions it does.
 
 use serde_json::{Map, Value, json};
 
@@ -23,6 +23,10 @@ pub const LEGACY: &str = "2025-11-25";
 /// error list.
 pub const SUPPORTED_VERSIONS: [&str; 2] = [MODERN, LEGACY];
 
+/// The versions a request may name in its `_meta`: those without a
+/// handshake. 2025-11-25 is served over `initialize` alone.
+const PER_REQUEST_VERSIONS: [&str; 1] = [MODERN];
+
 /// MCP 2026-07-28's `UnsupportedProtocolVersionError`: a request named a
 /// version the server does not serve. A client that receives it retries with
 /// one of the versions in its data; any other error answering
@@ -30,8 +34,9 @@ pub const SUPPORTED_VERSIONS: [&str; 2] = [MODERN, LEGACY];
 /// that the server is legacy.
 pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 
-/// The longest `instructions`, in characters: as much as Claude Code's tool
-/// search loads at startup.
+/// The longest `instructions`, in characters as a JavaScript string counts
+/// them (UTF-16 code units): as much as Claude Code's tool search loads at
+/// startup.
 pub const MAX_INSTRUCTIONS_CHARS: usize = 4096;
 
 /// How long a client may keep a discovery result, in milliseconds: an hour.
@@ -64,7 +69,7 @@ impl ServerConfig {
         ServerConfig {
             name: "duscope".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            instructions: instructions.chars().take(MAX_INSTRUCTIONS_CHARS).collect(),
+            instructions: cut(instructions),
             capabilities: Map::new(),
         }
     }
@@ -93,10 +98,23 @@ impl ServerConfig {
     }
 }
 
+/// `text` up to [`MAX_INSTRUCTIONS_CHARS`] UTF-16 code units, never splitting
+/// a character.
+fn cut(text: &str) -> String {
+    let mut units = 0;
+    text.chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= MAX_INSTRUCTIONS_CHARS
+        })
+        .collect()
+}
+
 /// The version a request names in its `_meta`: `None` when it names none,
 /// as a request of the `initialize` revision does; else the version, once
 /// the request carries the fields 2026-07-28 requires (`-32602` without
-/// them) and names a version the server serves (`-32022` otherwise).
+/// them) and names a version served without a handshake (`-32022`
+/// otherwise, 2025-11-25 included).
 pub(crate) fn request_version(
     params: Option<&Map<String, Value>>,
 ) -> Option<Result<&'static str, RpcError>> {
@@ -117,17 +135,17 @@ pub(crate) fn request_version(
         ))));
     }
     Some(
-        SUPPORTED_VERSIONS
+        PER_REQUEST_VERSIONS
             .into_iter()
             .find(|&served| served == requested)
-            .ok_or_else(|| unsupported_version(requested)),
+            .ok_or_else(|| version_error(UNSUPPORTED_PROTOCOL_VERSION, requested)),
     )
 }
 
-/// The `-32022` error for a request naming `requested`, listing the
-/// versions served.
-pub fn unsupported_version(requested: &str) -> RpcError {
-    RpcError::new(UNSUPPORTED_PROTOCOL_VERSION, "Unsupported protocol version").with_data(json!({
+/// The error refusing `requested`, with `code`: both revisions word it the
+/// same and list the versions served in its data.
+pub(crate) fn version_error(code: i64, requested: &str) -> RpcError {
+    RpcError::new(code, "Unsupported protocol version").with_data(json!({
         "supported": SUPPORTED_VERSIONS,
         "requested": requested,
     }))
@@ -144,15 +162,15 @@ pub(crate) fn complete(config: &ServerConfig, mut fields: Map<String, Value>) ->
     Value::Object(fields)
 }
 
-/// The answer to `server/discover`: the versions served, the capabilities,
-/// the instructions, and how long the answer holds. `cacheScope` is
-/// `public`: every client gets the same answer.
-pub(crate) fn discover_result(config: &ServerConfig) -> Value {
+/// The fields of `server/discover`'s answer: the versions served, the
+/// capabilities, the instructions, and how long the answer holds.
+/// `cacheScope` is `public`: every client gets the same answer.
+pub(crate) fn discover_fields(config: &ServerConfig) -> Map<String, Value> {
     let mut fields = Map::new();
     fields.insert("supportedVersions".to_owned(), json!(SUPPORTED_VERSIONS));
     fields.insert("capabilities".to_owned(), config.capabilities());
     fields.insert("instructions".to_owned(), json!(config.instructions));
     fields.insert("ttlMs".to_owned(), json!(DISCOVER_TTL_MS));
     fields.insert("cacheScope".to_owned(), json!("public"));
-    complete(config, fields)
+    fields
 }
