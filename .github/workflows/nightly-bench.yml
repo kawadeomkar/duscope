@@ -274,9 +274,10 @@ jobs:
           STATUS: ${{ steps.harness.outputs.status }}
       # P2-BENCH-01: a saved scan's write, queries and size on T2, and the D34
       # comparison with dua's and fdu's snapshots (bench/README.md, "Index
-      # measurements"). On the image the cold command remounts, so the cold
-      # runs read the index cold too. The result goes to bench-results beside
-      # the harness's; Gate 2 -> 3 reads its numbers.
+      # measurements"). The warm runs on the internal disk, as the harness's;
+      # the cold ones on the image the cold command remounts, their saved scan
+      # beside the trees there, so it is read cold too. The result goes to
+      # bench-results beside the harness's; Gate 2 -> 3 reads its numbers.
       - name: Index measurements
         id: index
         if: ${{ !cancelled() && env.SWEEP != 'true' }}
@@ -287,7 +288,8 @@ jobs:
           cold="$PWD/bench/drop-caches.sh --remount $(printf %q "$image") $(printf %q "$volume")"
           status=0
           file=$(caffeinate -is bench/run.sh index --duscope "$DUSCOPE_BIN" --trees T2 --mode "$MODE" \
-            --scale "$SCALE" --trees-dir "$volume/trees" --tools-dir "$home/tools" --cold-cmd "$cold" \
+            --scale "$SCALE" --trees-dir "$home/trees" --cold-trees-dir "$volume/trees" --tools-dir "$home/tools" \
+            --cold-cmd "$cold" \
             --results-dir "$RUNNER_TEMP/index-results") || status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
           if [[ -n $file && -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi

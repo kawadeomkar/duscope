@@ -73,8 +73,8 @@ def _pairs(values: Optional[List[str]], flag: str) -> Dict[str, str]:
     return out
 
 
-def _tree_options(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--trees", default="T1", help="T1, T2, T3, a comma-separated list, or all (default T1)")
+def _tree_options(p: argparse.ArgumentParser, default: str = "T1") -> None:
+    p.add_argument("--trees", default=default, help=f"T1, T2, T3, a comma-separated list, or all (default {default})")
     p.add_argument("--scale", type=float, default=1.0, help="build the trees scaled by this factor, 0 < F <= 1 (default 1)")
     p.add_argument("--trees-dir", default=os.path.join(BENCH, ".trees"), help="where the trees live (default bench/.trees)")
 
@@ -145,13 +145,13 @@ def parser() -> argparse.ArgumentParser:
     swept.add_argument("--hyperfine", default="hyperfine", help="the hyperfine command (default hyperfine on PATH)")
 
     index = sub.add_parser("index", help="measure a saved scan's write, queries and size, and the D34 comparison (P2-BENCH-01)")
-    _tree_options(index)
-    index.set_defaults(trees="T2")
+    _tree_options(index, "T2")
     _jobs_option(index)
     index.add_argument("--duscope", required=True, metavar="PATH", help="the duscope executable to measure")
     _tool_options(index, ",".join(indexbench.COMPETITORS))
     index.add_argument("--mode", choices=("warm", "cold", "both"), default="both", help="warm caches, cold caches, or both (default both)")
     index.add_argument("--cold-cmd", default=shlex.quote(os.path.join(BENCH, "drop-caches.sh")), help="the command that drops the caches before each cold run (default bench/drop-caches.sh)")
+    index.add_argument("--cold-trees-dir", help="where the trees the cold runs measure live, their saved scans beside them (default --trees-dir)")
     index.add_argument("--runs", type=int, default=20, help="measured runs of each write, query and pair (default 20)")
     index.add_argument("--warmup", type=int, default=2, help="warm-up runs before each warm measurement (default 2)")
     index.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")

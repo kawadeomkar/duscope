@@ -341,8 +341,9 @@ still override.
 ## Index measurements
 
 `bench/run.sh index --duscope target/release/duscope` measures what Gate 2 → 3 asks of a saved
-scan (P2-BENCH-01), on T2 unless `--trees` names others, warm and cold by default, 20 runs of
-each measurement after two warm-up runs:
+scan (P2-BENCH-01, plan/PROPOSAL.md's 1.0 acceptance targets 3, 4, 6 and 7), on T2 unless
+`--trees` names others, warm and cold by default, 20 runs of each measurement after two warm-up
+runs:
 
 - **The write:** `scan --save -v` prints the write's seconds and microseconds per entry. Warm runs
   give the cost per entry. Cold runs, with the caches dropped before each, also give the write's
@@ -354,34 +355,47 @@ each measurement after two warm-up runs:
   - `stale`;
   - `explain` of the scan's largest file;
   - `by-type` over the whole scan and over its largest directory.
-- **The first query after a cache drop:** `top --scan`, cold.
+- **The first query after a cache drop:** `top --scan`, cold, against a scan saved beside the
+  cold trees.
 - **The index's size:** bytes per entry of a basic index and of an `--attrs full` one.
-- **D34:** `top --scan` in interleaved pairs, as `run` pairs tools, with two competitors:
-  - `dua aggregate --import`, reading the snapshot that `dua i --once --export` wrote. dua writes
-    snapshots only from its interactive mode, which needs a terminal, so the harness runs it
-    under `script`.
-  - `fdu --stale-ok`, after `fdu --cache=on` kept a scan.
+- **D34:** `top --scan` in interleaved pairs, as `run` pairs tools, with two competitors that
+  load their whole snapshot:
+  - `dua interactive --import --once`, reading the snapshot that `dua i --once --export` wrote.
+    dua's interactive mode needs a terminal, so both commands run under `script`.
+  - `fdu --stale-ok`, after `fdu --cache=on` kept a scan. fdu runs with `HOME` and
+    `XDG_CACHE_HOME` in the run's work directory, so its scan is removed with it.
 
   Each competitor's speed-up is the median, over rounds, of its time over duscope's in the same
-  round. `--competitors none` leaves this step out, and `--tool-path` and `--tools-dir` mean
-  what they mean in `run`.
+  round. `--competitors none` leaves this step out, and `--tool-path dua=…` or `fdu=…` and
+  `--tools-dir` mean what they mean in `run`.
 
-The saved scans live in a temporary directory inside `--trees-dir`, on the trees' filesystem, so
-a cold run reads them cold as it reads the trees; bench-macos passes its disk image's trees for
-that reason ([Cold runs](#cold-runs)). The result file is `<date>-<platform>-index.json` in
-`--results-dir` (`…-index-x<scale>.json` on scaled trees). It holds:
+`--cold-trees-dir` gives the cold runs trees of their own, as in `run`. Each mode's saved scans
+live in a temporary directory inside its trees directory, on the trees' filesystem, so a cold
+run reads them cold as it reads the trees. bench-macos measures warm on the internal disk and
+cold on its disk image, for the reason [Cold runs](#cold-runs) gives.
+
+The result file is `<date>-<platform>-index.json` in `--results-dir` (`…-index-x<scale>.json`
+on scaled trees). It holds:
 
 - the usual header;
 - the runs, as `results` rows with a `kind`: `query`, `first_query` or `d34`;
 - for each tree, its two scans, `index_size`, `write` (the runs and their percentiles),
   `query_targets` and `speedups`;
-- `gates`: each line of the gate with the value measured, its limit and whether it holds.
+- `gates`: each line of the targets with the value measured, its limit, the platform it binds,
+  and whether it holds, read from T2 (`gates_tree`; the first tree when T2 was not measured).
 
-The gates are a write of at most 2.5 µs per entry warm and at most 25% of a cold scan; `top`,
-`stale` and `explain` at p50 ≤ 20 ms and p95 ≤ 50 ms; `by-type` at p50 ≤ 50 ms over the scan and
-over a subtree; the first query after a cache drop at p50 ≤ 250 ms; at most 110 bytes per entry
-basic and 140 full; and `top --scan` at least 20 times faster than each competitor. Exit status
-1 means something could not be measured (`failures` says what), not that a gate failed.
+The gates follow the targets:
+
+- **The write:** at most 2.5 µs per entry warm, on Linux alone, and at most 25% of a cold scan on
+  both platforms.
+- **The queries:** `top`, `stale` and `explain` at p50 ≤ 20 ms and p95 ≤ 50 ms. `by-type` at
+  p50 ≤ 50 ms over the whole scan, and over a subtree ≤ 50 ms per 100,000 of its files.
+- **The first query after a cache drop:** p50 ≤ 250 ms.
+- **The index's size:** at most 110 bytes per entry basic and 140 full.
+- **D34:** `top --scan` at least 20 times faster than each competitor.
+
+A part that cannot be measured is recorded in `failures` and the rest is still measured. Exit
+status 1 means something could not be measured, not that a gate failed.
 
 `nightly-bench.yml` runs it on each bench runner after the harness, and publishes the file to
 `bench-results` beside the harness's.
