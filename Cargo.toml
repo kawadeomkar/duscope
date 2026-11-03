@@ -47,6 +47,9 @@ libc = "=0.2.191"
 log = "=0.4.34"
 # The allocator of the musl builds only (P1-BENCH-03); no default features.
 mimalloc = { version = "=0.1.52", default-features = false }
+# The XML of `import`'s .gpscan files (P2-CLI-03): a streaming reader, no
+# default features.
+quick-xml = { version = "=0.42.0", default-features = false }
 # The index (P2-IDX-02): `bundled` compiles the SQLite the binary ships, with
 # the features duscope does not use left out (.cargo/config.toml); `functions`,
 # `hooks` and `limits` for the `query --sql` sandbox (P2-QRY-07). 0.40.2 is
@@ -118,9 +121,9 @@ opt-level = 1
 
 # The code off the scan's and the queries' hot paths, optimised for size: the
 # binary's verbs and output layer, the treemap, the TUI and MCP crates, and the
-# command line with its man page and completions, and compression (export,
-# import and PNG). The walker, the engine
-# (accounting, index, queries), SQLite and JSON output keep their levels. At
+# command line with its man page and completions, compression (export, import
+# and PNG) and the .gpscan reader. The walker, the engine (accounting, index,
+# queries), SQLite and JSON output keep their levels. At
 # the top of the phase-2 stack this took the stripped arm64 macOS binary from
 # 6.16 to 5.19 MB (-16%), and the x86_64 musl one, which passed size_budget by
 # about 5% at opt-level 3, back under it. A warm T1 scan (1.33 s) and `top
@@ -153,6 +156,8 @@ opt-level = "z"
 [profile.release.package.flate2]
 opt-level = "z"
 [profile.release.package.miniz_oxide]
+opt-level = "z"
+[profile.release.package.quick-xml]
 opt-level = "z"
 
 # cargo-dist always builds with a profile named `dist`. It is the release profile

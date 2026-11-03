@@ -26,3 +26,24 @@ path = "fuzz_targets/sql.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ncdu"
+path = "fuzz_targets/ncdu.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gdu"
+path = "fuzz_targets/gdu.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gpscan"
+path = "fuzz_targets/gpscan.rs"
+test = false
+doc = false
+bench = false

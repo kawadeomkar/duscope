@@ -1,7 +1,8 @@
-//! Interchange: a saved scan written in the formats other tools read.
+//! Interchange: a saved scan written in the formats other tools read:
 //! [`ncdu`] JSON (`ncdu -f`), `GrandPerspective`'s [`gpscan`] (gzip XML,
 //! format 7), `QDirStat`'s [`qdirstat`] cache file, and [`flat`] NDJSON and
-//! CSV, a row an entry, for `jq` and pandas.
+//! CSV, a row an entry, for `jq` and pandas; and the trees other tools
+//! wrote, read back ([`import`]).
 //!
 //! Every format is written from [`walk`]: the entries under one, in
 //! pre-order (a directory, its files, then its subdirectories, each
@@ -11,6 +12,7 @@
 
 pub mod flat;
 pub mod gpscan;
+pub mod import;
 pub mod ncdu;
 pub mod qdirstat;
 

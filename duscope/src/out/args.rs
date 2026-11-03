@@ -12,11 +12,13 @@ use clap::{Args, ValueEnum};
 #[command(next_help_heading = "Output")]
 pub struct OutputArgs {
     /// Print the JSON envelope (--format json)
-    #[arg(long, global = true, conflicts_with_all = ["plain", "format"])]
+    // Beside --format only for import, whose input --format names: main
+    // refuses the pair for the other verbs.
+    #[arg(long, global = true, conflicts_with = "plain")]
     pub json: bool,
 
     /// One tab-separated record per line, sizes in bytes (--format plain)
-    #[arg(long, global = true, conflicts_with = "format")]
+    #[arg(long, global = true)]
     pub plain: bool,
 
     /// The output format
@@ -88,22 +90,29 @@ pub enum FormatArg {
     Json,
     /// One JSON object per line, every row
     Ndjson,
-    /// ncdu's JSON (export)
+    /// ncdu's JSON (export, import)
     Ncdu,
-    /// GrandPerspective's .gpscan (export)
+    /// GrandPerspective's .gpscan (export, import)
     Gpscan,
     /// QDirStat's cache file (export)
     Qdirstat,
     /// Comma-separated values, a row an entry (export)
     Csv,
+    /// gdu's JSON (import)
+    Gdu,
 }
 
 impl FormatArg {
-    /// Whether only `export` writes it.
-    pub fn exports_only(self) -> bool {
+    /// Whether it is another tool's format, which only `export` writes
+    /// and `import` reads.
+    pub fn interchange(self) -> bool {
         matches!(
             self,
-            FormatArg::Ncdu | FormatArg::Gpscan | FormatArg::Qdirstat | FormatArg::Csv
+            FormatArg::Ncdu
+                | FormatArg::Gpscan
+                | FormatArg::Qdirstat
+                | FormatArg::Csv
+                | FormatArg::Gdu
         )
     }
 }

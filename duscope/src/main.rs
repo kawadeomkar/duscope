@@ -54,6 +54,10 @@ fn main() -> ExitCode {
         }
         return ExitCode::from(failure.exit.code());
     }
+    // import's --format names the file's format, not the output's.
+    if let Some(Verb::Import(args)) = &mut cli.verb {
+        args.format = cli.output.format.take();
+    }
     // --all streams: ndjson, unless the flags name another format; the
     // JSON envelope holds a page, not every row.
     let all = cli.wants_all();
@@ -68,20 +72,35 @@ fn main() -> ExitCode {
             return ExitCode::from(failure.exit.code());
         }
     };
-    if let Some(format) = cli.output.format.filter(|f| f.exports_only())
+    // --format names the output, as --json and --plain do, for every verb
+    // but import.
+    if cli.output.format.is_some() && (cli.output.json || cli.output.plain) {
+        let flag = if cli.output.json { "--json" } else { "--plain" };
+        let failure = Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("the argument '--format <FORMAT>' cannot be used with '{flag}'"),
+        )
+        .hint("Run duscope --help for the verbs and their flags");
+        output.failure(&failure);
+        return ExitCode::from(failure.exit.code());
+    }
+    if let Some(format) = cli.output.format.filter(|f| f.interchange())
         && !matches!(cli.verb, Some(Verb::Export(_)))
     {
         let failure = Failure::new(
             Exit::Usage,
             "usage",
             format!(
-                "--format {} is one of export's formats",
+                "--format {} is another tool's format, which export writes and import reads",
                 format
                     .to_possible_value()
                     .map_or_else(String::new, |v| v.get_name().to_owned())
             ),
         )
-        .hint("Run duscope export --format to write a saved scan in it");
+        .hint(
+            "Run duscope export --format to write a saved scan in it, or duscope import to read it",
+        );
         output.failure(&failure);
         return ExitCode::from(failure.exit.code());
     }
