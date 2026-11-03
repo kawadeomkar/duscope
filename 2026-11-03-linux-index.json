@@ -1,0 +1,873 @@
+{
+  "schema_version": 1,
+  "kind": "index",
+  "date": "2026-11-03",
+  "started_at": "2026-11-03T19:18:56Z",
+  "finished_at": "2026-11-03T19:23:02Z",
+  "platform": "linux",
+  "subject": "duscope",
+  "host": {
+    "os": "Ubuntu 24.04.5 LTS",
+    "kernel": "Linux 6.8.0-147-generic",
+    "arch": "x86_64",
+    "cpu": "Intel(R) Core(TM) i9-10900K CPU @ 3.70GHz",
+    "logical_cpus": 10,
+    "memory_bytes": 8324771840
+  },
+  "harness": {
+    "commit": "8c4de465edef20576bee819e0ef2a8e6ea3bf257",
+    "hyperfine": "2.0.0",
+    "runs": 20,
+    "warmup": 2,
+    "cold_command": "/home/runner/actions-runner/_work/duscope/duscope/bench/drop-caches.sh"
+  },
+  "duscope": {
+    "path": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope",
+    "version": "duscope 0.1.0"
+  },
+  "tools": [
+    {
+      "name": "dua",
+      "pinned": "2.46.0",
+      "status": "ready",
+      "version": "dua 2.46.0",
+      "reason": null
+    },
+    {
+      "name": "fdu",
+      "pinned": "0.5.0",
+      "status": "ready",
+      "version": "fdu 0.5.0",
+      "reason": null
+    }
+  ],
+  "trees": [
+    {
+      "name": "T2",
+      "scale": 1.0,
+      "dirs": 125000,
+      "files": 875000,
+      "digest": "c4842661c6a5141e1f3b668faf5d955e",
+      "filesystem": "ext4",
+      "cold_filesystem": null,
+      "index_size": {
+        "basic": {
+          "bytes": 108560384,
+          "entries": 1000001,
+          "bytes_per_entry": 108.56
+        },
+        "full": {
+          "bytes": 132116480,
+          "entries": 1000001,
+          "bytes_per_entry": 132.116
+        }
+      },
+      "scans": {
+        "basic": "a51cc9812f2f",
+        "full": "8d96a657cce7"
+      },
+      "write": {
+        "warm": {
+          "runs": [
+            {
+              "entries": 1000001,
+              "write_s": 2.5,
+              "us_per_entry": 2.5,
+              "walk_s": 0.332,
+              "rollup_s": 0.041
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.543,
+              "us_per_entry": 2.54,
+              "walk_s": 0.279,
+              "rollup_s": 0.039
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.534,
+              "us_per_entry": 2.53,
+              "walk_s": 0.279,
+              "rollup_s": 0.042
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.505,
+              "us_per_entry": 2.5,
+              "walk_s": 0.257,
+              "rollup_s": 0.038
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.472,
+              "us_per_entry": 2.47,
+              "walk_s": 0.278,
+              "rollup_s": 0.039
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.494,
+              "us_per_entry": 2.49,
+              "walk_s": 0.236,
+              "rollup_s": 0.038
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.516,
+              "us_per_entry": 2.52,
+              "walk_s": 0.273,
+              "rollup_s": 0.039
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.541,
+              "us_per_entry": 2.54,
+              "walk_s": 0.267,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.482,
+              "us_per_entry": 2.48,
+              "walk_s": 0.268,
+              "rollup_s": 0.038
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.509,
+              "us_per_entry": 2.51,
+              "walk_s": 0.246,
+              "rollup_s": 0.037
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.569,
+              "us_per_entry": 2.57,
+              "walk_s": 0.283,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.491,
+              "us_per_entry": 2.49,
+              "walk_s": 0.259,
+              "rollup_s": 0.038
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.514,
+              "us_per_entry": 2.51,
+              "walk_s": 0.23,
+              "rollup_s": 0.039
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.528,
+              "us_per_entry": 2.53,
+              "walk_s": 0.297,
+              "rollup_s": 0.041
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.478,
+              "us_per_entry": 2.48,
+              "walk_s": 0.229,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.521,
+              "us_per_entry": 2.52,
+              "walk_s": 0.253,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.57,
+              "us_per_entry": 2.57,
+              "walk_s": 0.243,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.497,
+              "us_per_entry": 2.5,
+              "walk_s": 0.241,
+              "rollup_s": 0.039
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.516,
+              "us_per_entry": 2.52,
+              "walk_s": 0.246,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.496,
+              "us_per_entry": 2.5,
+              "walk_s": 0.295,
+              "rollup_s": 0.039
+            }
+          ],
+          "us_per_entry": {
+            "p50": 2.51,
+            "p95": 2.57,
+            "min": 2.47,
+            "max": 2.57
+          }
+        },
+        "cold": {
+          "runs": [
+            {
+              "entries": 1000001,
+              "write_s": 2.529,
+              "us_per_entry": 2.53,
+              "walk_s": 2.01,
+              "rollup_s": 0.039
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.578,
+              "us_per_entry": 2.58,
+              "walk_s": 2.023,
+              "rollup_s": 0.042
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.534,
+              "us_per_entry": 2.53,
+              "walk_s": 2.743,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.533,
+              "us_per_entry": 2.53,
+              "walk_s": 2.463,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.498,
+              "us_per_entry": 2.5,
+              "walk_s": 2.145,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.563,
+              "us_per_entry": 2.56,
+              "walk_s": 2.081,
+              "rollup_s": 0.039
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.46,
+              "us_per_entry": 2.46,
+              "walk_s": 2.024,
+              "rollup_s": 0.041
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.497,
+              "us_per_entry": 2.5,
+              "walk_s": 2.03,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.525,
+              "us_per_entry": 2.52,
+              "walk_s": 2.008,
+              "rollup_s": 0.041
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.513,
+              "us_per_entry": 2.51,
+              "walk_s": 2.617,
+              "rollup_s": 0.041
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.522,
+              "us_per_entry": 2.52,
+              "walk_s": 2.009,
+              "rollup_s": 0.041
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.515,
+              "us_per_entry": 2.52,
+              "walk_s": 2.031,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.529,
+              "us_per_entry": 2.53,
+              "walk_s": 2.032,
+              "rollup_s": 0.041
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.542,
+              "us_per_entry": 2.54,
+              "walk_s": 2.007,
+              "rollup_s": 0.041
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.499,
+              "us_per_entry": 2.5,
+              "walk_s": 2.171,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.472,
+              "us_per_entry": 2.47,
+              "walk_s": 2.195,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.491,
+              "us_per_entry": 2.49,
+              "walk_s": 2.023,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.514,
+              "us_per_entry": 2.51,
+              "walk_s": 2.015,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.611,
+              "us_per_entry": 2.61,
+              "walk_s": 2.023,
+              "rollup_s": 0.04
+            },
+            {
+              "entries": 1000001,
+              "write_s": 2.507,
+              "us_per_entry": 2.51,
+              "walk_s": 2.03,
+              "rollup_s": 0.041
+            }
+          ],
+          "us_per_entry": {
+            "p50": 2.52,
+            "p95": 2.5815,
+            "min": 2.46,
+            "max": 2.61
+          },
+          "share_of_scan": {
+            "p50": 1.209744,
+            "p95": 1.249286,
+            "min": 0.910528,
+            "max": 1.265633
+          }
+        }
+      },
+      "query_targets": {
+        "largest_file": "/home/runner/duscope-bench/trees/T2/d-0000000-fc371f/d-0000008-986cf6/d-0000072-17d786/d-0000584-bc57d2/d-0004680-e49b24/d-0037448-fc40eb/f-000352443-8f2b68e1.txt",
+        "largest_dir": "/home/runner/duscope-bench/trees/T2/d-0000001-498cdf",
+        "largest_dir_files": 262290
+      },
+      "speedups": {
+        "dua": null,
+        "fdu": 202.563
+      }
+    }
+  ],
+  "gates_tree": "T2",
+  "gates": [
+    {
+      "name": "write_us_per_entry_warm_p50",
+      "value": 2.51,
+      "op": "<=",
+      "limit": 2.5,
+      "binds": "linux",
+      "holds": false
+    },
+    {
+      "name": "write_share_of_cold_scan_p50",
+      "value": 1.209744,
+      "op": "<=",
+      "limit": 0.25,
+      "binds": null,
+      "holds": false
+    },
+    {
+      "name": "top_p50_ms",
+      "value": 3.236,
+      "op": "<=",
+      "limit": 20.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "top_p95_ms",
+      "value": 3.32,
+      "op": "<=",
+      "limit": 50.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "stale_p50_ms",
+      "value": 2.084,
+      "op": "<=",
+      "limit": 20.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "stale_p95_ms",
+      "value": 2.148,
+      "op": "<=",
+      "limit": 50.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "explain_p50_ms",
+      "value": 2.677,
+      "op": "<=",
+      "limit": 20.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "explain_p95_ms",
+      "value": 2.76,
+      "op": "<=",
+      "limit": 50.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "by_type_p50_ms",
+      "value": 37.531,
+      "op": "<=",
+      "limit": 50.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "by_type_subtree_p50_ms",
+      "value": 102.858,
+      "op": "<=",
+      "limit": 131.145,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "first_query_cold_p50_ms",
+      "value": 27.433,
+      "op": "<=",
+      "limit": 250.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "bytes_per_entry_basic",
+      "value": 108.56,
+      "op": "<=",
+      "limit": 110.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "bytes_per_entry_full",
+      "value": 132.116,
+      "op": "<=",
+      "limit": 140.0,
+      "binds": null,
+      "holds": true
+    },
+    {
+      "name": "dua_speedup_p50",
+      "value": null,
+      "op": ">=",
+      "limit": 20.0,
+      "binds": null,
+      "holds": null
+    },
+    {
+      "name": "fdu_speedup_p50",
+      "value": 202.563,
+      "op": ">=",
+      "limit": 20.0,
+      "binds": null,
+      "holds": true
+    }
+  ],
+  "failures": [
+    "T2 dua: writing dua's snapshot: `script -qec '/home/runner/duscope-bench/tools/bin/dua i --once --export /home/runner/duscope-bench/trees/.duscope-index-_6df7_16/T2-dua.snapshot /home/runner/duscope-bench/trees/T2' /dev/null` exited 1: \u001b[?25l\u001b[6n\u001b[?25h\u001b[?25hError: The cursor position could not be read within a normal duration"
+  ],
+  "results": [
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "top",
+      "command": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope top /home/runner/duscope-bench/trees/T2 --scan a51cc9812f2f --json --index-dir /home/runner/duscope-bench/trees/.duscope-index-_6df7_16/T2-ref",
+      "paired_with": null,
+      "run_count": 20,
+      "times_s": [
+        0.003116957,
+        0.003318653,
+        0.003345684,
+        0.003233963,
+        0.00321962,
+        0.003259802,
+        0.003154877,
+        0.003278328,
+        0.003276295,
+        0.003198322,
+        0.003148051,
+        0.00309894,
+        0.003262762,
+        0.003256612,
+        0.003168475,
+        0.003238223,
+        0.003283664,
+        0.0032809,
+        0.003196778,
+        0.003129794
+      ],
+      "p50_s": 0.003236093,
+      "p95_s": 0.003320005,
+      "mean_s": 0.003223335,
+      "stddev_s": 6.9363e-05,
+      "min_s": 0.00309894,
+      "max_s": 0.003345684,
+      "user_s": 0.00164085,
+      "system_s": 0.0015169,
+      "peak_rss_bytes": 6815744,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "kind": "query"
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "stale",
+      "command": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope stale /home/runner/duscope-bench/trees/T2 --scan a51cc9812f2f --json --index-dir /home/runner/duscope-bench/trees/.duscope-index-_6df7_16/T2-ref",
+      "paired_with": null,
+      "run_count": 20,
+      "times_s": [
+        0.002062586,
+        0.002144661,
+        0.002049924,
+        0.002117573,
+        0.002055006,
+        0.002127484,
+        0.002212917,
+        0.002106152,
+        0.002087887,
+        0.002038821,
+        0.002087796,
+        0.002125886,
+        0.002100922,
+        0.002088261,
+        0.002043511,
+        0.002001495,
+        0.002043882,
+        0.00198566,
+        0.002073138,
+        0.002079322
+      ],
+      "p50_s": 0.002083559,
+      "p95_s": 0.002148074,
+      "mean_s": 0.002081644,
+      "stddev_s": 5.1378e-05,
+      "min_s": 0.00198566,
+      "max_s": 0.002212917,
+      "user_s": 0.00104375,
+      "system_s": 0.0009796,
+      "peak_rss_bytes": 6291456,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "kind": "query"
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "explain",
+      "command": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope explain /home/runner/duscope-bench/trees/T2/d-0000000-fc371f/d-0000008-986cf6/d-0000072-17d786/d-0000584-bc57d2/d-0004680-e49b24/d-0037448-fc40eb/f-000352443-8f2b68e1.txt --scan a51cc9812f2f --json --index-dir /home/runner/duscope-bench/trees/.duscope-index-_6df7_16/T2-ref",
+      "paired_with": null,
+      "run_count": 20,
+      "times_s": [
+        0.002685853,
+        0.002716051,
+        0.002699836,
+        0.002737887,
+        0.002647112,
+        0.002615313,
+        0.002714842,
+        0.002651524,
+        0.002667027,
+        0.002716195,
+        0.002592594,
+        0.002714547,
+        0.002759041,
+        0.002777132,
+        0.002649802,
+        0.002670979,
+        0.002644431,
+        0.002672871,
+        0.002624682,
+        0.002681511
+      ],
+      "p50_s": 0.002677191,
+      "p95_s": 0.002759946,
+      "mean_s": 0.002681962,
+      "stddev_s": 4.7935e-05,
+      "min_s": 0.002592594,
+      "max_s": 0.002777132,
+      "user_s": 0.00179455,
+      "system_s": 0.0008286,
+      "peak_rss_bytes": 7208960,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "kind": "query"
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "by_type",
+      "command": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope by-type /home/runner/duscope-bench/trees/T2 --scan a51cc9812f2f --json --index-dir /home/runner/duscope-bench/trees/.duscope-index-_6df7_16/T2-ref",
+      "paired_with": null,
+      "run_count": 20,
+      "times_s": [
+        0.037387111,
+        0.03763182,
+        0.037929502,
+        0.038519653,
+        0.037532161,
+        0.037748838,
+        0.037277447,
+        0.037710877,
+        0.037576998,
+        0.03741548,
+        0.037719563,
+        0.037274376,
+        0.037413868,
+        0.037251487,
+        0.03745007,
+        0.037914768,
+        0.037322472,
+        0.037697451,
+        0.037529982,
+        0.03751372
+      ],
+      "p50_s": 0.037531071,
+      "p95_s": 0.03795901,
+      "mean_s": 0.037590882,
+      "stddev_s": 0.000296783,
+      "min_s": 0.037251487,
+      "max_s": 0.038519653,
+      "user_s": 0.03377375,
+      "system_s": 0.0036961,
+      "peak_rss_bytes": 9830400,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "kind": "query"
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "by_type_subtree",
+      "command": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope by-type /home/runner/duscope-bench/trees/T2/d-0000001-498cdf --scan a51cc9812f2f --json --index-dir /home/runner/duscope-bench/trees/.duscope-index-_6df7_16/T2-ref",
+      "paired_with": null,
+      "run_count": 20,
+      "times_s": [
+        0.102810638,
+        0.102710146,
+        0.102613624,
+        0.103915197,
+        0.102615915,
+        0.102728532,
+        0.103758848,
+        0.102969126,
+        0.103170634,
+        0.102753989,
+        0.10270622,
+        0.102904633,
+        0.102468417,
+        0.1035937,
+        0.10260142,
+        0.104206987,
+        0.102741147,
+        0.10318204,
+        0.108464521,
+        0.105469714
+      ],
+      "p50_s": 0.102857636,
+      "p95_s": 0.105619454,
+      "mean_s": 0.103419272,
+      "stddev_s": 0.001393318,
+      "min_s": 0.102468417,
+      "max_s": 0.108464521,
+      "user_s": 0.09825365,
+      "system_s": 0.0050555,
+      "peak_rss_bytes": 9830400,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "kind": "query"
+    },
+    {
+      "tree": "T2",
+      "mode": "cold",
+      "tool": "top",
+      "command": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope top /home/runner/duscope-bench/trees/T2 --scan 895215e5d500 --json --index-dir /home/runner/duscope-bench/trees/.duscope-index-_6df7_16/T2-cold",
+      "paired_with": null,
+      "run_count": 20,
+      "times_s": [
+        0.026904344,
+        0.028468457,
+        0.027665114,
+        0.02854862,
+        0.027155594,
+        0.02838836,
+        0.02791442,
+        0.027547488,
+        0.026842808,
+        0.02739963,
+        0.02736122,
+        0.027261428,
+        0.027242226,
+        0.027431982,
+        0.027650011,
+        0.027176303,
+        0.029635433,
+        0.027433309,
+        0.027352085,
+        0.028731279
+      ],
+      "p50_s": 0.027432646,
+      "p95_s": 0.028776487,
+      "mean_s": 0.027705506,
+      "stddev_s": 0.000706201,
+      "min_s": 0.026842808,
+      "max_s": 0.029635433,
+      "user_s": 0.0014639,
+      "system_s": 0.00525595,
+      "peak_rss_bytes": 6684672,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "kind": "first_query"
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "top",
+      "command": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope top /home/runner/duscope-bench/trees/T2 --scan a51cc9812f2f --json --index-dir /home/runner/duscope-bench/trees/.duscope-index-_6df7_16/T2-ref",
+      "paired_with": "fdu",
+      "run_count": 20,
+      "times_s": [
+        0.00323951,
+        0.003552995,
+        0.003300945,
+        0.003488902,
+        0.003370635,
+        0.003544366,
+        0.003355369,
+        0.003654986,
+        0.003473527,
+        0.003536989,
+        0.003288048,
+        0.003680131,
+        0.003438105,
+        0.003517843,
+        0.00341782,
+        0.003515207,
+        0.003341031,
+        0.00361235,
+        0.003466203,
+        0.003806308
+      ],
+      "p50_s": 0.003481215,
+      "p95_s": 0.00368644,
+      "mean_s": 0.003480064,
+      "stddev_s": 0.000143185,
+      "min_s": 0.00323951,
+      "max_s": 0.003806308,
+      "user_s": 0.0019585,
+      "system_s": 0.00144335,
+      "peak_rss_bytes": 6815744,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "kind": "d34"
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "fdu",
+      "command": "/home/runner/duscope-bench/tools/bin/fdu /home/runner/duscope-bench/trees/T2 --stale-ok",
+      "paired_with": null,
+      "run_count": 20,
+      "times_s": [
+        0.703348696,
+        0.709927152,
+        0.702663851,
+        0.722149769,
+        0.709667357,
+        0.706939873,
+        0.708930092,
+        0.720326991,
+        0.703721974,
+        0.708476237,
+        0.741690379,
+        0.708834379,
+        0.74351451,
+        0.709268768,
+        0.708034237,
+        0.70438483,
+        0.703967895,
+        0.711107453,
+        0.702012709,
+        0.699446128
+      ],
+      "p50_s": 0.708655308,
+      "p95_s": 0.741781586,
+      "mean_s": 0.711420664,
+      "stddev_s": 0.012012935,
+      "min_s": 0.699446128,
+      "max_s": 0.74351451,
+      "user_s": 0.5903284,
+      "system_s": 0.12110875,
+      "peak_rss_bytes": 414056448,
+      "subject_times_s": [
+        0.00323951,
+        0.003552995,
+        0.003300945,
+        0.003488902,
+        0.003370635,
+        0.003544366,
+        0.003355369,
+        0.003654986,
+        0.003473527,
+        0.003536989,
+        0.003288048,
+        0.003680131,
+        0.003438105,
+        0.003517843,
+        0.00341782,
+        0.003515207,
+        0.003341031,
+        0.00361235,
+        0.003466203,
+        0.003806308
+      ],
+      "subject_ratio_p50": 0.004936729,
+      "kind": "d34"
+    }
+  ]
+}
