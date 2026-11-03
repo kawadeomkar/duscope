@@ -104,7 +104,8 @@ impl Hints {
         let Some(cursor) = cursor else {
             return self;
         };
-        let Some(ran) = std::env::args_os()
+        let Some(ran) = crate::command_line()
+            .into_iter()
             .skip(1)
             .map(|a| a.into_string().ok())
             .collect::<Option<Vec<String>>>()

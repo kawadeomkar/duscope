@@ -9,6 +9,8 @@
 //! not serve this way gets the revision's `UnsupportedProtocolVersionError`,
 //! which lists the versions it does.
 
+use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
 use crate::jsonrpc::RpcError;
@@ -82,6 +84,13 @@ impl ServerConfig {
         self
     }
 
+    /// The same server offering one more capability, `name`, as `value`.
+    #[must_use]
+    pub fn with_capability(mut self, name: &str, value: Value) -> ServerConfig {
+        self.capabilities.insert(name.to_owned(), value);
+        self
+    }
+
     /// The instructions, as cut.
     pub fn instructions(&self) -> &str {
         &self.instructions
@@ -151,15 +160,27 @@ pub(crate) fn version_error(code: i64, requested: &str) -> RpcError {
     }))
 }
 
-/// A 2026-07-28 result: `fields`, marked complete and naming the server in
-/// its `_meta`, as every result of the revision should.
-pub(crate) fn complete(config: &ServerConfig, mut fields: Map<String, Value>) -> Value {
-    fields.insert("resultType".to_owned(), json!("complete"));
-    fields.insert(
-        "_meta".to_owned(),
-        json!({ SERVER_INFO_KEY: config.server_info() }),
-    );
-    Value::Object(fields)
+/// A 2026-07-28 result: `body`'s fields, then the mark that it is complete
+/// and the server's name in its `_meta`, as every result of the revision
+/// should carry.
+pub(crate) fn complete<T: Serialize>(
+    config: &ServerConfig,
+    body: &T,
+) -> serde_json::Result<Box<RawValue>> {
+    #[derive(Serialize)]
+    struct Complete<'a, T> {
+        #[serde(flatten)]
+        body: &'a T,
+        #[serde(rename = "resultType")]
+        result_type: &'static str,
+        #[serde(rename = "_meta")]
+        meta: Value,
+    }
+    serde_json::value::to_raw_value(&Complete {
+        body,
+        result_type: "complete",
+        meta: json!({ SERVER_INFO_KEY: config.server_info() }),
+    })
 }
 
 /// The fields of `server/discover`'s answer: the versions served, the

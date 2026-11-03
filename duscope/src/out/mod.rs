@@ -14,8 +14,10 @@ mod table;
 mod units;
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use duscope_core::envelope::{
     ByTypeEntry, CacheEntry, CheckedEntry, CleanEnvelope, DiffEntry, DiffEnvelope, DiffTotals,
@@ -26,6 +28,7 @@ use serde::Serialize;
 
 pub use args::{ColorWhen, FormatArg, OutputArgs};
 pub use fields::Fields;
+pub use spill::DEFAULT_MAX_CHARS;
 
 /// A floating-point value as the JSON writes it (`3.0`, `1e300`); empty
 /// for one the JSON writes as null.
@@ -119,7 +122,13 @@ pub struct Output {
     pub max_chars: usize,
     /// Where a spilled envelope goes: the index directory's `out/`.
     pub spill_dir: Option<PathBuf>,
+    /// Where what would go to stdout goes instead, for a verb an MCP tool
+    /// runs (`None`: stdout).
+    pub capture: Option<Capture>,
 }
+
+/// What a verb run for an MCP tool writes, in place of stdout.
+pub type Capture = Rc<RefCell<Vec<u8>>>;
 
 impl Output {
     /// Decides from the flags, the environment and whether stdout is a
@@ -186,6 +195,7 @@ impl Output {
             file: args.output.clone(),
             max_chars: args.max_chars.unwrap_or(spill::DEFAULT_MAX_CHARS),
             spill_dir: None,
+            capture: None,
         })
     }
 
@@ -765,9 +775,7 @@ impl Output {
                 writeln!(out, "{footer}")
             }),
         };
-        if self.is_machine() {
-            stderr_line(footer);
-        }
+        self.footer(footer);
         if !self.is_json() && !self.quiet {
             warn(&envelope.warnings);
         }
@@ -836,9 +844,7 @@ impl Output {
                 self.sink(|out| writeln!(out, "{grid}{footer}"))
             }
         };
-        if self.is_machine() {
-            stderr_line(footer);
-        }
+        self.footer(footer);
         if !self.is_json() && !self.quiet {
             warn(&envelope.warnings);
         }
@@ -888,9 +894,7 @@ impl Output {
                 self.sink(|out| writeln!(out, "{table}{footer}"))
             }
         };
-        if self.is_machine() {
-            stderr_line(footer);
-        }
+        self.footer(footer);
         if !self.is_json() && !self.quiet {
             warn(&listing.warnings);
         }
@@ -968,9 +972,7 @@ impl Output {
                 self.sink(|out| writeln!(out, "{table}{footer}"))
             }
         };
-        if self.is_machine() {
-            stderr_line(footer);
-        }
+        self.footer(footer);
         if !self.is_json() && !self.quiet {
             warn(&envelope.warnings);
         }
@@ -1093,7 +1095,7 @@ impl Output {
         write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
     ) -> Result<(), Failure> {
         let Some(path) = &self.file else {
-            return emit(write);
+            return self.stdout(write);
         };
         let failed = |e: std::io::Error| {
             Failure::new(
@@ -1118,9 +1120,34 @@ impl Output {
     pub fn failure(&self, failure: &Failure) {
         self.report(
             failure,
-            |envelope| emit(|out| format::json(out, envelope)),
+            |envelope| self.stdout(|out| format::json(out, envelope)),
             to_stderr,
         );
+    }
+
+    /// The one line for people, on stderr in the machine formats. A verb
+    /// run for an MCP tool writes none: its stderr is the server's log.
+    fn footer(&self, footer: &str) {
+        if self.is_machine() && self.capture.is_none() {
+            stderr_line(footer);
+        }
+    }
+
+    /// Writes to stdout, or to the capture of a verb an MCP tool runs.
+    fn stdout(
+        &self,
+        write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+    ) -> Result<(), Failure> {
+        let Some(capture) = &self.capture else {
+            return emit(write);
+        };
+        write(&mut *capture.borrow_mut()).map_err(|e| {
+            Failure::new(
+                Exit::Runtime,
+                "io_error",
+                format!("cannot write the output: {e}"),
+            )
+        })
     }
 
     /// Reports `failure` through `write` (the envelope to stdout) or
@@ -1139,6 +1166,12 @@ impl Output {
         }
         fallback(failure);
     }
+}
+
+/// The error envelope of `failure` as `--json` writes it, without the
+/// newline.
+pub fn error_json(failure: &Failure) -> String {
+    serde_json::to_string(&format::error_envelope(failure)).unwrap_or_default()
 }
 
 /// Warnings for people, on stderr.

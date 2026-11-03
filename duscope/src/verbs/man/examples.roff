@@ -64,5 +64,11 @@ reads back.
 The briefing an AI agent reads before it uses duscope: which command answers
 which question, the rules that keep it safe, the exit codes and SQL examples.
 .TP
+.B duscope mcp \-\-roots ~
+The MCP server an AI agent's client starts, on stdin and stdout; the client
+reads nothing outside the
+.B \-\-roots
+directories.
+.TP
 .B duscope completions zsh > _duscope
 Write the zsh completion script.

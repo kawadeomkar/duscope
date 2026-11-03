@@ -247,10 +247,10 @@ pub fn parse(line: &[u8]) -> Result<Incoming, Rejection> {
 }
 
 #[derive(Serialize)]
-struct ResultResponse<'a> {
+struct ResultResponse<'a, R: ?Sized> {
     jsonrpc: &'static str,
     id: &'a Id,
-    result: &'a Value,
+    result: &'a R,
 }
 
 #[derive(Serialize)]
@@ -275,8 +275,10 @@ fn line(message: &impl Serialize) -> serde_json::Result<Vec<u8>> {
     Ok(line)
 }
 
-/// The line of the response to `id` with `result`, newline included.
-pub fn result_line(id: &Id, result: &Value) -> serde_json::Result<Vec<u8>> {
+/// The line of the response to `id` with `result`, newline included:
+/// a [`Value`], or JSON already written ([`serde_json::value::RawValue`]),
+/// which goes out as it is.
+pub fn result_line<R: Serialize + ?Sized>(id: &Id, result: &R) -> serde_json::Result<Vec<u8>> {
     line(&ResultResponse {
         jsonrpc: VERSION,
         id,
