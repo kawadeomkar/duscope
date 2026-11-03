@@ -46,6 +46,7 @@ const REQUIRED_CHECKS: &[&str] = &[
     "fuzz-smoke (gdu)",
     "fuzz-smoke (gpscan)",
     "fuzz-smoke (args)",
+    "fuzz-smoke (jsonrpc)",
     "docs",
     "schemas",
     "size (macos-26)",

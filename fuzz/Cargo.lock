@@ -209,8 +209,20 @@ name = "duscope-fuzz"
 version = "0.0.0"
 dependencies = [
  "duscope-core",
+ "duscope-mcp",
  "duscope-walk",
  "libfuzzer-sys",
+ "serde_json",
+]
+
+[[package]]
+name = "duscope-mcp"
+version = "0.1.0"
+dependencies = [
+ "duscope-core",
+ "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

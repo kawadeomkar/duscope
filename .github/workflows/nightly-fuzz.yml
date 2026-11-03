@@ -47,7 +47,7 @@ jobs:
       fail-fast: false
       matrix:
         # Every target of fuzz/Cargo.toml, as ci.yml's fuzz-smoke runs them.
-        target: [sql, ncdu, gdu, gpscan, args]
+        target: [sql, ncdu, gdu, gpscan, args, jsonrpc]
     runs-on: ubuntu-24.04
     # Ten minutes of fuzzing, a cold build of the target and cargo-fuzz's.
     timeout-minutes: 30

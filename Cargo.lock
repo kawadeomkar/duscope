@@ -457,6 +457,10 @@ name = "duscope-mcp"
 version = "0.1.0"
 dependencies = [
  "duscope-core",
+ "duscope-testkit",
+ "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
