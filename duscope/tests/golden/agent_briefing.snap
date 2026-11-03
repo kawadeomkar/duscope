@@ -1,0 +1,182 @@
+# duscope: a briefing for agents
+
+Use duscope when someone asks about disk space: what is eating my disk, where
+the space went, which large files or stale files they could delete, how much
+node_modules and other build caches hold, space by file type, or what changed
+between two scans (compare scans); and when they ask to clean up, to plan what
+to free. duscope scans a tree once, saves the scan as an index, and answers each
+question from it in milliseconds, one JSON envelope per command.
+
+## Rules that `--help` cannot tell you
+
+- **Sizes are bytes.** Every size under `--json` is an integer count of bytes;
+  `human_size` and the tables round them for people. The envelope's `size_kind`
+  says which size it counts: `allocated` (blocks on disk, the default, and what
+  deleting frees) or `apparent` (file lengths, `--size apparent`).
+- **`clean` is a dry run unless `--yes`.** It prints the plan (what it would
+  move to the Trash, and the bytes that frees) and changes nothing. Never pass
+  `--yes` unless a person has told you to delete those paths. Without a
+  terminal and without `--yes`, `clean` returns `confirmation_required` (exit 1)
+  instead of asking.
+- **Nothing is deleted outright.** `clean` moves to the Trash, and refuses
+  symlinks, mount points, the scan's root and paths outside it, item by item.
+- **`explain` gives facts, not verdicts:** links outside the path, clones,
+  `freeable_now_bytes` and its `freeable_kind`, cache rules, git state, each
+  with its `evidence` and a `confidence`. Report what it found; do not turn
+  `"confidence": "high"` into "safe to delete".
+- **Answers come from a saved scan.** The list verbs (`top`, `tree`, `by-type`,
+  `stale`, `caches`) read the newest saved scan holding their path, else scan
+  and save one; the envelope's `scan` block says which scan and when.
+  `--max-age 1h` warns (`stale_index`) when that scan is older;
+  `duscope rescan PATH` scans its root again, `--no-save` scans without
+  saving, and `--scan ID` names a saved scan (`duscope scans` lists them).
+  `explain` on a path no saved scan holds reports what it can see without one.
+- **Ask for `--json`** and read one envelope: `ok`, then `entries` (the list
+  verbs) or `result` (`summary`, `explain`, `schema`), `warnings`, and `next`
+  (commands that follow on). A failure is `{"ok": false, "error": {"code",
+  "message", "hint", "retryable", "fixable_by"}}`: fix the command when
+  `fixable_by` is `agent`, ask the person when it is `user`, and report it
+  when it is `none`.
+- **Large answers spill.** An envelope over `--max-chars` (24,000 characters) is
+  written to a file, and stdout holds its path and the first rows (`spilled`).
+  `--limit` (25 rows, at most 100), `--fields a,b` and `--cursor` keep answers
+  small.
+
+## Before deleting anything: the handle flow
+
+1. `duscope explain PATH --json`: read the facts, and keep `result.handle`. A
+   handle names the path, its device and inode, its size and the scan, and
+   expires after 15 minutes. It is null when the path changed since the scan,
+   or no handle key can be kept in the index directory: scan again, then
+   explain again.
+2. `duscope clean --from HANDLE --json`: the plan, still a dry run. A handle
+   past its 15 minutes, or naming a path that changed since the scan, is
+   refused (`handle_expired`, `path_changed`).
+3. Show the plan to the person. Only on their explicit yes:
+   `duscope clean --from HANDLE --yes --json`, whose result reports
+   `trashed_bytes`.
+
+## Which command answers which question
+
+| Question | Command |
+| --- | --- |
+| What is eating my disk? | `duscope top ~ --depth 2 --json` |
+| The largest files | `duscope top ~ --files --json` |
+| Large files not touched in months | `duscope stale ~ --older-than 180d --min-size 100M --json` |
+| Which node_modules or build caches are largest? | `duscope caches ~ --by-project --json` |
+| Space by file type | `duscope by-type ~ --json` |
+| Is this safe to delete? | `duscope explain PATH --json` (facts, not a verdict) |
+| What changed since last week? | `duscope scans --json`, then `duscope diff OLD NEW --json` |
+| Totals per volume, as `du` counts them | `duscope summary ~ --json` |
+| Anything else | `duscope query ~ --sql "SELECT …" --json` (below) |
+
+## The commands
+
+`duscope PATH` alone scans PATH, as `duscope scan PATH` does.
+
+| Command | What it does |
+| --- | --- |
+| `duscope scan` | Scan a tree and show where its space goes |
+| `duscope top` | The largest directories or files under a path |
+| `duscope tree` | A depth-limited tree with sizes and percentages |
+| `duscope by-type` | Bytes and counts by file class, with the largest examples |
+| `duscope stale` | Large files not modified (or accessed) since a date |
+| `duscope caches` | Regenerable caches (node_modules, target, .venv, …) and their projects |
+| `duscope summary` | A scan's totals: per volume, as du counts them, and what it left unfound |
+| `duscope diff` | What changed between two saved scans of one tree |
+| `duscope explain` | Facts about one path: links, clones, what deleting it frees, caches, git |
+| `duscope clean` | Move paths to the Trash: a plan first, and nothing moves without --yes |
+| `duscope query` | One read-only SQL statement over a saved scan's tables |
+| `duscope view` | The treemap in the interactive viewer, on a saved scan or a new one |
+| `duscope schema` | The index's tables and columns, and each verb's envelope schema |
+| `duscope scans` | List, prune or check the saved scans |
+| `duscope rescan` | Scan a saved scan's root again, with the options it was scanned with |
+| `duscope export` | Write a saved scan for other tools, in the format --format names |
+| `duscope import` | Save a tree that ncdu, gdu or GrandPerspective wrote as a scan |
+| `duscope render` | Draw the treemap as a picture, --format svg or png, at any size |
+| `duscope agent` | Print the briefing an AI agent reads before it uses duscope |
+| `duscope man` | Print the manual page, in roff, to stdout |
+| `duscope completions` | Print the completion script for a shell to stdout |
+
+## Exit codes
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | success, partial reads included (`partial_read` in `warnings`) |
+| 1 | a runtime error: read `error.code` and `error.hint` |
+| 2 | a usage error, an unknown flag or a bad value: fix the command |
+| 3 | the path, or the saved scan asked for, does not exist |
+| 4 | permission denied on the root, or unreadable directories under `--strict` |
+| 5 | a saved scan is damaged, or of an index version this duscope cannot read: scan again |
+| 130 | interrupted (SIGINT) |
+
+Each error `code` comes with its exit code (envelope `schema_version`
+0.2):
+
+- exit 1: `attrs_not_collected`, `confirmation_required`, `expectation_mismatch`, `refused_path`, `handle_invalid`, `handle_expired`, `trash_unavailable`, `path_changed`, `untrusted_index`, `deadline_exceeded`, `index_write_failed`, `index_stale`, `sql_denied`, `sql_timeout`, `io_error`
+- exit 2: `usage`, `invalid_cursor`, `unknown_field`, `incompatible_scans`, `not_compiled`, `not_available`
+- exit 3: `scan_not_found`
+- exit 4: `permission_denied`
+- exit 5: `index_version_mismatch`, `index_corrupt`
+- exit 130: `interrupted`
+
+## SQL over a saved scan
+
+`duscope query PATH --sql "SELECT …" --json` runs one read-only statement over
+the saved scan's tables (`duscope schema` lists them). `files` and `dirs` share
+one id sequence, in pre-order: a directory's subtree is
+`id BETWEEN :root_id AND :root_last` (the entry of PATH and the last id below
+it), and its own files are `id + 1 .. files_end`. `type_stats` totals each
+extension. Sizes are bytes, times are nanoseconds since the Unix epoch, and
+names are BLOBs (`CAST(name AS TEXT)`). duscope adds `path(id)`,
+`human_size(bytes)` and `under(id, root_id)`. A statement without a `LIMIT` of
+its own returns 25 rows; writes, `PRAGMA` and `ATTACH` are refused
+(`sql_denied`).
+
+The largest files under PATH, each inode once:
+
+```sql
+SELECT path(id) AS path, human_size(allocated) AS size FROM files WHERE charged AND id BETWEEN :root_id AND :root_last ORDER BY allocated DESC LIMIT 10
+```
+
+The largest directories directly in PATH:
+
+```sql
+SELECT path(id) AS path, human_size(cum_allocated) AS size FROM dirs WHERE parent_id = :root_id ORDER BY cum_allocated DESC LIMIT 10
+```
+
+Space by extension, each inode once:
+
+```sql
+SELECT ext, count(*) AS files, human_size(sum(allocated)) AS size FROM files WHERE charged AND id BETWEEN :root_id AND :root_last GROUP BY ext ORDER BY sum(allocated) DESC LIMIT 10
+```
+
+Files over 100 MiB not modified for a year:
+
+```sql
+SELECT path(id) AS path, human_size(allocated) AS size, date(mtime / 1000000000, 'unixepoch') AS modified FROM files WHERE id BETWEEN :root_id AND :root_last AND allocated > 100 * 1048576 AND mtime < (unixepoch('now') - 365 * 86400) * 1000000000 ORDER BY allocated DESC LIMIT 20
+```
+
+The largest node_modules directories:
+
+```sql
+SELECT path(id) AS path, human_size(cum_allocated) AS size FROM dirs WHERE CAST(name AS TEXT) = 'node_modules' AND id BETWEEN :root_id AND :root_last ORDER BY cum_allocated DESC LIMIT 10
+```
+
+Files with more than one hard link:
+
+```sql
+SELECT path(id) AS path, nlink, human_size(allocated) AS size FROM files WHERE nlink > 1 AND id BETWEEN :root_id AND :root_last ORDER BY allocated DESC LIMIT 10
+```
+
+The directories holding the most files of their own:
+
+```sql
+SELECT path(id) AS path, files_end - id AS files FROM dirs WHERE id BETWEEN :root_id AND :root_last ORDER BY files_end - id DESC LIMIT 10
+```
+
+Large files that share a name:
+
+```sql
+SELECT CAST(name AS TEXT) AS name, count(*) AS copies, human_size(sum(allocated)) AS size FROM files WHERE charged AND allocated > 1048576 AND id BETWEEN :root_id AND :root_last GROUP BY name HAVING count(*) > 1 ORDER BY sum(allocated) DESC LIMIT 10
+```

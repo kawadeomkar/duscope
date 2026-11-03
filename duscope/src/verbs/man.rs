@@ -17,7 +17,7 @@ use clap::{Arg, Command, CommandFactory};
 use clap_mangen::Man;
 
 use super::{Exit, Failure};
-use crate::cli::Cli;
+use crate::cli::{Cli, visible_verbs};
 use crate::out::emit_bytes;
 
 /// The page's date, changed with its hand-written prose.
@@ -60,10 +60,7 @@ pub fn page() -> std::io::Result<String> {
     // duscope's own flags, a section per heading: SCAN OPTIONS, OUTPUT
     // OPTIONS.
     out += &headed(&roff(|w| man.render_options_section(w))?);
-    let verbs: Vec<&Command> = command
-        .get_subcommands()
-        .filter(|v| !v.is_hide_set() && v.get_name() != "help")
-        .collect();
+    let verbs: Vec<&Command> = visible_verbs(&command).collect();
     // What is described above, by flag: its help text.
     let mut described: HashMap<String, String> = command
         .get_arguments()

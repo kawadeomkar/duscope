@@ -132,6 +132,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
             output,
         ),
         Some(Verb::View(args)) => view::run(&args, index_dir, output),
+        Some(Verb::Agent) => crate::agent::run(),
         Some(Verb::Man) => man::run(),
         Some(Verb::Completions(args)) => completions::run(args.shell),
     }
