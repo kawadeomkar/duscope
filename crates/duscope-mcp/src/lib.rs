@@ -6,5 +6,8 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod discover;
 pub mod jsonrpc;
+mod legacy;
+pub mod server;
 pub mod transport;
