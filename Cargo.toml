@@ -69,6 +69,10 @@ rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled
 # Scan ids: SHA-256 of the root, the start time and 8 random bytes.
 sha2 = { version = "=0.11.1", default-features = false }
 thiserror = "2.0.21"
+# `clean`'s Trash (P4-CORE-01): NSFileManager's trashItemAtURL on macOS, the
+# XDG Trash on Linux. Default features off: no `chrono`, whose only use is the
+# `.trashinfo` file's DeletionDate (jiff is the tree's date library).
+trash = { version = "5.2.9", default-features = false }
 # Default features off: no `cjk`, whose ambiguous-width variant the map does not use.
 unicode-normalization = { version = "=0.1.26", default-features = false, features = ["std"] }
 unicode-width = { version = "=0.2.2", default-features = false }

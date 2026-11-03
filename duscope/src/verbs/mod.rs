@@ -1,5 +1,6 @@
 //! The verbs, and the failures they report.
 
+mod clean;
 mod completions;
 mod diff;
 mod explain;
@@ -64,6 +65,9 @@ pub struct Failure {
     pub message: String,
     /// One imperative sentence naming a command, where one helps.
     pub hint: Option<String>,
+    /// Whether the verb wrote its answer already, the failure in it
+    /// (`clean`'s plan with its error): it then goes to stderr alone.
+    pub reported: bool,
 }
 
 impl Failure {
@@ -74,6 +78,7 @@ impl Failure {
             code,
             message: message.into(),
             hint: None,
+            reported: false,
         }
     }
 
@@ -81,6 +86,13 @@ impl Failure {
     #[must_use]
     pub fn hint(mut self, hint: impl Into<String>) -> Failure {
         self.hint = Some(hint.into());
+        self
+    }
+
+    /// The failure, written already in the verb's answer.
+    #[must_use]
+    pub fn reported(mut self) -> Failure {
+        self.reported = true;
         self
     }
 }
@@ -105,6 +117,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::Summary(args)) => summary::run(&args, index_dir, output),
         Some(Verb::Diff(args)) => diff::run(&args, index_dir, output),
         Some(Verb::Explain(args)) => explain::run(&args, index_dir, output),
+        Some(Verb::Clean(args)) => clean::run(&args, index_dir, output),
         Some(Verb::Query(args)) => sql::run(&args, index_dir, output),
         Some(Verb::Schema(args)) => schema::run(&args, index_dir, output),
         Some(Verb::Scans(args)) => scans::run(&args, index_dir, output),

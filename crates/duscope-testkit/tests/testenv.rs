@@ -16,6 +16,7 @@ const PINNED: &[&str] = &[
     "COLUMNS",
     "DUSCOPE_INDEX_DIR",
     "DUSCOPE_TEST_NOW",
+    "DUSCOPE_TEST_TRASH",
     "HOME",
     "LC_ALL",
     "LINES",

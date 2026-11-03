@@ -170,6 +170,59 @@ pub(crate) fn cache_dir(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".cache")
 }
 
+/// Whether a test run asked that the Trash take only items it can move into
+/// a Trash of the test's own (`DUSCOPE_TEST_TRASH`, honoured in debug builds
+/// only, as `DUSCOPE_TEST_NOW` is).
+fn trash_guarded() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("DUSCOPE_TEST_TRASH").is_some()
+}
+
+/// Moves `path` to the Trash.
+#[cfg(target_os = "macos")]
+pub(crate) fn trash(path: &std::path::Path) -> Result<(), crate::TrashError> {
+    macos::trash::trash(path, trash_guarded())
+}
+
+/// Moves `path` to the Trash.
+#[cfg(target_os = "linux")]
+pub(crate) fn trash(path: &std::path::Path) -> Result<(), crate::TrashError> {
+    linux::trash::trash(path, trash_guarded())
+}
+
+/// Moves `path` to the Trash: there is none on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn trash(_path: &std::path::Path) -> Result<(), crate::TrashError> {
+    let _ = trash_guarded();
+    Err(crate::TrashError::Unavailable(
+        "duscope has no Trash on this platform".to_owned(),
+    ))
+}
+
+/// Whether `path` is a firmlink.
+#[cfg(target_os = "macos")]
+pub(crate) fn firmlink(path: &std::path::Path) -> bool {
+    macos::trash::firmlink(path)
+}
+
+/// Whether `path` is a firmlink: there are none on this platform.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn firmlink(_path: &std::path::Path) -> bool {
+    false
+}
+
+/// Whether the volume holding `path` is mounted read-only.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn read_only(path: &std::path::Path) -> std::io::Result<bool> {
+    posix::read_only(path)
+}
+
+/// Whether the volume holding `path` is mounted read-only: not known on this
+/// platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn read_only(_path: &std::path::Path) -> std::io::Result<bool> {
+    Ok(false)
+}
+
 /// The size of the terminal on stdout: unknown on this platform.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {

@@ -20,6 +20,10 @@ libc.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
+# The macOS Trash (NSFileManager); Linux's is in-tree (platform/linux/trash.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+trash.workspace = true
+
 [dev-dependencies]
 duscope-testkit.workspace = true
 proptest.workspace = true

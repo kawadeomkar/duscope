@@ -7,6 +7,7 @@ mod ffi;
 mod stat;
 #[cfg(test)]
 mod tests;
+pub(in crate::platform) mod trash;
 mod volume;
 
 pub(super) use stat::from_stat;

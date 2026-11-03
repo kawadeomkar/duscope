@@ -30,6 +30,19 @@ pub enum WalkError {
     TooManyDirectories,
 }
 
+/// Why an item was not moved to the Trash. Nothing was moved or removed.
+#[derive(Debug, thiserror::Error)]
+pub enum TrashError {
+    /// The item's volume has no Trash this platform can move it into (a
+    /// network mount, a read-only volume, some removable media), or the
+    /// system refused the move.
+    #[error("{0}")]
+    Unavailable(String),
+    /// The item could not be read or moved.
+    #[error("{0}")]
+    Failed(String),
+}
+
 /// An entry that was listed but could not be read: one `scan_errors` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanError {

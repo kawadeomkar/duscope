@@ -17,7 +17,8 @@ use duscope_core::CoreError;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
 use duscope_core::index::{Index, ScanId, index_path};
 use duscope_core::query::{
-    self, ScanQuery, ScanSelector, SizeKind, Subtree, TreeView, resolve_scan, short_id, timegrammar,
+    self, Resolved, ScanQuery, ScanSelector, SizeKind, Subtree, TreeView, clock, resolve_scan,
+    short_id, timegrammar,
 };
 use duscope_core::resolve::resolve_path;
 use duscope_walk::Attrs;
@@ -185,6 +186,92 @@ pub(super) fn stale_index(index: &Index, max_age: &str) -> Warning {
             "Run duscope scan --save {} to measure the tree again",
             index.root_path().display()
         )),
+    }
+}
+
+/// How a verb that reads one saved scan and never scans finds it:
+/// `explain`'s and `clean`'s.
+pub(super) struct Lookup {
+    /// `--max-age`, as given or the default.
+    pub(super) max_age: String,
+    max_age_ns: i64,
+    now: i64,
+    pub(super) cwd: PathBuf,
+    /// The index directory, when one can be found.
+    pub(super) dir: Option<PathBuf>,
+    /// `--trust`.
+    trust: Vec<PathBuf>,
+}
+
+impl Lookup {
+    /// From the verb's `--max-age`, hidden `--test-now` and `--trust`.
+    pub(super) fn new(
+        max_age: Option<&str>,
+        test_now: Option<&str>,
+        trust: &[PathBuf],
+        index_dir: Option<&Path>,
+    ) -> Result<Lookup, Failure> {
+        let max_age = max_age.unwrap_or(DEFAULT_MAX_AGE).to_owned();
+        let max_age_ns = timegrammar::parse_age(&max_age)
+            .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--max-age {e}")))?;
+        let now = match test_now {
+            Some(text) => timegrammar::parse_date(text)
+                .map(|date| date.ns)
+                .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--test-now {e}")))?,
+            None => clock::now(),
+        };
+        let cwd = std::env::current_dir().map_err(|e| {
+            Failure::new(
+                Exit::Runtime,
+                "io_error",
+                format!("cannot read the working directory: {e}"),
+            )
+        })?;
+        let dir = index_dir
+            .map(Path::to_owned)
+            .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)));
+        Ok(Lookup {
+            max_age,
+            max_age_ns,
+            now,
+            cwd,
+            dir,
+            trust: trust.to_vec(),
+        })
+    }
+
+    /// The saved scan `selector` names for `path`: `None` when latest finds
+    /// none. Without an index directory latest has nothing to find and a
+    /// prefix nowhere to look; an index file needs none, though without one
+    /// it is outside it, so --trust must name it.
+    pub(super) fn resolve(
+        &self,
+        selector: &ScanSelector,
+        path: Option<&Path>,
+    ) -> Result<Option<Resolved>, Failure> {
+        let dir = match (&self.dir, selector) {
+            (Some(dir), _) => dir.as_path(),
+            (None, ScanSelector::File(_)) => Path::new(""),
+            (None, ScanSelector::Latest) => return Ok(None),
+            (None, ScanSelector::Prefix(_)) => {
+                return Err(Failure::new(
+                    Exit::NotFound,
+                    "scan_not_found",
+                    "no index directory to look for the scan in: neither HOME nor \
+                     XDG_CACHE_HOME is set",
+                )
+                .hint("Run duscope with --index-dir naming the directory the scans are in"));
+            }
+        };
+        let q = ScanQuery {
+            index_dir: dir,
+            path,
+            cwd: &self.cwd,
+            max_age_ns: self.max_age_ns,
+            now: self.now,
+            trust: &self.trust,
+        };
+        resolve_scan(selector, &q, scanned).map_err(core_failure)
     }
 }
 
@@ -641,6 +728,10 @@ pub fn core_failure(error: CoreError) -> Failure {
             Failure::new(Exit::Runtime, "handle_expired", error.to_string())
                 .hint("Run duscope explain --json again for a fresh handle")
         }
+        CoreError::PathChanged(_) => Failure::new(Exit::Runtime, "path_changed", error.to_string())
+            .hint("Run duscope explain --json again for a handle of what is there now"),
+        CoreError::CleanOverlap(_) => Failure::new(Exit::Usage, "usage", error.to_string())
+            .hint("Rerun duscope clean naming each item once, and none inside another"),
         CoreError::ImportInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())
             .hint("Rerun duscope import with --format naming the tool that wrote the file"),
         CoreError::UntrustedIndex(ref file) => {

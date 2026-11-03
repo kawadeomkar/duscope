@@ -22,6 +22,13 @@ The saved scans, newest first: each scan's id, start, entries, sizes and root.
 What the directory is, what deleting it would free, and the command that
 builds it again.
 .TP
+.B duscope clean ~/dev/app/node_modules
+The plan for moving the directory to the Trash, from the saved scan that holds
+it, and what it would free; nothing moves.
+.TP
+.B duscope clean ~/dev/app/node_modules \-\-yes
+Moves it to the Trash, which keeps it until the Trash is emptied.
+.TP
 .B duscope diff 1fd3 7a2c
 What changed between two saved scans of one tree, the largest change first.
 .TP

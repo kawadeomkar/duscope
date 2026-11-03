@@ -27,10 +27,10 @@ use schemars::generate::SchemaSettings;
 use serde_json::Value;
 
 use crate::envelope::{
-    ByTypeEntry, CacheEntry, CheckedEntry, DiffEntry, DiffEnvelope, Envelope, ErrorEnvelope,
-    Explain, Listing, ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry, ScanErrorEntry,
-    SchemaInfo, SpilledEnvelope, SqlQueryBlock, SqlResult, StaleEntry, Summary, TopEntry,
-    TreeEntry,
+    ByTypeEntry, CacheEntry, CheckedEntry, CleanEnvelope, DiffEntry, DiffEnvelope, Envelope,
+    ErrorEnvelope, Explain, Listing, ObjectEnvelope, ProjectEntry, PrunedEntry, SavedScanEntry,
+    ScanErrorEntry, SchemaInfo, SpilledEnvelope, SqlQueryBlock, SqlResult, StaleEntry, Summary,
+    TopEntry, TreeEntry,
 };
 
 /// Each envelope schema file: its path under `schemas/`, and the schema derived
@@ -80,6 +80,7 @@ fn derived_schemas() -> Vec<(&'static str, Value)> {
             "envelope/schema.schema.json",
             derive::<ObjectEnvelope<SchemaInfo>>(),
         ),
+        ("envelope/clean.schema.json", derive::<CleanEnvelope>()),
         ("envelope/error.schema.json", derive::<ErrorEnvelope>()),
         (
             "envelope/spilled.schema.json",

@@ -125,6 +125,22 @@ pub mod values {
     pub const PRUNED_KINDS: [&str; 3] = ["index", "temporary", "spill"];
     /// The platforms a column of the index is filled on, macOS first.
     pub const PLATFORMS: [&str; 2] = ["macos", "linux"];
+    /// Why `clean` refuses an item.
+    pub const REFUSALS: [&str; 6] = [
+        "symlink",
+        "mount_point",
+        "firmlink",
+        "root",
+        "outside_root",
+        "read_only_volume",
+    ];
+    /// What `clean`'s plan does with an item (`permanent` arrives with
+    /// `--permanent`).
+    pub const ACTIONS: [&str; 2] = ["trash", "refused"];
+    /// How `clean` deletes (`permanent` arrives with `--permanent`).
+    pub const METHODS: [&str; 1] = ["trash"];
+    /// What became of an item `clean` was told to move.
+    pub const OUTCOMES: [&str; 2] = ["trashed", "failed"];
 }
 
 /// `values` with null, for a nullable field's values.
@@ -1186,6 +1202,130 @@ impl serde::Serialize for SqlValue {
             }
         }
     }
+}
+
+/// What `clean` prints under `--json`: the plan and what became of it, with
+/// the conventions' error object where nothing, or not everything, was moved
+/// (`ok` false): `confirmation_required`, `refused_path`, `trash_unavailable`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct CleanEnvelope {
+    /// Whether every item of the plan was moved to the Trash.
+    pub ok: bool,
+    /// The version of the envelope's shape.
+    pub schema_version: &'static str,
+    /// The program.
+    pub tool: Tool,
+    /// The saved scan the plan's sizes come from; null when none holds the
+    /// paths and they come from a fresh `stat`.
+    pub scan: Option<ScanBlock>,
+    /// What `clean` was asked.
+    pub query: CleanQuery,
+    /// The plan, and what moving it did.
+    pub result: CleanResult,
+    /// Why nothing, or not everything, was moved; null when all was.
+    pub error: Option<ErrorObject>,
+    /// What the user should know beside the answer.
+    pub warnings: Vec<Warning>,
+    /// Commands for the same scan, most useful first.
+    pub next: Vec<String>,
+}
+
+/// What `clean` was asked.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct CleanQuery {
+    /// The verb.
+    pub command: &'static str,
+    /// The items, absolute, as the plan names them: the paths, then the
+    /// handles' paths.
+    pub paths: Vec<String>,
+    /// How many items came from `--from` handles.
+    pub handle_count: u64,
+    /// `--yes`: move the items, not only plan.
+    pub yes: bool,
+    /// `--skip-refused`: move what is not refused.
+    pub skip_refused: bool,
+}
+
+/// The plan, and what moving it did. Moving to the Trash frees nothing until
+/// the Trash is emptied: `trashed_bytes` counts what moved, `freed_bytes` is
+/// 0.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct CleanResult {
+    /// What would be moved, and what is refused.
+    pub plan: CleanPlan,
+    /// The items moved to the Trash.
+    pub trashed_count: u64,
+    /// Their bytes on disk, still taken until the Trash is emptied.
+    pub trashed_bytes: u64,
+    /// The bytes freed: 0, since the Trash keeps what it holds.
+    pub freed_bytes: u64,
+}
+
+/// `clean`'s plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct CleanPlan {
+    /// Each item, in the order given.
+    pub items: Vec<PlanItem>,
+    /// The bytes on disk of the items to move.
+    pub total_allocated_bytes: u64,
+    /// What deleting them would free now, their sharers outside them kept.
+    pub total_frees_bytes: u64,
+    /// `trash`.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(values::METHODS))))]
+    pub method: &'static str,
+    /// Whether the plan waits for `--yes`, or `yes` typed at the prompt.
+    pub confirmation_required: bool,
+}
+
+/// An item of `clean`'s plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct PlanItem {
+    /// Its path, absolute, as lossy UTF-8.
+    pub path: String,
+    /// Its path's bytes, for `--plain`.
+    #[serde(skip)]
+    pub path_bytes: Vec<u8>,
+    /// Its name.
+    pub name: String,
+    /// The name's bytes in base64 when they are not UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_raw: Option<String>,
+    /// `file`, `dir`, `symlink` or `other`.
+    #[cfg_attr(test, schemars(extend("enum" = values::KINDS)))]
+    pub kind: &'static str,
+    /// Bytes on disk: a directory's subtree, hard links and clones once.
+    pub allocated_bytes: u64,
+    /// What deleting it would free now: its bytes less those a link or
+    /// clone member outside it keeps; null where that is not known (a
+    /// directory no saved scan holds).
+    pub frees_bytes: Option<u64>,
+    /// `exact`, `lower_bound` or `upper_bound`; null with `frees_bytes`.
+    #[cfg_attr(test, schemars(extend("enum" = nullable(&values::FREEABLE_KINDS))))]
+    pub frees_kind: Option<&'static str>,
+    /// A file's link count; null for a directory.
+    pub nlink: Option<u64>,
+    /// Links of the inodes under it that lie outside it.
+    pub links_outside_subtree: Option<u64>,
+    /// The command that regenerates it, when a cache rule says so.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::REGENERABLE_BY)))))]
+    pub regenerable_by: Option<&'static str>,
+    /// `trash`, or `refused`.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(values::ACTIONS))))]
+    pub action: &'static str,
+    /// Why it is refused; null when it is not.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::REFUSALS)))))]
+    pub reason: Option<&'static str>,
+    /// `trashed` or `failed` once `clean` acted; null in a dry run and for a
+    /// refused item.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::OUTCOMES)))))]
+    pub outcome: Option<&'static str>,
+    /// Why moving it failed; null otherwise.
+    pub error: Option<ErrorObject>,
 }
 
 // The schema of a value as `Serialize` above writes it. A `$bytes` object

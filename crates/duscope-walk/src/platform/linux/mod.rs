@@ -6,6 +6,7 @@
 mod dents;
 mod mounts;
 mod statx;
+pub(in crate::platform) mod trash;
 
 pub(super) use mounts::Mounts;
 pub(super) use statx::from_stat;

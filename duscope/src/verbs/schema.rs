@@ -21,7 +21,7 @@ use crate::out::{Output, thousands};
 /// Each envelope's JSON Schema, by the name `--envelope` takes: compact
 /// copies of `schemas/envelope/<name>.schema.json`, which the published
 /// crate does not carry (a test holds them equal).
-const ENVELOPES: [(&str, &str); 16] = [
+const ENVELOPES: [(&str, &str); 17] = [
     ("scan", include_str!("schema/scan.schema.json")),
     ("top", include_str!("schema/top.schema.json")),
     ("tree", include_str!("schema/tree.schema.json")),
@@ -31,6 +31,7 @@ const ENVELOPES: [(&str, &str); 16] = [
     ("summary", include_str!("schema/summary.schema.json")),
     ("diff", include_str!("schema/diff.schema.json")),
     ("explain", include_str!("schema/explain.schema.json")),
+    ("clean", include_str!("schema/clean.schema.json")),
     ("query", include_str!("schema/query.schema.json")),
     ("scans", include_str!("schema/scans.schema.json")),
     ("rescan", include_str!("schema/rescan.schema.json")),
