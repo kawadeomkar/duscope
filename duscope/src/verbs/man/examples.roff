@@ -63,6 +63,12 @@ reads back.
 .B duscope agent
 The briefing an AI agent reads before it uses duscope: which command answers
 which question, the rules that keep it safe, the exit codes and SQL examples.
+.B duscope agent \-\-skill
+writes it as a skill under
+.I .agents/skills/duscope/
+and
+.IR .claude/skills/duscope/ ,
+where agents' clients load it on their own.
 .TP
 .B duscope mcp \-\-roots ~
 The MCP server an AI agent's client starts, on stdin and stdout; the client

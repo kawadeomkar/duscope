@@ -1,0 +1,14 @@
+---
+name: duscope
+description: "Answers questions about disk space from a saved scan of the tree: what is eating my disk, where the space went, large files, stale files nobody opens, node_modules and other build caches (target, .venv, DerivedData), space by file type, and what changed between two scans (compare scans). Plans a clean up that moves paths to the Trash only when a person says so."
+when_to_use: "Use when someone asks why a disk or folder is full, what is taking up space, what they could delete or clean up to free space, how big their caches or downloads are, which files are large or old, or what grew since last week."
+---
+
+{{briefing}}
+
+## SQL over a saved scan
+
+`references/sql.md` beside this file holds the tables a saved scan has, the
+functions duscope adds, and {{sql_count}} statements an agent can start from, each
+run on duscope's fixture tree by its tests. Run one with
+`duscope query PATH --sql "…" --json`; `duscope schema` lists the tables.

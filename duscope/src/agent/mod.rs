@@ -1,24 +1,48 @@
 //! `agent`: the briefing an AI agent reads before it uses duscope, as
-//! Markdown on stdout. The text is `briefing.md.tmpl`; when it runs, the
+//! Markdown on stdout, or with `--skill` as a skill an agent's client loads
+//! by itself (P3-AGT-02). The text is `briefing.md.tmpl`; when it runs, the
 //! binary fills in its own verbs from the command line, its exit codes, and
 //! the envelope's error codes (the conventions' `ERROR_CODES`) with the exit
 //! code of each, so those lists cannot drift from the code. The MCP server's `instructions` are the briefing's first
 //! 4,096 characters (P3-MCP-03), which is why the template opens with the
 //! words that should bring duscope to mind, the invariants and the handle
 //! flow.
+//!
+//! The skill is `skill.md.tmpl` around the same briefing: a frontmatter
+//! whose `description` and `when_to_use` carry the words that should bring
+//! duscope to mind (the client lists at most 1,536 characters of the two),
+//! the briefing up to its SQL, and a pointer to `references/sql.md`, which
+//! holds the briefing's SQL section. `--skill` writes both files to
+//! `.agents/skills/duscope/` and `.claude/skills/duscope/`, the two folders
+//! agents' clients read skills from, under the working directory or
+//! `--dir`, and replaces a skill that is there only under `--force`.
 
 use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use clap::CommandFactory;
 use duscope_core::envelope::{ERROR_CODES, SCHEMA_VERSION};
 
-use crate::cli::{Cli, visible_verbs};
+use crate::cli::{AgentArgs, Cli, visible_verbs};
 use crate::out::emit_bytes;
 use crate::verbs::{Exit, Failure};
 
 /// The briefing, with `{{verbs}}`, `{{exit_codes}}`, `{{error_codes}}` and
 /// `{{schema_version}}` to fill in.
 const TEMPLATE: &str = include_str!("briefing.md.tmpl");
+
+/// The skill, with `{{briefing}}` (the briefing up to its SQL) and
+/// `{{sql_count}}` to fill in.
+const SKILL_TEMPLATE: &str = include_str!("skill.md.tmpl");
+
+/// The heading of the briefing's SQL section, which the skill keeps in
+/// `references/sql.md`.
+const SQL_HEADING: &str = "## SQL over a saved scan";
+
+/// The folders the skill goes to, under the working directory or `--dir`:
+/// where agents' clients look for a project's skills.
+pub const SKILL_DIRS: [&str; 2] = [".agents/skills/duscope", ".claude/skills/duscope"];
 
 /// Every exit code, in the order the briefing lists them.
 const EXITS: [Exit; 7] = [
@@ -31,9 +55,87 @@ const EXITS: [Exit; 7] = [
     Exit::Interrupted,
 ];
 
-/// Prints the briefing.
-pub fn run() -> Result<(), Failure> {
-    emit_bytes(briefing().as_bytes())
+/// Prints the briefing, or writes the skill.
+pub fn run(args: &AgentArgs) -> Result<(), Failure> {
+    if !args.skill {
+        return emit_bytes(briefing().as_bytes());
+    }
+    let base = match &args.dir {
+        Some(dir) => dir.clone(),
+        None => std::env::current_dir().map_err(|e| {
+            Failure::new(
+                Exit::Runtime,
+                "io_error",
+                format!("cannot read the working directory: {e}"),
+            )
+        })?,
+    };
+    let written = write_skill(&base, args.force)?;
+    let mut listing = String::new();
+    for path in written {
+        let _ = writeln!(listing, "{}", path.display());
+    }
+    emit_bytes(listing.as_bytes())
+}
+
+/// The skill's files, by their path in a skill folder: `SKILL.md` and
+/// `references/sql.md`.
+pub fn skill() -> [(&'static str, String); 2] {
+    let briefing = briefing();
+    let (body, sql) = briefing
+        .split_once(SQL_HEADING)
+        .unwrap_or((briefing.as_str(), ""));
+    let skill = SKILL_TEMPLATE
+        .replace("{{briefing}}", body.trim_end())
+        .replace("{{sql_count}}", &sql.matches("```sql").count().to_string());
+    let references = format!("# SQL over a saved scan{sql}");
+    [("SKILL.md", skill), ("references/sql.md", references)]
+}
+
+/// Writes the skill to both folders under `base`: the files written. A
+/// skill that is there is replaced only when `force`; otherwise nothing is
+/// written. Each file goes to a temporary name beside it first and is
+/// renamed over the old one, so a reader never sees half a file.
+fn write_skill(base: &Path, force: bool) -> Result<Vec<PathBuf>, Failure> {
+    let files = skill();
+    let targets: Vec<(PathBuf, &str)> = SKILL_DIRS
+        .iter()
+        .flat_map(|dir| {
+            files
+                .iter()
+                .map(move |(name, text)| (base.join(dir).join(name), text.as_str()))
+        })
+        .collect();
+    if !force && let Some((there, _)) = targets.iter().find(|(path, _)| path.exists()) {
+        return Err(Failure::new(
+            Exit::Usage,
+            "usage",
+            format!("{} is already there", there.display()),
+        )
+        .hint("Run duscope agent --skill --force to replace the skill"));
+    }
+    let failed = |path: &Path, e: std::io::Error| {
+        Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!("cannot write {}: {e}", path.display()),
+        )
+    };
+    for (path, text) in &targets {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| failed(parent, e))?;
+        }
+        let mut temporary = path.clone().into_os_string();
+        temporary.push(format!(".tmp-{}", std::process::id()));
+        let temporary = PathBuf::from(temporary);
+        fs::write(&temporary, text)
+            .and_then(|()| fs::rename(&temporary, path))
+            .map_err(|e| {
+                let _ = fs::remove_file(&temporary);
+                failed(path, e)
+            })?;
+    }
+    Ok(targets.into_iter().map(|(path, _)| path).collect())
 }
 
 /// The briefing, its placeholders filled in.

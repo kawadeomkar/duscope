@@ -1,0 +1,60 @@
+# SQL over a saved scan
+
+`duscope query PATH --sql "SELECT …" --json` runs one read-only statement over
+the saved scan's tables (`duscope schema` lists them). `files` and `dirs` share
+one id sequence, in pre-order: a directory's subtree is
+`id BETWEEN :root_id AND :root_last` (the entry of PATH and the last id below
+it), and its own files are `id + 1 .. files_end`. `type_stats` totals each
+extension. Sizes are bytes, times are nanoseconds since the Unix epoch, and
+names are BLOBs (`CAST(name AS TEXT)`). duscope adds `path(id)`,
+`human_size(bytes)` and `under(id, root_id)`. A statement without a `LIMIT` of
+its own returns 25 rows; writes, `PRAGMA` and `ATTACH` are refused
+(`sql_denied`).
+
+The largest files under PATH, each inode once:
+
+```sql
+SELECT path(id) AS path, human_size(allocated) AS size FROM files WHERE charged AND id BETWEEN :root_id AND :root_last ORDER BY allocated DESC LIMIT 10
+```
+
+The largest directories directly in PATH:
+
+```sql
+SELECT path(id) AS path, human_size(cum_allocated) AS size FROM dirs WHERE parent_id = :root_id ORDER BY cum_allocated DESC LIMIT 10
+```
+
+Space by extension, each inode once:
+
+```sql
+SELECT ext, count(*) AS files, human_size(sum(allocated)) AS size FROM files WHERE charged AND id BETWEEN :root_id AND :root_last GROUP BY ext ORDER BY sum(allocated) DESC LIMIT 10
+```
+
+Files over 100 MiB not modified for a year:
+
+```sql
+SELECT path(id) AS path, human_size(allocated) AS size, date(mtime / 1000000000, 'unixepoch') AS modified FROM files WHERE id BETWEEN :root_id AND :root_last AND allocated > 100 * 1048576 AND mtime < (unixepoch('now') - 365 * 86400) * 1000000000 ORDER BY allocated DESC LIMIT 20
+```
+
+The largest node_modules directories:
+
+```sql
+SELECT path(id) AS path, human_size(cum_allocated) AS size FROM dirs WHERE CAST(name AS TEXT) = 'node_modules' AND id BETWEEN :root_id AND :root_last ORDER BY cum_allocated DESC LIMIT 10
+```
+
+Files with more than one hard link:
+
+```sql
+SELECT path(id) AS path, nlink, human_size(allocated) AS size FROM files WHERE nlink > 1 AND id BETWEEN :root_id AND :root_last ORDER BY allocated DESC LIMIT 10
+```
+
+The directories holding the most files of their own:
+
+```sql
+SELECT path(id) AS path, files_end - id AS files FROM dirs WHERE id BETWEEN :root_id AND :root_last ORDER BY files_end - id DESC LIMIT 10
+```
+
+Large files that share a name:
+
+```sql
+SELECT CAST(name AS TEXT) AS name, count(*) AS copies, human_size(sum(allocated)) AS size FROM files WHERE charged AND allocated > 1048576 AND id BETWEEN :root_id AND :root_last GROUP BY name HAVING count(*) > 1 ORDER BY sum(allocated) DESC LIMIT 10
+```
