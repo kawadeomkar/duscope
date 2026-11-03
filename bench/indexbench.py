@@ -85,6 +85,9 @@ BY_TYPE_PER = 100_000
 # What `scan -v` prints (duscope/src/verbs/scan.rs), after the logger's prefix.
 WRITE_LINE = re.compile(r"write: ([0-9,]+) entries in ([0-9.]+) s: ([0-9.]+) µs/entry")
 WALK_LINE = re.compile(r"walk: .*? in ([0-9.]+) s")
+# On Linux the walk is two lines that share its time (P5-WALK-04).
+LISTING_LINE = re.compile(r"listing: .*? in ([0-9.]+) s")
+STAT_LINE = re.compile(r"stat: .*? in ([0-9.]+) s")
 ROLLUP_LINE = re.compile(r"roll-up: ([0-9.]+) s")
 
 
@@ -93,14 +96,21 @@ def parse_verbose(stderr: str) -> Dict[str, float]:
     from `scan --save -v`'s stderr."""
     write = WRITE_LINE.search(stderr)
     walk = WALK_LINE.search(stderr)
+    listing, stat = LISTING_LINE.search(stderr), STAT_LINE.search(stderr)
     rollup = ROLLUP_LINE.search(stderr)
-    if not (write and walk and rollup):
+    if walk:
+        walk_s: Optional[float] = float(walk.group(1))
+    elif listing and stat:
+        walk_s = round(float(listing.group(1)) + float(stat.group(1)), 3)
+    else:
+        walk_s = None
+    if not (write and walk_s is not None and rollup):
         raise measure.MeasureError(f"`scan --save -v` printed no walk, roll-up and write lines: {stderr.strip()[-300:]}")
     return {
         "entries": int(write.group(1).replace(",", "")),
         "write_s": float(write.group(2)),
         "us_per_entry": float(write.group(3)),
-        "walk_s": float(walk.group(1)),
+        "walk_s": walk_s,
         "rollup_s": float(rollup.group(1)),
     }
 

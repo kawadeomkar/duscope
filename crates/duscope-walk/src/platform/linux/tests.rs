@@ -1,5 +1,6 @@
 //! P1-WALK-02: the Linux provider against `lstat`, its `statx` count, and
-//! a wide directory spread over every worker.
+//! a wide directory spread over every worker; P5-WALK-04: listing timed
+//! apart from `statx`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -9,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::thread::{self, ThreadId};
+use std::time::Duration;
 
 use duscope_testkit::TestEnv;
 
@@ -16,8 +18,8 @@ use super::mounts::{Mount, parse_mountinfo};
 use super::{LinuxProvider, dents};
 use crate::tests::Gate;
 use crate::{
-    DirHandle, DirId, Entry, Kind, NameRef, Provider, STAT_BATCH, ScanError, ScanEvent, VolumeInfo,
-    WalkOptions, walk_with,
+    Counters, DirHandle, DirId, Entry, Kind, NameRef, Provider, STAT_BATCH, ScanError, ScanEvent,
+    VolumeInfo, WalkOptions, walk_with,
 };
 
 /// Every entry of a walk by its path.
@@ -420,5 +422,41 @@ fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
     assert_eq!(
         super::statx::entry(NameRef::from("d"), &unvouched, crate::Attrs::Basic).boundary,
         crate::Boundary::None
+    );
+}
+
+#[test]
+fn p5_walk_04_listing_is_timed_apart_from_statx() {
+    let env = TestEnv::new();
+    let root = env.fixtures().case_root("wide-directory");
+    let mut opts = WalkOptions {
+        threads: 4,
+        ..WalkOptions::default()
+    };
+    let summary = walk_with(&LinuxProvider::new(), &root, &opts, |_| {}).unwrap();
+    assert_eq!(summary.phases, None, "a default walk reads no clock");
+    assert!(summary.workers.is_empty());
+
+    opts.counters = Counters::Listing;
+    let summary = walk_with(&LinuxProvider::new(), &root, &opts, |_| {}).unwrap();
+    let phases = summary.phases.expect("Linux times listing apart");
+    assert!(phases.listing > Duration::ZERO, "{phases:?}");
+    assert!(phases.stat > Duration::ZERO, "{phases:?}");
+    assert!(
+        summary.workers.is_empty(),
+        "-v's counters leave the workers out"
+    );
+
+    opts.counters = Counters::Workers;
+    let summary = walk_with(&LinuxProvider::new(), &root, &opts, |_| {}).unwrap();
+    let phases = summary.phases.expect("Linux times listing apart");
+    assert_eq!(summary.workers.len(), 4);
+    let delivered: u64 = summary.workers.iter().map(|w| w.entries).sum();
+    assert_eq!(delivered, 100_000, "every file; the walk reads the root");
+    // Both are timed inside the reads that the busy time covers.
+    let busy: Duration = summary.workers.iter().map(|w| w.busy).sum();
+    assert!(
+        phases.listing + phases.stat <= busy,
+        "{phases:?} > {busy:?}"
     );
 }

@@ -1,6 +1,7 @@
 //! The Linux provider: `getdents64(2)` listings and one dirfd-relative
 //! `statx(2)` per entry, with a wide directory's entries spread over every
-//! worker in batches of 1,024.
+//! worker in batches of 1,024. Under the walk's counters it times the two
+//! apart: opening and listing a directory, and reading its entries.
 
 mod dents;
 mod mounts;
@@ -18,10 +19,11 @@ use std::path::Path;
 
 use dents::DentBuf;
 
+use crate::counters::{self, Timer};
 use crate::platform::posix;
 use crate::{
-    DirHandle, Entry, Flags, Flush, Kind, NameRef, Provider, STAT_BATCH, STREAM_CHUNK, ScanError,
-    VolumeInfo, WalkOptions,
+    Counters, DirHandle, Entry, Flags, Flush, Kind, NameRef, Provider, STAT_BATCH, STREAM_CHUNK,
+    ScanError, VolumeInfo, WalkOptions,
 };
 
 thread_local! {
@@ -138,9 +140,11 @@ impl Provider for LinuxProvider {
         later: &mut Vec<NameRef>,
         flush: &mut Flush<'_>,
     ) -> io::Result<()> {
+        let timed = opts.counters != Counters::Off;
+        let listing = timed.then(Timer::start);
         let fd = posix::open_handle(dir)?;
         let mut names = Vec::new();
-        DENTS.with_borrow_mut(|buf| {
+        let listed = DENTS.with_borrow_mut(|buf| {
             dents::list(fd.as_fd(), buf, &mut names, &mut |names| {
                 if names.len() > STAT_BATCH {
                     later.extend(names.drain(STAT_BATCH..));
@@ -149,8 +153,18 @@ impl Provider for LinuxProvider {
                     }
                 }
             })
-        })?;
+        });
+        if let Some(listing) = listing {
+            let took = listing.elapsed();
+            counters::add(|tally| tally.listing += took);
+        }
+        listed?;
+        let stat = timed.then(Timer::start);
         self.read_names(fd.as_fd(), dir, names, opts, out, errs);
+        if let Some(stat) = stat {
+            let took = stat.elapsed();
+            counters::add(|tally| tally.stat += took);
+        }
         Ok(())
     }
 
@@ -162,9 +176,18 @@ impl Provider for LinuxProvider {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
+        let stat = (opts.counters != Counters::Off).then(Timer::start);
         let fd = posix::reopen(dir)?;
         self.read_names(fd.as_fd(), dir, names.iter().cloned(), opts, out, errs);
+        if let Some(stat) = stat {
+            let took = stat.elapsed();
+            counters::add(|tally| tally.stat += took);
+        }
         Ok(())
+    }
+
+    fn times_listing(&self) -> bool {
+        true
     }
 
     /// Clone ids are read only on APFS; on Linux, `explain --clones` finds

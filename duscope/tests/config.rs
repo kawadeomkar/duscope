@@ -1,5 +1,6 @@
 //! P2-CORE-02: the configuration file, the environment, and what goes to
-//! stderr (`-v`, `-vv`, `--debug`, `-q`).
+//! stderr (`-v`, `-vv`, `--debug`, `-q`); P5-WALK-04: the walk's counters on
+//! `-v` and `-vv`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -158,9 +159,17 @@ fn p2_core_02_debug_output_shape() {
         return;
     }
     let root = fixtures.case_root("unreadable");
+    // Two workers, so the shape has two worker lines on every machine.
     let out = run(
         &env,
-        &["scan", root.to_str().unwrap(), "--debug", "--json"],
+        &[
+            "scan",
+            root.to_str().unwrap(),
+            "--debug",
+            "--json",
+            "--threads",
+            "2",
+        ],
         &[],
     );
     json(&out);
@@ -170,7 +179,9 @@ fn p2_core_02_debug_output_shape() {
         .filter(|line| line.starts_with("duscope: "))
         .map(|line| shape(line, &real, &root) + "\n")
         .collect();
-    golden("scan_stderr_debug.snap", &shape);
+    // Linux's walk is a listing line and a stat line (P5-WALK-04).
+    let os = std::env::consts::OS;
+    golden(&format!("scan_stderr_debug@{os}.snap"), &shape);
 }
 
 /// `line` with the root as `<root>`, the volume's mount point and type as
@@ -207,8 +218,10 @@ fn p2_core_02_v_prints_phase_timings_and_stdout_stays_the_envelope() {
     let out = run(&env, &["scan", root, "-v", "--json"], &[]);
     json(&out);
     let err = stderr(&out);
+    // On Linux the walk is two lines (P5-WALK-04).
     assert!(
-        err.contains("duscope: walk: 6 entries, 3 directories"),
+        err.contains("duscope: walk: 6 entries, 3 directories")
+            || err.contains("duscope: stat: 6 entries"),
         "{err}"
     );
     assert!(err.contains("duscope: roll-up: "), "{err}");
@@ -223,11 +236,82 @@ fn p2_core_02_v_prints_phase_timings_and_stdout_stays_the_envelope() {
     assert!(err.contains("duscope: volume "), "{err}");
     // The environment's filter, when no flag is given.
     let out = run(&env, &["scan", root, "--json"], &[("DUSCOPE_LOG", "info")]);
-    assert!(stderr(&out).contains("duscope: walk: "));
+    assert!(stderr(&out).contains("duscope: roll-up: "));
     let out = run(&env, &["scan", root, "--json"], &[("RUST_LOG", "info")]);
-    assert!(stderr(&out).contains("duscope: walk: "));
+    assert!(stderr(&out).contains("duscope: roll-up: "));
     let out = run(&env, &["scan", root, "--json"], &[]);
-    assert!(!stderr(&out).contains("duscope: walk: "));
+    assert!(!stderr(&out).contains("duscope: roll-up: "));
+}
+
+/// The number before `what` in the stderr line that starts with `prefix`.
+fn count_in(err: &str, prefix: &str, what: &str) -> Option<u64> {
+    let line = err.lines().find(|line| line.starts_with(prefix))?;
+    let before = line.split(what).next()?;
+    let number = before.rsplit(' ').next()?;
+    number.replace(',', "").parse().ok()
+}
+
+#[test]
+fn p5_walk_04_vv_prints_one_line_per_worker() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let root = root.to_str().unwrap();
+    let out = run(
+        &env,
+        &["scan", root, "-vv", "--threads", "3", "--json"],
+        &[],
+    );
+    json(&out);
+    let err = stderr(&out);
+    let workers: Vec<&str> = err
+        .lines()
+        .filter(|line| line.starts_with("duscope: worker "))
+        .collect();
+    assert_eq!(workers.len(), 3, "{err}");
+    for (n, line) in workers.iter().enumerate() {
+        assert!(
+            line.starts_with(&format!("duscope: worker {n}: ")),
+            "{line}"
+        );
+        assert!(line.contains(" s busy of "), "{line}");
+    }
+    // The workers delivered every entry but the root, which the walk reads.
+    let delivered: u64 = workers
+        .iter()
+        .map(|line| count_in(line, "duscope: worker ", " entries").unwrap())
+        .sum();
+    let entries = count_in(&err, "duscope: walk: ", " entries")
+        .or_else(|| count_in(&err, "duscope: stat: ", " entries"))
+        .unwrap();
+    assert_eq!((delivered, entries), (5, 6), "{err}");
+    // -v leaves them out.
+    let out = run(&env, &["scan", root, "-v", "--json"], &[]);
+    assert!(
+        !stderr(&out).contains("duscope: worker "),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn p5_walk_04_on_linux_v_prints_a_listing_line_and_a_stat_line() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let out = run(&env, &["scan", root.to_str().unwrap(), "-v", "--json"], &[]);
+    json(&out);
+    let err = stderr(&out);
+    let walk = err.contains("duscope: walk: ");
+    let split = err.contains("duscope: listing: 3 directories in ")
+        && err.contains("duscope: stat: 6 entries, 0 MB in ");
+    if std::env::consts::OS == "linux" {
+        assert!(
+            split && !walk,
+            "listing and stat in place of the walk: {err}"
+        );
+    } else {
+        // macOS lists and reads attributes in one call: one walk line.
+        assert!(walk && !split, "{err}");
+    }
 }
 
 #[test]

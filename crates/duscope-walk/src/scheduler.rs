@@ -49,6 +49,8 @@
 //!   the struct's fields.
 //! - The deque and parker come from the `crossbeam-deque` and `crossbeam-utils`
 //!   crates rather than the `crossbeam` umbrella.
+//! - `run` is also given the worker's number, which the walk's per-worker
+//!   counters are kept by (`-v`).
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use crossbeam_utils::sync::{Parker, Unparker};
@@ -131,7 +133,7 @@ pub(crate) fn start_pool<'scope, 'env, Job, Event, Run>(
 where
     Job: Send + 'scope,
     Event: Send + 'scope,
-    Run: Fn(Job, &Worker<Job>, &PoolShared<Job, Event>) + Sync,
+    Run: Fn(Job, usize, &Worker<Job>, &PoolShared<Job, Event>) + Sync,
 {
     let workers: Vec<_> = (0..threads).map(|_| Worker::new_lifo()).collect();
     let parkers: Vec<_> = (0..threads).map(|_| Parker::new()).collect();
@@ -165,7 +167,8 @@ where
     Ok(pool)
 }
 
-// duscope: `run` in place of upstream's `run_job`; the worker, parker and shared state are borrowed.
+// duscope: `run` in place of upstream's `run_job`, given the worker's number too; the worker, parker
+// and shared state are borrowed.
 fn worker_loop<Job, Event, Run>(
     idx: usize,
     worker: &Worker<Job>,
@@ -173,7 +176,7 @@ fn worker_loop<Job, Event, Run>(
     shared: &PoolShared<Job, Event>,
     run: &Run,
 ) where
-    Run: Fn(Job, &Worker<Job>, &PoolShared<Job, Event>),
+    Run: Fn(Job, usize, &Worker<Job>, &PoolShared<Job, Event>),
 {
     while !shared.stop.load(AtomicOrdering::Relaxed) {
         let found = if let Some(found) = find_job(worker, shared) {
@@ -194,7 +197,7 @@ fn worker_loop<Job, Event, Run>(
             // concurrency ramps up only while work remains stealable.
             shared.wake_worker();
         }
-        run(job, worker, shared);
+        run(job, idx, worker, shared);
     }
 }
 

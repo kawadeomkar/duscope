@@ -18,6 +18,23 @@ pub enum Attrs {
     Full,
 }
 
+/// What a walk counts beside its entries, for `-v` and `-vv`. Off, it reads
+/// no clock and touches no counter for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Counters {
+    /// Nothing: a plain walk.
+    #[default]
+    Off,
+    /// The workers' time listing directories apart from their time reading
+    /// entries' attributes, with a provider that times them apart
+    /// ([`Provider::times_listing`](crate::Provider::times_listing));
+    /// nothing with one that cannot (`-v`).
+    Listing,
+    /// That, and each worker's entries and time in the provider's reads
+    /// (`-vv`).
+    Workers,
+}
+
 /// A cache-directory rule, compiled by the binary from duscope-core's
 /// `caches.toml`: a directory whose name matches `name` and whose parent
 /// listing holds one of `markers` is a cache.
@@ -63,6 +80,9 @@ pub struct WalkOptions {
     /// `fstatat`, instead of this platform's own (`--provider fallback`, a
     /// hidden flag for tests).
     pub fallback: bool,
+    /// What the walk counts beside its entries, reported in the
+    /// [`WalkSummary`](crate::WalkSummary).
+    pub counters: Counters,
 }
 
 impl Default for WalkOptions {
@@ -80,6 +100,7 @@ impl Default for WalkOptions {
             exclude_caches: Vec::new(),
             cancel: Arc::default(),
             fallback: false,
+            counters: Counters::Off,
         }
     }
 }

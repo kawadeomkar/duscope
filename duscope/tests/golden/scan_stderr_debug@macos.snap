@@ -3,3 +3,5 @@ duscope: walk: N entries, N directories, N MB in N s: N entries/s, N MB/s
 duscope: roll-up: N s
 duscope: volume <mount>: <type>, entered, N MB, N MB free
 duscope: workers: N threads
+duscope: worker N: N entries, N s busy of N s
+duscope: worker N: N entries, N s busy of N s
