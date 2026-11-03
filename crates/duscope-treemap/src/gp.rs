@@ -67,7 +67,7 @@ pub fn layout_gp(items: &[(u64, usize)], area: Rect) -> Vec<(usize, Rect)> {
 
 /// Cuts `rect` for a first child of weight `part` out of `whole`: the first
 /// child's rectangle (right or bottom), then the second's.
-fn cut(rect: Rect, part: u128, whole: u128) -> (Rect, Rect) {
+pub(crate) fn cut(rect: Rect, part: u128, whole: u128) -> (Rect, Rect) {
     let share = |extent: u16| -> u16 {
         let extent = u128::from(extent);
         let size = if whole == 0 {

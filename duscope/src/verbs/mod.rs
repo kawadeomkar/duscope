@@ -8,6 +8,7 @@ mod import;
 mod man;
 mod next;
 mod query;
+mod render;
 mod rescan;
 mod scan;
 mod scans;
@@ -109,6 +110,13 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::Rescan(args)) => rescan::run(&args, index_dir, output),
         Some(Verb::Export(args)) => export::run(&args, cli.output.format, index_dir, output),
         Some(Verb::Import(args)) => import::run(&args, index_dir, output),
+        Some(Verb::Render(args)) => render::run(
+            &args,
+            cli.output.format,
+            cli.output.json || cli.output.plain,
+            index_dir,
+            output,
+        ),
         Some(Verb::Man) => man::run(),
         Some(Verb::Completions(args)) => completions::run(args.shell),
     }

@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400" viewBox="0 0 640 400" font-family="Inter, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="10">
+<title>ROOT</title>
+<rect width="640" height="400" fill="#1e1e2e"/>
+<g shape-rendering="crispEdges">
+<path fill="url(#v0)" d="M0 0V205H243Z"/><path fill="url(#h0)" d="M0 0H243V205Z"/>
+<path fill="url(#v1)" d="M0 205V368H83Z"/><path fill="url(#h1)" d="M0 205H83V368Z"/>
+<path fill="url(#v0)" d="M83 205V304H177Z"/><path fill="url(#h0)" d="M83 205H177V304Z"/>
+<path fill="url(#v0)" d="M177 205V304H243Z"/><path fill="url(#h0)" d="M177 205H243V304Z"/>
+<path fill="url(#v0)" d="M83 304V368H172Z"/><path fill="url(#h0)" d="M83 304H172V368Z"/>
+<path fill="url(#v0)" d="M172 304V368H242Z"/><path fill="url(#h0)" d="M172 304H242V368Z"/>
+<rect x="242" y="304" width="1" height="64" fill="#6c7086"/>
+<path fill="url(#v1)" d="M243 0V151H477Z"/><path fill="url(#h1)" d="M243 0H477V151Z"/>
+<path fill="url(#v2)" d="M243 151V249H475Z"/><path fill="url(#h2)" d="M243 151H475V249Z"/>
+<rect x="475" y="151" width="2" height="70" fill="#94e2d5"/>
+<rect x="475" y="221" width="2" height="23" fill="#94e2d5"/>
+<rect x="475" y="244" width="2" height="3" fill="#94e2d5"/>
+<rect x="475" y="247" width="2" height="2" fill="#94e2d5"/>
+<path fill="url(#v3)" d="M243 249V313H344Z"/><path fill="url(#h3)" d="M243 249H344V313Z"/>
+<path fill="url(#v3)" d="M243 313V368H344Z"/><path fill="url(#h3)" d="M243 313H344V368Z"/>
+<path fill="url(#v3)" d="M344 249V315H414Z"/><path fill="url(#h3)" d="M344 249H414V315Z"/>
+<path fill="url(#v3)" d="M344 315V368H414Z"/><path fill="url(#h3)" d="M344 315H414V368Z"/>
+<path fill="url(#v3)" d="M414 249V308H477Z"/><path fill="url(#h3)" d="M414 249H477V308Z"/>
+<path fill="url(#v3)" d="M414 308V368H476Z"/><path fill="url(#h3)" d="M414 308H476V368Z"/>
+<rect x="476" y="308" width="1" height="60" fill="#6c7086"/>
+<path fill="url(#v4)" d="M477 0V76H562Z"/><path fill="url(#h4)" d="M477 0H562V76Z"/>
+<path fill="url(#v4)" d="M477 76V128H545Z"/><path fill="url(#h4)" d="M477 76H545V128Z"/>
+<path fill="url(#v4)" d="M545 76V95H562Z"/><path fill="url(#h4)" d="M545 76H562V95Z"/>
+<path fill="url(#v3)" d="M545 95V112H562Z"/><path fill="url(#h3)" d="M545 95H562V112Z"/>
+<path fill="url(#v4)" d="M545 112V128H553Z"/><path fill="url(#h4)" d="M545 112H553V128Z"/>
+<path fill="url(#v0)" d="M553 112V116H562Z"/><path fill="url(#h0)" d="M553 112H562V116Z"/>
+<path fill="url(#v4)" d="M553 116V124H558Z"/><path fill="url(#h4)" d="M553 116H558V124Z"/>
+<path fill="url(#v4)" d="M558 116V124H562Z"/><path fill="url(#h4)" d="M558 116H562V124Z"/>
+<path fill="url(#v4)" d="M553 124V128H556Z"/><path fill="url(#h4)" d="M553 124H556V128Z"/>
+<path fill="url(#v4)" d="M556 124V128H559Z"/><path fill="url(#h4)" d="M556 124H559V128Z"/>
+<path fill="url(#v4)" d="M559 124V127H562Z"/><path fill="url(#h4)" d="M559 124H562V127Z"/>
+<rect x="559" y="127" width="3" height="1" fill="#94e2d5"/>
+<path fill="url(#v3)" d="M562 0V70H640Z"/><path fill="url(#h3)" d="M562 0H640V70Z"/>
+<path fill="url(#v3)" d="M562 70V128H635Z"/><path fill="url(#h3)" d="M562 70H635V128Z"/>
+<path fill="url(#v3)" d="M635 70V81H640Z"/><path fill="url(#h3)" d="M635 70H640V81Z"/>
+<path fill="url(#v3)" d="M635 81V91H640Z"/><path fill="url(#h3)" d="M635 81H640V91Z"/>
+<path fill="url(#v3)" d="M635 91V99H640Z"/><path fill="url(#h3)" d="M635 91H640V99Z"/>
+<path fill="url(#v3)" d="M635 99V107H640Z"/><path fill="url(#h3)" d="M635 99H640V107Z"/>
+<path fill="url(#v3)" d="M635 107V114H640Z"/><path fill="url(#h3)" d="M635 107H640V114Z"/>
+<path fill="url(#v3)" d="M635 114V119H640Z"/><path fill="url(#h3)" d="M635 114H640V119Z"/>
+<path fill="url(#v3)" d="M635 119V123H640Z"/><path fill="url(#h3)" d="M635 119H640V123Z"/>
+<path fill="url(#v3)" d="M635 123V128H639Z"/><path fill="url(#h3)" d="M635 123H639V128Z"/>
+<rect x="639" y="123" width="1" height="5" fill="#f5c2e7"/>
+<path fill="url(#v0)" d="M477 128V210H524Z"/><path fill="url(#h0)" d="M477 128H524V210Z"/>
+<path fill="url(#v0)" d="M524 128V210H566Z"/><path fill="url(#h0)" d="M524 128H566V210Z"/>
+<path fill="url(#v0)" d="M477 210V235H537Z"/><path fill="url(#h0)" d="M477 210H537V235Z"/>
+<path fill="url(#v0)" d="M537 210V224H551Z"/><path fill="url(#h0)" d="M537 210H551V224Z"/>
+<path fill="url(#v0)" d="M537 224V235H551Z"/><path fill="url(#h0)" d="M537 224H551V235Z"/>
+<path fill="url(#v0)" d="M551 210V218H566Z"/><path fill="url(#h0)" d="M551 210H566V218Z"/>
+<path fill="url(#v0)" d="M551 218V226H566Z"/><path fill="url(#h0)" d="M551 218H566V226Z"/>
+<path fill="url(#v5)" d="M551 226V235H563Z"/><path fill="url(#h5)" d="M551 226H563V235Z"/>
+<rect x="563" y="226" width="3" height="2" fill="#cba6f7"/>
+<rect x="563" y="228" width="3" height="1" fill="#cba6f7"/>
+<rect x="563" y="229" width="3" height="1" fill="#94e2d5"/>
+<rect x="563" y="230" width="3" height="2" fill="#94e2d5"/>
+<rect x="563" y="232" width="3" height="1" fill="#cba6f7"/>
+<rect x="563" y="233" width="2" height="2" fill="#6c7086"/>
+<rect x="565" y="233" width="1" height="2" fill="#6c7086"/>
+<path fill="url(#v0)" d="M566 128V235H640Z"/><path fill="url(#h0)" d="M566 128H640V235Z"/>
+<path fill="url(#v6)" d="M477 235V302H519Z"/><path fill="url(#h6)" d="M477 235H519V302Z"/>
+<path fill="url(#v6)" d="M519 235V263H569Z"/><path fill="url(#h6)" d="M519 235H569V263Z"/>
+<path fill="url(#v6)" d="M519 263V284H553Z"/><path fill="url(#h6)" d="M519 263H553V284Z"/>
+<path fill="url(#v6)" d="M519 284V302H553Z"/><path fill="url(#h6)" d="M519 284H553V302Z"/>
+<path fill="url(#v6)" d="M553 263V291H569Z"/><path fill="url(#h6)" d="M553 263H569V291Z"/>
+<path fill="url(#v4)" d="M553 291V302H568Z"/><path fill="url(#h4)" d="M553 291H568V302Z"/>
+<rect x="568" y="291" width="1" height="11" fill="#6c7086"/>
+<path fill="url(#v5)" d="M477 302V368H527Z"/><path fill="url(#h5)" d="M477 302H527V368Z"/>
+<path fill="url(#v2)" d="M527 302V328H569Z"/><path fill="url(#h2)" d="M527 302H569V328Z"/>
+<path fill="url(#v1)" d="M527 328V350H544Z"/><path fill="url(#h1)" d="M527 328H544V350Z"/>
+<path fill="url(#v1)" d="M527 350V368H544Z"/><path fill="url(#h1)" d="M527 350H544V368Z"/>
+<path fill="url(#v2)" d="M544 328V341H557Z"/><path fill="url(#h2)" d="M544 328H557V341Z"/>
+<path fill="url(#v5)" d="M557 328V341H569Z"/><path fill="url(#h5)" d="M557 328H569V341Z"/>
+<path fill="url(#v2)" d="M544 341V352H557Z"/><path fill="url(#h2)" d="M544 341H557V352Z"/>
+<path fill="url(#v2)" d="M557 341V352H569Z"/><path fill="url(#h2)" d="M557 341H569V352Z"/>
+<path fill="url(#v4)" d="M544 352V360H557Z"/><path fill="url(#h4)" d="M544 352H557V360Z"/>
+<path fill="url(#v5)" d="M544 360V368H557Z"/><path fill="url(#h5)" d="M544 360H557V368Z"/>
+<path fill="url(#v2)" d="M557 352V361H564Z"/><path fill="url(#h2)" d="M557 352H564V361Z"/>
+<path fill="url(#v2)" d="M564 352V361H569Z"/><path fill="url(#h2)" d="M564 352H569V361Z"/>
+<path fill="url(#v1)" d="M557 361V368H562Z"/><path fill="url(#h1)" d="M557 361H562V368Z"/>
+<path fill="url(#v2)" d="M562 361V365H569Z"/><path fill="url(#h2)" d="M562 361H569V365Z"/>
+<path fill="url(#v2)" d="M562 365V368H569Z"/><path fill="url(#h2)" d="M562 365H569V368Z"/>
+<path fill="url(#v3)" d="M569 235V281H640Z"/><path fill="url(#h3)" d="M569 235H640V281Z"/>
+<path fill="url(#v3)" d="M569 281V307H612Z"/><path fill="url(#h3)" d="M569 281H612V307Z"/>
+<path fill="url(#v3)" d="M612 281V307H624Z"/><path fill="url(#h3)" d="M612 281H624V307Z"/>
+<path fill="url(#v3)" d="M624 281V290H640Z"/><path fill="url(#h3)" d="M624 281H640V290Z"/>
+<path fill="url(#v3)" d="M624 290V296H636Z"/><path fill="url(#h3)" d="M624 290H636V296Z"/>
+<path fill="url(#v3)" d="M636 290V296H640Z"/><path fill="url(#h3)" d="M636 290H640V296Z"/>
+<path fill="url(#v3)" d="M624 296V302H629Z"/><path fill="url(#h3)" d="M624 296H629V302Z"/>
+<path fill="url(#v3)" d="M624 302V307H629Z"/><path fill="url(#h3)" d="M624 302H629V307Z"/>
+<path fill="url(#v3)" d="M629 296V302H633Z"/><path fill="url(#h3)" d="M629 296H633V302Z"/>
+<path fill="url(#v3)" d="M629 302V307H633Z"/><path fill="url(#h3)" d="M629 302H633V307Z"/>
+<path fill="url(#v3)" d="M633 296V300H636Z"/><path fill="url(#h3)" d="M633 296H636V300Z"/>
+<path fill="url(#v3)" d="M636 296V300H640Z"/><path fill="url(#h3)" d="M636 296H640V300Z"/>
+<path fill="url(#v3)" d="M633 300V304H636Z"/><path fill="url(#h3)" d="M633 300H636V304Z"/>
+<path fill="url(#v3)" d="M633 304V307H636Z"/><path fill="url(#h3)" d="M633 304H636V307Z"/>
+<path fill="url(#v3)" d="M636 300V303H640Z"/><path fill="url(#h3)" d="M636 300H640V303Z"/>
+<path fill="url(#v3)" d="M636 303V306H640Z"/><path fill="url(#h3)" d="M636 303H640V306Z"/>
+<rect x="636" y="306" width="4" height="1" fill="#6c7086"/>
+<path fill="url(#v1)" d="M569 307V368H605Z"/><path fill="url(#h1)" d="M569 307H605V368Z"/>
+<path fill="url(#v0)" d="M605 307V336H640Z"/><path fill="url(#h0)" d="M605 307H640V336Z"/>
+<path fill="url(#v0)" d="M605 336V367H623Z"/><path fill="url(#h0)" d="M605 336H623V367Z"/>
+<path fill="url(#v0)" d="M623 336V364H640Z"/><path fill="url(#h0)" d="M623 336H640V364Z"/>
+<path fill="url(#v2)" d="M623 364V367H634Z"/><path fill="url(#h2)" d="M623 364H634V367Z"/>
+<rect x="634" y="364" width="2" height="2" fill="#94e2d5"/>
+<rect x="634" y="366" width="2" height="1" fill="#94e2d5"/>
+<rect x="636" y="364" width="3" height="2" fill="#94e2d5"/>
+<rect x="636" y="366" width="3" height="1" fill="#94e2d5"/>
+<rect x="639" y="364" width="1" height="3" fill="#94e2d5"/>
+<rect x="605" y="367" width="17" height="1" fill="#6c7086"/>
+<rect x="622" y="367" width="6" height="1" fill="#6c7086"/>
+<rect x="628" y="367" width="6" height="1" fill="#6c7086"/>
+<rect x="634" y="367" width="6" height="1" fill="#6c7086"/>
+</g>
+<clipPath id="c0"><rect x="0" y="0" width="243" height="205"/></clipPath><g clip-path="url(#c0)"><text x="6" y="11" fill="#11111b">Containers/</text><text x="6" y="24" fill="#11111b">53M</text></g>
+<clipPath id="c1"><rect x="0" y="205" width="83" height="163"/></clipPath><g clip-path="url(#c1)"><text x="6" y="216" fill="#11111b">Developer/</text><text x="6" y="229" fill="#11111b">14M</text></g>
+<clipPath id="c2"><rect x="83" y="205" width="94" height="99"/></clipPath><g clip-path="url(#c2)"><text x="89" y="216" fill="#11111b">Group Conta…</text><text x="89" y="229" fill="#11111b">10M</text></g>
+<clipPath id="c3"><rect x="177" y="205" width="66" height="99"/></clipPath><g clip-path="url(#c3)"><text x="183" y="216" fill="#11111b">Caches/</text><text x="183" y="229" fill="#11111b">7.0M</text></g>
+<clipPath id="c4"><rect x="83" y="304" width="89" height="64"/></clipPath><g clip-path="url(#c4)"><text x="89" y="315" fill="#11111b">Applicatio…</text><text x="89" y="328" fill="#11111b">6.2M</text></g>
+<clipPath id="c5"><rect x="172" y="304" width="70" height="64"/></clipPath><g clip-path="url(#c5)"><text x="178" y="315" fill="#11111b">Mail/</text><text x="178" y="328" fill="#11111b">4.8M</text></g>
+<clipPath id="c6"><rect x="243" y="0" width="234" height="151"/></clipPath><g clip-path="url(#c6)"><text x="249" y="11" fill="#11111b">target/</text><text x="249" y="24" fill="#11111b">38M</text></g>
+<clipPath id="c7"><rect x="243" y="151" width="232" height="98"/></clipPath><g clip-path="url(#c7)"><text x="249" y="162" fill="#11111b">node_modules/</text><text x="249" y="175" fill="#11111b">24M</text></g>
+<clipPath id="c8"><rect x="243" y="249" width="101" height="64"/></clipPath><g clip-path="url(#c8)"><text x="249" y="260" fill="#11111b">holiday-2035…</text><text x="249" y="273" fill="#11111b">7.0M</text></g>
+<clipPath id="c9"><rect x="243" y="313" width="101" height="55"/></clipPath><g clip-path="url(#c9)"><text x="249" y="324" fill="#11111b">wedding.mp4</text><text x="249" y="337" fill="#11111b">6.0M</text></g>
+<clipPath id="c10"><rect x="344" y="249" width="70" height="66"/></clipPath><g clip-path="url(#c10)"><text x="350" y="260" fill="#11111b">screen-…</text><text x="350" y="273" fill="#11111b">5.0M</text></g>
+<clipPath id="c11"><rect x="344" y="315" width="70" height="53"/></clipPath><g clip-path="url(#c11)"><text x="350" y="326" fill="#11111b">clips/</text><text x="350" y="339" fill="#11111b">4.0M</text></g>
+<clipPath id="c12"><rect x="414" y="249" width="63" height="59"/></clipPath><g clip-path="url(#c12)"><text x="420" y="260" fill="#11111b">lectur…</text><text x="420" y="273" fill="#11111b">4.0M</text></g>
+<clipPath id="c13"><rect x="414" y="308" width="62" height="60"/></clipPath><g clip-path="url(#c13)"><text x="420" y="319" fill="#11111b">lectur…</text><text x="420" y="332" fill="#11111b">4.0M</text></g>
+<clipPath id="c14"><rect x="477" y="0" width="85" height="76"/></clipPath><g clip-path="url(#c14)"><text x="483" y="11" fill="#11111b">update/</text><text x="483" y="24" fill="#11111b">6.9M</text></g>
+<clipPath id="c15"><rect x="477" y="76" width="68" height="52"/></clipPath><g clip-path="url(#c15)"><text x="483" y="87" fill="#11111b">frame/</text><text x="483" y="100" fill="#11111b">3.8M</text></g>
+<clipPath id="c16"><rect x="562" y="0" width="78" height="70"/></clipPath><g clip-path="url(#c16)"><text x="568" y="11" fill="#11111b">window/</text><text x="568" y="24" fill="#11111b">5.8M</text></g>
+<clipPath id="c17"><rect x="562" y="70" width="73" height="58"/></clipPath><g clip-path="url(#c17)"><text x="568" y="81" fill="#11111b">core/</text><text x="568" y="94" fill="#11111b">4.5M</text></g>
+<clipPath id="c18"><rect x="477" y="128" width="47" height="82"/></clipPath><g clip-path="url(#c18)"><text x="483" y="139" fill="#11111b">neb…</text></g>
+<clipPath id="c19"><rect x="524" y="128" width="42" height="82"/></clipPath><g clip-path="url(#c19)"><text x="530" y="139" fill="#11111b">led…</text></g>
+<clipPath id="c20"><rect x="477" y="210" width="60" height="25"/></clipPath><g clip-path="url(#c20)"><text x="483" y="221" fill="#11111b">union/</text></g>
+<clipPath id="c21"><rect x="566" y="128" width="74" height="107"/></clipPath><g clip-path="url(#c21)"><text x="572" y="139" fill="#11111b">share/</text><text x="572" y="152" fill="#11111b">8.5M</text></g>
+<clipPath id="c22"><rect x="477" y="235" width="42" height="67"/></clipPath><g clip-path="url(#c22)"><text x="483" y="246" fill="#11111b">Xco…</text></g>
+<clipPath id="c23"><rect x="519" y="235" width="50" height="28"/></clipPath><g clip-path="url(#c23)"><text x="525" y="246" fill="#11111b">ubun…</text><text x="525" y="259" fill="#11111b">1.5M</text></g>
+<clipPath id="c24"><rect x="519" y="263" width="34" height="21"/></clipPath><g clip-path="url(#c24)"><text x="525" y="274" fill="#11111b">o…</text></g>
+<clipPath id="c25"><rect x="519" y="284" width="34" height="18"/></clipPath><g clip-path="url(#c25)"><text x="525" y="295" fill="#11111b">p…</text></g>
+<clipPath id="c26"><rect x="477" y="302" width="50" height="66"/></clipPath><g clip-path="url(#c26)"><text x="483" y="313" fill="#11111b">rust…</text><text x="483" y="326" fill="#11111b">3.5M</text></g>
+<clipPath id="c27"><rect x="527" y="302" width="42" height="26"/></clipPath><g clip-path="url(#c27)"><text x="533" y="313" fill="#11111b">npm…</text></g>
+<clipPath id="c28"><rect x="569" y="235" width="71" height="46"/></clipPath><g clip-path="url(#c28)"><text x="575" y="246" fill="#11111b">media/</text><text x="575" y="259" fill="#11111b">3.5M</text></g>
+<clipPath id="c29"><rect x="569" y="281" width="43" height="26"/></clipPath><g clip-path="url(#c29)"><text x="575" y="292" fill="#11111b">upd…</text></g>
+<clipPath id="c30"><rect x="569" y="307" width="36" height="61"/></clipPath><g clip-path="url(#c30)"><text x="575" y="318" fill="#11111b">Ex…</text></g>
+<clipPath id="c31"><rect x="605" y="307" width="35" height="29"/></clipPath><g clip-path="url(#c31)"><text x="611" y="318" fill="#11111b">v…</text></g>
+<rect x="6" y="375" width="7" height="7" fill="#94e2d5"/><text x="16" y="382" fill="#cdd6f4">data 22%</text>
+<rect x="78" y="375" width="7" height="7" fill="#f5c2e7"/><text x="88" y="382" fill="#cdd6f4">media 20%</text>
+<rect x="156" y="375" width="7" height="7" fill="#cba6f7"/><text x="166" y="382" fill="#cdd6f4">binaries 18%</text>
+<rect x="252" y="375" width="7" height="7" fill="#89b4fa"/><text x="262" y="382" fill="#cdd6f4">code 10%</text>
+<rect x="324" y="375" width="7" height="7" fill="#a6e3a1"/><text x="334" y="382" fill="#cdd6f4">docs 6%</text>
+<rect x="390" y="375" width="7" height="7" fill="#fab387"/><text x="400" y="382" fill="#cdd6f4">archives 3%</text>
+<rect x="480" y="375" width="7" height="7" fill="#6c7086"/><text x="490" y="382" fill="#cdd6f4">other 10%</text>
+<text x="6" y="395" fill="#cdd6f4">252.3 MiB allocated · 43,137 files · 8,129 dirs · SAVED SCAN</text>
+<defs>
+<linearGradient id="v0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#eafffb"/><stop offset="0.25" stop-color="#cafff6"/><stop offset="0.375" stop-color="#aafff1"/><stop offset="0.5" stop-color="#94e2d5"/><stop offset="0.625" stop-color="#82c6ba"/><stop offset="0.75" stop-color="#6faaa0"/><stop offset="0.875" stop-color="#5d8d85"/><stop offset="1" stop-color="#4a716b"/></linearGradient><linearGradient id="h0"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#eafffb"/><stop offset="0.25" stop-color="#cafff6"/><stop offset="0.375" stop-color="#aafff1"/><stop offset="0.5" stop-color="#94e2d5"/><stop offset="0.625" stop-color="#82c6ba"/><stop offset="0.75" stop-color="#6faaa0"/><stop offset="0.875" stop-color="#5d8d85"/><stop offset="1" stop-color="#4a716b"/></linearGradient>
+<linearGradient id="v1" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#f0e3ff"/><stop offset="0.375" stop-color="#dfc3ff"/><stop offset="0.5" stop-color="#cba6f7"/><stop offset="0.625" stop-color="#b291d8"/><stop offset="0.75" stop-color="#987db9"/><stop offset="0.875" stop-color="#7f689a"/><stop offset="1" stop-color="#65537c"/></linearGradient><linearGradient id="h1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#f0e3ff"/><stop offset="0.375" stop-color="#dfc3ff"/><stop offset="0.5" stop-color="#cba6f7"/><stop offset="0.625" stop-color="#b291d8"/><stop offset="0.75" stop-color="#987db9"/><stop offset="0.875" stop-color="#7f689a"/><stop offset="1" stop-color="#65537c"/></linearGradient>
+<linearGradient id="v2" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#e6f0ff"/><stop offset="0.25" stop-color="#c6dcff"/><stop offset="0.375" stop-color="#a7c8ff"/><stop offset="0.5" stop-color="#89b4fa"/><stop offset="0.625" stop-color="#789edb"/><stop offset="0.75" stop-color="#6787bb"/><stop offset="0.875" stop-color="#56719c"/><stop offset="1" stop-color="#455a7d"/></linearGradient><linearGradient id="h2"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#e6f0ff"/><stop offset="0.25" stop-color="#c6dcff"/><stop offset="0.375" stop-color="#a7c8ff"/><stop offset="0.5" stop-color="#89b4fa"/><stop offset="0.625" stop-color="#789edb"/><stop offset="0.75" stop-color="#6787bb"/><stop offset="0.875" stop-color="#56719c"/><stop offset="1" stop-color="#455a7d"/></linearGradient>
+<linearGradient id="v3" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#ffffff"/><stop offset="0.375" stop-color="#ffe0f6"/><stop offset="0.5" stop-color="#f5c2e7"/><stop offset="0.625" stop-color="#d6aaca"/><stop offset="0.75" stop-color="#b892ad"/><stop offset="0.875" stop-color="#997990"/><stop offset="1" stop-color="#7b6174"/></linearGradient><linearGradient id="h3"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#ffffff"/><stop offset="0.375" stop-color="#ffe0f6"/><stop offset="0.5" stop-color="#f5c2e7"/><stop offset="0.625" stop-color="#d6aaca"/><stop offset="0.75" stop-color="#b892ad"/><stop offset="0.875" stop-color="#997990"/><stop offset="1" stop-color="#7b6174"/></linearGradient>
+<linearGradient id="v4" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#f9fff8"/><stop offset="0.25" stop-color="#dcffd9"/><stop offset="0.375" stop-color="#beffb9"/><stop offset="0.5" stop-color="#a6e3a1"/><stop offset="0.625" stop-color="#91c78d"/><stop offset="0.75" stop-color="#7daa79"/><stop offset="0.875" stop-color="#688e65"/><stop offset="1" stop-color="#537251"/></linearGradient><linearGradient id="h4"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#f9fff8"/><stop offset="0.25" stop-color="#dcffd9"/><stop offset="0.375" stop-color="#beffb9"/><stop offset="0.5" stop-color="#a6e3a1"/><stop offset="0.625" stop-color="#91c78d"/><stop offset="0.75" stop-color="#7daa79"/><stop offset="0.875" stop-color="#688e65"/><stop offset="1" stop-color="#537251"/></linearGradient>
+<linearGradient id="v5" x2="0" y2="1"><stop offset="0" stop-color="#d3daff"/><stop offset="0.125" stop-color="#b9c0e6"/><stop offset="0.25" stop-color="#9fa5c6"/><stop offset="0.375" stop-color="#868ba6"/><stop offset="0.5" stop-color="#6c7086"/><stop offset="0.625" stop-color="#5f6275"/><stop offset="0.75" stop-color="#515465"/><stop offset="0.875" stop-color="#444654"/><stop offset="1" stop-color="#363843"/></linearGradient><linearGradient id="h5"><stop offset="0" stop-color="#d3daff"/><stop offset="0.125" stop-color="#b9c0e6"/><stop offset="0.25" stop-color="#9fa5c6"/><stop offset="0.375" stop-color="#868ba6"/><stop offset="0.5" stop-color="#6c7086"/><stop offset="0.625" stop-color="#5f6275"/><stop offset="0.75" stop-color="#515465"/><stop offset="0.875" stop-color="#444654"/><stop offset="1" stop-color="#363843"/></linearGradient>
+<linearGradient id="v6" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffefe4"/><stop offset="0.25" stop-color="#ffdbc4"/><stop offset="0.375" stop-color="#ffc7a5"/><stop offset="0.5" stop-color="#fab387"/><stop offset="0.625" stop-color="#db9d76"/><stop offset="0.75" stop-color="#bb8665"/><stop offset="0.875" stop-color="#9c7054"/><stop offset="1" stop-color="#7d5a44"/></linearGradient><linearGradient id="h6"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffefe4"/><stop offset="0.25" stop-color="#ffdbc4"/><stop offset="0.375" stop-color="#ffc7a5"/><stop offset="0.5" stop-color="#fab387"/><stop offset="0.625" stop-color="#db9d76"/><stop offset="0.75" stop-color="#bb8665"/><stop offset="0.875" stop-color="#9c7054"/><stop offset="1" stop-color="#7d5a44"/></linearGradient>
+</defs>
+</svg>

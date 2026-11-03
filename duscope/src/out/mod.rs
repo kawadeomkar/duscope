@@ -82,12 +82,13 @@ impl From<FormatArg> for Format {
             FormatArg::Plain => Format::Plain,
             FormatArg::Json => Format::Json,
             FormatArg::Ndjson => Format::Ndjson,
-            // export's own: a machine format, its payload alone on stdout.
+            // One verb's own: a machine format, its payload alone on stdout.
             FormatArg::Ncdu
             | FormatArg::Gpscan
             | FormatArg::Qdirstat
             | FormatArg::Csv
-            | FormatArg::Gdu => Format::Plain,
+            | FormatArg::Gdu
+            | FormatArg::Svg => Format::Plain,
         }
     }
 }

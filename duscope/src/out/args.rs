@@ -100,20 +100,22 @@ pub enum FormatArg {
     Csv,
     /// gdu's JSON (import)
     Gdu,
+    /// An SVG picture of the treemap (render)
+    Svg,
 }
 
 impl FormatArg {
-    /// Whether it is another tool's format, which only `export` writes
-    /// and `import` reads.
-    pub fn interchange(self) -> bool {
-        matches!(
-            self,
-            FormatArg::Ncdu
-                | FormatArg::Gpscan
-                | FormatArg::Qdirstat
-                | FormatArg::Csv
-                | FormatArg::Gdu
-        )
+    /// The verb a format belongs to, for a format only one verb takes;
+    /// `None` for the output formats every verb takes.
+    #[must_use]
+    pub fn verbs(self) -> Option<&'static str> {
+        match self {
+            FormatArg::Ncdu | FormatArg::Gpscan => Some("export and import"),
+            FormatArg::Qdirstat | FormatArg::Csv => Some("export"),
+            FormatArg::Gdu => Some("import"),
+            FormatArg::Svg => Some("render"),
+            _ => None,
+        }
     }
 }
 

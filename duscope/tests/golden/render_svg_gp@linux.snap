@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400" viewBox="0 0 640 400" font-family="Inter, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="10">
+<title>ROOT</title>
+<rect width="640" height="400" fill="#1e1e2e"/>
+<g shape-rendering="crispEdges">
+<path fill="url(#v0)" d="M397 0V205H640Z"/><path fill="url(#h0)" d="M397 0H640V205Z"/>
+<path fill="url(#v0)" d="M397 205V297H543Z"/><path fill="url(#h0)" d="M397 205H543V297Z"/>
+<path fill="url(#v0)" d="M543 205V301H640Z"/><path fill="url(#h0)" d="M543 205H640V301Z"/>
+<path fill="url(#v0)" d="M543 301V368H640Z"/><path fill="url(#h0)" d="M543 301H640V368Z"/>
+<path fill="url(#v0)" d="M397 297V368H479Z"/><path fill="url(#h0)" d="M397 297H479V368Z"/>
+<path fill="url(#v0)" d="M479 297V367H543Z"/><path fill="url(#h0)" d="M479 297H543V367Z"/>
+<rect x="479" y="367" width="64" height="1" fill="#6c7086"/>
+<rect x="239" y="367" width="113" height="1" fill="#f5c2e7"/>
+<rect x="352" y="367" width="37" height="1" fill="#f5c2e7"/>
+<rect x="393" y="367" width="4" height="1" fill="#f5c2e7"/>
+<rect x="389" y="367" width="4" height="1" fill="#f5c2e7"/>
+<path fill="url(#v1)" d="M239 0V223H397Z"/><path fill="url(#h1)" d="M239 0H397V223Z"/>
+<path fill="url(#v1)" d="M239 223V367H397Z"/><path fill="url(#h1)" d="M239 223H397V367Z"/>
+<path fill="url(#v2)" d="M70 29V136H131Z"/><path fill="url(#h2)" d="M70 29H131V136Z"/>
+<path fill="url(#v2)" d="M0 136V214H71Z"/><path fill="url(#h2)" d="M0 136H71V214Z"/>
+<path fill="url(#v2)" d="M71 136V214H131Z"/><path fill="url(#h2)" d="M71 136H131V214Z"/>
+<path fill="url(#v2)" d="M0 29V83H69Z"/><path fill="url(#h2)" d="M0 29H69V83Z"/>
+<path fill="url(#v2)" d="M0 83V136H70Z"/><path fill="url(#h2)" d="M0 83H70V136Z"/>
+<rect x="69" y="29" width="1" height="54" fill="#6c7086"/>
+<path fill="url(#v2)" d="M0 0V29H131Z"/><path fill="url(#h2)" d="M0 0H131V29Z"/>
+<path fill="url(#v3)" d="M236 114V203H239Z"/><path fill="url(#h3)" d="M236 114H239V203Z"/>
+<path fill="url(#v3)" d="M236 206V210H239Z"/><path fill="url(#h3)" d="M236 206H239V210Z"/>
+<path fill="url(#v3)" d="M236 203V206H239Z"/><path fill="url(#h3)" d="M236 203H239V206Z"/>
+<path fill="url(#v3)" d="M236 210V213H239Z"/><path fill="url(#h3)" d="M236 210H239V213Z"/>
+<rect x="236" y="213" width="3" height="1" fill="#94e2d5"/>
+<path fill="url(#v3)" d="M131 114V214H195Z"/><path fill="url(#h3)" d="M131 114H195V214Z"/>
+<path fill="url(#v3)" d="M195 114V200H236Z"/><path fill="url(#h3)" d="M195 114H236V200Z"/>
+<path fill="url(#v3)" d="M195 200V214H218Z"/><path fill="url(#h3)" d="M195 200H218V214Z"/>
+<path fill="url(#v3)" d="M218 200V214H228Z"/><path fill="url(#h3)" d="M218 200H228V214Z"/>
+<path fill="url(#v3)" d="M228 209V214H236Z"/><path fill="url(#h3)" d="M228 209H236V214Z"/>
+<path fill="url(#v3)" d="M228 200V205H236Z"/><path fill="url(#h3)" d="M228 200H236V205Z"/>
+<path fill="url(#v3)" d="M228 205V209H236Z"/><path fill="url(#h3)" d="M228 205H236V209Z"/>
+<path fill="url(#v4)" d="M122 278V293H126Z"/><path fill="url(#h4)" d="M122 278H126V293Z"/>
+<path fill="url(#v4)" d="M122 214V228H126Z"/><path fill="url(#h4)" d="M122 214H126V228Z"/>
+<path fill="url(#v4)" d="M122 251V262H126Z"/><path fill="url(#h4)" d="M122 251H126V262Z"/>
+<path fill="url(#v4)" d="M122 240V251H126Z"/><path fill="url(#h4)" d="M122 240H126V251Z"/>
+<path fill="url(#v4)" d="M122 262V271H126Z"/><path fill="url(#h4)" d="M122 262H126V271Z"/>
+<path fill="url(#v4)" d="M122 228V234H126Z"/><path fill="url(#h4)" d="M122 228H126V234Z"/>
+<path fill="url(#v4)" d="M122 271V277H126Z"/><path fill="url(#h4)" d="M122 271H126V277Z"/>
+<path fill="url(#v4)" d="M122 234V240H126Z"/><path fill="url(#h4)" d="M122 234H126V240Z"/>
+<rect x="122" y="277" width="4" height="1" fill="#cba6f7"/>
+<path fill="url(#v4)" d="M0 214V293H69Z"/><path fill="url(#h4)" d="M0 214H69V293Z"/>
+<path fill="url(#v4)" d="M69 214V293H122Z"/><path fill="url(#h4)" d="M69 214H122V293Z"/>
+<path fill="url(#v5)" d="M74 293V368H126Z"/><path fill="url(#h5)" d="M74 293H126V368Z"/>
+<path fill="url(#v5)" d="M0 293V339H74Z"/><path fill="url(#h5)" d="M0 293H74V339Z"/>
+<path fill="url(#v5)" d="M0 339V368H50Z"/><path fill="url(#h5)" d="M0 339H50V368Z"/>
+<path fill="url(#v5)" d="M63 339V356H74Z"/><path fill="url(#h5)" d="M63 339H74V356Z"/>
+<path fill="url(#v5)" d="M50 356V368H64Z"/><path fill="url(#h5)" d="M50 356H64V368Z"/>
+<path fill="url(#v5)" d="M64 356V368H74Z"/><path fill="url(#h5)" d="M64 356H74V368Z"/>
+<path fill="url(#v5)" d="M50 339V348H63Z"/><path fill="url(#h5)" d="M50 339H63V348Z"/>
+<path fill="url(#v5)" d="M50 348V356H63Z"/><path fill="url(#h5)" d="M50 348H63V356Z"/>
+<path fill="url(#v6)" d="M126 298V368H239Z"/><path fill="url(#h6)" d="M126 298H239V368Z"/>
+<path fill="url(#v7)" d="M190 0V58H239Z"/><path fill="url(#h7)" d="M190 0H239V58Z"/>
+<path fill="url(#v7)" d="M166 0V58H190Z"/><path fill="url(#h7)" d="M166 0H190V58Z"/>
+<path fill="url(#v7)" d="M131 37V58H166Z"/><path fill="url(#h7)" d="M131 37H166V58Z"/>
+<path fill="url(#v7)" d="M131 19V37H166Z"/><path fill="url(#h7)" d="M131 19H166V37Z"/>
+<path fill="url(#v7)" d="M131 0V19H157Z"/><path fill="url(#h7)" d="M131 0H157V19Z"/>
+<path fill="url(#v7)" d="M157 0V18H166Z"/><path fill="url(#h7)" d="M157 0H166V18Z"/>
+<rect x="157" y="18" width="9" height="1" fill="#6c7086"/>
+<path fill="url(#v8)" d="M131 58V114H190Z"/><path fill="url(#h8)" d="M131 58H190V114Z"/>
+<path fill="url(#v8)" d="M190 92V114H239Z"/><path fill="url(#h8)" d="M190 92H239V114Z"/>
+<path fill="url(#v8)" d="M218 58V76H239Z"/><path fill="url(#h8)" d="M218 58H239V76Z"/>
+<path fill="url(#v8)" d="M190 58V78H204Z"/><path fill="url(#h8)" d="M190 58H204V78Z"/>
+<path fill="url(#v8)" d="M218 76V92H229Z"/><path fill="url(#h8)" d="M218 76H229V92Z"/>
+<path fill="url(#v8)" d="M229 76V92H239Z"/><path fill="url(#h8)" d="M229 76H239V92Z"/>
+<path fill="url(#v8)" d="M204 58V69H218Z"/><path fill="url(#h8)" d="M204 58H218V69Z"/>
+<path fill="url(#v8)" d="M204 69V78H218Z"/><path fill="url(#h8)" d="M204 69H218V78Z"/>
+<path fill="url(#v8)" d="M198 78V92H206Z"/><path fill="url(#h8)" d="M198 78H206V92Z"/>
+<path fill="url(#v8)" d="M206 78V86H218Z"/><path fill="url(#h8)" d="M206 78H218V86Z"/>
+<path fill="url(#v8)" d="M190 78V86H198Z"/><path fill="url(#h8)" d="M190 78H198V86Z"/>
+<path fill="url(#v8)" d="M206 86V92H212Z"/><path fill="url(#h8)" d="M206 86H212V92Z"/>
+<path fill="url(#v8)" d="M212 86V92H218Z"/><path fill="url(#h8)" d="M212 86H218V92Z"/>
+<path fill="url(#v8)" d="M190 86V92H195Z"/><path fill="url(#h8)" d="M190 86H195V92Z"/>
+<path fill="url(#v8)" d="M195 86V92H198Z"/><path fill="url(#h8)" d="M195 86H198V92Z"/>
+<path fill="url(#v9)" d="M144 295V298H153Z"/><path fill="url(#h9)" d="M144 295H153V298Z"/>
+<path fill="url(#v9)" d="M135 295V298H144Z"/><path fill="url(#h9)" d="M135 295H144V298Z"/>
+<path fill="url(#v9)" d="M175 295V298H182Z"/><path fill="url(#h9)" d="M175 295H182V298Z"/>
+<path fill="url(#v9)" d="M168 295V298H175Z"/><path fill="url(#h9)" d="M168 295H175V298Z"/>
+<path fill="url(#v9)" d="M182 295V298H187Z"/><path fill="url(#h9)" d="M182 295H187V298Z"/>
+<path fill="url(#v9)" d="M153 295V298H157Z"/><path fill="url(#h9)" d="M153 295H157V298Z"/>
+<path fill="url(#v9)" d="M130 295V298H135Z"/><path fill="url(#h9)" d="M130 295H135V298Z"/>
+<path fill="url(#v9)" d="M126 295V298H130Z"/><path fill="url(#h9)" d="M126 295H130V298Z"/>
+<path fill="url(#v9)" d="M157 295V298H160Z"/><path fill="url(#h9)" d="M157 295H160V298Z"/>
+<path fill="url(#v9)" d="M164 295V298H168Z"/><path fill="url(#h9)" d="M164 295H168V298Z"/>
+<path fill="url(#v9)" d="M161 295V298H164Z"/><path fill="url(#h9)" d="M161 295H164V298Z"/>
+<rect x="160" y="295" width="1" height="3" fill="#6c7086"/>
+<path fill="url(#v9)" d="M126 214V268H187Z"/><path fill="url(#h9)" d="M126 214H187V268Z"/>
+<path fill="url(#v9)" d="M126 268V295H168Z"/><path fill="url(#h9)" d="M126 268H168V295Z"/>
+<path fill="url(#v9)" d="M168 268V284H187Z"/><path fill="url(#h9)" d="M168 268H187V284Z"/>
+<path fill="url(#v9)" d="M168 284V295H180Z"/><path fill="url(#h9)" d="M168 284H180V295Z"/>
+<path fill="url(#v9)" d="M180 284V295H187Z"/><path fill="url(#h9)" d="M180 284H187V295Z"/>
+<path fill="url(#v0)" d="M187 214V256H239Z"/><path fill="url(#h0)" d="M187 214H239V256Z"/>
+<path fill="url(#v1)" d="M213 256V298H238Z"/><path fill="url(#h1)" d="M213 256H238V298Z"/>
+<path fill="url(#v1)" d="M187 256V278H213Z"/><path fill="url(#h1)" d="M187 256H213V278Z"/>
+<path fill="url(#v1)" d="M187 278V298H211Z"/><path fill="url(#h1)" d="M187 278H211V298Z"/>
+<rect x="211" y="278" width="2" height="20" fill="#f5c2e7"/>
+<rect x="238" y="256" width="1" height="42" fill="#6c7086"/>
+</g>
+<clipPath id="c0"><rect x="397" y="0" width="243" height="205"/></clipPath><g clip-path="url(#c0)"><text x="403" y="11" fill="#11111b">Containers/</text><text x="403" y="24" fill="#11111b">53M</text></g>
+<clipPath id="c1"><rect x="397" y="205" width="146" height="92"/></clipPath><g clip-path="url(#c1)"><text x="403" y="216" fill="#11111b">Developer/</text><text x="403" y="229" fill="#11111b">14M</text></g>
+<clipPath id="c2"><rect x="543" y="205" width="97" height="96"/></clipPath><g clip-path="url(#c2)"><text x="549" y="216" fill="#11111b">Group Contai…</text><text x="549" y="229" fill="#11111b">10M</text></g>
+<clipPath id="c3"><rect x="543" y="301" width="97" height="67"/></clipPath><g clip-path="url(#c3)"><text x="549" y="312" fill="#11111b">Caches/</text><text x="549" y="325" fill="#11111b">7.0M</text></g>
+<clipPath id="c4"><rect x="397" y="297" width="82" height="71"/></clipPath><g clip-path="url(#c4)"><text x="403" y="308" fill="#11111b">Applicati…</text><text x="403" y="321" fill="#11111b">6.2M</text></g>
+<clipPath id="c5"><rect x="479" y="297" width="64" height="70"/></clipPath><g clip-path="url(#c5)"><text x="485" y="308" fill="#11111b">Mail/</text><text x="485" y="321" fill="#11111b">4.8M</text></g>
+<clipPath id="c6"><rect x="239" y="0" width="158" height="223"/></clipPath><g clip-path="url(#c6)"><text x="245" y="11" fill="#11111b">target/</text><text x="245" y="24" fill="#11111b">38M</text></g>
+<clipPath id="c7"><rect x="239" y="223" width="158" height="144"/></clipPath><g clip-path="url(#c7)"><text x="245" y="234" fill="#11111b">node_modules/</text><text x="245" y="247" fill="#11111b">24M</text></g>
+<clipPath id="c8"><rect x="70" y="29" width="61" height="107"/></clipPath><g clip-path="url(#c8)"><text x="76" y="40" fill="#11111b">holida…</text><text x="76" y="53" fill="#11111b">7.0M</text></g>
+<clipPath id="c9"><rect x="0" y="136" width="71" height="78"/></clipPath><g clip-path="url(#c9)"><text x="6" y="147" fill="#11111b">wedding…</text><text x="6" y="160" fill="#11111b">6.0M</text></g>
+<clipPath id="c10"><rect x="71" y="136" width="60" height="78"/></clipPath><g clip-path="url(#c10)"><text x="77" y="147" fill="#11111b">screen…</text><text x="77" y="160" fill="#11111b">5.0M</text></g>
+<clipPath id="c11"><rect x="0" y="29" width="69" height="54"/></clipPath><g clip-path="url(#c11)"><text x="6" y="40" fill="#11111b">lecture…</text><text x="6" y="53" fill="#11111b">4.0M</text></g>
+<clipPath id="c12"><rect x="0" y="83" width="70" height="53"/></clipPath><g clip-path="url(#c12)"><text x="6" y="94" fill="#11111b">lecture…</text><text x="6" y="107" fill="#11111b">4.0M</text></g>
+<clipPath id="c13"><rect x="0" y="0" width="131" height="29"/></clipPath><g clip-path="url(#c13)"><text x="6" y="11" fill="#11111b">clips/</text><text x="6" y="24" fill="#11111b">4.0M</text></g>
+<clipPath id="c14"><rect x="131" y="114" width="64" height="100"/></clipPath><g clip-path="url(#c14)"><text x="137" y="125" fill="#11111b">update/</text><text x="137" y="138" fill="#11111b">6.9M</text></g>
+<clipPath id="c15"><rect x="195" y="114" width="41" height="86"/></clipPath><g clip-path="url(#c15)"><text x="201" y="125" fill="#11111b">fr…</text></g>
+<clipPath id="c16"><rect x="0" y="214" width="69" height="79"/></clipPath><g clip-path="url(#c16)"><text x="6" y="225" fill="#11111b">window/</text><text x="6" y="238" fill="#11111b">5.8M</text></g>
+<clipPath id="c17"><rect x="69" y="214" width="53" height="79"/></clipPath><g clip-path="url(#c17)"><text x="75" y="225" fill="#11111b">core/</text><text x="75" y="238" fill="#11111b">4.5M</text></g>
+<clipPath id="c18"><rect x="74" y="293" width="52" height="75"/></clipPath><g clip-path="url(#c18)"><text x="80" y="304" fill="#11111b">nebu…</text><text x="80" y="317" fill="#11111b">4.2M</text></g>
+<clipPath id="c19"><rect x="0" y="293" width="74" height="46"/></clipPath><g clip-path="url(#c19)"><text x="6" y="304" fill="#11111b">ledger/</text><text x="6" y="317" fill="#11111b">3.7M</text></g>
+<clipPath id="c20"><rect x="0" y="339" width="50" height="29"/></clipPath><g clip-path="url(#c20)"><text x="6" y="350" fill="#11111b">unio…</text><text x="6" y="363" fill="#11111b">1.6M</text></g>
+<clipPath id="c21"><rect x="126" y="298" width="113" height="70"/></clipPath><g clip-path="url(#c21)"><text x="132" y="309" fill="#11111b">share/</text><text x="132" y="322" fill="#11111b">8.5M</text></g>
+<clipPath id="c22"><rect x="190" y="0" width="49" height="58"/></clipPath><g clip-path="url(#c22)"><text x="196" y="11" fill="#11111b">Xcod…</text><text x="196" y="24" fill="#11111b">3.0M</text></g>
+<clipPath id="c23"><rect x="131" y="37" width="35" height="21"/></clipPath><g clip-path="url(#c23)"><text x="137" y="48" fill="#11111b">o…</text></g>
+<clipPath id="c24"><rect x="131" y="19" width="35" height="18"/></clipPath><g clip-path="url(#c24)"><text x="137" y="30" fill="#11111b">p…</text></g>
+<clipPath id="c25"><rect x="131" y="58" width="59" height="56"/></clipPath><g clip-path="url(#c25)"><text x="137" y="69" fill="#11111b">rust-…</text><text x="137" y="82" fill="#11111b">3.5M</text></g>
+<clipPath id="c26"><rect x="190" y="92" width="49" height="22"/></clipPath><g clip-path="url(#c26)"><text x="196" y="103" fill="#11111b">npm-…</text></g>
+<clipPath id="c27"><rect x="126" y="214" width="61" height="54"/></clipPath><g clip-path="url(#c27)"><text x="132" y="225" fill="#11111b">media/</text><text x="132" y="238" fill="#11111b">3.5M</text></g>
+<clipPath id="c28"><rect x="126" y="268" width="42" height="27"/></clipPath><g clip-path="url(#c28)"><text x="132" y="279" fill="#11111b">upd…</text></g>
+<clipPath id="c29"><rect x="187" y="214" width="52" height="42"/></clipPath><g clip-path="url(#c29)"><text x="193" y="225" fill="#11111b">Exam…</text><text x="193" y="238" fill="#11111b">2.3M</text></g>
+<rect x="6" y="375" width="7" height="7" fill="#94e2d5"/><text x="16" y="382" fill="#cdd6f4">data 22%</text>
+<rect x="78" y="375" width="7" height="7" fill="#f5c2e7"/><text x="88" y="382" fill="#cdd6f4">media 20%</text>
+<rect x="156" y="375" width="7" height="7" fill="#cba6f7"/><text x="166" y="382" fill="#cdd6f4">binaries 18%</text>
+<rect x="252" y="375" width="7" height="7" fill="#89b4fa"/><text x="262" y="382" fill="#cdd6f4">code 10%</text>
+<rect x="324" y="375" width="7" height="7" fill="#a6e3a1"/><text x="334" y="382" fill="#cdd6f4">docs 6%</text>
+<rect x="390" y="375" width="7" height="7" fill="#fab387"/><text x="400" y="382" fill="#cdd6f4">archives 3%</text>
+<rect x="480" y="375" width="7" height="7" fill="#6c7086"/><text x="490" y="382" fill="#cdd6f4">other 10%</text>
+<text x="6" y="395" fill="#cdd6f4">252.3 MiB allocated · 43,137 files · 8,129 dirs · SAVED SCAN</text>
+<defs>
+<linearGradient id="v0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#e6f0ff"/><stop offset="0.25" stop-color="#c6dcff"/><stop offset="0.375" stop-color="#a7c8ff"/><stop offset="0.5" stop-color="#89b4fa"/><stop offset="0.625" stop-color="#789edb"/><stop offset="0.75" stop-color="#6787bb"/><stop offset="0.875" stop-color="#56719c"/><stop offset="1" stop-color="#455a7d"/></linearGradient><linearGradient id="h0"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#e6f0ff"/><stop offset="0.25" stop-color="#c6dcff"/><stop offset="0.375" stop-color="#a7c8ff"/><stop offset="0.5" stop-color="#89b4fa"/><stop offset="0.625" stop-color="#789edb"/><stop offset="0.75" stop-color="#6787bb"/><stop offset="0.875" stop-color="#56719c"/><stop offset="1" stop-color="#455a7d"/></linearGradient>
+<linearGradient id="v1" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#ffffff"/><stop offset="0.375" stop-color="#ffe0f6"/><stop offset="0.5" stop-color="#f5c2e7"/><stop offset="0.625" stop-color="#d6aaca"/><stop offset="0.75" stop-color="#b892ad"/><stop offset="0.875" stop-color="#997990"/><stop offset="1" stop-color="#7b6174"/></linearGradient><linearGradient id="h1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#ffffff"/><stop offset="0.375" stop-color="#ffe0f6"/><stop offset="0.5" stop-color="#f5c2e7"/><stop offset="0.625" stop-color="#d6aaca"/><stop offset="0.75" stop-color="#b892ad"/><stop offset="0.875" stop-color="#997990"/><stop offset="1" stop-color="#7b6174"/></linearGradient>
+<linearGradient id="v2" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffefe4"/><stop offset="0.25" stop-color="#ffdbc4"/><stop offset="0.375" stop-color="#ffc7a5"/><stop offset="0.5" stop-color="#fab387"/><stop offset="0.625" stop-color="#db9d76"/><stop offset="0.75" stop-color="#bb8665"/><stop offset="0.875" stop-color="#9c7054"/><stop offset="1" stop-color="#7d5a44"/></linearGradient><linearGradient id="h2"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffefe4"/><stop offset="0.25" stop-color="#ffdbc4"/><stop offset="0.375" stop-color="#ffc7a5"/><stop offset="0.5" stop-color="#fab387"/><stop offset="0.625" stop-color="#db9d76"/><stop offset="0.75" stop-color="#bb8665"/><stop offset="0.875" stop-color="#9c7054"/><stop offset="1" stop-color="#7d5a44"/></linearGradient>
+<linearGradient id="v3" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#eafffb"/><stop offset="0.25" stop-color="#cafff6"/><stop offset="0.375" stop-color="#aafff1"/><stop offset="0.5" stop-color="#94e2d5"/><stop offset="0.625" stop-color="#82c6ba"/><stop offset="0.75" stop-color="#6faaa0"/><stop offset="0.875" stop-color="#5d8d85"/><stop offset="1" stop-color="#4a716b"/></linearGradient><linearGradient id="h3"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#eafffb"/><stop offset="0.25" stop-color="#cafff6"/><stop offset="0.375" stop-color="#aafff1"/><stop offset="0.5" stop-color="#94e2d5"/><stop offset="0.625" stop-color="#82c6ba"/><stop offset="0.75" stop-color="#6faaa0"/><stop offset="0.875" stop-color="#5d8d85"/><stop offset="1" stop-color="#4a716b"/></linearGradient>
+<linearGradient id="v4" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#f0e3ff"/><stop offset="0.375" stop-color="#dfc3ff"/><stop offset="0.5" stop-color="#cba6f7"/><stop offset="0.625" stop-color="#b291d8"/><stop offset="0.75" stop-color="#987db9"/><stop offset="0.875" stop-color="#7f689a"/><stop offset="1" stop-color="#65537c"/></linearGradient><linearGradient id="h4"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#f0e3ff"/><stop offset="0.375" stop-color="#dfc3ff"/><stop offset="0.5" stop-color="#cba6f7"/><stop offset="0.625" stop-color="#b291d8"/><stop offset="0.75" stop-color="#987db9"/><stop offset="0.875" stop-color="#7f689a"/><stop offset="1" stop-color="#65537c"/></linearGradient>
+<linearGradient id="v5" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#f9fff8"/><stop offset="0.25" stop-color="#dcffd9"/><stop offset="0.375" stop-color="#beffb9"/><stop offset="0.5" stop-color="#a6e3a1"/><stop offset="0.625" stop-color="#91c78d"/><stop offset="0.75" stop-color="#7daa79"/><stop offset="0.875" stop-color="#688e65"/><stop offset="1" stop-color="#537251"/></linearGradient><linearGradient id="h5"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#f9fff8"/><stop offset="0.25" stop-color="#dcffd9"/><stop offset="0.375" stop-color="#beffb9"/><stop offset="0.5" stop-color="#a6e3a1"/><stop offset="0.625" stop-color="#91c78d"/><stop offset="0.75" stop-color="#7daa79"/><stop offset="0.875" stop-color="#688e65"/><stop offset="1" stop-color="#537251"/></linearGradient>
+<linearGradient id="v6" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#fff9ed"/><stop offset="0.375" stop-color="#ffefcd"/><stop offset="0.5" stop-color="#f9e2af"/><stop offset="0.625" stop-color="#dac699"/><stop offset="0.75" stop-color="#bba983"/><stop offset="0.875" stop-color="#9c8d6d"/><stop offset="1" stop-color="#7d7158"/></linearGradient><linearGradient id="h6"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#fff9ed"/><stop offset="0.375" stop-color="#ffefcd"/><stop offset="0.5" stop-color="#f9e2af"/><stop offset="0.625" stop-color="#dac699"/><stop offset="0.75" stop-color="#bba983"/><stop offset="0.875" stop-color="#9c8d6d"/><stop offset="1" stop-color="#7d7158"/></linearGradient>
+<linearGradient id="v7" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#fff9fa"/><stop offset="0.25" stop-color="#ffd9df"/><stop offset="0.375" stop-color="#ffb9c5"/><stop offset="0.5" stop-color="#eba0ac"/><stop offset="0.625" stop-color="#ce8c97"/><stop offset="0.75" stop-color="#b07881"/><stop offset="0.875" stop-color="#93646c"/><stop offset="1" stop-color="#765056"/></linearGradient><linearGradient id="h7"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#fff9fa"/><stop offset="0.25" stop-color="#ffd9df"/><stop offset="0.375" stop-color="#ffb9c5"/><stop offset="0.5" stop-color="#eba0ac"/><stop offset="0.625" stop-color="#ce8c97"/><stop offset="0.75" stop-color="#b07881"/><stop offset="0.875" stop-color="#93646c"/><stop offset="1" stop-color="#765056"/></linearGradient>
+<linearGradient id="v8" x2="0" y2="1"><stop offset="0" stop-color="#e9f8ff"/><stop offset="0.125" stop-color="#caefff"/><stop offset="0.25" stop-color="#aae5ff"/><stop offset="0.375" stop-color="#8adbff"/><stop offset="0.5" stop-color="#74c7ec"/><stop offset="0.625" stop-color="#66aecf"/><stop offset="0.75" stop-color="#5795b1"/><stop offset="0.875" stop-color="#497c94"/><stop offset="1" stop-color="#3a6376"/></linearGradient><linearGradient id="h8"><stop offset="0" stop-color="#e9f8ff"/><stop offset="0.125" stop-color="#caefff"/><stop offset="0.25" stop-color="#aae5ff"/><stop offset="0.375" stop-color="#8adbff"/><stop offset="0.5" stop-color="#74c7ec"/><stop offset="0.625" stop-color="#66aecf"/><stop offset="0.75" stop-color="#5795b1"/><stop offset="0.875" stop-color="#497c94"/><stop offset="1" stop-color="#3a6376"/></linearGradient>
+<linearGradient id="v9" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#f3f5ff"/><stop offset="0.375" stop-color="#d4d9ff"/><stop offset="0.5" stop-color="#b4befe"/><stop offset="0.625" stop-color="#9ea6de"/><stop offset="0.75" stop-color="#878fbf"/><stop offset="0.875" stop-color="#71779f"/><stop offset="1" stop-color="#5a5f7f"/></linearGradient><linearGradient id="h9"><stop offset="0" stop-color="#ffffff"/><stop offset="0.125" stop-color="#ffffff"/><stop offset="0.25" stop-color="#f3f5ff"/><stop offset="0.375" stop-color="#d4d9ff"/><stop offset="0.5" stop-color="#b4befe"/><stop offset="0.625" stop-color="#9ea6de"/><stop offset="0.75" stop-color="#878fbf"/><stop offset="0.875" stop-color="#71779f"/><stop offset="1" stop-color="#5a5f7f"/></linearGradient>
+</defs>
+</svg>

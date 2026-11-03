@@ -19,6 +19,7 @@ mod gp;
 pub mod packs;
 pub mod paint;
 mod squarify;
+pub mod svg;
 mod width;
 
 pub use errors::TreemapError;
