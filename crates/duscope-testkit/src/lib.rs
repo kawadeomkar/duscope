@@ -321,6 +321,9 @@ impl TestEnv {
         }
         fs::set_permissions(env.xdg_runtime_dir(), Permissions::from_mode(0o700))
             .unwrap_or_else(|e| panic!("duscope-testkit: chmod XDG_RUNTIME_DIR: {e}"));
+        // As duscope makes it: a looser one is read with a warning.
+        fs::set_permissions(env.index_dir(), Permissions::from_mode(0o700))
+            .unwrap_or_else(|e| panic!("duscope-testkit: chmod the index directory: {e}"));
         env
     }
 

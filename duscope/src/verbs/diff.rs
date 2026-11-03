@@ -48,8 +48,8 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         .under
         .as_deref()
         .map(|path| resolve_path(&cwd, path).real);
-    let old = open(&args.old, &dir, &cwd, under.as_deref())?;
-    let new = open(&args.new, &dir, &cwd, under.as_deref())?;
+    let old = open(&args.old, &dir, &cwd, under.as_deref(), &args.trust)?;
+    let new = open(&args.new, &dir, &cwd, under.as_deref(), &args.trust)?;
     // The entry each scan compares from: the root, or the path both hold.
     let (old_base, new_base) = match &under {
         Some(path) => {
@@ -140,7 +140,13 @@ fn row_limit(args: &DiffArgs, output: &Output) -> Result<Option<usize>, Failure>
 /// The saved scan a selector names. `under` picks `latest`; whether a
 /// named scan holds it is the comparison's to say (`incompatible_scans`),
 /// not the lookup's.
-fn open(text: &str, dir: &Path, cwd: &Path, under: Option<&Path>) -> Result<Index, Failure> {
+fn open(
+    text: &str,
+    dir: &Path,
+    cwd: &Path,
+    under: Option<&Path>,
+    trust: &[PathBuf],
+) -> Result<Index, Failure> {
     let selector = ScanSelector::parse(text).map_err(core_failure)?;
     let path = match selector {
         ScanSelector::Latest => under,
@@ -153,6 +159,7 @@ fn open(text: &str, dir: &Path, cwd: &Path, under: Option<&Path>) -> Result<Inde
         // Old scans are what diff compares: none is stale to it.
         max_age_ns: i64::MAX,
         now: clock::now(),
+        trust,
     };
     let resolved = resolve_scan(&selector, &q, scanned)
         .map_err(core_failure)?

@@ -117,12 +117,18 @@ impl Hints {
         let mut ran = ran.into_iter();
         while let Some(arg) = ran.next() {
             match arg.as_str() {
-                "--cursor" | "--scan" | "--index-dir" | "-o" | "--output" => {
+                "--cursor" | "--scan" | "--index-dir" | "--trust" | "-o" | "--output" => {
                     ran.next();
                 }
-                _ if ["--cursor=", "--scan=", "--index-dir=", "--output="]
-                    .iter()
-                    .any(|p| arg.starts_with(p))
+                _ if [
+                    "--cursor=",
+                    "--scan=",
+                    "--index-dir=",
+                    "--trust=",
+                    "--output=",
+                ]
+                .iter()
+                .any(|p| arg.starts_with(p))
                     || (arg.starts_with("-o") && arg.len() > 2) => {}
                 _ if !placed && Some(arg.as_str()) == given => {
                     args.push(path.to_owned());
@@ -177,8 +183,9 @@ impl Hints {
 
 /// The flags that name scan `id` in `file`: `--scan <id>` for an index in
 /// the directory a command reads without `--index-dir`, with
-/// `--index-dir` for one in another, and `--scan <file>` for a file
-/// outside the `scans/<id>.db` layout.
+/// `--index-dir` for one in another, and `--trust <file> --scan <file>`
+/// for a file outside the `scans/<id>.db` layout, which the command read
+/// trusted or inside the index directory.
 fn selector(id: &str, file: &Path) -> Vec<String> {
     let in_layout = file.file_name() == Some(OsStr::new(&format!("{id}.db")))
         && file.parent().and_then(Path::file_name) == Some(OsStr::new("scans"));
@@ -193,7 +200,15 @@ fn selector(id: &str, file: &Path) -> Vec<String> {
             "--scan".to_owned(),
             id.to_owned(),
         ],
-        None => vec!["--scan".to_owned(), file.to_string_lossy().into_owned()],
+        None => {
+            let file = file.to_string_lossy().into_owned();
+            vec![
+                "--trust".to_owned(),
+                file.clone(),
+                "--scan".to_owned(),
+                file,
+            ]
+        }
     }
 }
 
@@ -280,10 +295,10 @@ mod tests {
         );
         assert!(Hints::new(None, Some(file)).is_none());
         assert!(Hints::new(Some("3f9a0c1d2e3f"), None).is_none());
-        // An index file outside the layout is named by its path.
+        // An index file outside the layout is named by its path, trusted.
         assert_eq!(
             selector("3f9a0c1d2e3f", Path::new("/tmp/copy.db")),
-            ["--scan", "/tmp/copy.db"]
+            ["--trust", "/tmp/copy.db", "--scan", "/tmp/copy.db"]
         );
     }
 }

@@ -23,6 +23,7 @@ use duscope_core::resolve::resolve_path;
 use duscope_walk::Attrs;
 
 use super::scan::{self, Scanned};
+use super::treemap::shell_quote;
 use super::{Exit, Failure};
 use crate::cli::{AttrsArg, IndexArgs, WalkArgs};
 use crate::out::{Output, iso8601, thousands};
@@ -81,11 +82,12 @@ pub fn source(
         )
     })?;
     let path = walk.path.as_ref().map(|p| resolve_path(&cwd, p).real);
-    // An index file needs no index directory; a prefix does, and latest
+    // An index file needs no index directory, though without one it is
+    // outside it, so --trust must name it; a prefix needs one, and latest
     // without one has nothing to find.
     let index_dir = match (&dir, &selector) {
         (Some(dir), _) => Some(dir.as_path()),
-        (None, ScanSelector::File(_)) => Some(cwd.as_path()),
+        (None, ScanSelector::File(_)) => Some(Path::new("")),
         (None, ScanSelector::Prefix(_)) => {
             return Err(Failure::new(
                 Exit::NotFound,
@@ -103,6 +105,7 @@ pub fn source(
             cwd: &cwd,
             max_age_ns,
             now,
+            trust: &index_args.trust,
         };
         let resolved =
             resolve_scan(&selector, &q, |index| usable(walk, index)).map_err(core_failure)?;
@@ -640,6 +643,13 @@ pub fn core_failure(error: CoreError) -> Failure {
         }
         CoreError::ImportInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())
             .hint("Rerun duscope import with --format naming the tool that wrote the file"),
+        CoreError::UntrustedIndex(ref file) => {
+            let hint = format!(
+                "Rerun the command with --trust {} if you trust the file",
+                shell_quote(file)
+            );
+            Failure::new(Exit::Runtime, "untrusted_index", error.to_string()).hint(hint)
+        }
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
     }
 }

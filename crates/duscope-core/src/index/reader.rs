@@ -3,8 +3,13 @@
 //! An index is opened through a `mode=ro&immutable=1` URI: snapshots are
 //! never edited, so the read takes no locks and reads no journal, and with
 //! `SQLITE_DBCONFIG_DEFENSIVE` and untrusted schema nothing in the file can
-//! change it or run outside plain reads. The version is checked first: a
-//! reader opens every minor of its major and refuses the others.
+//! change it or run outside plain reads. Any index file may have been made
+//! by someone else (SECURITY.md), so its views and triggers are switched
+//! off rather than trusted, and a schema no duscope writes is refused: a
+//! virtual table, a statement longer than 64 KiB, or more than 256
+//! objects, where loading stops early. The version is
+//! checked first: a reader opens every minor of its major and refuses the
+//! others; `tool_version` must name a duscope version.
 //!
 //! Entries are read in blocks of 256 ids, a query for each table, and the
 //! 32 blocks used last are kept: a query that walks the ids in
@@ -23,9 +28,12 @@ use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use duscope_walk::{Attrs, Flags, Kind};
 use rusqlite::config::DbConfig;
+use rusqlite::limits::Limit;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use unicode_normalization::UnicodeNormalization;
@@ -37,6 +45,28 @@ use crate::query::{Node, TreeView};
 
 /// The major version of the index this build reads.
 const MAJOR: u32 = 2;
+
+/// The longest statement the connection parses, the schema's included: an
+/// index's longest is under 2 KiB.
+const SQL_LENGTH: i32 = 64 * 1024;
+
+/// The longest string or BLOB the connection reads: a name or a path is
+/// at most a few KiB.
+const VALUE_LENGTH: i32 = 1_000_000;
+
+/// The most objects (tables and indexes) a schema may have: an index has
+/// about 25.
+const SCHEMA_OBJECTS: i64 = 256;
+
+/// How often, in virtual machine steps, the progress handler counts while
+/// the schema loads.
+const STEPS_PER_CALL: i32 = 100;
+
+/// The progress handler's calls the schema may take to load and count, at
+/// [`STEPS_PER_CALL`] steps each: loading takes about 8 steps a row, so a
+/// schema of a few hundred objects stays well inside the budget and one of
+/// millions stops early.
+const SCHEMA_CALLS: u32 = 200;
 
 /// Entries read at once.
 const BLOCK: u32 = 256;
@@ -124,8 +154,9 @@ pub struct Index {
 
 impl Index {
     /// Opens the index at `path` read-only. A file that is not an index,
-    /// or is damaged, is [`CoreError::IndexCorrupt`]; one of another major
-    /// version [`CoreError::IndexVersion`].
+    /// is damaged, or has a schema no duscope writes is
+    /// [`CoreError::IndexCorrupt`]; one of another major version
+    /// [`CoreError::IndexVersion`].
     pub fn open(path: &Path) -> Result<Index, CoreError> {
         let file = path.display().to_string();
         let corrupt = |message: String| CoreError::IndexCorrupt {
@@ -139,9 +170,8 @@ impl Index {
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| corrupt(e.to_string()))?;
-        db.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
-            .and_then(|_| db.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false))
-            .map_err(|e| corrupt(e.to_string()))?;
+        harden(&db).map_err(|e| corrupt(e.to_string()))?;
+        check_schema(&db).map_err(corrupt)?;
         // The version first: a file of another major may lay out its other
         // tables differently.
         let version: String = db
@@ -173,6 +203,12 @@ impl Index {
             }
         }
         let meta = Meta(&keys);
+        let tool = meta.text("tool_version");
+        if !is_version(&tool) {
+            return Err(corrupt(format!(
+                "scan_meta.tool_version {tool:?} is not a duscope version"
+            )));
+        }
         let id = meta.text("scan_id");
         let scan_id = ScanId::parse(&id)
             .ok_or_else(|| corrupt(format!("scan_meta.scan_id {id:?} is not a scan id")))?;
@@ -1006,6 +1042,116 @@ pub(crate) fn uri(path: &Path) -> String {
     }
     uri.push_str("?mode=ro&immutable=1");
     uri
+}
+
+/// Sets what every index connection runs under before its first statement:
+/// defensive, the schema untrusted, views and triggers off, and the limits.
+fn harden(db: &Connection) -> rusqlite::Result<()> {
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_VIEW, false)?;
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
+    db.set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, SQL_LENGTH)?;
+    db.set_limit(Limit::SQLITE_LIMIT_LENGTH, VALUE_LENGTH)?;
+    db.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    Ok(())
+}
+
+/// Loads the schema, the connection's first statement, and refuses one no
+/// duscope writes: why, if it does. A progress handler stops a schema too
+/// large to be an index while it loads.
+fn check_schema(db: &Connection) -> Result<(), String> {
+    let calls = Arc::new(AtomicU32::new(0));
+    let counted = Arc::clone(&calls);
+    db.progress_handler(
+        STEPS_PER_CALL,
+        Some(move || counted.fetch_add(1, Ordering::Relaxed) >= SCHEMA_CALLS),
+    )
+    .map_err(|e| e.to_string())?;
+    let too_large = || format!("its schema has more than {SCHEMA_OBJECTS} objects");
+    let schema = schema_objects(db);
+    db.progress_handler(0, None::<fn() -> bool>)
+        .map_err(|e| e.to_string())?;
+    let (objects, virtual_table) = schema.map_err(|e| {
+        if calls.load(Ordering::Relaxed) >= SCHEMA_CALLS {
+            too_large()
+        } else {
+            e.to_string()
+        }
+    })?;
+    if objects > SCHEMA_OBJECTS {
+        return Err(too_large());
+    }
+    match virtual_table {
+        Some(name) => Err(format!("its schema has a virtual table, {name}")),
+        None => Ok(()),
+    }
+}
+
+/// The schema's objects, counted up to one past [`SCHEMA_OBJECTS`], and
+/// the first virtual table among them. A virtual table is told from its
+/// statement, whatever its row's type says (`SQLite` reads `TABLE` as
+/// `table`), since asking `SQLite` about one (`pragma_table_list`,
+/// `table_info`) connects it, which runs its module on the file's data.
+fn schema_objects(db: &Connection) -> rusqlite::Result<(i64, Option<String>)> {
+    let mut stmt = db.prepare("SELECT name, sql FROM sqlite_schema")?;
+    let mut rows = stmt.query([])?;
+    let mut objects = 0;
+    let mut virtual_table = None;
+    while let Some(row) = rows.next()? {
+        objects += 1;
+        if objects > SCHEMA_OBJECTS {
+            break;
+        }
+        let sql: Option<String> = row.get(1)?;
+        if virtual_table.is_none() && sql.as_deref().is_some_and(creates_virtual_table) {
+            virtual_table = Some(row.get::<_, String>(0)?);
+        }
+    }
+    Ok((objects, virtual_table))
+}
+
+/// Whether `sql`, a statement of the schema, creates a virtual table:
+/// `CREATE` then `VIRTUAL`, in any case, with any blanks and comments
+/// between them, as `SQLite`'s tokenizer reads it.
+fn creates_virtual_table(sql: &str) -> bool {
+    keyword(sql, "CREATE").is_some_and(|rest| keyword(blanks(rest), "VIRTUAL").is_some())
+}
+
+/// `sql` past its leading blanks and comments: the characters `SQLite`'s
+/// tokenizer takes for space, `--` to the end of the line, and `/* */`
+/// (to the end, unclosed).
+fn blanks(mut sql: &str) -> &str {
+    loop {
+        let rest = sql.trim_start_matches([' ', '\t', '\n', '\x0c', '\r']);
+        if let Some(comment) = rest.strip_prefix("--") {
+            sql = comment.find('\n').map_or("", |at| &comment[at..]);
+        } else if let Some(comment) = rest.strip_prefix("/*") {
+            sql = comment.find("*/").map_or("", |at| &comment[at + 2..]);
+        } else {
+            return rest;
+        }
+    }
+}
+
+/// `sql` past the keyword `word` at its start, in any case, when no
+/// character of an identifier follows it.
+fn keyword<'a>(sql: &'a str, word: &str) -> Option<&'a str> {
+    let head = sql.get(..word.len())?;
+    let rest = &sql[word.len()..];
+    let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$' || !c.is_ascii();
+    (head.eq_ignore_ascii_case(word) && !rest.starts_with(identifier)).then_some(rest)
+}
+
+/// Whether `text` is a version as duscope writes `tool_version`:
+/// `major.minor.patch`, perhaps with a pre-release or build suffix.
+fn is_version(text: &str) -> bool {
+    let core = text.split(['-', '+']).next().unwrap_or("");
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The major of a `major.minor` version.

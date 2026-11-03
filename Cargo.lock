@@ -438,6 +438,7 @@ dependencies = [
  "globset",
  "hmac",
  "jiff",
+ "log",
  "proptest",
  "quick-xml",
  "regex",

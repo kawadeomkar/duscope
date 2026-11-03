@@ -151,6 +151,7 @@ fn parent(args: &RescanArgs, dir: &Path) -> Result<Parent, Failure> {
         // An old scan is what a rescan renews: none is too old for it.
         max_age_ns: i64::MAX,
         now: clock::now(),
+        trust: &args.trust,
     };
     let resolved = resolve_scan(&selector, &q, scanned).map_err(core_failure)?;
     let index = resolved.map(|r| r.index).ok_or_else(|| {
