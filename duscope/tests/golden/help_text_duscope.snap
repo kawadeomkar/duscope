@@ -17,6 +17,7 @@ Verbs:
   diff         What changed between two saved scans of one tree
   explain      Facts about one path: links, clones, what deleting it frees, caches, git
   query        One read-only SQL statement over a saved scan's tables
+  view         The treemap in the interactive viewer, on a saved scan or a new one
   schema       The index's tables and columns, and each verb's envelope schema
   scans        List, prune or check the saved scans
   rescan       Scan a saved scan's root again, with the options it was scanned with
@@ -136,6 +137,9 @@ Output:
 
       --save
           Save the scan as an index and print its id
+
+  -i, --interactive
+          Open the interactive viewer on the result
 
       --json
           Print the JSON envelope (--format json)

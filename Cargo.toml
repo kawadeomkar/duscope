@@ -36,6 +36,11 @@ clap_mangen = { version = "=0.3.3", default-features = false }
 clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions"] }
 crossbeam-deque = "=0.8.8"
 crossbeam-utils = "=0.8.23"
+# The viewer's terminal (P4-TUI-01): raw mode, the alternate screen, mouse
+# capture and the key, mouse and resize events. Default features: ratatui-crossterm
+# asks for them, so `bracketed-paste` and `derive-more` are compiled in whatever
+# this line says (DEV-72); the viewer never turns bracketed paste on.
+crossterm = "=0.29.0"
 # The gzip of `export --format gpscan` (P2-CLI-02): the pure-Rust backend
 # (miniz_oxide) alone.
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
@@ -52,6 +57,10 @@ mimalloc = { version = "=0.1.52", default-features = false }
 # The XML of `import`'s .gpscan files (P2-CLI-03): a streaming reader, no
 # default features.
 quick-xml = { version = "=0.42.0", default-features = false }
+# The viewer's cell buffer, styles and frame diff (P4-TUI-01): ratatui's core
+# crate without its widget set, and its crossterm backend, pinned together.
+ratatui-core = { version = "=0.1.2", default-features = false, features = ["std"] }
+ratatui-crossterm = { version = "=0.1.2", default-features = false, features = ["crossterm_0_29"] }
 # The index (P2-IDX-02): `bundled` compiles the SQLite the binary ships, with
 # the features duscope does not use left out (.cargo/config.toml); `functions`,
 # `hooks` and `limits` for the `query --sql` sandbox (P2-QRY-07). 0.40.2 is

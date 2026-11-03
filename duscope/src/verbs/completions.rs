@@ -290,13 +290,7 @@ mod tests {
         // Every flag the clap tree hides, so a flag hidden later is checked
         // too; the test-only and later-phase ones are among them.
         let hidden = hidden_flags(&command);
-        for flag in [
-            "--provider",
-            "--test-now",
-            "--interactive",
-            "-i",
-            "--skip-containers",
-        ] {
+        for flag in ["--provider", "--test-now", "--skip-containers"] {
             assert!(hidden.iter().any(|h| h == flag), "{flag}: {hidden:?}");
         }
         for shell in [

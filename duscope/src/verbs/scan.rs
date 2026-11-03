@@ -98,7 +98,7 @@ pub fn unaccounted(scanned: &Scanned) -> Option<u64> {
 /// configuration's) or the default directory.
 pub fn run(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     if args.interactive {
-        return Err(not_yet("--interactive", "the interactive viewer"));
+        return super::view::scan(args, index_dir, output);
     }
     super::query::scan(args, index_dir, output)
 }

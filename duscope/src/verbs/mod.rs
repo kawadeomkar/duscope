@@ -17,6 +17,7 @@ mod source;
 mod sql;
 mod summary;
 mod treemap;
+mod view;
 
 pub use scan::report_interrupt;
 
@@ -117,6 +118,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
             index_dir,
             output,
         ),
+        Some(Verb::View(args)) => view::run(&args, index_dir, output),
         Some(Verb::Man) => man::run(),
         Some(Verb::Completions(args)) => completions::run(args.shell),
     }

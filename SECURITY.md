@@ -4,9 +4,9 @@ Last reviewed: 2026-11-01, against the code that adds `--trust` (P2-SEC-01). The
 is P5-SEC-01's, before 1.0, against the MCP server and `clean`.
 
 duscope measures directory trees. It reads metadata, writes snapshot indexes of what it found
-into its own index directory, and answers queries about them. It opens no socket. From phase 3,
-an MCP server lets agents ask the same questions, and from phase 4, `clean` moves what it is
-told to the trash. This page says what duscope treats as untrusted, the rule for each untrusted
+into its own index directory, and answers queries about them. It opens no network socket. From
+phase 3, an MCP server lets agents ask the same questions, and from phase 4, `clean` moves what
+it is told to the trash. This page says what duscope treats as untrusted, the rule for each untrusted
 input, how to report a vulnerability, and how a fix is released.
 
 ## Reporting a vulnerability
@@ -158,8 +158,13 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
 
 ### No network
 
-The binary opens no socket. There is no telemetry and no update check, and `cargo deny` bans
-HTTP and TLS crates from the dependency tree.
+The binary opens no network socket. There is no telemetry and no update check, and `cargo deny`
+bans HTTP and TLS crates from the dependency tree.
+
+The one socket it opens is local: while `view` or `scan -i` runs, the terminal library's event
+reader (crossterm's) opens a pair of Unix-domain sockets connected only to each other, through
+which its signal handler tells the event loop that the window was resized. The pair has no
+address, never leaves the process and closes when it exits (DEV-70).
 
 ## Security releases
 

@@ -21,7 +21,7 @@ The design is fixed by two documents; read the parts a task cites before writing
   fields; summary, schema and explain return one object.
 - In --json, --plain and mcp modes nothing but the payload reaches stdout; humans get stderr.
 - clean is a dry run unless --yes; trash by default; --permanent re-checks (dev, ino) first.
-- The binary opens no socket. No telemetry, no update checks, no HTTP crates.
+- The binary opens no network socket. No telemetry, no update checks, no HTTP crates.
 - One binary, one package: no component feature flags. The only Cargo features are
   `system-sqlite` and `pixels`.
 - A new dependency needs a row in DEPENDENCIES.md, a cargo deny pass, and the size budget

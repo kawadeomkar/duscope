@@ -6,6 +6,7 @@
 mod cli;
 mod log;
 mod out;
+mod panic;
 mod verbs;
 
 use std::io;
@@ -29,6 +30,7 @@ use verbs::{Exit, Failure};
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
+    panic::install();
     let (mut cli, matches) = match parse() {
         Ok(parsed) => parsed,
         Err(error) => return refused(&error),

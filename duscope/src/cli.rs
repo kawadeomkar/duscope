@@ -153,6 +153,8 @@ pub enum Verb {
     Explain(ExplainArgs),
     /// One read-only SQL statement over a saved scan's tables
     Query(SqlArgs),
+    /// The treemap in the interactive viewer, on a saved scan or a new one
+    View(ViewArgs),
     /// The index's tables and columns, and each verb's envelope schema
     Schema(SchemaArgs),
     /// List, prune or check the saved scans
@@ -499,9 +501,40 @@ pub struct ScanArgs {
     pub save: bool,
 
     /// Open the interactive viewer on the result
-    // The viewer arrives in phase 4.
-    #[arg(short = 'i', long, hide = true)]
+    #[arg(short = 'i', long, help_heading = "Output")]
     pub interactive: bool,
+}
+
+/// `view`'s arguments: the tree as the list verbs find it (a saved scan
+/// that holds the path, or a scan run for the viewer), and the map's
+/// colours.
+#[derive(Debug, Clone, Args)]
+pub struct ViewArgs {
+    #[command(flatten)]
+    pub walk: WalkArgs,
+
+    #[command(flatten)]
+    pub index: IndexArgs,
+
+    /// What colours the treemap's tiles
+    ///
+    /// lscolors takes LS_COLORS' *suffix= and ex= (with --attrs full) entries
+    #[arg(long, value_enum, value_name = "BY", help_heading = "Viewer")]
+    pub color_by: Option<ColorBy>,
+
+    /// The colours: a theme name or the path of a theme file
+    ///
+    /// mocha|tokyo-night|dracula|gruvbox|light|terminal-native|no-color; by
+    /// default the terminal's background picks light or mocha
+    #[arg(
+        long,
+        env = "DUSCOPE_THEME",
+        value_name = "THEME",
+        value_parser = ThemeName,
+        hide_possible_values = true,
+        help_heading = "Viewer"
+    )]
+    pub theme: Option<OsString>,
 }
 
 /// `top`'s flags.
@@ -1028,6 +1061,20 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             walk_defaults(&mut args.walk)?;
             index_defaults(&mut args.index);
             args.configured_theme = d.theme.as_ref().map(|theme| OsString::from(&theme.value));
+            if args.color_by.is_none()
+                && let Some(by) = &d.color_by
+            {
+                args.color_by = Some(choice(config, "color_by", by)?);
+            }
+        }
+        Some(Verb::View(args)) => {
+            walk_defaults(&mut args.walk)?;
+            index_defaults(&mut args.index);
+            if args.theme.is_none()
+                && let Some(theme) = &d.theme
+            {
+                args.theme = Some(OsString::from(&theme.value));
+            }
             if args.color_by.is_none()
                 && let Some(by) = &d.color_by
             {
