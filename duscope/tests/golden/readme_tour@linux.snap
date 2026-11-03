@@ -44,3 +44,16 @@ $ duscope top ~ --files --limit 3 --plain
 $ duscope top ~ --files --limit 2 --json | jq -c '.entries[] | {path, kind, allocated_bytes}'
 {"path":"~/Movies/holiday-2035.mov","kind":"file","allocated_bytes":7340032}
 {"path":"~/Movies/wedding.mp4","kind":"file","allocated_bytes":6291456}
+
+$ duscope scans --json | jq -c '.entries[] | {root, entry_count, source}'
+{"root":"~","entry_count":51266,"source":"scan"}
+
+$ duscope explain ~/dev/node_modules --json | jq -c '.result | {kind, allocated_bytes, freeable_now_bytes, regenerable_by, confidence}'
+{"kind":"dir","allocated_bytes":25624576,"freeable_now_bytes":25624576,"regenerable_by":"npm install","confidence":"high"}
+
+$ duscope query ~ --plain --sql "SELECT human_size(sum(apparent)) AS size, count(*) AS files, ext FROM files WHERE ext != '' GROUP BY ext ORDER BY sum(apparent) DESC, ext LIMIT 4"
+size	files	ext
+17.1 MiB	147	mov
+8.0 MiB	2	mkv
+7.1 MiB	129	mp4
+3.0 MiB	1	xip

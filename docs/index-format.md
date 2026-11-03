@@ -326,7 +326,7 @@ stays 0; bits 9 to 11 are set on directories only, and bit 12 on files only.
 | `incremental` | INTEGER | 1 when an incremental rescan wrote the file |
 | `parent_scan_id` | TEXT | the scan a rescan started from; NULL for a fresh scan |
 | `source` | TEXT | `scan`, or `import:ncdu`, `import:gdu` or `import:gpscan` for a tree `import` read from another tool's file; `latest` never names an import: a verb reads one where `--scan` names it |
-| `tool_version` | TEXT | the duscope version that wrote the file |
+| `tool_version` | TEXT | the duscope version that wrote the file, `major.minor.patch` |
 | `sibling_order` | TEXT | how siblings are ordered: `bytewise` |
 
 ## Compatibility
@@ -335,6 +335,30 @@ A reader opens every minor version of its major and ignores columns it does not
 know; a minor version only adds nullable columns, tables or keys. A change to
 what an existing column means is a new major version, which an older reader
 refuses (exit 5) with a hint to rescan.
+
+## What duscope opens
+
+An index file may come from anyone, so duscope reads one only from its index
+directory, or where `--trust FILE` names it; `--scan` naming a file anywhere
+else is refused before the file is opened (`untrusted_index`, exit 1).
+
+duscope opens every index file the same way, trusted or not ([SECURITY.md](../SECURITY.md)):
+
+- **Read-only and immutable.** Defensive mode is on and the schema is
+  untrusted.
+- **Switched off.** Views, triggers and attached databases. A view is never
+  read, even one named as a table, and no trigger fires.
+- **Limits.** No statement, the schema's own included, may be longer than
+  64 KiB, and no string or BLOB longer than 1 MB. (`query --sql` runs its
+  statement in a sandbox, a connection of its own with limits of its own.)
+- **Refused files.** A file is refused, with exit 5, when:
+  - its schema has a virtual table, or more than 256 objects (tables, indexes,
+    views and triggers together): `index_corrupt`;
+  - `scan_id` is not 12 lowercase hex digits, or `tool_version` is not a
+    version: `index_corrupt`;
+  - its major `index_version` is another: `index_version_mismatch`.
+
+A program that writes index files for duscope to read keeps within these.
 
 ## Changelog
 
