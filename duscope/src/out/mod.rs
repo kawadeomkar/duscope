@@ -88,7 +88,8 @@ impl From<FormatArg> for Format {
             | FormatArg::Qdirstat
             | FormatArg::Csv
             | FormatArg::Gdu
-            | FormatArg::Svg => Format::Plain,
+            | FormatArg::Svg
+            | FormatArg::Png => Format::Plain,
         }
     }
 }

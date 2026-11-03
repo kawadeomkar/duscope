@@ -102,6 +102,8 @@ pub enum FormatArg {
     Gdu,
     /// An SVG picture of the treemap (render)
     Svg,
+    /// A PNG picture of the treemap (render)
+    Png,
 }
 
 impl FormatArg {
@@ -113,7 +115,7 @@ impl FormatArg {
             FormatArg::Ncdu | FormatArg::Gpscan => Some("export and import"),
             FormatArg::Qdirstat | FormatArg::Csv => Some("export"),
             FormatArg::Gdu => Some("import"),
-            FormatArg::Svg => Some("render"),
+            FormatArg::Svg | FormatArg::Png => Some("render"),
             _ => None,
         }
     }

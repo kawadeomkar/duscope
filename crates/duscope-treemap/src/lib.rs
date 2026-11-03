@@ -15,9 +15,12 @@
 
 pub mod cells;
 mod errors;
+mod font;
 mod gp;
 pub mod packs;
 pub mod paint;
+pub mod picture;
+pub mod png;
 mod squarify;
 pub mod svg;
 mod width;
