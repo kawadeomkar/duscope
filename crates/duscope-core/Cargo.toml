@@ -15,6 +15,7 @@ duscope-walk.workspace = true
 flate2.workspace = true
 gix-ignore.workspace = true
 globset.workspace = true
+hmac.workspace = true
 jiff.workspace = true
 quick-xml.workspace = true
 regex.workspace = true

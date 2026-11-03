@@ -1,0 +1,2 @@
+### Added
+- `explain --json` returns a `handle`: the path as `explain` found it (device, inode, bytes on disk, the scan) with a fifteen-minute expiry, signed with HMAC-SHA256 by a key that duscope makes on first use in its cache directory (`handle.key`, 32 random bytes, mode 0600; deleting it invalidates every outstanding handle). A later `clean --from` will act only on what a handle names. A key that others may read issues no handle.
