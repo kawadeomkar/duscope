@@ -22,11 +22,14 @@
 # account, of twenty jobs). The full set runs where it decides a merge: a pull
 # request into main, a push to main, the schedule, a dispatch, and a pull
 # request labelled `full-ci`, which the top of a stack carries, since it holds
-# the whole stack's code. A pull request into another branch runs fmt, deny,
-# changelog and quick (clippy and the tests on ubuntu-24.04, in one job): no
-# branch protection applies to it, and branch protection requires it to be
-# updated with main before it merges, which runs the full set on its new head.
-# intel-mac runs on pushes to main, the schedule and a dispatch.
+# the whole stack's code. GitHub's stacked pull requests run as if into main:
+# for the pull requests of a stack it recognises, github.base_ref reads main
+# and main's protection applies, so they run the full set too. Any other pull
+# request into another branch runs fmt, deny, changelog and quick (clippy and
+# the tests on ubuntu-24.04, in one job): no branch protection applies to it,
+# and branch protection requires it to be updated with main before it merges,
+# which runs the full set on its new head. intel-mac runs on pushes to main,
+# the schedule and a dispatch.
 
 name: CI
 

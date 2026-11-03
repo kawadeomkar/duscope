@@ -15,6 +15,7 @@ mod errors;
 pub mod git;
 pub mod index;
 pub mod query;
+pub mod rescan;
 pub mod resolve;
 pub mod rollup;
 pub mod rules;

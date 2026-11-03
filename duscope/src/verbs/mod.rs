@@ -6,6 +6,7 @@ mod explain;
 mod man;
 mod next;
 mod query;
+mod rescan;
 mod scan;
 mod scans;
 mod schema;
@@ -103,6 +104,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
         Some(Verb::Query(args)) => sql::run(&args, index_dir, output),
         Some(Verb::Schema(args)) => schema::run(&args, index_dir, output),
         Some(Verb::Scans(args)) => scans::run(&args, index_dir, output),
+        Some(Verb::Rescan(args)) => rescan::run(&args, index_dir, output),
         Some(Verb::Man) => man::run(),
         Some(Verb::Completions(args)) => completions::run(args.shell),
     }
