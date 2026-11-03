@@ -193,8 +193,10 @@ fn colours_drawn(
     extra: &[(&str, &str)],
 ) -> Vec<termlens::Color> {
     let tree = env.fixtures().case_root(CASE);
+    // Wide enough for the legend pane, whose squares are each class's
+    // own colour (a tile's may be tinted toward the base).
     let mut terminal = Terminal::builder()
-        .size(100, 30)
+        .size(160, 45)
         .timeout(Duration::from_secs(60))
         .background_rgb(background.0, background.1, background.2)
         .env_clear()
@@ -208,7 +210,7 @@ fn colours_drawn(
         .unwrap();
     // The frame is whole once its last row, the key line, is drawn.
     terminal
-        .wait_until(|s| up(s) && !s.row_text(29).trim().is_empty())
+        .wait_until(|s| up(s) && !s.row_text(44).trim().is_empty())
         .unwrap();
     let screen = terminal.screen();
     let mut colours = Vec::new();

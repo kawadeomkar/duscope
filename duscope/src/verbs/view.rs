@@ -177,7 +177,6 @@ fn show(
     let classes = super::query::classes(walk.classes_extra.as_deref(), "[classes] extra")?;
     let size = scan::size_kind(walk);
     let now = scan::now(walk)?;
-    let legend = treemap::legend(view, &classes, size);
     let warning = treemap::frame_warning(warnings);
     // test-only: DUSCOPE_TEST_PANIC=1 panics once the first frame is drawn,
     // in debug builds alone, for the tests of the panic hook.
@@ -196,7 +195,10 @@ fn show(
         now,
         &classes,
     );
-    let mut app = App::new(view, opts, style.depth(), legend, summary, warning);
+    let home = std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from);
+    let mut app = App::new(view, opts, style.depth(), home.as_deref(), summary, warning);
     duscope_tui::run(tui.terminal(), &mut app, || {
         assert!(
             !test_panic,

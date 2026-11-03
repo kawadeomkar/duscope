@@ -31,6 +31,11 @@
 //! class letter. Names are measured and cut in terminal columns, with
 //! control characters shown as escapes (`\x1b`); a file whose
 //! bytes are charged elsewhere (a later hard link, a clone) weighs nothing.
+//!
+//! The viewer's map ([`paint_unlabelled`]) carries no labels below the
+//! depth-1 titles: its panes name whatever the cursor is on.
+
+use std::borrow::Cow;
 
 use duscope_core::query::{Node, SizeKind, TreeView, children, classify};
 use duscope_core::rules::{Class, Classes};
@@ -134,7 +139,7 @@ struct Unit {
 
 /// The painter's state: the units, the overlay of border and label cells,
 /// and each entry's class.
-struct Painter<'v, 'o, V: TreeView + ?Sized> {
+struct Painter<'v, 'o, 'c, V: TreeView + ?Sized> {
     view: &'v V,
     opts: &'o PaintOpts<'o>,
     w: u16,
@@ -142,7 +147,9 @@ struct Painter<'v, 'o, V: TreeView + ?Sized> {
     units: Vec<Unit>,
     overlay: Vec<Option<Cell>>,
     /// Each entry's class, by pre-order id.
-    class_of: Vec<Class>,
+    class_of: Cow<'c, [Class]>,
+    /// Whether tiles are labelled; the depth-1 titles are drawn either way.
+    labels: bool,
 }
 
 /// Paints the scan in `view` as a map of `w` columns and `h` rows, at most
@@ -151,17 +158,38 @@ struct Painter<'v, 'o, V: TreeView + ?Sized> {
 pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u16) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
     let mut buffer = CellBuffer::new(w, h);
-    paint_into(view, opts, h, &mut buffer);
+    paint_into(view, opts, h, &mut buffer, None);
+    buffer
+}
+
+/// Paints the scan as [`paint`] does, without labels on its tiles: the
+/// viewer's map, whose panes carry each tile's name and size. Folders keep
+/// their outlines and the depth-1 boxes their titles. `class_of` is
+/// [`classes_of`]'s answer for `view` and `opts.classes`, which the viewer
+/// works out once rather than for every frame.
+#[must_use]
+pub fn paint_unlabelled(
+    view: &(impl TreeView + ?Sized),
+    opts: &PaintOpts<'_>,
+    w: u16,
+    h: u16,
+    class_of: &[Class],
+) -> CellBuffer {
+    let h = h.min(u16::MAX / 2);
+    let mut buffer = CellBuffer::new(w, h);
+    paint_into(view, opts, h, &mut buffer, Some(class_of));
     buffer
 }
 
 /// Paints the map into the top `h` rows of `buffer` (at most 32767), as
-/// wide as the buffer.
+/// wide as the buffer: labelled, or without labels given each entry's class
+/// (`unlabelled`).
 fn paint_into(
     view: &(impl TreeView + ?Sized),
     opts: &PaintOpts<'_>,
     h: u16,
     buffer: &mut CellBuffer,
+    unlabelled: Option<&[Class]>,
 ) {
     let (w, h) = (buffer.width(), h.min(u16::MAX / 2).min(buffer.height()));
     let h_units = h * 2;
@@ -178,7 +206,9 @@ fn paint_into(
             usize::from(w) * usize::from(h_units)
         ],
         overlay: vec![None; usize::from(w) * usize::from(h)],
-        class_of: classes_of(view, opts.classes),
+        class_of: unlabelled
+            .map_or_else(|| Cow::Owned(classes_of(view, opts.classes)), Cow::Borrowed),
+        labels: unlabelled.is_none(),
     };
     if !view.is_empty() && w > 0 && h > 0 {
         let root = view.node(0);
@@ -194,7 +224,8 @@ fn paint_into(
 
 /// Each entry's class by pre-order id, as `by-type` reads it
 /// ([`classify`]), so the tiles agree with the legend.
-pub(crate) fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Class> {
+#[must_use]
+pub fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Class> {
     let mut out = vec![Class::Other; view.len() as usize];
     classify(view, classes, |node, class| out[node.id as usize] = class);
     out
@@ -209,7 +240,7 @@ enum Item {
     Files(u32, u64),
 }
 
-impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
+impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
     /// Lays out `dir`'s children in `area` (units) and paints each; `depth`
     /// is `dir`'s, `folder` the index of the top-level folder above.
     fn block(&mut self, dir: &Node, area: Rect, depth: u32, folder: Option<usize>) {
@@ -346,7 +377,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
         let base = tile_color(self.view, self.opts, node, class, depth, folder);
         let color = self.tinted(base, order % 2 == 1);
         self.fill(rect, color, clamp_depth(depth));
-        if !labelled {
+        if !labelled || !self.labels {
             return;
         }
         let mut name = String::from_utf8_lossy(&self.view.name(node.id)).into_owned();
@@ -460,7 +491,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
     /// With shades, the name carries the class letter.
     fn label(&mut self, rect: Rect, name: &str, size: Option<&str>, fill: Color, class: Class) {
         let (top, rows) = cell_rows(rect);
-        if rect.w < 5 || rows == 0 {
+        if !self.labels || rect.w < 5 || rows == 0 {
             return;
         }
         let pack = self.opts.pack;
@@ -557,7 +588,8 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, V> {
 
 /// The class holding most of the bytes under directory `id`, each entry's
 /// class in `class_of`; only its own files with `own_files`.
-pub(crate) fn dominant(
+#[must_use]
+pub fn dominant(
     view: &(impl TreeView + ?Sized),
     class_of: &[Class],
     size: SizeKind,
@@ -593,7 +625,8 @@ pub(crate) fn dominant(
 
 /// The colour `--color-by` gives a tile: `node`, of `class`, at `depth`,
 /// under the top-level folder of index `folder`.
-pub(crate) fn tile_color(
+#[must_use]
+pub fn tile_color(
     view: &(impl TreeView + ?Sized),
     opts: &PaintOpts<'_>,
     node: &Node,
@@ -627,7 +660,8 @@ fn clamp_depth(depth: u32) -> u8 {
 }
 
 /// The age ramp's step for a time: a day, a week, a month, a year, older.
-fn age_step(now: i64, mtime: i64) -> usize {
+#[must_use]
+pub fn age_step(now: i64, mtime: i64) -> usize {
     const DAY: i64 = 86_400_000_000_000;
     let age = now.saturating_sub(mtime);
     [DAY, 7 * DAY, 30 * DAY, 365 * DAY]
@@ -672,7 +706,8 @@ pub fn compact(bytes: u64) -> String {
 
 /// `text` cut to `room` columns, the last one `…` (`~` in ASCII) when
 /// cut.
-pub(crate) fn truncate(text: &str, room: usize, style: Glyphs) -> String {
+#[must_use]
+pub fn truncate(text: &str, room: usize, style: Glyphs) -> String {
     let ascii = style == Glyphs::Ascii;
     let glyphs = glyphs(text, ascii);
     if glyphs.iter().map(|g| g.columns()).sum::<usize>() <= room {
@@ -800,7 +835,7 @@ pub fn frame(
     }
     let map_rows = rows - 5;
     let mut buffer = CellBuffer::new(w, map_rows + 4);
-    paint_into(view, opts, map_rows, &mut buffer);
+    paint_into(view, opts, map_rows, &mut buffer, None);
     // The legend: `■ code 61%` per class, the swatch in its colour.
     let mut x = 2u16;
     let y = map_rows;

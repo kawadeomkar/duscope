@@ -29,6 +29,7 @@ pub use errors::TreemapError;
 pub use gp::layout_gp;
 pub use pool::layout;
 pub use squarify::squarify;
+pub use width::columns;
 
 /// A rectangle in half-cell units: `x` and `w` count columns, `y` and `h`
 /// half rows.

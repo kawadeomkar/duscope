@@ -70,7 +70,7 @@ pub(crate) fn glyphs(text: &str, ascii: bool) -> Vec<Glyph> {
 }
 
 /// The columns `text` takes.
-pub(crate) fn columns(text: &str, ascii: bool) -> usize {
+pub fn columns(text: &str, ascii: bool) -> usize {
     glyphs(text, ascii).iter().map(|g| g.columns()).sum()
 }
 

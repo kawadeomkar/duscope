@@ -5,14 +5,14 @@
 
 use std::convert::Infallible;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use duscope_core::arena::Arena;
 use duscope_core::interchange::import::{ImportFormat, import};
 use duscope_core::query::{ArenaView, SizeKind};
 use duscope_core::rollup::{RollUp, roll_up};
-use duscope_core::rules::{Class, Classes};
+use duscope_core::rules::Classes;
 use duscope_testkit::golden;
 use duscope_treemap::cells::Depth;
 use duscope_treemap::packs::Pack;
@@ -72,11 +72,7 @@ fn app<'a>(view: &'a ArenaView<'a>, pack: &'a Pack, classes: &'a Classes) -> App
         view,
         opts(pack, classes),
         Depth::TrueColor,
-        vec![
-            (Class::Data, 45.0),
-            (Class::Code, 31.0),
-            (Class::Media, 12.0),
-        ],
+        Some(Path::new("/Users/alex")),
         "175 MiB · 5 files · 6 dirs".to_owned(),
         None,
     )
@@ -137,9 +133,11 @@ fn p4_tui_01_a_resize_draws_at_the_new_size() {
             rows.iter().all(|r| r.chars().count() == usize::from(w)),
             "{w}×{h}"
         );
-        // The map from the top row, the key line on the last.
-        assert!(rows[0].starts_with('┌'), "{w}×{h}:\n{text}");
-        assert_eq!(rows[usize::from(h) - 1].trim_end(), "q quit", "{w}×{h}");
+        // The header on the top row, the map's pane from the third, the
+        // key line on the last.
+        assert!(rows[0].starts_with(" duscope "), "{w}×{h}:\n{text}");
+        assert!(rows[2].starts_with('╭'), "{w}×{h}:\n{text}");
+        assert_eq!(rows[usize::from(h) - 1].trim(), "q quit", "{w}×{h}");
     }
     // Made smaller than 80×24 while it runs, it asks for room.
     terminal.backend_mut().resize(79, 24);
@@ -263,7 +261,7 @@ fn p4_tui_01_without_utf_8_the_frame_keeps_to_ascii() {
         &view,
         opts,
         Depth::TrueColor,
-        Vec::new(),
+        Some(Path::new("/Users/alex")),
         "175 MiB · 5 files · 6 dirs".to_owned(),
         Some("warning: a · b".to_owned()),
     );
