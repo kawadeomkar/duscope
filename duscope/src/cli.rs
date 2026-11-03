@@ -20,7 +20,7 @@ use duscope_core::config::{Config, Setting};
 use duscope_core::query::timegrammar;
 
 use crate::log::Verbosity;
-use crate::out::OutputArgs;
+use crate::out::{FormatArg, OutputArgs};
 use crate::verbs::{Exit, Failure};
 
 /// Fast, queryable disk-usage analyzer.
@@ -159,6 +159,8 @@ pub enum Verb {
     Scans(ScansArgs),
     /// Scan a saved scan's root again, with the options it was scanned with
     Rescan(RescanArgs),
+    /// Write a saved scan for other tools, in the format --format names
+    Export(ExportArgs),
     /// Print the manual page, in roff, to stdout
     Man,
     /// Print the completion script for a shell to stdout
@@ -603,6 +605,15 @@ pub struct DiffArgs {
     pub size: Option<SizeKind>,
 }
 
+/// `export`'s flags; the format is `--format`.
+#[derive(Debug, Clone, Args)]
+pub struct ExportArgs {
+    #[command(flatten)]
+    pub walk: WalkArgs,
+    #[command(flatten)]
+    pub index: IndexArgs,
+}
+
 /// `rescan`'s flags.
 #[derive(Debug, Clone, Args)]
 pub struct RescanArgs {
@@ -789,7 +800,15 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
     let d = &config.defaults;
     let refused = |key: &str, line: usize, why: &str| refused(config, key, line, why);
     if let Some(format) = &d.format {
-        cli.output.configured = Some(choice(config, "format", format)?);
+        let configured: FormatArg = choice(config, "format", format)?;
+        if configured.exports_only() {
+            return Err(refused(
+                "format",
+                format.line,
+                "export's formats are for one export, named with --format",
+            ));
+        }
+        cli.output.configured = Some(configured);
     }
     cli.output.quiet = cli.global.quiet;
     if cli.global.index_dir.is_none() {
@@ -870,10 +889,19 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
         Some(Verb::Stale(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
         Some(Verb::Caches(a)) => list_defaults(&mut a.walk, &mut a.query, &mut a.index)?,
         Some(
-            Verb::Summary(SummaryArgs { walk, index }) | Verb::Query(SqlArgs { walk, index, .. }),
+            Verb::Summary(SummaryArgs { walk, index })
+            | Verb::Query(SqlArgs { walk, index, .. })
+            | Verb::Export(ExportArgs { walk, index }),
         ) => {
             walk_defaults(walk)?;
             index_defaults(index);
+            // QDirStat's file holds owners and modes: a scan run for it
+            // collects them, and a saved one without them is passed over.
+            if cli.output.format == Some(FormatArg::Qdirstat)
+                && matches.value_source("attrs") != Some(ValueSource::CommandLine)
+            {
+                walk.attrs = AttrsArg::Full;
+            }
         }
         Some(Verb::Diff(args)) => {
             size_default(config, &mut args.size)?;
