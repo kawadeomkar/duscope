@@ -78,6 +78,19 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     } else {
         None
     };
+    if let Some(age) = &args.reuse {
+        if style.is_some() {
+            return Err(Failure::new(
+                Exit::Usage,
+                "usage",
+                "--reuse prints a saved scan's rows, and the treemap is drawn only from a scan run now",
+            )
+            .hint("Run duscope scan --reuse with --treemap never, --plain or --json, or draw the saved scan with duscope view"));
+        }
+        if let Some(saved) = source::reusable(&args.walk, &args.exclude, age, index_dir)? {
+            return reused(saved, args, output);
+        }
+    }
     let scanned = scan::scan(&args.walk, &args.exclude)?;
     // The id is chosen before anything is written, so the output can carry
     // it; the index is written only after the output is out.
@@ -119,6 +132,19 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         ),
         None => Ok(()),
     }
+}
+
+/// `scan --reuse`, when a saved scan answers: its rows, as a scan of the
+/// tree would print them, and nothing saved.
+fn reused(saved: Source, args: &ScanArgs, output: &Output) -> Result<(), Failure> {
+    let file = saved.index_file();
+    if let Some(id) = saved.scan_id() {
+        log::info!("printing the saved scan {id} in place of a scan");
+    }
+    let (mut envelope, footer, _) =
+        top_envelope(saved, &args.walk, None, "scan", false, true, None, output)?;
+    envelope.next = next::list(&envelope, file.as_deref(), args.walk.path.as_deref());
+    output.list(&envelope, &footer)
 }
 
 /// `top`.

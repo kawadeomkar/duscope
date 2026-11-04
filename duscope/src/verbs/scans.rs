@@ -1,6 +1,8 @@
 //! `scans`: the saved scans under the index directory, listed newest
-//! first; with `--prune`, the ones past keeping removed, and the temporary
-//! and spill files left behind; with `--check`, one checked for damage.
+//! first (with PATHs, those of the directories named and of directories
+//! under them); with `--prune`, the ones past keeping removed, and the
+//! temporary and spill files left behind; with `--check`, one checked for
+//! damage.
 //!
 //! `--prune` keeps the five newest scans of each root and every scan under
 //! seven days old, a temporary file (`<id>.db.tmp-<pid>`) while its writer
@@ -21,6 +23,7 @@ use duscope_core::query::{
     ScanQuery, ScanSelector, TreeView, clock, index_files, resolve_scan, shortest_prefix,
     timegrammar,
 };
+use duscope_core::resolve::resolve_path;
 use duscope_walk::Attrs;
 
 use super::next::Hints;
@@ -77,7 +80,7 @@ pub fn run(args: &ScansArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     } else if let Some(selector) = &args.check {
         check(&dir, selector, &args.trust, now, output)
     } else {
-        list(&dir, output)
+        list(&dir, &args.paths, output)
     }
 }
 
@@ -111,12 +114,24 @@ fn saved(files: &[(ScanId, PathBuf)]) -> Vec<Index> {
     scans
 }
 
-/// The listing of saved scans.
-fn list(dir: &Path, output: &Output) -> Result<(), Failure> {
+/// The listing of saved scans: every one, or with `paths`, those whose
+/// root is one of them or lies under one.
+fn list(dir: &Path, paths: &[PathBuf], output: &Output) -> Result<(), Failure> {
     // People see each id's shortest prefix among every index file, so the
     // prefix they type to --scan names this one.
     let files = index_files(dir);
-    let scans = saved(&files);
+    let mut scans = saved(&files);
+    if !paths.is_empty() {
+        let cwd = std::env::current_dir().map_err(|e| {
+            Failure::new(
+                Exit::Runtime,
+                "io_error",
+                format!("cannot read the working directory: {e}"),
+            )
+        })?;
+        let under: Vec<PathBuf> = paths.iter().map(|p| resolve_path(&cwd, p).real).collect();
+        scans.retain(|index| under.iter().any(|p| index.root_path().starts_with(p)));
+    }
     let ids: Vec<&str> = files.iter().map(|(id, _)| id.as_str()).collect();
     let entries: Vec<SavedScanEntry> = scans
         .iter()

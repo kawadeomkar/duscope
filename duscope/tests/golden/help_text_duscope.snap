@@ -141,6 +141,11 @@ Output:
       --save
           Save the scan as an index and print its id
 
+      --reuse <AGE>
+          Print a saved scan of PATH younger than AGE instead of scanning (h, d, w, y)
+          
+          One taken with the same options; nothing new is saved. Not with the treemap
+
   -i, --interactive
           Open the interactive viewer on the result
 

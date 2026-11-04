@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "duscope_scans.input.json",
+  "title": "duscope_scans",
+  "description": "The arguments of duscope_scans, which runs `duscope scans` on the server's roots: none.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

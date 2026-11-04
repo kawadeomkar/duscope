@@ -281,6 +281,10 @@ pub struct CleanArgs {
 /// `scans`' arguments.
 #[derive(Debug, Clone, Args)]
 pub struct ScansArgs {
+    /// List only the scans of these directories and of directories under them
+    #[arg(value_name = "PATH", conflicts_with_all = ["prune", "check"])]
+    pub paths: Vec<PathBuf>,
+
     /// Remove saved scans past keeping, and stray temporary files
     ///
     /// Keeps the five newest scans of each root and any under seven days old
@@ -566,6 +570,17 @@ pub struct ScanArgs {
     /// Save the scan as an index and print its id
     #[arg(long, help_heading = "Output")]
     pub save: bool,
+
+    /// Print a saved scan of PATH younger than AGE instead of scanning (h, d, w, y)
+    ///
+    /// One taken with the same options; nothing new is saved. Not with the treemap
+    #[arg(
+        long,
+        value_name = "AGE",
+        conflicts_with = "interactive",
+        help_heading = "Output"
+    )]
+    pub reuse: Option<String>,
 
     /// Open the interactive viewer on the result
     #[arg(short = 'i', long, help_heading = "Output")]

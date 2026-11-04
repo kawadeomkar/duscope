@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "duscope_top.input.json",
+  "title": "duscope_top",
+  "description": "The arguments of duscope_top, which runs `duscope top --no-scan`.",
+  "type": "object",
+  "properties": {
+    "scan_id": {
+      "type": "string",
+      "description": "The saved scan to read: an id duscope_scan or duscope_scans gave (its first 4 or more characters will do), or latest. Default: the newest saved scan that holds the path and was taken with the default options"
+    },
+    "path": {
+      "type": "string",
+      "description": "A directory or file under one of the server's roots: absolute, or relative to the scan's root. Default: the scan's root, or the server's root when it has one"
+    },
+    "files": {
+      "type": "boolean",
+      "description": "List the largest files instead of directories. Default: false"
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many levels below the path to list. Default: 1 for directories, every level for files"
+    },
+    "min_size": {
+      "type": "string",
+      "description": "Leave out rows smaller than this: 100M, 1.5G, 10KB, or a number of bytes"
+    },
+    "glob": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Only rows whose path matches one of these globs"
+    },
+    "exclude": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Leave out rows whose path matches one of these globs"
+    },
+    "size": {
+      "type": "string",
+      "enum": [
+        "allocated",
+        "apparent"
+      ],
+      "description": "What rows are ranked and shown by: bytes on disk (allocated, the default) or apparent length"
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z_]+$"
+      },
+      "description": "The fields of each row, in this order. Default: every field"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Rows to return. Default: 25"
+    },
+    "cursor": {
+      "type": "string",
+      "description": "Where the next page starts: the previous result's next_cursor, sent with the same other arguments"
+    }
+  },
+  "additionalProperties": false
+}
