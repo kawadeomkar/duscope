@@ -1,4 +1,4 @@
-[1,2,{"progname":"duscope","progver":"0.1.0","timestamp":2114380800},
+[1,2,{"progname":"duscope","progver":"0.2.0","timestamp":2114380800},
 [{"name":"<root>","asize":256,"dsize":0,"dev":0,"uid":0,"gid":0,"mode":16877,"mtime":1800000000},
 {"name":"a-link.bin","asize":5000,"dsize":8192,"ino":0,"hlnkc":true,"nlink":2,"uid":0,"gid":0,"mode":33188,"mtime":1800000000},
 {"name":"a.bin","asize":5000,"dsize":8192,"ino":0,"hlnkc":true,"nlink":2,"uid":0,"gid":0,"mode":33188,"mtime":1800000000},
