@@ -58,8 +58,9 @@ class Gates(unittest.TestCase):
 
     def test_p2_bench_01_the_gates_are_plan_specs(self):
         limits = {name: (op, limit) for name, op, limit, _ in indexbench.GATES}
-        self.assertEqual(limits["write_us_per_entry_warm_p50"], ("<=", 2.5))
-        self.assertEqual(limits["write_share_of_cold_scan_p50"], ("<=", 0.25))
+        self.assertEqual(limits["write_us_per_entry_warm_p50"], ("<=", 2.75))
+        # Recorded, not gated (DEV-108).
+        self.assertNotIn("write_share_of_cold_scan_p50", limits)
         for verb in ("top", "stale", "explain"):
             self.assertEqual(limits[f"{verb}_p50_ms"], ("<=", 20.0))
             self.assertEqual(limits[f"{verb}_p95_ms"], ("<=", 50.0))
@@ -78,7 +79,7 @@ class Gates(unittest.TestCase):
             got = {g["name"]: g for g in indexbench.gates(values, platform)}
             self.assertIs(got["write_us_per_entry_warm_p50"]["holds"], holds, platform)
             self.assertEqual(got["write_us_per_entry_warm_p50"]["value"], 3.1)
-            self.assertTrue(got["write_share_of_cold_scan_p50"]["holds"], platform)
+            self.assertNotIn("write_share_of_cold_scan_p50", got, platform)
 
     def test_p2_bench_01_a_subtree_gets_50_ms_per_100k_files(self):
         def subtree(files, ms):

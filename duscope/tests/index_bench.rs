@@ -152,9 +152,15 @@ fn p2_bench_01_the_index_measurements_run_end_to_end() {
     assert_eq!(result["failures"], serde_json::json!([]));
     assert_eq!(result["gates_tree"], "T3");
     // Every gate was measured, and says whether it holds, but the warm write
-    // on macOS, which the target leaves to Linux.
+    // on macOS, which the target leaves to Linux. The write's share of a cold
+    // scan is measured (below) and holds no line (DEV-108).
     let gates = result["gates"].as_array().unwrap();
-    assert_eq!(gates.len(), 15);
+    assert_eq!(gates.len(), 14);
+    assert!(
+        gates
+            .iter()
+            .all(|gate| gate["name"] != "write_share_of_cold_scan_p50")
+    );
     for gate in gates {
         assert!(gate["value"].is_number(), "{gate}");
         let macos_write =

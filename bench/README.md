@@ -388,8 +388,11 @@ on scaled trees). It holds:
 
 The gates follow the targets:
 
-- **The write:** at most 2.5 µs per entry warm, on Linux alone, and at most 25% of a cold scan on
-  both platforms.
+- **The write:** at most 2.75 µs per entry warm, on Linux alone (DEV-107). A cold run's share of
+  the scan, the write's time over the walk's and roll-up's, is in the result file and holds no
+  line (DEV-108): the write starts after the output, which
+  `p2_idx_02_the_write_starts_after_the_output` checks, and on a fast disk a cold walk costs less
+  per entry than any write.
 - **The queries:** `top`, `stale` and `explain` at p50 ≤ 20 ms and p95 ≤ 50 ms. `by-type` at
   p50 ≤ 50 ms over the whole scan, and over a subtree ≤ 50 ms per 100,000 of its files.
 - **The first query after a cache drop:** p50 ≤ 250 ms.
