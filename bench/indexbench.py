@@ -20,9 +20,9 @@ fast it answers, on T2 unless `--trees` says otherwise.
   --once` (from a snapshot `dua i --once --export` wrote) and with `fdu
   --stale-ok` (after `fdu --cache=on` kept a scan): each competitor's speed-up
   is the median of its time over duscope's in the same round. dua's
-  interactive mode wants a terminal, so both of its commands run under
-  `script`; fdu keeps its scan under a home of its own in the run's work
-  directory.
+  interactive mode wants a terminal that answers where the cursor is, so both
+  of its commands run on bench/ptyrun.py's pseudo-terminal; fdu keeps its scan
+  under a home of its own in the run's work directory.
 
 The result file (`<date>-<platform>-index.json` in `--results-dir`) holds the
 usual header, the runs, and `gates`: each line of plan/PROPOSAL.md's 1.0
@@ -56,6 +56,8 @@ import trees
 
 # The competitors of the D34 comparison.
 COMPETITORS = ("dua", "fdu")
+# The pseudo-terminal dua runs on (under_pty).
+PTYRUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ptyrun.py")
 
 # plan/PROPOSAL.md's 1.0 acceptance targets 3, 4, 6 and 7, as Gate 2 -> 3
 # reads them: (what is measured, how it compares, the limit, the platforms it
@@ -132,10 +134,10 @@ def gates(values: Dict[str, Optional[float]], platform: str) -> List[Dict[str, o
 
 
 def under_pty(argv: Sequence[str]) -> List[str]:
-    """`argv` under `script`, which gives it a pseudo-terminal: util-linux's or BSD's."""
-    if sys.platform == "darwin":
-        return ["script", "-q", "/dev/null", *argv]
-    return ["script", "-qec", shlex.join(argv), "/dev/null"]
+    """`argv` on bench/ptyrun.py's pseudo-terminal, which answers the cursor
+    position dua's interactive mode asks for before anything else; `script`
+    gives a pseudo-terminal too, but on a runner nothing answers it."""
+    return [sys.executable, "-I", "-S", PTYRUN, *argv]
 
 
 def _run(argv: Sequence[str], what: str, timeout: int = 1800) -> subprocess.CompletedProcess:

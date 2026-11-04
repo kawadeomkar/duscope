@@ -361,7 +361,9 @@ runs:
 - **D34:** `top --scan` in interleaved pairs, as `run` pairs tools, with two competitors that
   load their whole snapshot:
   - `dua interactive --import --once`, reading the snapshot that `dua i --once --export` wrote.
-    dua's interactive mode needs a terminal, so both commands run under `script`.
+    dua's interactive mode starts by asking the terminal where the cursor is and gives up when
+    no answer comes, so both commands run on `bench/ptyrun.py`, a pseudo-terminal that answers
+    it. Its start adds about 20 ms to each of dua's runs on bench-linux, as `script`'s did.
   - `fdu --stale-ok`, after `fdu --cache=on` kept a scan. fdu runs with `HOME` and
     `XDG_CACHE_HOME` in the run's work directory, so its scan is removed with it.
 

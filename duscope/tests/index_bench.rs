@@ -40,15 +40,25 @@ fn script(path: &Path, body: &str) {
 }
 
 /// A dua that writes its snapshot with `i --once --export FILE TREE` and reads
-/// it with `i --import FILE --once`, and an fdu that keeps nothing and exits
-/// `fdu_status` when it answers.
+/// it with `i --import FILE --once`, each time first asking the terminal where
+/// the cursor is and giving up without an answer, as dua's interactive mode
+/// does; and an fdu that keeps nothing and exits `fdu_status` when it answers.
 fn stand_ins(scratch: &Path, fdu_status: u8) -> (PathBuf, PathBuf) {
     let dua = scratch.join("dua");
     script(
         &dua,
         "case \"$1\" in\n\
          --version) echo 'dua 2.46.0' ;;\n\
-         i) while [ $# -gt 0 ]; do\n\
+         i) old=$(stty -g 2>/dev/null) || { echo 'Error: not a terminal' >&2; exit 1; }\n\
+            stty raw -echo min 0 time 20\n\
+            printf '\\033[6n'\n\
+            reply=$(dd bs=16 count=1 2>/dev/null)\n\
+            stty \"$old\"\n\
+            case \"$reply\" in\n\
+              *R) ;;\n\
+              *) echo 'Error: The cursor position could not be read within a normal duration' >&2; exit 1 ;;\n\
+            esac\n\
+            while [ $# -gt 0 ]; do\n\
               case \"$1\" in\n\
                 --export) echo snapshot > \"$2\" ;;\n\
                 --import) [ -s \"$2\" ] || exit 3 ;;\n\
@@ -188,7 +198,8 @@ fn p2_bench_01_the_index_measurements_run_end_to_end() {
             "query warm top",
         ]
     );
-    // dua answers from its snapshot under a pseudo-terminal.
+    // dua answers from its snapshot on the pseudo-terminal that tells it where
+    // the cursor is.
     let dua_row = result["results"]
         .as_array()
         .unwrap()
@@ -197,7 +208,7 @@ fn p2_bench_01_the_index_measurements_run_end_to_end() {
         .unwrap();
     let command = dua_row["command"].as_str().unwrap();
     assert!(
-        command.starts_with("script ") && command.contains(" i --import "),
+        command.contains("bench/ptyrun.py ") && command.contains(" i --import "),
         "{command}"
     );
     // The saved scans and fdu's home, beside each mode's trees, are gone.
