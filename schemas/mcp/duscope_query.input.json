@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "duscope_query.input.json",
+  "title": "duscope_query",
+  "description": "The arguments of duscope_query, which runs `duscope query --no-scan --scan ID --sql SQL`.",
+  "type": "object",
+  "properties": {
+    "sql": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One SELECT over the scan's tables, which duscope_schema lists; :root_id and :root_last name the path's entry and the last id under it. Without a LIMIT, 25 rows; with one, at most 10000"
+    },
+    "scan_id": {
+      "type": "string",
+      "description": "The saved scan to read: an id duscope_scan or duscope_scans gave (its first 4 or more characters will do), of a root or a directory under one. Default, or latest: the newest saved scan of a directory under the roots that holds the path"
+    },
+    "path": {
+      "type": "string",
+      "description": "The entry :root_id names, under one of the server's roots: absolute, or relative to the scan's root. Default: the scan's root, or the server's root when it has one"
+    }
+  },
+  "required": [
+    "sql"
+  ],
+  "additionalProperties": false
+}

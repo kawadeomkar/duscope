@@ -263,5 +263,123 @@ configuration's); a scan taken with others is read by its `scan_id`.
 
 ## Analysis group (P3-MCP-07)
 
-`duscope_caches`, `duscope_explain`, `duscope_query`, `duscope_schema`,
-`duscope_diff`: not yet written.
+`duscope_caches` reads a saved scan with `--no-scan`, as the scan group does;
+`duscope_explain` reads one, or the path as it is now, and never scans.
+`duscope_query`'s statement and `duscope_schema`'s row counts read a whole scan,
+not the subtree at a path, so these two read only a scan whose root is a root or
+lies under one: one whose root lies above a root is not found, as one the roots
+hide. With no `scan_id`, or `latest`, they read the newest such scan that holds
+the path, and pass its id. `duscope_diff` always compares under a path inside
+the roots, so a scan whose root lies above a root is compared at that root.
+
+### `duscope_caches` (`caches`)
+
+| Flag | Parameter | Why |
+| --- | --- | --- |
+| `PATH` | `path` | absolute, or relative to the scan's root |
+| `--scan` | `scan_id` | `latest` or an id, never an index file |
+| `--by-project` | `by_project` | |
+| `--loose` | `loose` | |
+| `--min-size` | `min_size` | |
+| `--size` | `size` | |
+| `--fields` | `fields` | joined with commas |
+| `--limit` | `limit` | 1 to 100 |
+| `--cursor` | `cursor` | |
+| `--depth` | — | caches are found at any depth under the path |
+| `--min-depth` | — | caches are found at any depth under the path |
+| `--max-size` | — | the tool lists the largest |
+| `--older-than` | — | `duscope_stale` answers by age |
+| `--newer-than` | — | `duscope_stale` answers by age |
+| `--since` | — | `duscope_stale` answers by age |
+| `--until` | — | `duscope_stale` answers by age |
+| `--time` | — | `duscope_stale` answers by age |
+| `--type` | — | caches are directories |
+| `--sort` | — | the tool lists the largest first |
+| `--reverse` | — | the tool lists the largest first |
+| `--glob` | — | caches are found by their rules' markers |
+| `--regex` | — | caches are found by their rules' markers |
+| `--invert` | — | caches are found by their rules' markers |
+| `--exclude` | — | caches are found by their rules' markers |
+| `--all` | — | a tool returns one envelope; `cursor` pages |
+| `--strict` | — | an unreadable directory is a warning in the envelope |
+| `--no-scan` | — | always set: a read-only tool never scans |
+| `--no-save` | — | with `--no-scan`, nothing is scanned to save |
+| `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
+| `--max-age` | — | the `stale_index` warning's threshold: the configuration's, or 7d |
+| `--apparent-size` | — | `size` |
+| `--threads` | — | the tool never scans |
+| `--one-file-system` | — | the tool never scans |
+| `--include-network` | — | the tool never scans |
+| `--follow-symlinks` | — | the tool never scans |
+| `--attrs` | — | the tool never scans |
+| `--clones` | — | the tool never scans |
+| `--no-clones` | — | the tool never scans |
+| `--exclude-from` | — | the tool never scans |
+| `--ignore-from` | — | the tool never scans |
+| `--exclude-caches` | — | the tool never scans |
+| `--skip-containers` | — | hidden: a later phase's |
+| `--provider` | — | hidden: for tests |
+| `--test-now` | — | hidden: for tests |
+
+### `duscope_explain` (`explain`)
+
+| Flag | Parameter | Why |
+| --- | --- | --- |
+| `PATH` | `path` | absolute, or relative to the scan's root |
+| `--scan` | `scan_id` | `latest` or an id, never an index file |
+| `--errors` | — | lists the unreadable directories of a whole scan, which for a scan above a root lie outside the roots |
+| `--max-age` | — | the `stale_index` warning's threshold: the configuration's, or 7d |
+| `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
+| `--test-now` | — | hidden: for tests |
+
+### `duscope_query` (`query`)
+
+| Flag | Parameter | Why |
+| --- | --- | --- |
+| `--sql` | `sql` | |
+| `PATH` | `path` | absolute, or relative to the scan's root: the entry `:root_id` names |
+| `--scan` | `scan_id` | always set: the scan `scan_id` names, or the newest of a directory under the roots that holds the path |
+| `--max-rows` | — | a `LIMIT` in the statement asks for fewer; the ceiling stays the sandbox's 10000 |
+| `--timeout` | — | the sandbox's 5 seconds |
+| `--no-scan` | — | always set: a read-only tool never scans |
+| `--no-save` | — | with `--no-scan`, nothing is scanned to save |
+| `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
+| `--max-age` | — | the `stale_index` warning's threshold: the configuration's, or 7d |
+| `--size` | — | the scan block's measure; the tables hold both sizes |
+| `--apparent-size` | — | the scan block's measure; the tables hold both sizes |
+| `--threads` | — | the tool never scans |
+| `--one-file-system` | — | the tool never scans |
+| `--include-network` | — | the tool never scans |
+| `--follow-symlinks` | — | the tool never scans |
+| `--attrs` | — | the tool never scans |
+| `--clones` | — | the tool never scans |
+| `--no-clones` | — | the tool never scans |
+| `--exclude-from` | — | the tool never scans |
+| `--ignore-from` | — | the tool never scans |
+| `--exclude-caches` | — | the tool never scans |
+| `--skip-containers` | — | hidden: a later phase's |
+| `--provider` | — | hidden: for tests |
+| `--test-now` | — | hidden: for tests |
+
+### `duscope_schema` (`schema`)
+
+| Flag | Parameter | Why |
+| --- | --- | --- |
+| `PATH` | `path` | absolute, or relative to the scan's root |
+| `--scan` | `scan_id` | always set, but with `envelope`: the scan `scan_id` names, or the newest of a directory under the roots that holds the path |
+| `--envelope` | `envelope` | a verb's name; the result's `envelopes` lists them |
+| `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
+
+### `duscope_diff` (`diff`)
+
+| Flag | Parameter | Why |
+| --- | --- | --- |
+| `OLD` | `old` | `latest` or an id, never an index file |
+| `NEW` | `new` | `latest` or an id, never an index file |
+| `--under` | `path` | always set: the path, or the older scan's root, or the root under it |
+| `--min-delta` | `min_delta` | |
+| `--depth` | `depth` | |
+| `--size` | `size` | |
+| `--limit` | `limit` | 1 to 100 |
+| `--all` | — | a tool returns one envelope |
+| `--trust` | — | names an index file outside the index directory; a client names saved scans by id |

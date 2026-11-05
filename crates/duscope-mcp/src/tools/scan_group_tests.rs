@@ -52,8 +52,13 @@ fn p3_mcp_04_the_shipped_tools_register() {
         names,
         [
             "duscope_by_type",
+            "duscope_caches",
+            "duscope_diff",
+            "duscope_explain",
+            "duscope_query",
             "duscope_scan",
             "duscope_scans",
+            "duscope_schema",
             "duscope_stale",
             "duscope_summary",
             "duscope_top",
@@ -69,7 +74,12 @@ fn p3_mcp_04_the_shipped_tools_register() {
 }
 
 /// The command line `tool` builds for `arguments`, with `root` the one root.
-fn command_line(tool: &str, arguments: &Value, root: &Path, index_dir: &Path) -> Vec<String> {
+pub(super) fn command_line(
+    tool: &str,
+    arguments: &Value,
+    root: &Path,
+    index_dir: &Path,
+) -> Vec<String> {
     let roots = Roots::new([root]).unwrap();
     let context = Context {
         roots: &roots,

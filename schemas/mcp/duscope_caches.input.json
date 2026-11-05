@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "duscope_caches.input.json",
+  "title": "duscope_caches",
+  "description": "The arguments of duscope_caches, which runs `duscope caches --no-scan`.",
+  "type": "object",
+  "properties": {
+    "scan_id": {
+      "type": "string",
+      "description": "The saved scan to read: an id duscope_scan or duscope_scans gave (its first 4 or more characters will do), or latest. Default: the newest saved scan that holds the path and was taken with the default options"
+    },
+    "path": {
+      "type": "string",
+      "description": "A directory or file under one of the server's roots: absolute, or relative to the scan's root. Default: the scan's root, or the server's root when it has one"
+    },
+    "by_project": {
+      "type": "boolean",
+      "description": "One row per project, the directory holding its caches' marker, instead of one per cache. Default: false"
+    },
+    "loose": {
+      "type": "boolean",
+      "description": "Also list a directory named like a cache without the marker that confirms it. Default: false"
+    },
+    "min_size": {
+      "type": "string",
+      "description": "Leave out caches smaller than this: 100M, 1.5G, 10KB, or a number of bytes. Default: 10M"
+    },
+    "size": {
+      "type": "string",
+      "enum": [
+        "allocated",
+        "apparent"
+      ],
+      "description": "What rows are ranked and shown by: bytes on disk (allocated, the default) or apparent length"
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z_]+$"
+      },
+      "description": "The fields of each row, in this order. Default: every field"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Rows to return. Default: 25"
+    },
+    "cursor": {
+      "type": "string",
+      "description": "Where the next page starts: the previous result's next_cursor, sent with the same other arguments"
+    }
+  },
+  "additionalProperties": false
+}
