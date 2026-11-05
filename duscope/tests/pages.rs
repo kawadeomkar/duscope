@@ -206,8 +206,10 @@ fn p2_qry_02_pages_join_into_the_list() {
         ],
         vec!["caches", home.as_str(), "--min-size", "0"],
     ] {
+        // The whole list, however long its paths: 60 rows under a long
+        // temporary directory pass the default 24,000 characters and spill.
         let mut whole = args.clone();
-        whole.extend(["--limit", "60"]);
+        whole.extend(["--limit", "60", "--max-chars", "0"]);
         let list: Vec<String> = json(&env, &whole)["entries"]
             .as_array()
             .unwrap()
