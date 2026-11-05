@@ -1205,6 +1205,21 @@ fn p1_pkg_02_the_tap_is_trusted_before_the_bump_loads_its_formula() {
 }
 
 #[test]
+fn p1_pkg_02_the_homebrew_job_leaves_homebrew_core_untapped() {
+    let jobs = jobs(&read(WORKFLOW));
+    let homebrew = job(&jobs, "homebrew");
+    // bump-formula-pr reads the formula from the tap's clone. With the API
+    // turned off, Homebrew first clones all of homebrew/core (1.5 GB).
+    assert!(
+        !homebrew
+            .lines
+            .iter()
+            .any(|line| line.contains("HOMEBREW_NO_INSTALL_FROM_API")),
+        "the homebrew job turns Homebrew's API off"
+    );
+}
+
+#[test]
 fn p1_pkg_02_the_first_release_opens_the_formula_as_a_pull_request() {
     let jobs = jobs(&read(WORKFLOW));
     let homebrew = job(&jobs, "homebrew");
