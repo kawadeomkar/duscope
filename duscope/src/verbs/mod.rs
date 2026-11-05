@@ -141,7 +141,7 @@ pub fn run(cli: Cli, output: &Output) -> Result<(), Failure> {
             "duscope mcp runs from the command line, not inside the server",
         )
         .hint("Run duscope mcp --roots DIR from the MCP client's configuration")),
-        Some(Verb::Agent) => crate::agent::run(),
+        Some(Verb::Agent(args)) => crate::agent::run(&args),
         Some(Verb::Man) => man::run(),
         Some(Verb::Completions(args)) => completions::run(args.shell),
     }

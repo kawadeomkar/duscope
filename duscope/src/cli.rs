@@ -180,7 +180,7 @@ pub enum Verb {
     /// Serve the saved scans to an MCP client over stdin and stdout
     Mcp(McpArgs),
     /// Print the briefing an AI agent reads before it uses duscope
-    Agent,
+    Agent(AgentArgs),
     /// Print the manual page, in roff, to stdout
     Man,
     /// Print the completion script for a shell to stdout
@@ -985,6 +985,24 @@ pub enum MinTile {
     Four,
 }
 
+/// `agent`'s flags.
+#[derive(Debug, Clone, Args)]
+pub struct AgentArgs {
+    /// Write the briefing as a skill that agents' clients load
+    ///
+    /// To .agents/skills/duscope/ and .claude/skills/duscope/ (see --dir)
+    #[arg(long)]
+    pub skill: bool,
+
+    /// Where the skill's two folders go (default: the working directory)
+    #[arg(long, value_name = "DIR", requires = "skill")]
+    pub dir: Option<PathBuf>,
+
+    /// Replace a skill that is there
+    #[arg(long, requires = "skill")]
+    pub force: bool,
+}
+
 /// `mcp`'s flags. `--index-dir` and `--max-chars`, which every verb takes,
 /// apply to the tools' verbs.
 #[derive(Debug, Clone, Args)]
@@ -1210,7 +1228,7 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             | Verb::Import(_)
             | Verb::Schema(_)
             | Verb::Mcp(_)
-            | Verb::Agent
+            | Verb::Agent(_)
             | Verb::Man
             | Verb::Completions(_),
         ) => {}
