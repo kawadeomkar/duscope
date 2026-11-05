@@ -1,10 +1,11 @@
 """Unit tests of bench/indexbench.py (P2-BENCH-01): reading `scan -v`, the
-gates, and the pseudo-terminal dua's snapshot is written under. The whole
+gates, and the pseudo-terminal dua runs on (bench/ptyrun.py). The whole
 subcommand runs in duscope/tests/index_bench.rs, against the binary."""
 
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import unittest
 
@@ -12,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import indexbench  # noqa: E402
 import measure  # noqa: E402
+import ptyrun  # noqa: E402
 
 
 class Verbose(unittest.TestCase):
@@ -90,13 +92,39 @@ class Gates(unittest.TestCase):
 
 
 class Pty(unittest.TestCase):
-    def test_p2_bench_01_dua_runs_under_script(self):
+    def test_p2_bench_01_dua_runs_on_a_terminal_that_answers(self):
         argv = indexbench.under_pty(["dua", "i", "--once", "--export", "/t/s p", "/t/tree"])
-        self.assertEqual(argv[0], "script")
-        if sys.platform == "darwin":
-            self.assertEqual(argv, ["script", "-q", "/dev/null", "dua", "i", "--once", "--export", "/t/s p", "/t/tree"])
-        else:
-            self.assertEqual(argv, ["script", "-qec", "dua i --once --export '/t/s p' /t/tree", "/dev/null"])
+        self.assertEqual(argv[:3], [sys.executable, "-I", "-S"])
+        self.assertEqual(os.path.basename(argv[3]), "ptyrun.py")
+        self.assertTrue(os.path.isfile(argv[3]))
+        self.assertEqual(argv[4:], ["dua", "i", "--once", "--export", "/t/s p", "/t/tree"])
+
+    def test_p2_bench_01_each_cursor_query_is_answered_once(self):
+        self.assertEqual(ptyrun.answers(b"\x1b[?25l\x1b[6nframe\x1b[6n"), ([b"\x1b[1;1R"] * 2, b""))
+        self.assertEqual(ptyrun.answers(b"text \x1b[2J and \x1b[1;1H"), ([], b""))
+        # A query split across two reads is answered when its end arrives.
+        found, pending = ptyrun.answers(b"frame\x1b[6")
+        self.assertEqual((found, pending), ([], b"\x1b[6"))
+        self.assertEqual(ptyrun.answers(pending + b"n"), ([b"\x1b[1;1R"], b""))
+
+    def test_p2_bench_01_a_command_that_asks_where_the_cursor_is_gets_an_answer(self):
+        # What dua does first: raw mode, the query, and a read that gives up
+        # after two seconds.
+        asks = (
+            "old=$(stty -g); stty raw -echo min 0 time 20; printf '\\033[6n'; "
+            "reply=$(dd bs=16 count=1 2>/dev/null); stty \"$old\"; "
+            "case $reply in *R) exit 0 ;; *) echo 'Error: The cursor position could not be read'; exit 1 ;; esac"
+        )
+        ran = subprocess.run(
+            [sys.executable, "-I", "-S", ptyrun.__file__, "sh", "-c", asks],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        failed = subprocess.run(
+            [sys.executable, "-I", "-S", ptyrun.__file__, "sh", "-c", "echo 'Error: no snapshot'; exit 3"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual((failed.returncode, failed.stderr.strip()), (3, "Error: no snapshot"))
 
 
 if __name__ == "__main__":
