@@ -702,4 +702,4 @@ fn minute(ns: i64) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

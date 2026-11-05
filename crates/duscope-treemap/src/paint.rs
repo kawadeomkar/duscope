@@ -33,7 +33,9 @@
 //! bytes are charged elsewhere (a later hard link, a clone) weighs nothing.
 //!
 //! The viewer's map ([`paint_unlabelled`]) carries no labels below the
-//! depth-1 titles: its panes name whatever the cursor is on.
+//! depth-1 titles: its panes name whatever the cursor is on. Painted with
+//! [`paint_viewer`], it also names the tiles it drew ([`Drawn`]), which
+//! the viewer's cursor moves between.
 
 use std::borrow::Cow;
 
@@ -150,6 +152,55 @@ struct Painter<'v, 'o, 'c, V: TreeView + ?Sized> {
     class_of: Cow<'c, [Class]>,
     /// Whether tiles are labelled; the depth-1 titles are drawn either way.
     labels: bool,
+    /// The tiles drawn, when the viewer asks for them.
+    drawn: Option<Vec<Drawn>>,
+    /// The depth in the scan of the map's root, below the scan's root when
+    /// the viewer zooms: added to a tile's depth for its `level` colour.
+    depth_base: u32,
+}
+
+/// A tile of the viewer's map, as [`paint_viewer`] drew it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Drawn {
+    /// The entry it shows; for [`DrawnKind::Small`] and
+    /// [`DrawnKind::Files`], the folder whose children it pools.
+    pub id: u32,
+    /// The folder whose block holds it.
+    pub parent: u32,
+    /// Where, in half-cell units.
+    pub rect: Rect,
+    /// How it is drawn.
+    pub kind: DrawnKind,
+}
+
+/// How a [`Drawn`] tile is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawnKind {
+    /// One tile: a file, or a folder too small to open.
+    Leaf,
+    /// An outlined folder, its children inside when `open` (not at the
+    /// `--depth` cap).
+    Box {
+        /// Whether its children are drawn.
+        open: bool,
+    },
+    /// A gutter group, its children inside.
+    Gutter,
+    /// The folder's `+N small` tile: its children too small to draw.
+    Small,
+    /// Under `--pool-files`, the folder's files as one tile.
+    Files,
+}
+
+/// Where a zoomed viewer's map stands in the scan, so that its tiles keep
+/// the colours the whole map gives them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Base {
+    /// The depth in the scan of the map's root: 0 for the scan's root.
+    pub depth: u32,
+    /// Below the scan's root, the `--color-by folder` place of the
+    /// top-level folder the map is inside.
+    pub folder: Option<usize>,
 }
 
 /// Paints the scan in `view` as a map of `w` columns and `h` rows, at most
@@ -158,7 +209,7 @@ struct Painter<'v, 'o, 'c, V: TreeView + ?Sized> {
 pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u16) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
     let mut buffer = CellBuffer::new(w, h);
-    paint_into(view, opts, h, &mut buffer, None);
+    paint_into(view, opts, h, &mut buffer, None, None);
     buffer
 }
 
@@ -177,20 +228,42 @@ pub fn paint_unlabelled(
 ) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
     let mut buffer = CellBuffer::new(w, h);
-    paint_into(view, opts, h, &mut buffer, Some(class_of));
+    paint_into(view, opts, h, &mut buffer, Some(class_of), None);
     buffer
+}
+
+/// Paints the viewer's map as [`paint_unlabelled`] does, and names the
+/// tiles drawn. `view` is the map's root as a scan of its own (the
+/// subtree the viewer zooms to), `class_of` its entries' classes, and
+/// `base` where that root stands in the scan: a zoomed map is drawn as the
+/// map of its root, its children the titled boxes, in the colours the
+/// whole map gives its tiles.
+#[must_use]
+pub fn paint_viewer(
+    view: &(impl TreeView + ?Sized),
+    opts: &PaintOpts<'_>,
+    w: u16,
+    h: u16,
+    class_of: &[Class],
+    base: Base,
+) -> (CellBuffer, Vec<Drawn>) {
+    let h = h.min(u16::MAX / 2);
+    let mut buffer = CellBuffer::new(w, h);
+    let drawn = paint_into(view, opts, h, &mut buffer, Some(class_of), Some(base));
+    (buffer, drawn)
 }
 
 /// Paints the map into the top `h` rows of `buffer` (at most 32767), as
 /// wide as the buffer: labelled, or without labels given each entry's class
-/// (`unlabelled`).
+/// (`unlabelled`); with a `base`, the viewer's map, whose tiles it returns.
 fn paint_into(
     view: &(impl TreeView + ?Sized),
     opts: &PaintOpts<'_>,
     h: u16,
     buffer: &mut CellBuffer,
     unlabelled: Option<&[Class]>,
-) {
+    base: Option<Base>,
+) -> Vec<Drawn> {
     let (w, h) = (buffer.width(), h.min(u16::MAX / 2).min(buffer.height()));
     let h_units = h * 2;
     let mut painter = Painter {
@@ -209,17 +282,24 @@ fn paint_into(
         class_of: unlabelled
             .map_or_else(|| Cow::Owned(classes_of(view, opts.classes)), Cow::Borrowed),
         labels: unlabelled.is_none(),
+        drawn: base.map(|_| Vec::new()),
+        depth_base: base.map_or(0, |b| b.depth),
     };
     if !view.is_empty() && w > 0 && h > 0 {
         let root = view.node(0);
         let area = Rect::new(0, 0, w, h_units);
+        // Below the scan's root every tile is inside one top-level folder.
+        let folder = base
+            .and_then(|b| b.folder)
+            .filter(|_| painter.depth_base > 0);
         if root.is_dir() {
-            painter.block(&root, area, 0, None);
+            painter.block(&root, area, 0, folder);
         } else {
-            painter.leaf(&root, area, 1, 0, None, true);
+            painter.leaf(&root, area, 1, 0, folder, true);
         }
     }
     painter.compose(h, buffer);
+    painter.drawn.unwrap_or_default()
 }
 
 /// Each entry's class by pre-order id, as `by-type` reads it
@@ -271,18 +351,23 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
             Algorithm::Squarify,
             self.opts.min_tile.max(1),
         );
+        // The scan's root places the top-level folders; a zoomed map's
+        // root is inside one already.
+        let places = depth == 0 && self.depth_base == 0;
         for (order, tile) in laid.tiles.iter().enumerate() {
             let tint = order % 2 == 1;
             match items[tile.id] {
                 Item::Entry(id) => {
                     let node = self.view.node(id);
-                    let folder = folder.or((depth == 0).then_some(order));
-                    if node.is_dir() {
+                    let folder = folder.or(places.then_some(order));
+                    let kind = if node.is_dir() {
                         let open = self.opts.depth.is_none_or(|cap| node.depth < cap.max(1));
-                        self.folder(&node, tile.rect, folder, tint, open);
+                        self.folder(&node, tile.rect, folder, tint, open)
                     } else {
                         self.leaf(&node, tile.rect, node.depth, order, folder, true);
-                    }
+                        DrawnKind::Leaf
+                    };
+                    self.record(id, dir.id, tile.rect, kind);
                 }
                 Item::Files(dir_id, count) => {
                     let class = self.dominant(dir_id, true);
@@ -290,6 +375,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
                     self.fill(tile.rect, color, clamp_depth(depth + 1));
                     let label = format!("{count} files");
                     self.label(tile.rect, &label, None, color, class);
+                    self.record(dir_id, dir_id, tile.rect, DrawnKind::Files);
                 }
             }
         }
@@ -298,13 +384,33 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
             self.fill(small.rect, color, clamp_depth(depth + 1));
             let label = format!("+{} small", small.ids.len());
             self.label(small.rect, &label, None, color, Class::Other);
+            self.record(dir.id, dir.id, small.rect, DrawnKind::Small);
+        }
+    }
+
+    /// Names a tile drawn, when the viewer asks for them.
+    fn record(&mut self, id: u32, parent: u32, rect: Rect, kind: DrawnKind) {
+        if let Some(drawn) = &mut self.drawn {
+            drawn.push(Drawn {
+                id,
+                parent,
+                rect,
+                kind,
+            });
         }
     }
 
     /// Paints directory `node` in `rect`: a box, a gutter group or a leaf,
     /// by its size in cells. A folder that does not `open` (at the
     /// `--depth` cap) keeps its box, filled as a leaf, or is a leaf.
-    fn folder(&mut self, node: &Node, rect: Rect, folder: Option<usize>, tint: bool, open: bool) {
+    fn folder(
+        &mut self,
+        node: &Node,
+        rect: Rect,
+        folder: Option<usize>,
+        tint: bool,
+        open: bool,
+    ) -> DrawnKind {
         let (top, rows) = cell_rows(rect);
         let cols = rect.w;
         let depth = node.depth;
@@ -338,6 +444,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
                 // The title names a depth-1 box already.
                 self.leaf(node, inner, depth, usize::from(tint), folder, depth > 1);
             }
+            DrawnKind::Box { open }
         } else if open && cols >= 3 && rows >= 2 {
             let crust = self.opts.pack.roles.crust;
             self.fill(
@@ -352,9 +459,11 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
             );
             let inner = Rect::new(rect.x + 1, rect.y + 1, rect.w - 1, rect.h - 1);
             self.block(node, inner, depth, folder);
+            DrawnKind::Gutter
         } else {
             let order = usize::from(tint);
             self.leaf(node, rect, depth, order, folder, true);
+            DrawnKind::Leaf
         }
     }
 
@@ -374,7 +483,14 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
         } else {
             self.class_of[node.id as usize]
         };
-        let base = tile_color(self.view, self.opts, node, class, depth, folder);
+        let base = tile_color(
+            self.view,
+            self.opts,
+            node,
+            class,
+            depth + self.depth_base,
+            folder,
+        );
         let color = self.tinted(base, order % 2 == 1);
         self.fill(rect, color, clamp_depth(depth));
         if !labelled || !self.labels {
@@ -835,7 +951,7 @@ pub fn frame(
     }
     let map_rows = rows - 5;
     let mut buffer = CellBuffer::new(w, map_rows + 4);
-    paint_into(view, opts, map_rows, &mut buffer, None);
+    paint_into(view, opts, map_rows, &mut buffer, None, None);
     // The legend: `■ code 61%` per class, the swatch in its colour.
     let mut x = 2u16;
     let y = map_rows;

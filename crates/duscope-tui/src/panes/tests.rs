@@ -421,7 +421,7 @@ impl Dir {
 }
 
 /// The example scanned from `/Users/alex/Library`.
-fn mockup() -> (Arena, RollUp) {
+pub(crate) fn mockup() -> (Arena, RollUp) {
     let mut root = Dir::default();
     root.add(library());
     let mut json = String::from(r#"[1,2,{"progname":"ncdu"},[{"name":"/Users/alex/Library"}"#);
@@ -434,7 +434,7 @@ fn mockup() -> (Arena, RollUp) {
     (arena, rollup)
 }
 
-fn classes() -> Classes {
+pub(crate) fn classes() -> Classes {
     let user = Classes::parse(
         "[ext]\n\"db-wal\" = \"data\"\n\"db-shm\" = \"data\"\n",
         "test",
@@ -443,7 +443,7 @@ fn classes() -> Classes {
     Classes::vendored().merged(user)
 }
 
-fn opts<'a>(pack: &'a Pack, classes: &'a Classes, color_by: ColorBy) -> PaintOpts<'a> {
+pub(crate) fn opts<'a>(pack: &'a Pack, classes: &'a Classes, color_by: ColorBy) -> PaintOpts<'a> {
     PaintOpts {
         pack,
         color_by,
@@ -474,7 +474,7 @@ fn screen(app: &mut App<'_>, w: u16, h: u16) -> String {
 
 /// The status the binary writes for a scan of the example: its total,
 /// its counts, how long the scan took.
-fn status(view: &ArenaView<'_>) -> String {
+pub(crate) fn status(view: &ArenaView<'_>) -> String {
     use duscope_core::query::TreeView;
     let root = view.node(0);
     format!(
@@ -614,7 +614,10 @@ fn p4_tui_02_the_mockups_tree_renders_with_its_pane_contents() {
         ]
     );
     // The key line.
-    assert_eq!(rows[44].trim_end(), " q quit");
+    assert_eq!(
+        rows[44].trim_end(),
+        " ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit"
+    );
 }
 
 #[test]

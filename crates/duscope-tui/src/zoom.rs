@@ -1,0 +1,270 @@
+//! The zoom: the map's visible root, the stack of what `z` replaced, and
+//! the maps already painted, one for each root at the map's size.
+//!
+//! `z` makes the folder under the cursor (a file's folder) the visible
+//! root, pushing the root and the cursor it replaced; `Z` pops them back;
+//! `0` pops them all. A zoomed map is the map of its root, as `view` of
+//! that folder would draw it (its children the titled boxes, `--depth`
+//! counted from it), in the colours the whole map gives its tiles
+//! (`--color-by folder` and `level` keep the scan's top-level folders and
+//! depths).
+//!
+//! A [`Map`] is painted once for a root and a size and kept: moving the
+//! cursor redraws only the marks on it, and zooming back out finds the
+//! outer map where it was left. A resize, which changes every layout,
+//! forgets them all; so must anything that changes how the map is painted
+//! (the colour mode, the pack).
+
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use duscope_core::query::{Subtree, TreeView};
+use duscope_treemap::Rect;
+use duscope_treemap::cells::CellBuffer;
+use duscope_treemap::paint::{Base, Drawn, DrawnKind, classes_of, paint_viewer};
+
+use crate::panes::Context;
+
+/// The maps kept at one size: the roots visited last.
+const KEPT: usize = 16;
+
+/// The visible root and the zoom stack.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Zoom {
+    /// The map's root.
+    root: u32,
+    /// What each `z` replaced: the root, and the cursor at the time.
+    stack: Vec<(u32, u32)>,
+}
+
+impl Zoom {
+    /// The map's root.
+    #[must_use]
+    pub fn root(&self) -> u32 {
+        self.root
+    }
+
+    /// How many zooms deep the map is.
+    #[cfg(test)]
+    pub fn depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Makes `root` the map's root, remembering the root it replaces and
+    /// the `cursor` there.
+    pub fn push(&mut self, root: u32, cursor: u32) {
+        self.stack.push((self.root, cursor));
+        self.root = root;
+    }
+
+    /// Goes back out one zoom: the root and the cursor `z` replaced, now
+    /// the root again; `None` at the scan's root.
+    pub fn pop(&mut self) -> Option<(u32, u32)> {
+        let (root, cursor) = self.stack.pop()?;
+        self.root = root;
+        Some((root, cursor))
+    }
+
+    /// Goes back out to the scan's root: what the first `z` replaced;
+    /// `None` at the scan's root.
+    pub fn reset(&mut self) -> Option<(u32, u32)> {
+        let first = *self.stack.first()?;
+        self.stack.clear();
+        self.root = first.0;
+        Some(first)
+    }
+}
+
+/// Where the map shows an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// It is the map's root: the whole map.
+    Whole,
+    /// The tile at this index of [`Map::tiles`]: the entry's own, or the
+    /// tile that holds it (a pool, or a folder too small to open).
+    Tile(usize),
+}
+
+/// A map painted for a root at a size, and the tiles on it.
+#[derive(Debug)]
+pub struct Map {
+    /// The root.
+    root: u32,
+    /// The cells, as wide and tall as the map.
+    pub cells: CellBuffer,
+    /// The tiles drawn, with the scan's ids.
+    tiles: Vec<Drawn>,
+    /// The tile of each entry drawn as its own.
+    own: HashMap<u32, usize>,
+    /// The tiles of each folder's block: its children's, its pool, its
+    /// files'. A folder whose block was laid out has an entry.
+    blocks: HashMap<u32, Vec<usize>>,
+}
+
+impl Map {
+    /// The map of `root` (a folder, or the scan's root) at `w`×`h` cells,
+    /// as `ctx` paints it.
+    #[must_use]
+    pub fn paint(ctx: &Context<'_>, root: u32, w: u16, h: u16) -> Map {
+        let view = ctx.view;
+        let (cells, drawn) = if root == 0 || view.is_empty() {
+            paint_viewer(view, ctx.opts, w, h, ctx.class_of, Base::default())
+        } else {
+            let node = view.node(root);
+            let sub = Subtree::new(view, root);
+            let mut top = node;
+            while top.depth > 1 {
+                top = view.node(top.parent);
+            }
+            let base = Base {
+                depth: node.depth,
+                folder: ctx.ranks.by_id.get(&top.id).copied(),
+            };
+            let range = root as usize..=node.last_id as usize;
+            if let Some(classes) = ctx.class_of.get(range) {
+                paint_viewer(&sub, ctx.opts, w, h, classes, base)
+            } else {
+                let classes = classes_of(&sub, ctx.opts.classes);
+                paint_viewer(&sub, ctx.opts, w, h, &classes, base)
+            }
+        };
+        let tiles: Vec<Drawn> = drawn
+            .into_iter()
+            .map(|d| Drawn {
+                id: d.id + root,
+                parent: d.parent + root,
+                ..d
+            })
+            .collect();
+        let mut own = HashMap::new();
+        let mut blocks: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (i, tile) in tiles.iter().enumerate() {
+            if matches!(
+                tile.kind,
+                DrawnKind::Leaf | DrawnKind::Box { .. } | DrawnKind::Gutter
+            ) {
+                own.insert(tile.id, i);
+            }
+            // A block's tiles are drawn, and pushed, in the order they
+            // were laid out.
+            blocks.entry(tile.parent).or_default().push(i);
+        }
+        Map {
+            root,
+            cells,
+            tiles,
+            own,
+            blocks,
+        }
+    }
+
+    /// The root it was painted for.
+    #[cfg(test)]
+    pub fn root(&self) -> u32 {
+        self.root
+    }
+
+    /// Its tiles.
+    #[must_use]
+    pub fn tiles(&self) -> &[Drawn] {
+        &self.tiles
+    }
+
+    /// The whole map, in half-cell units.
+    #[must_use]
+    pub fn area(&self) -> Rect {
+        Rect::new(0, 0, self.cells.width(), self.cells.height() * 2)
+    }
+
+    /// The tile drawn as `id`'s own.
+    #[must_use]
+    pub fn own(&self, id: u32) -> Option<usize> {
+        self.own.get(&id).copied()
+    }
+
+    /// The tiles of `dir`'s block, its children laid out inside it; empty
+    /// where it was not opened (too small, at the `--depth` cap, outside
+    /// the map).
+    #[must_use]
+    pub fn block(&self, dir: u32) -> &[usize] {
+        self.blocks.get(&dir).map_or(&[], Vec::as_slice)
+    }
+
+    /// Where the map shows `id`, an entry under its root: its own tile; in
+    /// a folder whose block was laid out, the pool it went into (a file
+    /// under `--pool-files`, the files' tile); else wherever its folder is
+    /// shown.
+    #[must_use]
+    pub fn mark(&self, view: &dyn TreeView, id: u32) -> Mark {
+        let mut at = id;
+        loop {
+            if at == self.root || at == 0 {
+                return Mark::Whole;
+            }
+            if let Some(i) = self.own(at) {
+                return Mark::Tile(i);
+            }
+            let node = view.node(at);
+            let block = self.block(node.parent);
+            let find = |kind| block.iter().copied().find(|&i| self.tiles[i].kind == kind);
+            // A file under `--pool-files` is in the files' tile when it has
+            // one, and that tile in the pool when it does not.
+            let files = if node.is_dir() {
+                None
+            } else {
+                find(DrawnKind::Files)
+            };
+            if let Some(i) = files.or_else(|| find(DrawnKind::Small)) {
+                return Mark::Tile(i);
+            }
+            if node.parent >= at {
+                return Mark::Whole;
+            }
+            at = node.parent;
+        }
+    }
+
+    /// The rectangle of `mark`, in half-cell units.
+    #[must_use]
+    pub fn rect(&self, mark: Mark) -> Rect {
+        match mark {
+            Mark::Whole => self.area(),
+            Mark::Tile(i) => self.tiles[i].rect,
+        }
+    }
+}
+
+/// The maps painted at the map's current size, the roots visited last.
+#[derive(Debug, Default)]
+pub struct Layouts {
+    /// The size they were painted at.
+    size: (u16, u16),
+    /// The latest first.
+    maps: Vec<Rc<Map>>,
+}
+
+impl Layouts {
+    /// The map of `root` at `w`×`h`: the one kept, or one `paint` paints
+    /// (and keeps). Another size forgets the maps kept.
+    pub fn get(&mut self, root: u32, w: u16, h: u16, paint: impl FnOnce() -> Map) -> Rc<Map> {
+        if self.size != (w, h) {
+            self.maps.clear();
+            self.size = (w, h);
+        }
+        if let Some(i) = self.maps.iter().position(|m| m.root == root) {
+            let map = self.maps.remove(i);
+            self.maps.insert(0, Rc::clone(&map));
+            return map;
+        }
+        let map = Rc::new(paint());
+        self.maps.insert(0, Rc::clone(&map));
+        self.maps.truncate(KEPT);
+        map
+    }
+
+    /// How many maps are kept.
+    #[cfg(test)]
+    pub fn kept(&self) -> usize {
+        self.maps.len()
+    }
+}
