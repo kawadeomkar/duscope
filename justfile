@@ -8,9 +8,13 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # 41263296119 (p2-qry-04-explain, 223cc43) measured x86_64 musl at 6,700,928
 # bytes and arm64 macOS at 5,635,232; plus 10% is 7,371,021, so 7.38 MB. Abort
 # on panic (P2-QRY-04) then took 13% off (4,889,664 bytes on arm64 macOS) and
-# the budget stayed, as room for the rest of phase 2. The spec's ceiling stays
-# 8 MB.
-size_budget := "7380000"
+# the budget stayed, as room for the rest of phase 2. Phase 2 ended at 7,352,256
+# bytes on x86_64 musl (run 41977141494, 5beb5a9). Phase 3's first tools take it
+# to 7,446,464 (P3-MCP-04 and P3-MCP-07), about half of P3-MCP-04's share being
+# P3-MCP-03's registry, which a release build drops while no tool is registered.
+# Plus 10% would pass the spec's 8 MB ceiling, so the budget is the ceiling
+# (DEV-115).
+size_budget := "8000000"
 
 # Developer tools installed by `just setup`, mirrored in CONTRIBUTING.md.
 cargo_deny_version := "0.20.2"
