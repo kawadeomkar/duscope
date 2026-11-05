@@ -1,4 +1,7 @@
-//! P1-WALK-06: mounts on real filesystems. These tests mount filesystems,
+//! P1-WALK-06: mounts on real filesystems; P5-WALK-02: btrfs subvolumes
+//! and reflinks, XFS reflinks, overlayfs, exFAT, FAT, NTFS and squashfs on
+//! Linux.
+//! These tests mount filesystems,
 //! so they are ignored by default and run with `DUSCOPE_TEST_PLATFORM=1`
 //! (`just check-full`; the CI platform job runs them under sudo). On Linux
 //! they need root: without it they skip, except in CI, where a missing
@@ -19,12 +22,15 @@ use std::path::{Path, PathBuf};
 
 use duscope_testkit::TestEnv;
 use duscope_walk::{
-    DirId, ScanEvent, Skip, VolumeClass, VolumeInfo, WalkOptions, WalkSummary, walk,
+    DirId, Entry, ScanEvent, Skip, VolumeClass, VolumeInfo, WalkOptions, WalkSummary, walk,
 };
 
 /// What a walk of `root` read and reported.
 struct Seen {
     paths: Vec<PathBuf>,
+    // Read by the Linux tests of filesystems' entries.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    entries: BTreeMap<PathBuf, Entry>,
     volumes: Vec<VolumeInfo>,
     skipped: BTreeMap<PathBuf, Skip>,
     summary: WalkSummary,
@@ -33,6 +39,7 @@ struct Seen {
 fn walk_root(root: &Path, opts: &WalkOptions) -> Seen {
     let mut dirs: BTreeMap<DirId, PathBuf> = BTreeMap::new();
     let (mut paths, mut volumes, mut skipped) = (Vec::new(), Vec::new(), BTreeMap::new());
+    let mut entries = BTreeMap::new();
     let summary = walk(root, opts, |event| match event {
         ScanEvent::Entry(entry) => {
             let path = if entry.dir == Some(DirId::ROOT) {
@@ -43,7 +50,8 @@ fn walk_root(root: &Path, opts: &WalkOptions) -> Seen {
             if let Some(id) = entry.dir {
                 dirs.insert(id, path.clone());
             }
-            paths.push(path);
+            paths.push(path.clone());
+            entries.insert(path, entry);
         }
         ScanEvent::Volume(volume) => volumes.push(volume),
         ScanEvent::Skipped { dir, reason } => {
@@ -54,6 +62,7 @@ fn walk_root(root: &Path, opts: &WalkOptions) -> Seen {
     .unwrap();
     Seen {
         paths,
+        entries,
         volumes,
         skipped,
         summary,
@@ -410,4 +419,512 @@ fn p1_walk_06_linux_mount_ids_hold_for_same_device_binds_and_reused_ids() {
         (kernel.fs_type.as_str(), kernel.class),
         ("proc", VolumeClass::Kernel)
     );
+}
+
+/// Runs a command of the test environment; `Err` with its error output (or
+/// why it did not start) when it fails, for a prerequisite this machine
+/// may lack: a `mkfs`, a kernel driver.
+#[cfg(target_os = "linux")]
+fn attempt(
+    env: &TestEnv,
+    program: &str,
+    args: &[&dyn AsRef<std::ffi::OsStr>],
+) -> Result<(), String> {
+    match env.command(program).args(args).output() {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(format!(
+            "{program}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => Err(format!("{program}: {e}")),
+    }
+}
+
+/// Whether the platform tests run here as root, as mounting needs; notes
+/// why not otherwise (`duscope_testkit::skip`, which fails in CI).
+#[cfg(target_os = "linux")]
+fn as_root(env: &TestEnv) -> bool {
+    if !platform_tests() {
+        return false;
+    }
+    let uid = env.command("id").arg("-u").output().unwrap();
+    if String::from_utf8_lossy(&uid.stdout).trim() != "0" {
+        duscope_testkit::skip("mounting needs root");
+        return false;
+    }
+    true
+}
+
+/// Makes a `size` image at `image` with `mkfs` (the program and its
+/// arguments before the image) and loop-mounts it at `point` with `opts`
+/// (`-t ntfs3`, `-o subvol=…`), recording the mount in `mounted`; `Err`
+/// with why, where a tool or a driver is missing.
+#[cfg(target_os = "linux")]
+fn loop_mount(
+    env: &TestEnv,
+    mounted: &mut Mounted<'_>,
+    image: &Path,
+    size: &str,
+    mkfs: &[&str],
+    opts: &[&str],
+    point: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(point).unwrap();
+    attempt(env, "truncate", &[&"-s", &size, &image])?;
+    let (program, args) = mkfs.split_first().unwrap();
+    let mut mkfs_args: Vec<&dyn AsRef<std::ffi::OsStr>> = args
+        .iter()
+        .map(|a| a as &dyn AsRef<std::ffi::OsStr>)
+        .collect();
+    mkfs_args.push(&image);
+    attempt(env, program, &mkfs_args)?;
+    let mut mount_args: Vec<&dyn AsRef<std::ffi::OsStr>> = vec![&"-o", &"loop"];
+    mount_args.extend(opts.iter().map(|a| a as &dyn AsRef<std::ffi::OsStr>));
+    mount_args.push(&image);
+    mount_args.push(&point);
+    attempt(env, "mount", &mount_args)?;
+    mounted.points.push(point.to_owned());
+    Ok(())
+}
+
+/// Writes `len` bytes of a repeating pattern to `path` and flushes them,
+/// so the file's extents are allocated before its map is read.
+#[cfg(target_os = "linux")]
+fn write_synced(path: &Path, len: usize) {
+    use std::io::Write;
+    let mut file = fs::File::create(path).unwrap();
+    let data: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect();
+    file.write_all(&data).unwrap();
+    file.sync_all().unwrap();
+}
+
+/// A reflink copy of `from` at `to`, flushed.
+#[cfg(target_os = "linux")]
+fn reflink(env: &TestEnv, from: &Path, to: &Path) {
+    run(env, "cp", &[&"--reflink=always", &from, &to]);
+    run(env, "sync", &[&"-f", &to]);
+}
+
+/// Asserts that the reflink pair `orig` and `copy` in `dir` shares every
+/// extent, on both sides, and that the file `plain` shares none.
+#[cfg(target_os = "linux")]
+fn assert_reflinked(dir: &Path, plain: &Path) {
+    for name in ["orig", "copy"] {
+        let extents = duscope_walk::extents(&dir.join(name)).unwrap().unwrap();
+        assert!(extents.shared >= 1024 * 1024, "{name}: {extents:?}");
+        assert_eq!(extents.shared, extents.mapped, "{name}: {extents:?}");
+    }
+    let plain = duscope_walk::extents(plain).unwrap().unwrap();
+    assert_eq!(plain.shared, 0, "{plain:?}");
+    assert!(plain.mapped > 0, "{plain:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts a btrfs image as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_walk_02_linux_btrfs_subvolumes_are_boundaries_and_reflinks_share_extents() {
+    use duscope_walk::{Boundary, Flags};
+
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let work = env.tmp_dir().join("btrfs");
+    let root = work.join("root");
+    let fs_root = root.join("btrfs");
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    if let Err(why) = loop_mount(
+        &env,
+        &mut mounted,
+        &work.join("btrfs.img"),
+        "256M",
+        &["mkfs.btrfs", "-q"],
+        &[],
+        &fs_root,
+    ) {
+        duscope_testkit::skip(&format!("no btrfs here ({why})"));
+        return;
+    }
+    run(
+        &env,
+        "btrfs",
+        &[&"-q", &"subvolume", &"create", &fs_root.join("sub")],
+    );
+    run(
+        &env,
+        "btrfs",
+        &[&"-q", &"subvolume", &"create", &fs_root.join("sub/nested")],
+    );
+    fs::create_dir(fs_root.join("plain")).unwrap();
+    write_synced(&fs_root.join("plain/file"), 256 * 1024);
+    write_synced(&fs_root.join("sub/orig"), 1024 * 1024);
+    reflink(&env, &fs_root.join("sub/orig"), &fs_root.join("sub/copy"));
+    // The subvolume mounted on its own as well, as /home is on many
+    // systems.
+    let source = env
+        .command("findmnt")
+        .args(["-n", "-o", "SOURCE"])
+        .arg(&fs_root)
+        .output()
+        .unwrap();
+    let source = String::from_utf8_lossy(&source.stdout).trim().to_owned();
+    fs::create_dir(fs_root.join("mnt")).unwrap();
+    run(
+        &env,
+        "mount",
+        &[&"-o", &"subvol=/sub", &source, &fs_root.join("mnt")],
+    );
+    mounted.points.push(fs_root.join("mnt"));
+
+    let seen = walk_root(&root, &WalkOptions::default());
+    let entry = |rel: &str| {
+        seen.entries
+            .get(&root.join(rel))
+            .unwrap_or_else(|| panic!("{rel} was not read"))
+    };
+    for rel in ["btrfs/sub", "btrfs/sub/nested"] {
+        assert_eq!(entry(rel).boundary, Boundary::Subvolume, "{rel}");
+        assert!(entry(rel).flags.contains(Flags::SUBVOLUME), "{rel}");
+    }
+    assert_eq!(entry("btrfs/plain").boundary, Boundary::None);
+    assert!(!entry("btrfs/plain").flags.contains(Flags::SUBVOLUME));
+    // The btrfs filesystem entered from the test's own is a mount; its
+    // subvolume mounted inside it is a subvolume, and a mount root.
+    assert_eq!(entry("btrfs").boundary, Boundary::Mount);
+    let mnt = entry("btrfs/mnt");
+    assert_eq!(mnt.boundary, Boundary::Subvolume);
+    assert!(mnt.flags.contains(Flags::SUBVOLUME | Flags::MOUNT_ROOT));
+    assert!(seen.paths.contains(&root.join("btrfs/mnt/orig")));
+    let volume = seen
+        .volumes
+        .iter()
+        .find(|v| v.mount_point == fs_root)
+        .unwrap();
+    assert_eq!(
+        (volume.fs_type.as_str(), volume.class),
+        ("btrfs", VolumeClass::Local)
+    );
+    assert!(
+        seen.volumes
+            .iter()
+            .any(|v| v.mount_point == fs_root.join("mnt") && v.entered()),
+        "the subvolume mount has a volume row of its own"
+    );
+
+    // -x keeps a subvolume inside the mount, and leaves the one mounted on
+    // its own out, as any mount.
+    let opts = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    let confined = walk_root(&fs_root, &opts);
+    assert!(confined.paths.contains(&fs_root.join("sub/nested")));
+    assert!(confined.paths.contains(&fs_root.join("sub/orig")));
+    assert_eq!(
+        confined.skipped.get(&fs_root.join("mnt")),
+        Some(&Skip::OneFileSystem)
+    );
+
+    assert_reflinked(&fs_root.join("sub"), &fs_root.join("plain/file"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts an XFS image as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_walk_02_linux_xfs_reflinks_share_extents() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let work = env.tmp_dir().join("xfs");
+    let point = work.join("mnt");
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    if let Err(why) = loop_mount(
+        &env,
+        &mut mounted,
+        &work.join("xfs.img"),
+        "320M",
+        &["mkfs.xfs", "-q", "-m", "reflink=1"],
+        &[],
+        &point,
+    ) {
+        duscope_testkit::skip(&format!("no XFS with reflinks here ({why})"));
+        return;
+    }
+    write_synced(&point.join("orig"), 1024 * 1024);
+    write_synced(&point.join("plain"), 64 * 1024);
+    reflink(&env, &point.join("orig"), &point.join("copy"));
+    assert_reflinked(&point, &point.join("plain"));
+    let seen = walk_root(&point, &WalkOptions::default());
+    let volume = seen.volumes.first().unwrap();
+    assert_eq!(
+        (volume.fs_type.as_str(), volume.class),
+        ("xfs", VolumeClass::Local)
+    );
+    // A reflinked file reports its whole allocation: the scan counts it
+    // twice, which is why explain --clones reads the extents.
+    let entry = |name: &str| &seen.entries[&point.join(name)];
+    assert_eq!(entry("orig").allocated, entry("copy").allocated);
+    assert!(entry("copy").allocated >= 1024 * 1024);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts an overlay as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_walk_02_linux_an_overlay_is_entered_and_confined_by_its_own_mount() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let work = env.tmp_dir().join("overlay");
+    let root = work.join("root");
+    for dir in ["lower", "upper", "work", "root/merged"] {
+        fs::create_dir_all(work.join(dir)).unwrap();
+    }
+    fs::write(work.join("lower/from-lower"), b"lower").unwrap();
+    let options = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        work.join("lower").display(),
+        work.join("upper").display(),
+        work.join("work").display()
+    );
+    if let Err(why) = attempt(
+        &env,
+        "mount",
+        &[
+            &"-t",
+            &"overlay",
+            &"overlay",
+            &"-o",
+            &options,
+            &root.join("merged"),
+        ],
+    ) {
+        duscope_testkit::skip(&format!("no overlayfs here ({why})"));
+        return;
+    }
+    let _mounted = Mounted {
+        env: &env,
+        points: vec![root.join("merged")],
+    };
+    fs::write(root.join("merged/from-upper"), b"upper").unwrap();
+    let seen = walk_root(&root, &WalkOptions::default());
+    for name in ["merged/from-lower", "merged/from-upper"] {
+        assert!(seen.paths.contains(&root.join(name)), "{name}");
+    }
+    let overlay = seen
+        .volumes
+        .iter()
+        .find(|v| v.mount_point == root.join("merged"))
+        .unwrap();
+    assert_eq!(
+        (overlay.fs_type.as_str(), overlay.class, overlay.entered()),
+        ("overlay", VolumeClass::Overlay, true)
+    );
+    let opts = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    let confined = walk_root(&root, &opts);
+    assert_eq!(
+        confined.skipped.get(&root.join("merged")),
+        Some(&Skip::OneFileSystem)
+    );
+    // Rooted inside the overlay, -x confines by the overlay's own mount.
+    let inside = walk_root(&root.join("merged"), &opts);
+    assert!(inside.paths.contains(&root.join("merged/from-lower")));
+    assert_eq!(inside.summary.mounts_excluded, 0);
+}
+
+/// The full attributes of the entries a walk of `root` read, by path.
+#[cfg(target_os = "linux")]
+fn walk_full(root: &Path) -> Seen {
+    let opts = WalkOptions {
+        attrs: duscope_walk::Attrs::Full,
+        ..WalkOptions::default()
+    };
+    walk_root(root, &opts)
+}
+
+/// The creation time std reads (with `statx`), for comparing the walk's:
+/// `None` where the filesystem reports none.
+#[cfg(target_os = "linux")]
+fn created(path: &Path) -> Option<i64> {
+    let time = fs::symlink_metadata(path).unwrap().created().ok()?;
+    let since = time.duration_since(std::time::UNIX_EPOCH).unwrap();
+    Some(i64::try_from(since.as_nanos()).unwrap())
+}
+
+/// On the exFAT or FAT volume mounted at `point`: a file cannot be linked
+/// and reports one link, its creation time is what `statx` reports, and
+/// the volume is foreign and case-insensitive.
+#[cfg(target_os = "linux")]
+fn no_links_and_no_case(point: &Path, fs_type: &str) {
+    use duscope_walk::Share;
+
+    fs::write(point.join("file"), b"foreign").unwrap();
+    assert!(
+        fs::hard_link(point.join("file"), point.join("link")).is_err(),
+        "{fs_type} has no hard links"
+    );
+    let seen = walk_full(point);
+    let file = &seen.entries[&point.join("file")];
+    assert_eq!((file.nlink, file.share), (1, Share::None), "{fs_type}");
+    assert_eq!(
+        file.full.unwrap().btime_ns,
+        created(&point.join("file")),
+        "{fs_type}: btime where statx has it"
+    );
+    let volume = seen.volumes.first().unwrap();
+    assert_eq!(
+        (volume.fs_type.as_str(), volume.class, volume.case_sensitive),
+        (fs_type, VolumeClass::Foreign, Some(false))
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts exFAT, FAT and NTFS images as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_walk_02_linux_foreign_filesystems_report_links_btime_and_case_as_they_are() {
+    use duscope_walk::Share;
+
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let work = env.tmp_dir().join("foreign");
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+
+    // exFAT and FAT: no hard links, case-insensitive, btime as statx
+    // reports it.
+    for (name, mkfs, fs_type) in [
+        ("exfat", "mkfs.exfat", "exfat"),
+        ("fat", "mkfs.vfat", "vfat"),
+    ] {
+        let point = work.join(name);
+        match loop_mount(
+            &env,
+            &mut mounted,
+            &work.join(format!("{name}.img")),
+            "16M",
+            &[mkfs],
+            &[],
+            &point,
+        ) {
+            Ok(()) => no_links_and_no_case(&point, fs_type),
+            Err(why) => duscope_testkit::skip(&format!("no {fs_type} here ({why})")),
+        }
+    }
+
+    // NTFS through ntfs3: hard links as nlink reports them, a creation
+    // time, case-sensitive unless mounted with nocase.
+    let ntfs = work.join("ntfs");
+    let image = work.join("ntfs.img");
+    match loop_mount(
+        &env,
+        &mut mounted,
+        &image,
+        "32M",
+        &["mkfs.ntfs", "-q", "-F", "-f"],
+        &["-t", "ntfs3"],
+        &ntfs,
+    ) {
+        Ok(()) => {
+            fs::write(ntfs.join("a"), b"linked").unwrap();
+            fs::hard_link(ntfs.join("a"), ntfs.join("b")).unwrap();
+            let seen = walk_full(&ntfs);
+            let (a, b) = (
+                &seen.entries[&ntfs.join("a")],
+                &seen.entries[&ntfs.join("b")],
+            );
+            assert_eq!((a.nlink, a.share), (2, Share::Hardlink));
+            assert_eq!((b.nlink, b.share), (2, Share::Hardlink));
+            assert_eq!((a.dev, a.ino), (b.dev, b.ino), "one inode");
+            let btime = a.full.unwrap().btime_ns;
+            assert!(btime.is_some(), "ntfs3 reports a creation time");
+            assert_eq!(btime, created(&ntfs.join("a")));
+            let volume = seen.volumes.first().unwrap();
+            assert_eq!(
+                (volume.fs_type.as_str(), volume.class, volume.case_sensitive),
+                ("ntfs3", VolumeClass::Foreign, Some(true))
+            );
+            mounted.points.pop();
+            run(&env, "umount", &[&ntfs]);
+            run(
+                &env,
+                "mount",
+                &[&"-t", &"ntfs3", &"-o", &"loop,nocase", &image, &ntfs],
+            );
+            mounted.points.push(ntfs.clone());
+            let volume = walk_root(&ntfs, &WalkOptions::default()).volumes[0].clone();
+            assert_eq!(volume.case_sensitive, Some(false), "nocase");
+        }
+        Err(why) => duscope_testkit::skip(&format!("no NTFS (ntfs3) here ({why})")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts a squashfs image as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_walk_02_linux_a_squashfs_image_is_read_only() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let work = env.tmp_dir().join("squashfs");
+    let root = work.join("root");
+    let source = work.join("source");
+    fs::create_dir_all(source.join("dir")).unwrap();
+    fs::create_dir_all(root.join("image")).unwrap();
+    fs::write(source.join("dir/file"), vec![3u8; 8192]).unwrap();
+    fs::write(root.join("plain"), b"writable").unwrap();
+    let image = work.join("image.sqfs");
+    let made = attempt(
+        &env,
+        "mksquashfs",
+        &[&source, &image, &"-quiet", &"-noappend"],
+    )
+    .and_then(|()| {
+        attempt(
+            &env,
+            "mount",
+            &[&"-o", &"loop", &image, &root.join("image")],
+        )
+    });
+    if let Err(why) = made {
+        duscope_testkit::skip(&format!("no squashfs here ({why})"));
+        return;
+    }
+    let _mounted = Mounted {
+        env: &env,
+        points: vec![root.join("image")],
+    };
+    let seen = walk_root(&root, &WalkOptions::default());
+    assert!(seen.paths.contains(&root.join("image/dir/file")));
+    let volume = seen
+        .volumes
+        .iter()
+        .find(|v| v.mount_point == root.join("image"))
+        .unwrap();
+    assert_eq!(
+        (
+            volume.fs_type.as_str(),
+            volume.class,
+            volume.read_only,
+            volume.entered()
+        ),
+        ("squashfs", VolumeClass::ReadOnlyImage, true, true)
+    );
+    // What clean asks before it moves an item.
+    assert!(duscope_walk::read_only_volume(&root.join("image/dir/file")).unwrap());
+    assert!(!duscope_walk::read_only_volume(&root.join("plain")).unwrap());
 }

@@ -45,7 +45,9 @@ pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
 pub use caches::{CachesQuery, caches, projects};
 pub use cursor::{After, Cursor, query_hash};
 pub use diff::{DEFAULT_MIN_DELTA, DiffQuery, diff};
-pub use explain::{ExplainQuery, explain, explain_unindexed, fs_holds_file, holds_file};
+pub use explain::{
+    ExplainQuery, explain, explain_unindexed, fs_holds_file, holds_file, shared_extents,
+};
 pub use plan::{Cut, Plan, Ranked};
 /// The regular expressions `--regex` takes, matched against path bytes.
 pub use regex::bytes::Regex;
@@ -54,7 +56,10 @@ pub use resolve::{
 };
 pub use sql::{SqlQuery, human_size, sql};
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
-pub use summary::{SummaryBytes, VolumeBytes, VolumeRoot, VolumeUse, shares, summary, unaccounted};
+pub use summary::{
+    SubvolumeBytes, SummaryBytes, VolumeBytes, VolumeRoot, VolumeUse, referenced, shares,
+    subvolume_shares, summary, unaccounted,
+};
 pub use top::{TopQuery, top};
 pub use tree::{TreeQuery, tree};
 
@@ -218,6 +223,26 @@ pub trait TreeView {
             apparent: node.apparent,
             du_compatible: node.allocated,
         }]
+    }
+
+    /// The subvolumes under `dir`, itself included, in id order, with their
+    /// totals: the directories flagged `subvolume` (a btrfs subvolume, a ZFS
+    /// dataset). A view that cannot count as `du` does counts their
+    /// allocated bytes; `dev` is 0, since a subvolume is placed by its path.
+    fn subvolume_roots(&self, dir: u32) -> Vec<VolumeRoot> {
+        let last = self.node(dir).last_id;
+        (dir..=last)
+            .map(|id| self.node(id))
+            .filter(|node| node.is_dir() && node.flags.contains(Flags::SUBVOLUME))
+            .map(|node| VolumeRoot {
+                id: node.id,
+                last: node.last_id,
+                dev: 0,
+                allocated: node.allocated,
+                apparent: node.apparent,
+                du_compatible: node.allocated,
+            })
+            .collect()
     }
 
     /// The logical size of the dataless files under `dir`.
@@ -424,6 +449,28 @@ impl TreeView for ArenaView<'_> {
         }
         sum
     }
+
+    /// Through the entries' flags, as the default does, counting as `du`
+    /// does from the roll-up.
+    fn subvolume_roots(&self, dir: u32) -> Vec<VolumeRoot> {
+        let last = self.node(dir).last_id;
+        let charges = self.rollup.charges();
+        (dir..=last)
+            .filter_map(|id| {
+                let view = self.arena.entry(self.rollup.entry_at(id));
+                let d = view.dir.filter(|_| view.flags.contains(Flags::SUBVOLUME))?;
+                let rec = self.arena.dir(d);
+                Some(VolumeRoot {
+                    id,
+                    last: rec.last_id,
+                    dev: 0,
+                    allocated: rec.cum_allocated,
+                    apparent: rec.cum_apparent,
+                    du_compatible: charges.du_compatible(self.arena, d),
+                })
+            })
+            .collect()
+    }
 }
 
 /// The subtree of a view at one of its directories, as a view of its own:
@@ -520,6 +567,18 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
     fn volume_roots(&self, dir: u32) -> Vec<VolumeRoot> {
         self.view
             .volume_roots(dir + self.base)
+            .into_iter()
+            .map(|r| VolumeRoot {
+                id: r.id.saturating_sub(self.base),
+                last: r.last.saturating_sub(self.base),
+                ..r
+            })
+            .collect()
+    }
+
+    fn subvolume_roots(&self, dir: u32) -> Vec<VolumeRoot> {
+        self.view
+            .subvolume_roots(dir + self.base)
             .into_iter()
             .map(|r| VolumeRoot {
                 id: r.id.saturating_sub(self.base),

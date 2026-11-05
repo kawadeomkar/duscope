@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -28,7 +29,7 @@ use super::{TreeView, abs_path, flag_names, kind_name, timegrammar::iso8601};
 use crate::CoreError;
 use crate::envelope::{Explain, ExplainGit, name_fields};
 use crate::git;
-use crate::index::Index;
+use crate::index::{Index, LATER_LINK};
 use crate::rules::Caches;
 
 /// What `explain` reads besides the scan: the cache rules, and the
@@ -296,6 +297,119 @@ pub fn explain_unindexed(path: &Path, q: &ExplainQuery<'_>) -> Result<Explain, C
         evidence,
         handle: None,
     })
+}
+
+/// What `explain --clones` adds where the scan recorded no clone ids (a
+/// Linux scan): the extents of the regular files at or under `path`, read
+/// now with read access only ([`duscope_walk::extents`]: btrfs and XFS
+/// reflinks, deduplicated ranges and snapshots' data, as
+/// `FIEMAP_EXTENT_SHARED` marks them). `index` lists the files under a
+/// directory, each inode once; without one, only a file is read. A file
+/// with shared extents `is_clone`; the clone group's size and its members
+/// outside the path stay null, since the map does not say with whom an
+/// extent is shared. What deleting the path frees loses the shared bytes,
+/// as a lower bound, where it was exact or a lower bound; where a file
+/// could not be read it is an upper bound. Where the scan recorded clone
+/// ids (APFS) their facts stand and nothing is read.
+pub fn shared_extents(
+    index: Option<&Index>,
+    id: u32,
+    path: &Path,
+    facts: &mut Explain,
+) -> Result<(), CoreError> {
+    if facts.clone_members_outside.is_some() {
+        return Ok(());
+    }
+    let files: Vec<(PathBuf, u64)> = match index {
+        Some(index) if facts.kind == "dir" => {
+            files_under(index, id).map_err(|e| CoreError::IndexCorrupt {
+                file: index.file().display().to_string(),
+                message: e.to_string(),
+            })?
+        }
+        _ if facts.kind == "file" => vec![(path.to_owned(), facts.allocated_bytes)],
+        _ => {
+            facts.evidence.push(
+                "clones: no saved scan lists the files under the path, so none was read".to_owned(),
+            );
+            return Ok(());
+        }
+    };
+    let (mut read, mut sharing, mut shared, mut failed, mut no_map) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
+    for (file, allocated) in &files {
+        match duscope_walk::extents(file) {
+            Ok(Some(extents)) => {
+                read += 1;
+                if extents.shared > 0 {
+                    sharing += 1;
+                    shared += extents.shared.min(*allocated);
+                }
+            }
+            Ok(None) => {
+                facts.evidence.push(
+                    "clones: this system reads no extent map; the scan recorded no clone ids"
+                        .to_owned(),
+                );
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => no_map += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    if facts.kind == "file" && read == 1 {
+        facts.is_clone = Some(sharing == 1);
+    }
+    let mut line = format!(
+        "fiemap: {sharing} of {read} files read now share {shared} bytes of extents with \
+         other files or snapshots (with which, the map does not say)"
+    );
+    if no_map > 0 {
+        let _ = write!(line, "; {no_map} on a filesystem that keeps no extent map");
+    }
+    if failed > 0 {
+        let _ = write!(line, "; {failed} could not be read");
+    }
+    facts.evidence.push(line);
+    match (facts.freeable_now_bytes.as_mut(), facts.freeable_kind) {
+        (Some(_), Some(_)) if failed + no_map > 0 => facts.freeable_kind = Some("upper_bound"),
+        (Some(bytes), Some("exact" | "lower_bound")) if shared > 0 => {
+            *bytes = bytes.saturating_sub(shared);
+            facts.freeable_kind = Some("lower_bound");
+        }
+        _ => {}
+    }
+    if facts.confidence == "high" && facts.freeable_kind.is_some_and(|k| k != "exact") {
+        facts.confidence = "medium";
+    }
+    Ok(())
+}
+
+/// The regular files with ids `id ..= last_id` of `index`, by path, each
+/// inode once (a later link left out), with their bytes on disk.
+fn files_under(index: &Index, id: u32) -> rusqlite::Result<Vec<(PathBuf, u64)>> {
+    let last = index.node(id).last_id;
+    let mut stmt = index.db().prepare(&format!(
+        "SELECT parent_id, name, allocated FROM files \
+         WHERE id BETWEEN ?1 AND ?2 AND kind = 'file' AND flags & {LATER_LINK} = 0 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([id, last], |row| {
+        Ok((
+            row.get::<_, u32>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+        ))
+    })?;
+    let mut dirs: BTreeMap<u32, PathBuf> = BTreeMap::new();
+    let mut files = Vec::new();
+    for row in rows {
+        let (parent, name, allocated) = row?;
+        let dir = dirs
+            .entry(parent)
+            .or_insert_with(|| PathBuf::from(OsStr::from_bytes(&abs_path(index, parent))));
+        files.push((dir.join(OsStr::from_bytes(&name)), allocated));
+    }
+    Ok(files)
 }
 
 /// The hard-link and clone groups of the files with ids `first ..= last`.

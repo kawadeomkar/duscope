@@ -233,6 +233,16 @@ pub struct FullAttrs {
     pub gid: u32,
 }
 
+/// A file's extents, as [`extents`](crate::extents) reads them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Extents {
+    /// Bytes in the file's extents.
+    pub mapped: u64,
+    /// Of those, bytes in extents the filesystem shares with another file
+    /// or a snapshot.
+    pub shared: u64,
+}
+
 /// One directory entry, as a provider reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {

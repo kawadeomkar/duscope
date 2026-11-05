@@ -254,14 +254,18 @@ fn p1_walk_02_mountinfo_lines_parse() {
         [
             Mount {
                 id: 22,
+                fs_dev: libc::makedev(0, 21),
                 path: PathBuf::from("/proc"),
                 fs_type: "proc".to_owned(),
+                source: "proc".to_owned(),
                 options: vec!["rw".to_owned(), "nosuid".to_owned(), "rw".to_owned()],
             },
             Mount {
                 id: 36,
+                fs_dev: libc::makedev(98, 0),
                 path: PathBuf::from("/mnt/with space"),
                 fs_type: "ext4".to_owned(),
+                source: "/dev/root".to_owned(),
                 options: vec!["rw".to_owned(), "noatime".to_owned(), "rw".to_owned()],
             },
         ]

@@ -4,6 +4,7 @@
 //! apart: opening and listing a directory, and reading its entries.
 
 mod dents;
+pub(in crate::platform) mod fiemap;
 mod mounts;
 mod statx;
 pub(in crate::platform) mod trash;
@@ -23,8 +24,8 @@ use dents::DentBuf;
 use crate::counters::{self, Timer};
 use crate::platform::posix;
 use crate::{
-    Counters, DirHandle, Entry, Flags, Flush, Kind, NameRef, Provider, STAT_BATCH, STREAM_CHUNK,
-    ScanError, VolumeInfo, WalkOptions,
+    Boundary, Counters, DirHandle, Entry, Flags, Flush, Kind, NameRef, Provider, STAT_BATCH,
+    STREAM_CHUNK, ScanError, VolumeInfo, WalkOptions,
 };
 
 thread_local! {
@@ -55,8 +56,9 @@ impl LinuxProvider {
 
     /// Reads `names` in the directory open on `fd`: an entry or an error
     /// each, one `statx` per name, each name moving into its entry or error.
-    /// A directory that is a different subvolume from `fd`'s is flagged;
-    /// `fd`'s own subvolume is read once, and only when a child reports one.
+    /// A directory that is another subvolume than `fd`'s is a
+    /// [`Boundary::Subvolume`] ([`subvolume`](Self::subvolume)); `fd`'s own
+    /// subvolume is read once, and only when a child reports one.
     fn read_names(
         &self,
         fd: std::os::fd::BorrowedFd<'_>,
@@ -67,7 +69,7 @@ impl LinuxProvider {
         errs: &mut Vec<ScanError>,
     ) {
         let mask = statx::mask(opts);
-        let mut dir_subvol = None;
+        let dir_subvol = std::cell::OnceCell::new();
         for name in names {
             #[cfg(test)]
             self.statx_calls
@@ -76,18 +78,10 @@ impl LinuxProvider {
                 Ok(stx) => {
                     let mut entry = statx::entry(name, &stx, opts.attrs);
                     self.mounts.fill_mnt_id(&mut entry, dir);
-                    if entry.kind == Kind::Dir && stx.stx_mask & libc::STATX_SUBVOL != 0 {
-                        let parent = *dir_subvol.get_or_insert_with(|| {
-                            #[cfg(test)]
-                            for counter in [&self.statx_calls, &self.subvol_reads] {
-                                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            statx::subvol_of(fd)
-                        });
-                        entry.flags.set(
-                            Flags::SUBVOLUME,
-                            parent.is_some_and(|p| p != stx.stx_subvol),
-                        );
+                    if entry.kind == Kind::Dir && self.subvolume(fd, dir, &entry, &stx, &dir_subvol)
+                    {
+                        entry.boundary = Boundary::Subvolume;
+                        entry.flags.insert(Flags::SUBVOLUME);
                     }
                     out.push(entry);
                 }
@@ -98,6 +92,39 @@ impl LinuxProvider {
                 }),
             }
         }
+    }
+
+    /// Whether the directory `entry`, read by `stx` in `dir` (open on
+    /// `fd`), is another subvolume than `dir`'s: a btrfs or ZFS mount root
+    /// the mount table names as another subvolume or dataset of the
+    /// filesystem around it; else another subvolume id (`STATX_SUBVOL`,
+    /// Linux 6.10; `dir`'s own read once into `dir_subvol`, and only when
+    /// a child reports one); else, before 6.10, another device inside the
+    /// same mount, which is how btrfs tells its subvolumes apart.
+    fn subvolume(
+        &self,
+        fd: std::os::fd::BorrowedFd<'_>,
+        dir: &DirHandle,
+        entry: &Entry,
+        stx: &libc::statx,
+        dir_subvol: &std::cell::OnceCell<Option<u64>>,
+    ) -> bool {
+        if entry.boundary == Boundary::Mount {
+            return entry.flags.contains(Flags::MOUNT_ROOT)
+                && entry.mnt_id != dir.mnt_id()
+                && self.mounts.subvolume_mount(dir, entry.name.as_bytes());
+        }
+        if stx.stx_mask & libc::STATX_SUBVOL != 0 {
+            let parent = *dir_subvol.get_or_init(|| {
+                #[cfg(test)]
+                for counter in [&self.statx_calls, &self.subvol_reads] {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                statx::subvol_of(fd)
+            });
+            return parent.is_some_and(|p| p != stx.stx_subvol);
+        }
+        entry.mnt_id != 0 && entry.mnt_id == dir.mnt_id() && entry.dev != dir.dev()
     }
 }
 

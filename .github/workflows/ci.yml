@@ -265,9 +265,15 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install exfatprogs
+      - name: Install the filesystems' tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -y -q exfatprogs
+        run: |
+          # mkfs for the exFAT, FAT, btrfs, XFS and NTFS images, mksquashfs for
+          # the read-only one (P5-WALK-02), and the kernel's extra modules,
+          # which hold ntfs3 and exfat where the image's kernel left them out.
+          sudo apt-get update -q
+          sudo apt-get install -y -q exfatprogs dosfstools btrfs-progs xfsprogs ntfs-3g squashfs-tools
+          sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" || echo "no linux-modules-extra package for $(uname -r)"
       - name: The platform tests, as root
         run: |
           # Built as the runner's user; each test binary runs under sudo, which

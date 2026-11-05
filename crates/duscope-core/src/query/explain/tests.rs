@@ -295,3 +295,82 @@ fn p5_walk_03_explain_on_a_dataless_file_reports_freeable_now_bytes_0() {
     let pictures = facts("/cloud-tree/Pictures");
     assert!(!pictures.evidence.iter().any(|e| e.starts_with("dataless:")));
 }
+
+#[test]
+fn p5_walk_02_clones_read_extents_where_the_scan_has_no_clone_ids() {
+    use super::shared_extents;
+
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("extents");
+    fs::create_dir_all(root.join("dir")).unwrap();
+    fs::write(root.join("dir/a.bin"), vec![1u8; 64 * 1024]).unwrap();
+    fs::write(root.join("dir/b.bin"), vec![2u8; 16 * 1024]).unwrap();
+    let mut arena = Arena::new(Attrs::Basic);
+    walk(&root, &WalkOptions::default(), |e| arena.push(e).unwrap()).unwrap();
+    let rollup = roll_up(&mut arena);
+    // A Linux scan: no clone ids.
+    let mut scan = meta(&root);
+    scan.clones_unavailable = true;
+    let dir = env.tmp_dir().join("index");
+    IndexWriter::write(&arena, &rollup, &scan, &dir).unwrap();
+    let index = Index::open(&index_path(&dir, &scan.scan_id)).unwrap();
+    let caches = Caches::vendored();
+    let q = ExplainQuery {
+        caches: &caches,
+        env: &no_env,
+    };
+    // What this system answers for a plain file: no map (macOS), a map
+    // with nothing shared, or no map on this filesystem (tmpfs).
+    let map = duscope_walk::extents(&root.join("dir/a.bin"));
+    let facts = |rel: &str| {
+        let path = root.join(rel);
+        let id = resolve_in_index(&index, &path).unwrap();
+        let mut facts = explain(&index, id, &q).unwrap();
+        let before = facts.clone();
+        shared_extents(Some(&index), id, &path, &mut facts).unwrap();
+        (before, facts)
+    };
+    let (before, file) = facts("dir/a.bin");
+    let (_, dir_facts) = facts("dir");
+    let last = |f: &crate::envelope::Explain| f.evidence.last().cloned().unwrap_or_default();
+    match map {
+        Ok(None) => {
+            assert_eq!(file.is_clone, None);
+            assert!(last(&file).contains("reads no extent map"), "{file:?}");
+        }
+        Ok(Some(_)) => {
+            assert_eq!(file.is_clone, Some(false), "nothing is shared");
+            assert!(last(&file).starts_with("fiemap: 0 of 1 files"), "{file:?}");
+            assert!(last(&dir_facts).starts_with("fiemap: 0 of 2 files"));
+            // Nothing shared: what deleting frees stands.
+            assert_eq!(
+                (file.freeable_now_bytes, file.freeable_kind),
+                (before.freeable_now_bytes, before.freeable_kind)
+            );
+            assert_eq!(dir_facts.freeable_kind, Some("exact"));
+        }
+        Err(_) => {
+            assert!(last(&file).contains("keeps no extent map"), "{file:?}");
+            assert_eq!(file.freeable_kind, Some("upper_bound"));
+        }
+    }
+    // The clone group's size and its members outside: the map never says.
+    assert_eq!(
+        (file.clone_group_size, file.clone_members_outside),
+        (None, None)
+    );
+
+    // Where the scan recorded clone ids, their facts stand and nothing is
+    // read.
+    let mut apfs = meta(&root);
+    apfs.clones_unavailable = false;
+    apfs.scan_id = ScanId::new(b"explain-apfs", 1, [0; 8]);
+    IndexWriter::write(&arena, &rollup, &apfs, &dir).unwrap();
+    let index = Index::open(&index_path(&dir, &apfs.scan_id)).unwrap();
+    let path = root.join("dir/a.bin");
+    let id = resolve_in_index(&index, &path).unwrap();
+    let mut facts = explain(&index, id, &q).unwrap();
+    let before = facts.clone();
+    shared_extents(Some(&index), id, &path, &mut facts).unwrap();
+    assert_eq!(facts, before);
+}

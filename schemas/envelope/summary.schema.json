@@ -278,6 +278,17 @@
           "format": "date-time",
           "type": "string"
         },
+        "subvolumes": {
+          "description": "The subvolumes the scan met under the path, the path included:\nbtrfs subvolumes and ZFS datasets, each with the bytes on it.",
+          "items": {
+            "$ref": "#/$defs/SummarySubvolume"
+          },
+          "type": "array",
+          "x-platforms": [
+            "linux"
+          ],
+          "x-since": "0.3"
+        },
         "thread_count": {
           "description": "The worker threads it ran.",
           "format": "uint64",
@@ -310,6 +321,7 @@
       "required": [
         "path",
         "volumes",
+        "subvolumes",
         "allocated_bytes",
         "apparent_bytes",
         "du_compatible_bytes",
@@ -328,6 +340,59 @@
         "thread_count"
       ],
       "type": "object"
+    },
+    "SummarySubvolume": {
+      "description": "A subvolume's share in `summary`: a btrfs subvolume or a ZFS dataset.",
+      "properties": {
+        "allocated_bytes": {
+          "description": "Bytes on disk the scan found on it, less the subvolumes and volumes\nbelow it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "apparent_bytes": {
+          "description": "Apparent bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "du_compatible_bytes": {
+          "description": "Bytes as `du` counts them.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fs_type": {
+          "description": "Its filesystem.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Where it starts, absolute.",
+          "type": "string"
+        },
+        "referenced_bytes": {
+          "description": "What the filesystem says the subvolume itself holds, at the scan's\nstart: a ZFS dataset's referenced bytes, its size less its free space\nas it reports them; null for a btrfs subvolume, whose size and free\nspace are the whole filesystem's.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "fs_type",
+        "allocated_bytes",
+        "apparent_bytes",
+        "du_compatible_bytes",
+        "referenced_bytes"
+      ],
+      "type": "object",
+      "x-platforms": [
+        "linux"
+      ],
+      "x-since": "0.3"
     },
     "SummaryVolume": {
       "description": "A volume's share in `summary`.",

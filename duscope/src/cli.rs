@@ -198,6 +198,14 @@ pub struct ExplainArgs {
     #[arg(long, value_name = "SCAN", conflicts_with = "path")]
     pub errors: Option<String>,
 
+    /// Size the extents the files under the path share (btrfs and XFS reflinks)
+    ///
+    /// Opens each file read-only for its extent map, without reading the file
+    ///
+    /// Where the scan recorded clone ids (APFS), those answer instead
+    #[arg(long, conflicts_with = "errors")]
+    pub clones: bool,
+
     /// The saved scan to read: latest, an id prefix, or an index file
     ///
     /// Default: the newest saved scan that holds the path, else a fresh stat
