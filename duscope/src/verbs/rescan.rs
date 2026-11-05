@@ -77,7 +77,7 @@ pub fn run(args: &RescanArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         exclude_from: saved.exclude_files.iter().map(PathBuf::from).collect(),
         ignore_from: saved.ignore_files.iter().map(PathBuf::from).collect(),
         exclude_caches: saved.exclude_caches,
-        skip_containers: false,
+        skip_containers: saved.skip_containers,
         provider: None,
         test_now: None,
         // The saved patterns hold the configuration's of the time; today's

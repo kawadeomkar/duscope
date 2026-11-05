@@ -495,8 +495,8 @@ impl Source {
         }
     }
 
-    /// The scan's warnings, the path's for `upper_bound`; and
-    /// `stale_index`. `clones_unavailable` warns when this verb asked for
+    /// The scan's warnings, the path's for `upper_bound` and
+    /// `dataless_present`; and `stale_index`. `clones_unavailable` warns when this verb asked for
     /// `--clones`, as a fresh scan does.
     pub fn warnings(&self, walk: &WalkArgs) -> Vec<Warning> {
         match self {
@@ -523,6 +523,7 @@ impl Source {
                     walk.clones && index.meta().clones_unavailable,
                 ));
                 warnings.extend(scan::upper_bound(view.node(0).upper_bound));
+                warnings.extend(scan::dataless_present(view.dataless(0)));
                 warnings.extend(stale.clone());
                 warnings
             }
@@ -738,6 +739,7 @@ fn reason_name(reason: &str) -> Option<&'static str> {
         Skip::BindCycle,
         Skip::Excluded,
         Skip::ExcludedCache,
+        Skip::Containers,
     ]
     .into_iter()
     .map(Skip::as_str)

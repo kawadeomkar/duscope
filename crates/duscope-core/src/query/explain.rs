@@ -6,7 +6,8 @@
 //! that lie outside it); the clone facts from `clones` and
 //! `shared_members`; `freeable_now_bytes`, the bytes deleting the path
 //! frees now (its total less the bytes a link or clone member outside it
-//! keeps); `regenerable_by` from the cache rules with their markers in the
+//! keeps, and less its dataless files', whose content is in the cloud, not on
+//! the disk); `regenerable_by` from the cache rules with their markers in the
 //! path's ancestors, and a valid `CACHEDIR.TAG`; git's facts. A path no
 //! saved scan holds is answered from a fresh `stat`, with low confidence.
 //!
@@ -155,20 +156,40 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
 
 /// The bytes deleting `node` frees now, and how exact that is: its total,
 /// less what a link or clone member outside it keeps (the bytes of each such
-/// group charged under it); an upper bound where blocks may be shared
-/// without a clone id or a directory under it could not be read, a lower
-/// bound where a link or member lies outside.
+/// group charged under it) and less what its dataless files hold, cloud
+/// placeholders whose deletion frees nothing on this disk (a dataless file
+/// frees 0); an upper bound where blocks may be shared without a clone id
+/// or a directory under it could not be read, a lower bound where a link or
+/// member lies outside.
 fn freeable(
     index: &Index,
     node: &super::Node,
     shared: &Shared,
     evidence: &mut Vec<String>,
 ) -> (u64, &'static str) {
-    let total = if node.is_dir() || node.charged {
+    let dataless = index.dataless(node.id);
+    let total = if node.is_dir() {
+        node.allocated.saturating_sub(dataless.allocated)
+    } else if node.charged && !node.flags.contains(Flags::DATALESS) {
         node.allocated
     } else {
         0
     };
+    if dataless.files > 0 {
+        evidence.push(if node.is_dir() {
+            format!(
+                "dataless: {} files under the path are cloud placeholders, {} bytes logical, \
+                 {} on disk; deleting them frees nothing here",
+                dataless.files, dataless.apparent, dataless.allocated
+            )
+        } else {
+            format!(
+                "dataless: a cloud placeholder, {} bytes logical, whose content is not on \
+                 this disk; deleting it frees nothing here",
+                dataless.apparent
+            )
+        });
+    }
     let kept: u64 = shared
         .kept
         .iter()

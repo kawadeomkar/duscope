@@ -92,6 +92,7 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         finished_ns: started_ns,
         parent: None,
         source: imported.format.source(),
+        full_disk_access_missing: false,
     };
     let id = scan::scan_id(&scanned)?;
     let fresh = Source::Fresh {

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use duscope_core::arena::Arena;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
 use duscope_core::index::{IndexWriter, ScanId, ScanMeta, index_path, random_bytes};
-use duscope_core::query::{self, ArenaView, SizeKind, TreeView, clock, timegrammar};
+use duscope_core::query::{self, ArenaView, Dataless, SizeKind, TreeView, clock, timegrammar};
 use duscope_core::rescan::ScanOptions;
 use duscope_core::resolve::{ResolvedPath, resolve_path};
 use duscope_core::rollup::{RollUp, roll_up};
@@ -58,6 +58,19 @@ pub struct Scanned {
     /// Where the tree came from, as `scan_meta.source` says: `scan`, or
     /// `import:<format>` for a tree another tool wrote.
     pub source: &'static str,
+    /// Whether the Full Disk Access probe found the grant missing, for a
+    /// root that holds the home's protected folders
+    /// ([`full_disk_access_missing`]).
+    pub full_disk_access_missing: bool,
+}
+
+/// Set while `duscope mcp` serves: the Full Disk Access warning then names
+/// the app that runs the server, whose grant the scan has.
+static SERVING_MCP: AtomicBool = AtomicBool::new(false);
+
+/// Marks the process as an MCP server, for the Full Disk Access warning.
+pub fn serving_mcp() {
+    SERVING_MCP.store(true, Ordering::Relaxed);
 }
 
 /// What the volume mounted at the root uses that the scan did not find,
@@ -173,7 +186,12 @@ fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
     let skipped: Vec<(DirId, &'static str)> = arena
         .skipped()
         .iter()
-        .filter(|(_, reason)| matches!(reason, Skip::Excluded | Skip::ExcludedCache))
+        .filter(|(_, reason)| {
+            matches!(
+                reason,
+                Skip::Excluded | Skip::ExcludedCache | Skip::Containers
+            )
+        })
         .map(|(&dir, reason)| (dir, reason.as_str()))
         .collect();
     if skipped.is_empty() {
@@ -334,6 +352,7 @@ pub(super) fn scan_options(walk: &WalkArgs, excludes: &[String]) -> ScanOptions 
             .as_ref()
             .filter(|_| walk.exclude_caches)
             .map(|file| cwd.join(file).to_string_lossy().into_owned()),
+        skip_containers: walk.skip_containers,
         threads: walk.threads.unwrap_or(0),
         size_kind: size_kind(walk).as_str().to_owned(),
     }
@@ -350,8 +369,72 @@ pub fn warnings(scanned: &Scanned) -> Vec<Warning> {
     warnings.extend(clones_unavailable(
         scanned.clones_asked && summary.clones_unavailable,
     ));
-    warnings.extend(upper_bound(scanned.view().node(0).upper_bound));
+    let view = scanned.view();
+    warnings.extend(upper_bound(view.node(0).upper_bound));
+    warnings.extend(dataless_present(view.dataless(0)));
+    if scanned.full_disk_access_missing {
+        warnings.push(full_disk_access_missing());
+    }
     warnings
+}
+
+/// `dataless_present`, when cloud placeholders (iCloud, Dropbox, `OneDrive`)
+/// lie under the path: their logical size counts in apparent sizes, but
+/// their content is not on this disk, so deleting them frees nothing here.
+pub fn dataless_present(dataless: Dataless) -> Option<Warning> {
+    (dataless.files > 0).then(|| Warning {
+        code: "dataless_present",
+        message: format!(
+            "{} files are cloud placeholders (iCloud, Dropbox, OneDrive) whose content is not \
+             on this disk: {} bytes of apparent size that deleting them would not free here",
+            thousands(dataless.files),
+            thousands(dataless.apparent)
+        ),
+        count: Some(dataless.files),
+        hint: Some("Run duscope summary to see their logical size as dataless_bytes".to_owned()),
+    })
+}
+
+/// `full_disk_access_missing`: macOS's privacy protections refused the
+/// probe's folders, so a scan of the home misses what they protect. The
+/// grant belongs to the app that started duscope (the terminal), or, over
+/// MCP, to the app that runs the server, which the warning names when the
+/// process's ancestors tell it.
+pub fn full_disk_access_missing() -> Warning {
+    let mcp = SERVING_MCP.load(Ordering::Relaxed);
+    let app = duscope_walk::host_app();
+    let (holder, grantee) = match (&app, mcp) {
+        (Some(app), true) => (
+            format!("{app}, the app running this MCP server,"),
+            app.clone(),
+        ),
+        (Some(app), false) => (format!("{app}, the app running duscope,"), app.clone()),
+        (None, true) => (
+            "the app running this MCP server".to_owned(),
+            "the app that starts duscope mcp".to_owned(),
+        ),
+        (None, false) => (
+            "the terminal running duscope".to_owned(),
+            "your terminal app".to_owned(),
+        ),
+    };
+    let rerun = if mcp {
+        "restart it, and call duscope_scan again"
+    } else {
+        "then rerun duscope scan"
+    };
+    Warning {
+        code: "full_disk_access_missing",
+        message: format!(
+            "{holder} has no Full Disk Access: macOS refused to open ~/Library/Mail and \
+             ~/Library/Safari, so the folders it protects are left out of the totals"
+        ),
+        count: None,
+        hint: Some(format!(
+            "Grant {grantee} Full Disk Access in System Settings > Privacy & Security > Full \
+             Disk Access, {rerun}"
+        )),
+    }
 }
 
 /// `clones_unavailable`, when `--clones` was asked of a filesystem without
@@ -464,15 +547,8 @@ pub fn now(walk_args: &WalkArgs) -> Result<i64, Failure> {
     }
 }
 
-/// Scans the tree `walk_args` names; a walk flag of a later phase is
-/// refused before anything is read.
+/// Scans the tree `walk_args` names.
 pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failure> {
-    if walk_args.skip_containers {
-        return Err(not_yet(
-            "--skip-containers",
-            "the rule that skips ~/Library/Containers",
-        ));
-    }
     let given = match &walk_args.path {
         Some(path) => path.clone(),
         None => std::env::current_dir().map_err(|e| {
@@ -488,7 +564,14 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     let cwd = std::env::current_dir().unwrap_or_default();
     let ResolvedPath { real: root, .. } = resolve_path(&cwd, &given);
     unresolved_link(&root, &given)?;
-    let mut opts = options(walk_args, excludes)?;
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty());
+    let mut opts = options(walk_args, excludes, home.as_deref())?;
+    // The probe of the home's protected folders, when the root holds them,
+    // before the walk meets them.
+    let full_disk_access_missing = home.as_deref().is_some_and(|home| {
+        let home = resolve_path(&cwd, Path::new(home)).real;
+        holds_protected_folders(&root, &home) && duscope_walk::full_disk_access_missing(&home)
+    });
     // The walk's setup, before the interrupt watcher starts a thread.
     duscope_walk::prepare();
     // Ctrl-C stops the walk; if it has not stopped soon after, the process
@@ -563,6 +646,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         finished_ns: now(walk_args)?,
         parent: None,
         source: "scan",
+        full_disk_access_missing,
     };
     phases(&scanned, walk_time, rollup_time);
     Ok(scanned)
@@ -711,8 +795,20 @@ impl DirErrors {
     }
 }
 
-/// The walk options the flags ask for.
-fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure> {
+/// Whether a scan of `root` meets the folders of `home` that macOS's privacy
+/// protections cover, the Full Disk Access probe's: a root that is the home,
+/// above it (`/`) or its `Library`.
+fn holds_protected_folders(root: &Path, home: &Path) -> bool {
+    home.join("Library").starts_with(root)
+}
+
+/// The walk options the flags ask for; `home` is the directory whose
+/// containers `--skip-containers` leaves out.
+fn options(
+    args: &WalkArgs,
+    excludes: &[String],
+    home: Option<&std::ffi::OsStr>,
+) -> Result<WalkOptions, Failure> {
     let mut globs = GlobSetBuilder::new();
     // Patterns ending in `/`, which leave out directories only, go to the
     // gitignore rules, which tell a directory from a file.
@@ -771,6 +867,18 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
     } else {
         Vec::new()
     };
+    let skip_containers = if args.skip_containers {
+        Some(home.map(PathBuf::from).ok_or_else(|| {
+            Failure::new(
+                Exit::Usage,
+                "usage",
+                "--skip-containers leaves out the home's containers, but HOME is not set",
+            )
+            .hint("Run duscope scan with HOME set, or without --skip-containers")
+        })?)
+    } else {
+        None
+    };
     Ok(WalkOptions {
         threads: args.threads.unwrap_or(0),
         follow_symlinks: args.follow_symlinks,
@@ -784,6 +892,7 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
         excludes,
         ignore,
         exclude_caches,
+        skip_containers,
         cancel: Arc::new(AtomicBool::new(false)),
         fallback: args.provider == Some(ProviderArg::Fallback),
         // What `-v` and `-vv` print beside the walk's own figures.
@@ -1014,15 +1123,6 @@ fn unresolved_link(root: &Path, given: &Path) -> Result<(), Failure> {
     }
 }
 
-/// A flag of a later phase.
-fn not_yet(flag: &str, what: &str) -> Failure {
-    Failure::new(
-        Exit::Usage,
-        "not_available",
-        format!("{flag} needs {what}, which this version does not have yet"),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1064,6 +1164,7 @@ mod tests {
             finished_ns: 0,
             parent: None,
             source: "scan",
+            full_disk_access_missing: false,
         }
     }
 
@@ -1098,6 +1199,81 @@ mod tests {
     }
 
     #[test]
+    fn p5_walk_03_dataless_files_warn_dataless_present() {
+        // Two cloud placeholders, as the macOS provider reads them (the
+        // mocked attributes: no runner holds an evicted iCloud file).
+        let mut tree = MemProvider::new("/t");
+        tree.file("local.txt", 10)
+            .dataless("Documents/report.pdf", 3_000_000)
+            .dataless("Documents/slides.key", 2_000_000);
+        let mut arena = Arena::new(Attrs::Basic);
+        let summary = walk_with(&tree, Path::new("/t"), &WalkOptions::default(), |event| {
+            arena.push(event).unwrap();
+        })
+        .unwrap();
+        let rollup = roll_up(&mut arena);
+        let mut placeholders = Scanned {
+            arena,
+            rollup,
+            summary,
+            elapsed: Duration::ZERO,
+            root: "/t".into(),
+            root_as_given: "/t".into(),
+            clones_asked: false,
+            started_ns: 0,
+            finished_ns: 0,
+            parent: None,
+            source: "scan",
+            full_disk_access_missing: false,
+        };
+        let found = warnings(&placeholders);
+        let dataless = found.iter().find(|w| w.code == "dataless_present").unwrap();
+        assert_eq!(dataless.count, Some(2));
+        assert!(
+            dataless.message.contains("5,000,000"),
+            "{}",
+            dataless.message
+        );
+        assert!(
+            dataless
+                .hint
+                .as_deref()
+                .unwrap()
+                .contains("duscope summary")
+        );
+        assert_eq!(found.len(), 1);
+        // The probe's verdict, which `scan` sets for a root holding the home.
+        placeholders.full_disk_access_missing = true;
+        let codes: Vec<&str> = warnings(&placeholders).iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["dataless_present", "full_disk_access_missing"]);
+        // A scan without placeholders warns of none.
+        let plain = scanned(true);
+        assert!(warnings(&plain).is_empty());
+    }
+
+    #[test]
+    fn p5_walk_03_the_probe_runs_for_roots_holding_the_home_library() {
+        let home = Path::new("/Users/a");
+        for root in ["/", "/Users", "/Users/a", "/Users/a/Library"] {
+            assert!(
+                super::holds_protected_folders(Path::new(root), home),
+                "{root}"
+            );
+        }
+        for root in [
+            "/Users/a/Documents",
+            "/Users/b",
+            "/Users/a/Library/Caches",
+            "/tmp",
+        ] {
+            assert!(
+                !super::holds_protected_folders(Path::new(root), home),
+                "{root}"
+            );
+        }
+    }
+
+    #[test]
     fn p1_walk_08_a_vanished_file_increments_vanished_count() {
         /// `ENOENT`, 2 on Linux and macOS alike.
         const ENOENT: i32 = 2;
@@ -1123,6 +1299,7 @@ mod tests {
             finished_ns: 0,
             parent: None,
             source: "scan",
+            full_disk_access_missing: false,
         };
         let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
         else {

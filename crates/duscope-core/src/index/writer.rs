@@ -48,6 +48,12 @@ pub const EXCLUDED_CACHE: u32 = 1 << 11;
 /// bytes, apparent ones included, count at its first link (DEV-68).
 pub const LATER_LINK: u32 = 1 << 12;
 
+/// Flag bit 13 of `dirs.flags`: the scan listed the directory but did not
+/// enter it, because it is a container `--skip-containers` leaves out. It
+/// is set beside [`EXCLUDED`], so the partial index `dirs_excluded` holds the
+/// directory and a reader that knows no bit 13 reads it as excluded.
+pub const SKIPPED_CONTAINERS: u32 = 1 << 13;
+
 /// What `scan_meta` records that the arena does not hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanMeta {
@@ -440,6 +446,7 @@ fn dir_flags(arena: &Arena, dir: DirId, own: u32, firmlink: bool) -> u32 {
     match arena.skipped().get(&dir) {
         Some(Skip::Excluded) => flags |= EXCLUDED,
         Some(Skip::ExcludedCache) => flags |= EXCLUDED_CACHE,
+        Some(Skip::Containers) => flags |= EXCLUDED | SKIPPED_CONTAINERS,
         _ => {}
     }
     flags

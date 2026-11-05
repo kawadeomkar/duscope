@@ -12,14 +12,15 @@
             {
               "enum": [
                 "excluded",
-                "excluded_cache"
+                "excluded_cache",
+                "skipped_containers"
               ]
             },
             {
               "type": "string"
             }
           ],
-          "description": "`excluded` (a glob or ignore pattern) or `excluded_cache`.",
+          "description": "`excluded` (a glob or ignore pattern), `excluded_cache` or\n`skipped_containers`.",
           "type": "string"
         }
       },
@@ -82,7 +83,7 @@
           "type": "array"
         },
         "excluded_count": {
-          "description": "Files left out and directories not entered by the excludes\n(`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`).",
+          "description": "Files left out and directories not entered by the excludes\n(`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`,\n`--skip-containers`).",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -381,6 +382,7 @@
                 "bind_cycle",
                 "excluded",
                 "excluded_cache",
+                "skipped_containers",
                 null
               ]
             },
@@ -472,6 +474,7 @@
                 "bind_cycle",
                 "excluded",
                 "excluded_cache",
+                "skipped_containers",
                 null
               ]
             },

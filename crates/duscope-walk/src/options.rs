@@ -1,6 +1,7 @@
 //! What the caller asks of a walk.
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -46,6 +47,11 @@ pub struct CacheRule {
     pub markers: Vec<OsString>,
 }
 
+/// The directories of a home that `--skip-containers` lists without
+/// entering: the app sandboxes of macOS and the containers app groups share,
+/// which hold much of a home and whose access checks slow a scan.
+pub const CONTAINERS: [&str; 2] = ["Library/Containers", "Library/Group Containers"];
+
 /// The options of one walk.
 #[derive(Debug, Clone)]
 // One field per scan flag, as the crate contract names them.
@@ -74,6 +80,11 @@ pub struct WalkOptions {
     /// Cache directories not to enter (`--exclude-caches`); when there are
     /// any, a directory holding a valid `CACHEDIR.TAG` is not entered either.
     pub exclude_caches: Vec<CacheRule>,
+    /// The home directory whose [`CONTAINERS`] the walk lists without
+    /// entering (`--skip-containers`); `None` enters them. They are known by
+    /// their identity, so a walk that reaches them by another path (a
+    /// firmlink, a link it follows) skips them too.
+    pub skip_containers: Option<PathBuf>,
     /// Set to stop the walk. Workers poll it once per directory.
     pub cancel: Arc<AtomicBool>,
     /// Read every directory with the fallback provider, `readdir` and
@@ -98,6 +109,7 @@ impl Default for WalkOptions {
             excludes: GlobSet::empty(),
             ignore: IgnoreRules::default(),
             exclude_caches: Vec::new(),
+            skip_containers: None,
             cancel: Arc::default(),
             fallback: false,
             counters: Counters::Off,

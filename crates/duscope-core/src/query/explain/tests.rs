@@ -240,3 +240,58 @@ fn p2_qry_04_a_marker_beyond_a_directory_of_the_rules_name_confirms_that_one() {
     let (rule, at) = caches.taking(&path, held, false).unwrap();
     assert_eq!((rule.regenerable_by.as_str(), at), ("npm install", Some(1)));
 }
+
+#[test]
+fn p5_walk_03_explain_on_a_dataless_file_reports_freeable_now_bytes_0() {
+    // A cloud placeholder as the macOS provider reads one (logical size,
+    // nothing allocated, flagged dataless): the mocked attributes, since no
+    // runner has an evicted iCloud file to read.
+    let env = TestEnv::new();
+    let mut tree = MemProvider::new("/cloud-tree");
+    tree.dataless("Documents/report.pdf", 5 << 20)
+        .file("Documents/notes.txt", 10_000)
+        .file("Pictures/a.jpg", 20_000);
+    let index = index_of(
+        Path::new("/cloud-tree"),
+        |arena| {
+            walk_with(&tree, tree.root_path(), &WalkOptions::default(), |e| {
+                arena.push(e).unwrap();
+            })
+            .unwrap();
+        },
+        &env.tmp_dir(),
+    );
+    let caches = Caches::vendored();
+    let q = ExplainQuery {
+        caches: &caches,
+        env: &no_env,
+    };
+    let facts = |path: &str| {
+        let id = resolve_in_index(&index, Path::new(path)).unwrap();
+        explain(&index, id, &q).unwrap()
+    };
+    let placeholder = facts("/cloud-tree/Documents/report.pdf");
+    assert_eq!(placeholder.apparent_bytes, 5 << 20);
+    assert_eq!(placeholder.freeable_now_bytes, Some(0));
+    assert_eq!(placeholder.freeable_kind, Some("exact"));
+    assert!(placeholder.flags.contains(&"dataless"));
+    assert!(
+        placeholder
+            .evidence
+            .iter()
+            .any(|e| e.starts_with("dataless:")),
+        "{:?}",
+        placeholder.evidence
+    );
+    // Its directory frees what is on the disk: the local file's blocks,
+    // none of the placeholder's 5 MiB.
+    let documents = facts("/cloud-tree/Documents");
+    let notes = facts("/cloud-tree/Documents/notes.txt");
+    assert_eq!(documents.freeable_now_bytes, notes.freeable_now_bytes);
+    assert_eq!(notes.freeable_now_bytes, Some(12_288));
+    // The tally a scan's warning and summary read.
+    let dataless = crate::query::TreeView::dataless(&index, 0);
+    assert_eq!((dataless.files, dataless.apparent), (1, 5 << 20));
+    let pictures = facts("/cloud-tree/Pictures");
+    assert!(!pictures.evidence.iter().any(|e| e.starts_with("dataless:")));
+}

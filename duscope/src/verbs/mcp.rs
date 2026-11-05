@@ -65,6 +65,8 @@ pub fn serve(args: &McpArgs, global: &GlobalArgs, output: &OutputArgs) -> Result
         max_chars: output.max_chars,
         config: global.config.clone(),
     };
+    // A scan's Full Disk Access warning names the app that runs the server.
+    super::scan::serving_mcp();
     let config = ServerConfig::new(&crate::agent::briefing());
     let server = Server::new(config)
         .with_tools(Tools {
