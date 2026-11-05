@@ -1,2 +1,0 @@
-### Added
-- `duscope agent --skill` writes the briefing as a skill that Claude Code and other agents' clients load on their own: `SKILL.md`, whose description carries the words that should bring duscope to mind (disk space, what is eating my disk, large files, node_modules, stale files, clean up, compare scans), and `references/sql.md` with the SQL examples, in `.agents/skills/duscope/` and `.claude/skills/duscope/` under the working directory or `--dir`. A skill that is already there is replaced only with `--force`.
