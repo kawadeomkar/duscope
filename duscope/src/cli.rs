@@ -177,6 +177,8 @@ pub enum Verb {
     Import(ImportArgs),
     /// Draw the treemap as a picture, --format svg or png, at any size
     Render(RenderArgs),
+    /// Serve the saved scans to an MCP client over stdin and stdout
+    Mcp(McpArgs),
     /// Print the briefing an AI agent reads before it uses duscope
     Agent,
     /// Print the manual page, in roff, to stdout
@@ -983,6 +985,48 @@ pub enum MinTile {
     Four,
 }
 
+/// `mcp`'s flags. `--index-dir` and `--max-chars`, which every verb takes,
+/// apply to the tools' verbs.
+#[derive(Debug, Clone, Args)]
+pub struct McpArgs {
+    /// A directory the client may read; nothing outside the roots is seen (repeatable)
+    #[arg(long, value_name = "DIR", required = true, num_args = 1.., action = ArgAction::Append)]
+    pub roots: Vec<PathBuf>,
+
+    /// Offer the tool that moves paths to the Trash
+    #[arg(long)]
+    pub allow_delete: bool,
+
+    /// What goes to stderr: error, warn, info or debug (default warn)
+    #[arg(long, value_enum, value_name = "LEVEL")]
+    pub log_level: Option<LogLevel>,
+}
+
+/// `mcp --log-level`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LogLevel {
+    /// Errors
+    Error,
+    /// Warnings and errors
+    Warn,
+    /// What the server does, warnings and errors
+    Info,
+    /// Every message read and written
+    Debug,
+}
+
+impl LogLevel {
+    /// The level's name, as a log filter reads it.
+    pub fn name(self) -> &'static str {
+        match self {
+            LogLevel::Error => "error",
+            LogLevel::Warn => "warn",
+            LogLevel::Info => "info",
+            LogLevel::Debug => "debug",
+        }
+    }
+}
+
 /// `--color-by`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ColorBy {
@@ -1165,6 +1209,7 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             | Verb::Rescan(_)
             | Verb::Import(_)
             | Verb::Schema(_)
+            | Verb::Mcp(_)
             | Verb::Agent
             | Verb::Man
             | Verb::Completions(_),

@@ -94,7 +94,9 @@ rmcp = { version = "=3.6.0", default-features = false, features = ["client", "tr
 schemars = { version = "1.2.3", default-features = false, features = ["derive"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
-serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
+# `raw_value`: a tool result carries the verb's envelope as the verb wrote it
+# (P3-MCP-03).
+serde_json = { version = "1.0.154", default-features = false, features = ["std", "raw_value"] }
 tempfile = "3.27.0"
 termlens = { version = "=0.11.6", default-features = false }
 # The runtime rmcp's client runs on in the MCP tests, and the pipes it reads.

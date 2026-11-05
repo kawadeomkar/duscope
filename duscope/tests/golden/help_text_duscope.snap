@@ -25,6 +25,7 @@ Verbs:
   export       Write a saved scan for other tools, in the format --format names
   import       Save a tree that ncdu, gdu or GrandPerspective wrote as a scan
   render       Draw the treemap as a picture, --format svg or png, at any size
+  mcp          Serve the saved scans to an MCP client over stdin and stdout
   agent        Print the briefing an AI agent reads before it uses duscope
   man          Print the manual page, in roff, to stdout
   completions  Print the completion script for a shell to stdout

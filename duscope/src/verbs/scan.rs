@@ -1119,6 +1119,7 @@ mod tests {
             file: None,
             max_chars: 0,
             spill_dir: None,
+            capture: None,
         };
         let fresh = super::super::source::Source::Fresh {
             scanned: Box::new(scanned),

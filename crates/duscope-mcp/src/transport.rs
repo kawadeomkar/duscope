@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
 use log::{debug, warn};
+use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 use crate::jsonrpc::{self, Id, Incoming, Notification, Request, RpcError};
@@ -78,7 +80,7 @@ impl Outbox {
         Ok(())
     }
 
-    fn send_result(&self, id: &Id, result: &Value) -> io::Result<()> {
+    fn send_result<R: Serialize + ?Sized>(&self, id: &Id, result: &R) -> io::Result<()> {
         let line = jsonrpc::result_line(id, result)?;
         self.write(&line)?;
         debug!("sent the result for request {id} ({} bytes)", line.len());
@@ -162,6 +164,16 @@ impl Responder {
         self.open = false;
         match outcome {
             Ok(result) => self.outbox.send_result(&self.id, &result),
+            Err(error) => self.outbox.send_error(Some(&self.id), &error),
+        }
+    }
+
+    /// Sends the response with a result already written as JSON, which goes
+    /// out byte for byte, or the error.
+    pub fn respond_raw(mut self, outcome: Result<Box<RawValue>, RpcError>) -> io::Result<()> {
+        self.open = false;
+        match outcome {
+            Ok(result) => self.outbox.send_result(&self.id, &*result),
             Err(error) => self.outbox.send_error(Some(&self.id), &error),
         }
     }

@@ -10,8 +10,11 @@ mod out;
 mod panic;
 mod verbs;
 
+use std::cell::RefCell;
+use std::ffi::OsString;
 use std::io;
 use std::process::ExitCode;
+use std::rc::Rc;
 
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
@@ -19,8 +22,8 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, ValueEnum};
 use duscope_core::CoreError;
 use duscope_core::config::{Config, ConfigSource};
 
-use cli::{Cli, TreemapWhen, Verb};
-use out::Output;
+use cli::{Cli, McpArgs, TreemapWhen, Verb};
+use out::{Capture, Output};
 use verbs::{Exit, Failure};
 
 /// The musl builds (the Linux archives and `.deb`s) allocate with mimalloc:
@@ -30,15 +33,70 @@ use verbs::{Exit, Failure};
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+thread_local! {
+    /// The command line being run: the process's own, or, while a verb
+    /// runs for an MCP tool, that verb's (the next-page hint repeats it).
+    static COMMAND_LINE: RefCell<Vec<OsString>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The command line being run, `duscope` first.
+pub fn command_line() -> Vec<OsString> {
+    COMMAND_LINE.with(|line| line.borrow().clone())
+}
+
 fn main() -> ExitCode {
     panic::install();
-    let (mut cli, matches) = match parse() {
+    let args: Vec<OsString> = std::env::args_os().collect();
+    COMMAND_LINE.with(|line| line.replace(args.clone()));
+    let (cli, matches) = match parse(args.iter().cloned()) {
         Ok(parsed) => parsed,
-        Err(error) => return refused(&error),
+        Err(error) => return refused(&error, &args),
     };
-    log::init(log::filter(cli.global.verbosity(), |name| {
-        std::env::var(name).ok()
-    }));
+    log::init(match &cli.verb {
+        Some(Verb::Mcp(McpArgs {
+            log_level: Some(level),
+            ..
+        })) => log::Filter::parse(level.name()),
+        _ => log::filter(cli.global.verbosity(), |name| std::env::var(name).ok()),
+    });
+    // mcp's stdout carries the protocol alone: a failure to start goes to
+    // stderr.
+    if let Some(Verb::Mcp(args)) = &cli.verb {
+        return match verbs::mcp::serve(args, &cli.global, &cli.output) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(failure) => {
+                out::to_stderr(&failure);
+                ExitCode::from(failure.exit.code())
+            }
+        };
+    }
+    ExitCode::from(execute(cli, &matches, None))
+}
+
+/// Runs the command line `argv` (`duscope` first) in this process, as the
+/// binary would run it, but with what it writes to stdout kept in a
+/// buffer: the verb behind an MCP tool. Returns its exit code and what it
+/// wrote.
+pub fn run_captured(argv: Vec<OsString>) -> (u8, Vec<u8>) {
+    let capture = Capture::default();
+    let server = COMMAND_LINE.with(|line| line.replace(argv.clone()));
+    let code = match parse(argv) {
+        Ok((cli, matches)) => execute(cli, &matches, Some(&capture)),
+        Err(error) => {
+            let failure = usage_failure(&error);
+            json_output(Some(Rc::clone(&capture))).failure(&failure);
+            failure.exit.code()
+        }
+    };
+    COMMAND_LINE.with(|line| line.replace(server));
+    let written = capture.take();
+    (code, written)
+}
+
+/// Runs the verb `cli` names, after the configuration file, and returns
+/// the exit code. What would go to stdout goes to `capture` when there is
+/// one.
+fn execute(mut cli: Cli, matches: &ArgMatches, capture: Option<&Capture>) -> u8 {
     // scan draws a treemap on a terminal; the other verbs print tables.
     let treemap = match &cli.verb {
         None => Some(cli.scan.treemap.unwrap_or(TreemapWhen::Auto)),
@@ -48,14 +106,14 @@ fn main() -> ExitCode {
     let source = ConfigSource::locate(cli.global.config.as_deref(), |name| std::env::var_os(name));
     let configured = Config::load(&source)
         .map_err(|e| config_failure(&e))
-        .and_then(|config| cli::apply_config(&mut cli, &matches, &config));
+        .and_then(|config| cli::apply_config(&mut cli, matches, &config));
     if let Err(failure) = configured {
         // Reported as the flags ask, without the file's own format.
         match Output::decide(&cli.output, treemap) {
-            Ok(output) => output.failure(&failure),
-            Err(_) => out::to_stderr(&failure),
+            Ok(output) => captured(output, capture).failure(&failure),
+            Err(_) => report_undecided(&failure, capture),
         }
-        return ExitCode::from(failure.exit.code());
+        return failure.exit.code();
     }
     // import's --format names the file's format, not the output's.
     if let Some(Verb::Import(args)) = &mut cli.verb {
@@ -69,15 +127,15 @@ fn main() -> ExitCode {
         cli.output.format = Some(out::FormatArg::Ndjson);
     }
     let mut output = match Output::decide(&cli.output, treemap) {
-        Ok(output) => output,
+        Ok(output) => captured(output, capture),
         Err(failure) => {
-            out::to_stderr(&failure);
-            return ExitCode::from(failure.exit.code());
+            report_undecided(&failure, capture);
+            return failure.exit.code();
         }
     };
     if let Some(failure) = format_refused(&cli) {
         output.failure(&failure);
-        return ExitCode::from(failure.exit.code());
+        return failure.exit.code();
     }
     if all_as_json {
         let failure = Failure::new(
@@ -87,7 +145,7 @@ fn main() -> ExitCode {
         )
         .hint("Run the command with --all --format ndjson, or --json with --limit");
         output.failure(&failure);
-        return ExitCode::from(failure.exit.code());
+        return failure.exit.code();
     }
     // A spilled envelope goes beside the saved scans, where scans --prune
     // finds it.
@@ -98,23 +156,38 @@ fn main() -> ExitCode {
         .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)))
         .map(|dir| dir.join("out"));
     match verbs::run(cli, &output) {
-        Ok(()) => ExitCode::from(Exit::Success.code()),
+        Ok(()) => Exit::Success.code(),
         // Ctrl-C is the user's own doing: one line on stderr, no envelope.
         Err(failure) if failure.exit == Exit::Interrupted => {
             verbs::report_interrupt();
-            ExitCode::from(failure.exit.code())
+            failure.exit.code()
         }
         // The index is written after the output, which stands, and clean's
         // plan carries its own error: the failure goes to stderr, never as a
         // second envelope.
         Err(failure) if failure.code == "index_write_failed" || failure.reported => {
             out::to_stderr(&failure);
-            ExitCode::from(failure.exit.code())
+            failure.exit.code()
         }
         Err(failure) => {
             output.failure(&failure);
-            ExitCode::from(failure.exit.code())
+            failure.exit.code()
         }
+    }
+}
+
+/// `output`, writing to `capture` when there is one.
+fn captured(mut output: Output, capture: Option<&Capture>) -> Output {
+    output.capture = capture.map(Rc::clone);
+    output
+}
+
+/// A failure before the output's format was decided: on stderr, or, for a
+/// verb an MCP tool runs, which always asks for JSON, as the error envelope.
+fn report_undecided(failure: &Failure, capture: Option<&Capture>) {
+    match capture {
+        Some(capture) => json_output(Some(Rc::clone(capture))).failure(failure),
+        None => out::to_stderr(failure),
     }
 }
 
@@ -181,9 +254,9 @@ fn format_refused(cli: &Cli) -> Option<Failure> {
 /// The command line and the matches of its verb (the top level's without
 /// one). Without a verb, `scan`'s flags and path come first; with one, only
 /// the global flags may come before it.
-fn parse() -> Result<(Cli, ArgMatches), clap::Error> {
+fn parse(argv: impl IntoIterator<Item = OsString>) -> Result<(Cli, ArgMatches), clap::Error> {
     let mut command = Cli::command();
-    let matches = command.try_get_matches_from_mut(std::env::args_os())?;
+    let matches = command.try_get_matches_from_mut(argv)?;
     if let Some((verb, _)) = matches.subcommand() {
         let before = command
             .get_arguments()
@@ -212,8 +285,9 @@ fn parse() -> Result<(Cli, ArgMatches), clap::Error> {
 /// A command line clap did not run: `--help` and `--version` (exit 0), or a
 /// usage error (exit 2), which is the error envelope when JSON was asked
 /// for and clap's own message otherwise.
-fn refused(error: &clap::Error) -> ExitCode {
-    let args: Vec<String> = std::env::args_os()
+fn refused(error: &clap::Error, args: &[OsString]) -> ExitCode {
+    let args: Vec<String> = args
+        .iter()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     let shown = matches!(
@@ -225,6 +299,13 @@ fn refused(error: &clap::Error) -> ExitCode {
     if shown || !Output::json_requested(&args) {
         error.exit();
     }
+    let failure = usage_failure(error);
+    json_output(None).failure(&failure);
+    ExitCode::from(failure.exit.code())
+}
+
+/// The usage error of a command line clap refused: its first line.
+fn usage_failure(error: &clap::Error) -> Failure {
     let rendered = error.render().to_string();
     let message = rendered
         .lines()
@@ -232,8 +313,13 @@ fn refused(error: &clap::Error) -> ExitCode {
         .unwrap_or_default()
         .trim_start_matches("error: ")
         .to_owned();
-    let failure = Failure::new(Exit::Usage, "usage", message)
-        .hint("Run duscope --help for the verbs and their flags");
+    Failure::new(Exit::Usage, "usage", message)
+        .hint("Run duscope --help for the verbs and their flags")
+}
+
+/// The output of a failure reported as the JSON envelope whatever the
+/// flags: to stdout, or to `capture`.
+fn json_output(capture: Option<Capture>) -> Output {
     Output {
         format: out::Format::Json,
         color: false,
@@ -245,9 +331,8 @@ fn refused(error: &clap::Error) -> ExitCode {
         file: None,
         max_chars: 0,
         spill_dir: None,
+        capture,
     }
-    .failure(&failure);
-    ExitCode::from(failure.exit.code())
 }
 
 #[cfg(test)]

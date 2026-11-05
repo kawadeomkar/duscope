@@ -94,6 +94,7 @@ question from it in milliseconds, one JSON envelope per command.
 | `duscope export` | Write a saved scan for other tools, in the format --format names |
 | `duscope import` | Save a tree that ncdu, gdu or GrandPerspective wrote as a scan |
 | `duscope render` | Draw the treemap as a picture, --format svg or png, at any size |
+| `duscope mcp` | Serve the saved scans to an MCP client over stdin and stdout |
 | `duscope agent` | Print the briefing an AI agent reads before it uses duscope |
 | `duscope man` | Print the manual page, in roff, to stdout |
 | `duscope completions` | Print the completion script for a shell to stdout |
