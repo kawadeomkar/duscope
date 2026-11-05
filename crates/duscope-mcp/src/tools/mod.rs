@@ -37,8 +37,13 @@ use crate::jsonrpc::RpcError;
 use crate::roots::{Refusal, Roots, Visibility};
 
 mod by_type;
+mod caches;
+mod diff;
+mod explain;
+mod query;
 mod scan;
 mod scans;
+mod schema;
 mod stale;
 mod summary;
 mod top;
@@ -52,6 +57,11 @@ pub fn shipped() -> Vec<Box<dyn Tool>> {
         Box::new(top::Top),
         Box::new(by_type::ByType),
         Box::new(stale::Stale),
+        Box::new(caches::Caches),
+        Box::new(explain::Explain),
+        Box::new(query::Query),
+        Box::new(schema::Schema),
+        Box::new(diff::Diff),
     ]
 }
 
@@ -970,6 +980,8 @@ fn rows_text(envelope: &Value) -> String {
     }
 }
 
+#[cfg(test)]
+mod analysis_group_tests;
 #[cfg(test)]
 mod scan_group_tests;
 #[cfg(test)]

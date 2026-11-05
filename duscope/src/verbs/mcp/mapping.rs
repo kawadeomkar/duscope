@@ -172,8 +172,12 @@ fn p3_mcp_04_mapping_names_every_flag_of_each_tools_verb() {
             problems.push(format!("{name} has a section and is no tool"));
             continue;
         };
-        let invocation = tool.invocation(&Map::new(), &context).unwrap();
-        assert_eq!(invocation.verb, verb, "{name} runs {}", invocation.verb);
+        // A tool that reads a whole scan finds none here, and refuses; its
+        // fixture test compares it with its verb.
+        match tool.invocation(&Map::new(), &context) {
+            Ok(invocation) => assert_eq!(invocation.verb, verb, "{name} runs {}", invocation.verb),
+            Err(refusal) => assert_eq!(refusal.code, "scan_not_found", "{name}: {refusal}"),
+        }
         let schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
         let properties = schema["properties"].as_object().unwrap();
         let subcommand = command

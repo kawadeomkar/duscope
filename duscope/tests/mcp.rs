@@ -11,6 +11,11 @@
 //! P3-MCP-04: the scan group's tools against their verbs, argument by
 //! argument, and the two verb flags they rest on: `scan --reuse` and
 //! `scans PATH...`.
+//!
+//! P3-MCP-07: the analysis group's tools against their verbs; the scan
+//! `duscope_query` and `duscope_schema` read, which must lie inside the
+//! roots; hostile statements refused through the tool as through the verb;
+//! and `duscope_diff` compared under the roots.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -24,13 +29,37 @@ use duscope_testkit::{TestEnv, golden};
 use serde_json::{Value, json};
 
 /// The tools a release build offers.
-const SHIPPED: [&str; 6] = [
+const SHIPPED: [&str; 11] = [
     "duscope_by_type",
+    "duscope_caches",
+    "duscope_diff",
+    "duscope_explain",
+    "duscope_query",
     "duscope_scan",
     "duscope_scans",
+    "duscope_schema",
     "duscope_stale",
     "duscope_summary",
     "duscope_top",
+];
+
+/// P3-MCP-04's tools.
+const SCAN_GROUP: [&str; 6] = [
+    "duscope_scan",
+    "duscope_scans",
+    "duscope_summary",
+    "duscope_top",
+    "duscope_by_type",
+    "duscope_stale",
+];
+
+/// P3-MCP-07's tools.
+const ANALYSIS_GROUP: [&str; 5] = [
+    "duscope_caches",
+    "duscope_explain",
+    "duscope_query",
+    "duscope_schema",
+    "duscope_diff",
 ];
 
 /// The fixture tools a debug build adds under `DUSCOPE_TEST_MCP_TOOLS`.
@@ -314,6 +343,7 @@ fn p3_mcp_03_structured_content_is_the_verbs_json_for_every_tool() {
     ]
     .into_iter()
     .chain(scan_group_cases(&env, &home, &id))
+    .chain(analysis_group_cases(&env, &home, &id))
     .collect();
     let requests: Vec<Value> = std::iter::once(request(0, "tools/list", &json!({})))
         .chain(
@@ -701,7 +731,7 @@ fn p3_mcp_04_each_tool_answers_with_its_verbs_json() {
     let env = TestEnv::new();
     let (home, id) = saved_home(&env);
     let cases = scan_group_cases(&env, &home, &id);
-    for tool in SHIPPED {
+    for tool in SCAN_GROUP {
         assert!(
             cases.iter().any(|(case, _, _)| *case == tool),
             "{tool} has no case comparing it with its verb"
@@ -1069,4 +1099,334 @@ fn p3_mcp_04_scans_lists_the_scans_of_the_paths_and_under_them() {
         let out = env.cmd().arg("scans").args(flags).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{flags:?}");
     }
+}
+
+// P3-MCP-07: the analysis group.
+
+/// `duscope ARGS`, each argument as given.
+fn args(parts: &[&dyn AsRef<std::ffi::OsStr>]) -> Vec<OsString> {
+    parts.iter().map(|part| part.as_ref().to_owned()).collect()
+}
+
+/// `--under=PATH`.
+fn under(path: &Path) -> OsString {
+    let mut flag = OsString::from("--under=");
+    flag.push(path);
+    flag
+}
+
+/// A statement that counts the files under the path's entry.
+const COUNT: &str = "SELECT count(*) AS n FROM files WHERE id BETWEEN :root_id AND :root_last";
+
+/// The analysis group on the fixture tree's `home`, saved as `id`, the
+/// server's one root, as [`scan_group_cases`] has the scan group.
+fn analysis_group_cases(env: &TestEnv, home: &Path, id: &str) -> Vec<Case> {
+    let library = home.join("Library");
+    let page = |args: &[OsString]| -> Value { serde_json::from_str(&cli_json(env, args)).unwrap() };
+    let first = page(&line("caches --no-scan --min-size=0 --limit=2", home));
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{first}"))
+        .to_owned();
+    let largest = page(&line("top --no-scan --files --limit=1", home));
+    let file = PathBuf::from(largest["entries"][0]["path"].as_str().unwrap());
+    let sql = format!("--sql={COUNT}");
+    vec![
+        ("duscope_caches", json!({}), line("caches --no-scan", home)),
+        (
+            "duscope_caches",
+            json!({"scan_id": id, "path": "Library", "by_project": true, "loose": true,
+                "min_size": "0", "size": "apparent", "fields": ["project_root", "allocated_bytes"],
+                "limit": 3}),
+            line(
+                &format!(
+                    "caches --no-scan --scan {id} --by-project --loose --min-size=0 \
+                     --size=apparent --fields=project_root,allocated_bytes --limit=3"
+                ),
+                &library,
+            ),
+        ),
+        (
+            "duscope_caches",
+            json!({"min_size": "0", "limit": 2, "cursor": cursor}),
+            line(
+                &format!("caches --no-scan --min-size=0 --limit=2 --cursor={cursor}"),
+                home,
+            ),
+        ),
+        (
+            "duscope_explain",
+            json!({"path": file}),
+            line("explain", &file),
+        ),
+        (
+            "duscope_explain",
+            json!({"scan_id": &id[..6], "path": "Library"}),
+            line(&format!("explain --scan {id}"), &library),
+        ),
+        (
+            "duscope_query",
+            json!({"sql": COUNT}),
+            args(&[&"query", &"--no-scan", &"--scan", &id, &sql, &home]),
+        ),
+        (
+            "duscope_query",
+            json!({"sql": COUNT, "scan_id": "latest", "path": library}),
+            args(&[&"query", &"--no-scan", &"--scan", &id, &sql, &library]),
+        ),
+        (
+            "duscope_schema",
+            json!({}),
+            line(&format!("schema --scan {id}"), home),
+        ),
+        (
+            "duscope_schema",
+            json!({"scan_id": &id[..6], "path": "Library"}),
+            line(&format!("schema --scan {id}"), &library),
+        ),
+        (
+            "duscope_schema",
+            json!({"envelope": "top"}),
+            args(&[&"schema", &"--envelope=top"]),
+        ),
+        (
+            "duscope_diff",
+            json!({"old": id, "new": "latest"}),
+            args(&[&"diff", &id, &"latest", &under(home)]),
+        ),
+        (
+            "duscope_diff",
+            json!({"old": &id[..6], "new": id, "path": "Library", "min_delta": "0", "depth": 2,
+                "size": "apparent", "limit": 5}),
+            args(&[
+                &"diff",
+                &id,
+                &id,
+                &under(&library),
+                &"--min-delta=0",
+                &"--depth=2",
+                &"--size=apparent",
+                &"--limit=5",
+            ]),
+        ),
+    ]
+}
+
+#[test]
+fn p3_mcp_07_each_tool_answers_with_its_verbs_json() {
+    let env = TestEnv::new();
+    let (home, id) = saved_home(&env);
+    let cases = analysis_group_cases(&env, &home, &id);
+    for tool in ANALYSIS_GROUP {
+        assert!(
+            cases.iter().any(|(case, _, _)| *case == tool),
+            "{tool} has no case comparing it with its verb"
+        );
+    }
+    let requests: Vec<Value> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, (tool, arguments, _))| call(i as u64 + 1, tool, arguments))
+        .collect();
+    let served = serve(&env, &roots(&[&home]), &requests);
+    for (i, (tool, arguments, args)) in cases.iter().enumerate() {
+        let id = i as u64 + 1;
+        let result = served.result(id);
+        assert_eq!(result["isError"], false, "{tool} {arguments}: {result}");
+        assert_eq!(
+            structured_content(served.line(id)),
+            cli_json(&env, args),
+            "{tool} {arguments}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("null") && !text.contains('?'),
+            "{tool}: {text}"
+        );
+    }
+    assert_eq!(saved_ids(&env), vec![id]);
+}
+
+#[test]
+fn p3_mcp_07_query_and_schema_read_only_a_scan_inside_the_roots() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let above = save(&env, &base);
+    let inside = save(&env, &root);
+    let calls = [
+        call(1, "duscope_query", &json!({"sql": "SELECT 1 AS one"})),
+        call(
+            2,
+            "duscope_query",
+            &json!({"sql": "SELECT 1 AS one", "scan_id": "latest"}),
+        ),
+        call(3, "duscope_schema", &json!({})),
+        call(
+            4,
+            "duscope_query",
+            &json!({"sql": "SELECT 1 AS one", "scan_id": &above[..8]}),
+        ),
+        call(5, "duscope_schema", &json!({"scan_id": above})),
+        call(
+            6,
+            "duscope_query",
+            &json!({"sql": "SELECT 1 AS one", "path": "/"}),
+        ),
+    ];
+    let served = serve(&env, &roots(&[&root]), &calls);
+    // The scan of the root, though the scan above it is as new.
+    for id in 1..=3 {
+        let result = served.result(id);
+        assert_eq!(result["isError"], false, "{result}");
+        assert_eq!(result["structuredContent"]["scan"]["id"], inside.as_str());
+    }
+    // A scan above the root is not found, as one the roots hide.
+    for id in 4..=5 {
+        let error = &served.result(id)["structuredContent"]["error"];
+        assert_eq!(error["code"], "scan_not_found", "{error}");
+    }
+    assert_eq!(
+        served.result(6)["structuredContent"]["error"]["code"],
+        "refused_path"
+    );
+    // With only a scan above the root, there is nothing to read.
+    let served = serve(
+        &env,
+        &roots(&[&root.join("a")]),
+        &[call(1, "duscope_query", &json!({"sql": "SELECT 1 AS one"}))],
+    );
+    let error = &served.result(1)["structuredContent"]["error"];
+    assert_eq!(error["code"], "scan_not_found", "{error}");
+}
+
+#[test]
+fn p3_mcp_07_a_hostile_statement_is_refused_through_the_tool_as_through_the_verb() {
+    let env = TestEnv::new();
+    let (home, id) = saved_home(&env);
+    let file = env.index_dir().join(format!("scans/{id}.db"));
+    let before = std::fs::read(&file).unwrap();
+    let statements = [
+        "DELETE FROM files",
+        "DROP TABLE files",
+        "CREATE TEMP TABLE t (x)",
+        "ATTACH '/tmp/duscope-attach.db' AS other",
+        "PRAGMA writable_schema = 1",
+        "SELECT * FROM sqlite_master",
+        "SELECT load_extension('/tmp/x')",
+        "SELECT readfile('/etc/passwd')",
+        "SELECT 1; DROP TABLE files",
+        "VACUUM INTO '/tmp/duscope-vacuum.db'",
+        "SELEC 1",
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c",
+    ];
+    let requests: Vec<Value> = statements
+        .iter()
+        .enumerate()
+        .map(|(i, sql)| call(i as u64 + 1, "duscope_query", &json!({"sql": sql})))
+        .collect();
+    let served = serve(&env, &roots(&[&home]), &requests);
+    for (i, sql) in statements.iter().enumerate() {
+        let result = served.result(i as u64 + 1);
+        assert_eq!(result["isError"], true, "{sql}: {result}");
+        let flag = format!("--sql={sql}");
+        assert_eq!(
+            structured_content(served.line(i as u64 + 1)),
+            cli_json(
+                &env,
+                &args(&[&"query", &"--no-scan", &"--scan", &id, &flag, &home])
+            ),
+            "{sql}"
+        );
+    }
+    assert_eq!(
+        served.result(statements.len() as u64)["structuredContent"]["error"]["code"],
+        "sql_timeout"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+}
+
+#[test]
+fn p3_mcp_07_diff_compares_under_a_path_inside_the_roots() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let old = save(&env, &base);
+    std::fs::write(base.join("outside/secret"), vec![0u8; 2_000_000]).unwrap();
+    std::fs::write(root.join("a/grown"), vec![0u8; 3_000_000]).unwrap();
+    let new = save(&env, &base);
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[
+            call(1, "duscope_diff", &json!({"old": old, "new": new})),
+            call(
+                2,
+                "duscope_diff",
+                &json!({"old": old, "new": new, "path": base}),
+            ),
+            call(3, "duscope_diff", &json!({"old": "0000", "new": new})),
+            call(
+                4,
+                "duscope_diff",
+                &json!({"old": env.index_dir().join(format!("scans/{old}.db")), "new": new}),
+            ),
+        ],
+    );
+    // The scans of the parent are compared at the root: the file grown
+    // outside it is not seen.
+    let result = served.result(1);
+    assert_eq!(result["isError"], false, "{result}");
+    let envelope = &result["structuredContent"];
+    assert_eq!(envelope["query"]["path"], root.display().to_string());
+    let paths: Vec<&str> = envelope["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        paths.iter().all(|path| Path::new(path).starts_with(&root)),
+        "{paths:?}"
+    );
+    assert!(
+        paths.contains(&root.join("a/grown").to_str().unwrap()),
+        "{paths:?}"
+    );
+    assert_eq!(
+        structured_content(served.line(1)),
+        cli_json(&env, &args(&[&"diff", &old, &new, &under(&root)]))
+    );
+    for (id, code) in [
+        (2, "refused_path"),
+        (3, "scan_not_found"),
+        (4, "refused_path"),
+    ] {
+        let error = &served.result(id)["structuredContent"]["error"];
+        assert_eq!(error["code"], code, "{id}: {error}");
+    }
+}
+
+#[test]
+fn p3_mcp_07_explain_reads_the_path_as_it_is_without_a_saved_scan() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let file = root.join("a/file");
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[call(1, "duscope_explain", &json!({"path": file}))],
+    );
+    let result = served.result(1);
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(
+        result["structuredContent"]["result"]["path"],
+        file.display().to_string()
+    );
+    assert_eq!(
+        structured_content(served.line(1)),
+        cli_json(&env, &line("explain", &file))
+    );
+    assert!(saved_ids(&env).is_empty());
 }

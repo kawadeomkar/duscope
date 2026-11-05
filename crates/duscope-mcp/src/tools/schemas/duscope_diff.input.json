@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "duscope_diff.input.json",
+  "title": "duscope_diff",
+  "description": "The arguments of duscope_diff, which runs `duscope diff OLD NEW --under PATH`.",
+  "type": "object",
+  "properties": {
+    "old": {
+      "type": "string",
+      "description": "The older saved scan: an id duscope_scan or duscope_scans gave (its first 4 or more characters will do), or latest"
+    },
+    "new": {
+      "type": "string",
+      "description": "The newer saved scan: an id, or latest"
+    },
+    "path": {
+      "type": "string",
+      "description": "The directory both scans hold, compared under it: absolute, or relative to the older scan's root. Default: the older scan's root, or the server's root under it"
+    },
+    "min_delta": {
+      "type": "string",
+      "description": "Leave out growth or shrinkage smaller than this: 100M, 1.5G, 10KB, or a number of bytes. Default: 1M"
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Compare the directories at this depth below the path whole"
+    },
+    "size": {
+      "type": "string",
+      "enum": [
+        "allocated",
+        "apparent"
+      ],
+      "description": "What is compared: bytes on disk (allocated, the default) or apparent length"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Rows to return. Default: 25"
+    }
+  },
+  "required": [
+    "old",
+    "new"
+  ],
+  "additionalProperties": false
+}
