@@ -385,7 +385,7 @@ fn p4_core_01_linux_a_trashed_file_round_trips() {
     assert_eq!(value["result"]["freed_bytes"], 0);
     assert_eq!(value["result"]["plan"]["confirmation_required"], false);
     assert_eq!(value["warnings"][0]["code"], "index_untouched");
-    assert_eq!(value["next"][0], format!("duscope rescan {id}"));
+    assert_eq!(value["next"][0], format!("duscope rescan --scan {id}"));
     // The link itself stays; it dangles now that a.bin, which it names, is
     // in the Trash, so `exists` (which follows it) cannot tell.
     assert!(!file.exists() && !dir.exists());
@@ -576,7 +576,7 @@ fn p5_core_03_du_before_and_after_equals_freed_bytes() {
         vec![5u8; 30_000]
     );
     assert_eq!(value["warnings"][0]["code"], "index_untouched");
-    assert_eq!(value["next"][0], format!("duscope rescan {id}"));
+    assert_eq!(value["next"][0], format!("duscope rescan --scan {id}"));
     // A refused item stops a permanent run as it does a move.
     let out = run(
         &env,
@@ -705,4 +705,29 @@ fn p5_core_03_expect_bytes_within_one_percent_or_nothing_is_touched() {
         assert_eq!(ok(&out)["result"]["trashed_count"], 1);
         assert!(!dir.exists());
     }
+}
+
+#[test]
+fn p4_core_01_the_rescan_a_clean_suggests_runs_as_written() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let id = save(&env, &root);
+    let file = root.join("a.bin");
+    let value = ok(&run(
+        &env,
+        &["clean", s(&file), "--permanent", "--yes", "--json"],
+    ));
+    // `rescan` reads a bare argument as a path, so the saved scan is named
+    // with --scan, in the hint and in `next`.
+    let next = format!("duscope rescan --scan {id}");
+    assert_eq!(value["next"][0], next);
+    let hint = value["warnings"][0]["hint"].as_str().unwrap();
+    assert!(hint.contains(&next), "{hint}");
+    let mut args: Vec<&str> = next.split(' ').skip(1).collect();
+    args.push("--json");
+    let again = ok(&run(&env, &args));
+    assert!(
+        again["scan"]["id"].as_str().is_some_and(|new| new != id),
+        "{again}"
+    );
 }

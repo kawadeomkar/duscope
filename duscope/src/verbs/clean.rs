@@ -342,7 +342,7 @@ fn first_error(plan: &Plan) -> Option<&ErrorObject> {
 /// the tree again.
 fn index_untouched(scan: &ScanBlock, method: Method) -> Warning {
     let hint = match scan.id.as_deref() {
-        Some(id) => format!("Run duscope rescan {id} to measure the tree again"),
+        Some(id) => format!("Run duscope rescan --scan {id} to measure the tree again"),
         None => "Run duscope scan to measure the tree again".to_owned(),
     };
     let what = match method {
@@ -366,7 +366,7 @@ fn next(args: &CleanArgs, plan: &Plan, acted: bool, scan: &ScanBlock) -> Vec<Str
         return scan
             .id
             .as_deref()
-            .map(|id| vec![format!("duscope rescan {id}")])
+            .map(|id| vec![format!("duscope rescan --scan {id}")])
             .unwrap_or_default();
     }
     if !plan.plan.confirmation_required {
