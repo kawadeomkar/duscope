@@ -38,7 +38,8 @@ pub enum Id {
 }
 
 impl Id {
-    fn from_value(value: &Value) -> Option<Id> {
+    /// The id `value` is, when it is a string or an integer.
+    pub(crate) fn from_value(value: &Value) -> Option<Id> {
         match value {
             Value::String(id) => Some(Id::String(id.clone())),
             Value::Number(id) if id.is_i64() || id.is_u64() => Some(Id::Number(id.clone())),

@@ -17,6 +17,11 @@
 //! which the verb puts its envelope in a file and returns the stub. A tool
 //! that deletes is listed only under `--allow-delete`.
 //!
+//! A call runs on the server's worker ([`crate::worker`]), which gives it a
+//! deadline ([`Tool::deadline`]) and passes the runner the flag that a
+//! cancellation or the deadline sets and the count that progress reports
+//! ([`Runner::run_call`]).
+//!
 //! The input schemas are a subset of JSON Schema that `validate` checks in
 //! full: an object of named properties, each a string, integer, number,
 //! boolean or array of those, with `enum`, bounds, lengths and `pattern`.
@@ -27,6 +32,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use duscope_core::query::Regex;
 use serde::Serialize;
@@ -35,6 +41,7 @@ use serde_json::{Map, Value, json};
 
 use crate::jsonrpc::RpcError;
 use crate::roots::{Refusal, Roots, Visibility};
+use crate::worker::{self, CallSignals};
 
 mod by_type;
 mod caches;
@@ -136,6 +143,13 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// How long a call may run before it is answered `deadline_exceeded`
+    /// and its verb is told to stop: 30 seconds unless the tool says
+    /// otherwise.
+    fn deadline(&self) -> Duration {
+        worker::DEADLINE
+    }
+
     /// The command line for `arguments`, which the input schema accepted.
     fn invocation(
         &self,
@@ -152,6 +166,16 @@ pub trait Runner: Send + Sync {
     /// Runs `invocation` as `duscope <verb> <args> --json` would, with the
     /// server's index directory and `--max-chars`, and returns what it wrote.
     fn run(&self, invocation: &Invocation) -> Outcome;
+
+    /// Runs `invocation` as [`run`](Runner::run) does, for a call the server
+    /// may cancel or time out: a scan stops once `call.cancel` is set, and
+    /// counts each entry it reads into `call.entries`, which the server
+    /// reports as progress. The default runs it as `run` does, reading
+    /// neither.
+    fn run_call(&self, invocation: &Invocation, call: &CallSignals) -> Outcome {
+        let _ = call;
+        self.run(invocation)
+    }
 
     /// The error envelope of a call refused before its verb ran, as the verb
     /// would have written it.
@@ -311,6 +335,19 @@ impl Registry {
         context: &Context<'_>,
         runner: &dyn Runner,
     ) -> Result<CallResult, RpcError> {
+        let prepared = self.prepare(params, context)?;
+        prepared.result(prepared.run(runner, &CallSignals::default()))
+    }
+
+    /// `tools/call`'s `params`, checked: the tool they name and the command
+    /// line its arguments make, or the refusal the call is answered with
+    /// before its verb runs. An unknown tool or malformed params are a
+    /// protocol error.
+    pub fn prepare(
+        &self,
+        params: Option<&Map<String, Value>>,
+        context: &Context<'_>,
+    ) -> Result<Prepared<'_>, RpcError> {
         let params = params.ok_or_else(|| RpcError::invalid_params("tools/call needs params"))?;
         let name = params
             .get("name")
@@ -336,11 +373,56 @@ impl Registry {
             .schema
             .check(name, arguments)
             .and_then(|()| entry.tool.invocation(arguments, context));
-        let outcome = match &invocation {
-            Ok(invocation) => runner.run(invocation),
+        Ok(Prepared {
+            tool: entry.tool.as_ref(),
+            invocation,
+        })
+    }
+}
+
+/// A `tools/call` checked against the registry, ready to run.
+pub struct Prepared<'a> {
+    tool: &'a dyn Tool,
+    invocation: Result<Invocation, Refusal>,
+}
+
+impl fmt::Debug for Prepared<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Prepared")
+            .field("tool", &self.tool.name())
+            .field("invocation", &self.invocation)
+            .finish()
+    }
+}
+
+impl Prepared<'_> {
+    /// The tool called.
+    pub fn tool(&self) -> &dyn Tool {
+        self.tool
+    }
+
+    /// The verb the call runs; `None` for a call refused before its verb
+    /// runs.
+    pub fn verb(&self) -> Option<&'static str> {
+        self.invocation
+            .as_ref()
+            .ok()
+            .map(|invocation| invocation.verb)
+    }
+
+    /// What the call's verb writes, run by `runner` for the call `call`
+    /// signals; or, for a call refused before its verb runs, the error
+    /// envelope the verb would have written.
+    pub fn run(&self, runner: &dyn Runner, call: &CallSignals) -> Outcome {
+        match &self.invocation {
+            Ok(invocation) => runner.run_call(invocation, call),
             Err(refusal) => runner.refuse(refusal),
-        };
-        CallResult::new(entry.tool.as_ref(), outcome)
+        }
+    }
+
+    /// The call's result, from what its verb wrote.
+    pub fn result(&self, outcome: Outcome) -> Result<CallResult, RpcError> {
+        CallResult::new(self.tool, outcome)
     }
 }
 

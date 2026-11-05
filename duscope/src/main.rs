@@ -158,7 +158,10 @@ fn execute(mut cli: Cli, matches: &ArgMatches, capture: Option<&Capture>) -> u8 
     match verbs::run(cli, &output) {
         Ok(()) => Exit::Success.code(),
         // Ctrl-C is the user's own doing: one line on stderr, no envelope.
-        Err(failure) if failure.exit == Exit::Interrupted => {
+        // A verb run for an MCP tool call was stopped by the call's
+        // cancellation or deadline, and writes its envelope as for any
+        // other failure.
+        Err(failure) if failure.exit == Exit::Interrupted && capture.is_none() => {
             verbs::report_interrupt();
             failure.exit.code()
         }

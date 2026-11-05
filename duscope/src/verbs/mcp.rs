@@ -8,7 +8,14 @@
 //! result's `structuredContent` is the envelope that command prints, byte
 //! for byte. Nothing but protocol messages reaches stdout; the log goes to
 //! stderr at `--log-level`.
+//!
+//! The calls run one at a time on the server's worker thread (P3-MCP-05). A
+//! call's verb runs with the call's [`CallSignals`] at hand
+//! ([`running_call`]): a scan stops its walk when the call is cancelled or
+//! runs past its deadline, as it stops for Ctrl-C from a shell, and counts
+//! the entries it reads, which the server reports as the call's progress.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -18,6 +25,7 @@ use duscope_mcp::roots::{Refusal, Roots};
 use duscope_mcp::server::{Server, Tools};
 use duscope_mcp::tools::{Invocation, Outcome, Registry, Runner};
 use duscope_mcp::transport::Transport;
+use duscope_mcp::worker::{CallSignals, Timing};
 
 use super::{Exit, Failure};
 use crate::cli::{GlobalArgs, McpArgs};
@@ -58,12 +66,14 @@ pub fn serve(args: &McpArgs, global: &GlobalArgs, output: &OutputArgs) -> Result
         config: global.config.clone(),
     };
     let config = ServerConfig::new(&crate::agent::briefing());
-    let server = Server::new(config).with_tools(Tools {
-        registry,
-        roots,
-        index_dir,
-        runner: Box::new(runner),
-    });
+    let server = Server::new(config)
+        .with_tools(Tools {
+            registry,
+            roots,
+            index_dir,
+            runner: Box::new(runner),
+        })
+        .with_timing(timing());
     log::info!("serving on stdin and stdout");
     let failed = |e: std::io::Error| {
         Failure::new(
@@ -89,6 +99,38 @@ fn tools() -> Vec<Box<dyn duscope_mcp::tools::Tool>> {
         tools
     };
     tools
+}
+
+/// When the server reports a call's progress and how long a call may run:
+/// every two seconds, and each tool's own deadline. In a debug build, which
+/// the tests run, `DUSCOPE_TEST_MCP_PROGRESS_MS` and
+/// `DUSCOPE_TEST_MCP_DEADLINE_MS` shorten them, the second for every tool.
+fn timing() -> Timing {
+    let millis = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+    };
+    let mut timing = Timing::default();
+    if cfg!(debug_assertions) {
+        if let Some(every) = millis("DUSCOPE_TEST_MCP_PROGRESS_MS") {
+            timing.progress_every = every;
+        }
+        timing.deadline = millis("DUSCOPE_TEST_MCP_DEADLINE_MS");
+    }
+    timing
+}
+
+thread_local! {
+    /// The signals of the tool call whose verb runs on this thread.
+    static RUNNING_CALL: RefCell<Option<CallSignals>> = const { RefCell::new(None) };
+}
+
+/// The signals of the tool call whose verb runs on this thread, if one
+/// does: the flag that stops a scan, and the count its entries go to.
+pub fn running_call() -> Option<CallSignals> {
+    RUNNING_CALL.with(|call| call.borrow().clone())
 }
 
 /// Runs a tool's verb in this process, as the shell command would.
@@ -120,10 +162,10 @@ impl VerbRunner {
         }
         flags
     }
-}
 
-impl Runner for VerbRunner {
-    fn run(&self, invocation: &Invocation) -> Outcome {
+    /// Runs `invocation`'s command line, as `duscope` with the server's
+    /// flags, in this process: what it wrote, and whether it succeeded.
+    fn run_verb(&self, invocation: &Invocation) -> Outcome {
         let mut argv: Vec<OsString> = vec!["duscope".into(), invocation.verb.into()];
         argv.extend(invocation.args.iter().cloned());
         argv.extend(self.server_flags());
@@ -134,6 +176,19 @@ impl Runner for VerbRunner {
             json,
             ok: code == Exit::Success.code(),
         }
+    }
+}
+
+impl Runner for VerbRunner {
+    fn run(&self, invocation: &Invocation) -> Outcome {
+        self.run_verb(invocation)
+    }
+
+    fn run_call(&self, invocation: &Invocation, call: &CallSignals) -> Outcome {
+        let outer = RUNNING_CALL.with(|running| running.replace(Some(call.clone())));
+        let outcome = self.run_verb(invocation);
+        RUNNING_CALL.with(|running| running.replace(outer));
+        outcome
     }
 
     fn refuse(&self, refusal: &Refusal) -> Outcome {
@@ -154,6 +209,8 @@ impl Runner for VerbRunner {
 
 #[cfg(test)]
 mod mapping;
+#[cfg(test)]
+mod tests;
 
 /// Tools for the tests alone, in debug builds under
 /// `DUSCOPE_TEST_MCP_TOOLS`: two verbs behind the machinery every tool goes

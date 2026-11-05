@@ -16,6 +16,11 @@
 //! `duscope_query` and `duscope_schema` read, which must lie inside the
 //! roots; hostile statements refused through the tool as through the verb;
 //! and `duscope_diff` compared under the roots.
+//!
+//! P3-MCP-05: the calls one at a time on the worker: two scans of one root
+//! in turn, a scan's progress (`DUSCOPE_TEST_MCP_PROGRESS_MS` shortens its
+//! two seconds), the deadline (`DUSCOPE_TEST_MCP_DEADLINE_MS`), and a
+//! cancelled call.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -1429,4 +1434,199 @@ fn p3_mcp_07_explain_reads_the_path_as_it_is_without_a_saved_scan() {
         cli_json(&env, &line("explain", &file))
     );
     assert!(saved_ids(&env).is_empty());
+}
+
+// P3-MCP-05.
+
+/// `serve` with the environment variables `vars` set for the server.
+fn serve_with_env(
+    env: &TestEnv,
+    vars: &[(&str, &str)],
+    args: &[OsString],
+    requests: &[Value],
+) -> Served {
+    let mut command = env.cmd();
+    command
+        .arg("mcp")
+        .args(args)
+        .env("DUSCOPE_TEST_MCP_TOOLS", "1")
+        .envs(vars.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for request in requests {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    Served {
+        lines: String::from_utf8(output.stdout.clone())
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        output,
+    }
+}
+
+/// A tree of 40 directories of 50 files each under the work directory,
+/// canonical.
+fn wide_tree(env: &TestEnv) -> PathBuf {
+    let root = env.work_dir().canonicalize().unwrap().join("wide");
+    for dir in 0..40 {
+        let dir = root.join(format!("d{dir}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in 0..50 {
+            std::fs::write(dir.join(format!("f{file}")), b"x").unwrap();
+        }
+    }
+    root
+}
+
+#[test]
+fn p3_mcp_05_two_scans_of_one_root_serialise_and_the_second_reuses_the_first() {
+    let env = TestEnv::new();
+    let root = wide_tree(&env);
+    let reuse = json!({"root": root, "max_age": "1h"});
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[
+            call(1, "duscope_scan", &reuse),
+            call(2, "duscope_scan", &reuse),
+        ],
+    );
+    let first = served.result(1);
+    let second = served.result(2);
+    assert_eq!(first["isError"], false, "{first}");
+    assert_eq!(second["isError"], false, "{second}");
+    // The second ran once the first had saved its scan, and returned it.
+    let id = first["structuredContent"]["scan"]["id"].as_str().unwrap();
+    assert_eq!(second["structuredContent"]["scan"]["id"], id);
+    assert_eq!(saved_ids(&env), [id]);
+    let at = |id: u64| served.lines.iter().position(|line| line == served.line(id));
+    assert!(at(1) < at(2), "{:#?}", served.lines);
+}
+
+#[test]
+fn p3_mcp_05_a_scan_sends_its_progress_before_its_result() {
+    let env = TestEnv::new();
+    let root = wide_tree(&env);
+    let mut scan = call(1, "duscope_scan", &json!({"root": root}));
+    scan["params"]["_meta"]["progressToken"] = json!("scan-1");
+    let served = serve_with_env(
+        &env,
+        &[("DUSCOPE_TEST_MCP_PROGRESS_MS", "1")],
+        &roots(&[&root]),
+        &[scan, call(2, "duscope_scans", &json!({}))],
+    );
+    let result = served.result(1);
+    assert_eq!(result["isError"], false, "{result}");
+    let counted = &result["structuredContent"]["scan"];
+    let entries = counted["file_count"].as_u64().unwrap() + counted["dir_count"].as_u64().unwrap();
+    assert_eq!(entries, 2_041);
+    let messages: Vec<Value> = served
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let answered = messages.iter().position(|m| m["id"] == 1).unwrap();
+    let mut last = 0;
+    for (at, message) in messages.iter().enumerate() {
+        if message["method"] != "notifications/progress" {
+            continue;
+        }
+        assert!(at < answered, "progress after the result: {message}");
+        let params = &message["params"];
+        assert_eq!(params["progressToken"], "scan-1", "{message}");
+        let progress = params["progress"].as_u64().unwrap();
+        assert!(progress > last && progress <= entries, "{message}");
+        last = progress;
+    }
+    assert!(last > 0, "no progress: {:#?}", served.lines);
+    // The call that named no token got none, and progress never reaches
+    // stderr.
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m["method"] == "notifications/progress")
+            .filter(|m| m["params"]["progressToken"] != "scan-1")
+            .count(),
+        0
+    );
+    assert!(
+        !served.stderr.contains("entries counted"),
+        "{}",
+        served.stderr
+    );
+}
+
+#[test]
+fn p3_mcp_05_a_call_past_its_deadline_is_deadline_exceeded() {
+    let env = TestEnv::new();
+    let root = wide_tree(&env);
+    let served = serve_with_env(
+        &env,
+        &[("DUSCOPE_TEST_MCP_DEADLINE_MS", "0")],
+        &roots(&[&root]),
+        &[
+            call(1, "duscope_scan", &json!({"root": root})),
+            request(2, "tools/list", &json!({})),
+        ],
+    );
+    let result = served.result(1);
+    assert_eq!(result["isError"], true, "{result}");
+    let envelope = &result["structuredContent"];
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(
+        envelope["error"],
+        json!({
+            "code": "deadline_exceeded",
+            "message": "duscope_scan ran past its deadline of 0 ms",
+            "hint": "Call duscope_scan again on a smaller directory, or run duscope scan in a \
+                     terminal, where no deadline applies",
+            "retryable": true,
+            "fixable_by": "user",
+        })
+    );
+    assert_eq!(
+        result["content"][0]["text"],
+        "duscope_scan ran past its deadline of 0 ms. Call duscope_scan again on a smaller \
+         directory, or run duscope scan in a terminal, where no deadline applies"
+    );
+    assert!(served.result(2)["tools"].is_array());
+    assert_eq!(served.output.status.code(), Some(0), "{}", served.stderr);
+}
+
+#[test]
+fn p3_mcp_05_a_cancelled_call_gets_no_response_and_the_next_one_runs() {
+    let env = TestEnv::new();
+    let root = wide_tree(&env);
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[
+            call(1, "duscope_scan", &json!({"root": root})),
+            call(2, "duscope_scan", &json!({"root": root.join("d1")})),
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}}),
+            call(3, "duscope_scans", &json!({})),
+            request(4, "tools/list", &json!({})),
+        ],
+    );
+    let ids: Vec<Value> = served
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["id"].clone())
+        .collect();
+    let mut sorted_ids = ids.clone();
+    sorted_ids.sort_by_key(Value::as_u64);
+    assert_eq!(sorted_ids, [1, 3, 4], "{:#?}", served.lines);
+    // The cancelled scan never ran: one scan saved, the one scans lists.
+    let first = served.result(1)["structuredContent"]["scan"]["id"].clone();
+    assert_eq!(saved_ids(&env), [first.as_str().unwrap()]);
+    let listed = &served.result(3)["structuredContent"]["entries"];
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
 }

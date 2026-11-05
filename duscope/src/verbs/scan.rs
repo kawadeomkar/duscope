@@ -493,8 +493,16 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     duscope_walk::prepare();
     // Ctrl-C stops the walk; if it has not stopped soon after, the process
     // ends anyway. Nothing is written before a scan completes, and once the
-    // walk is over the result is written whole.
-    let interrupts = Interrupts::arm();
+    // walk is over the result is written whole. A scan an MCP tool call runs
+    // stops instead when the call is cancelled or runs past its deadline,
+    // which set the call's flag, and leaves Ctrl-C to end the server as it
+    // would at any other time; it counts its entries for the call's
+    // progress.
+    let call = super::mcp::running_call();
+    let interrupts = match &call {
+        Some(call) => Interrupts::unarmed(Arc::clone(&call.cancel)),
+        None => Interrupts::arm(),
+    };
     opts.cancel = Arc::clone(&interrupts.flag);
     let started = Instant::now();
     let started_ns = now(walk_args)?;
@@ -502,6 +510,9 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     let mut push_error = None;
     let mut errors = log::log_enabled!(log::Level::Debug).then(|| DirErrors::new(&root));
     let walked = walk(&root, &opts, |event| {
+        if let (Some(call), ScanEvent::Entry(_)) = (&call, &event) {
+            call.entries.fetch_add(1, Ordering::Relaxed);
+        }
         if let Some(errors) = &mut errors {
             errors.note(&event);
         }
@@ -924,6 +935,15 @@ struct Interrupts {
 }
 
 impl Interrupts {
+    /// The walk's flag, `flag`, which Ctrl-C does not set.
+    fn unarmed(flag: Arc<AtomicBool>) -> Interrupts {
+        Interrupts {
+            flag,
+            over: Arc::default(),
+            armed: false,
+        }
+    }
+
     fn arm() -> Interrupts {
         let flag = Arc::new(AtomicBool::new(false));
         let over = Arc::new(Mutex::new(false));

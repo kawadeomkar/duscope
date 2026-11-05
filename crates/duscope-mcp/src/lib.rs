@@ -9,7 +9,9 @@
 pub mod discover;
 pub mod jsonrpc;
 mod legacy;
+pub mod progress;
 pub mod roots;
 pub mod server;
 pub mod tools;
 pub mod transport;
+pub mod worker;
