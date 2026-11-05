@@ -254,16 +254,23 @@ fn p1_test_01_scan_totals_equal_du_on_a_system_tree() {
     assert_du_parity(&env, &root);
 }
 
-/// The scan's peak RSS per entry on each benchmark tree that is built, held by
-/// the median of five runs: with basic attributes at most 100 bytes on T1 and
+/// The scan's peak RSS per entry on each benchmark tree that is built,
+/// counted above a small scan's (DEV-106): the median peak of five runs on
+/// the tree, less the median peak of five runs on a tree of 1,000 directories
+/// of 4 files that the test makes, over the entries between the two. The
+/// small scan holds what any scan costs before its entries (the binary, the
+/// worker threads and their allocator heaps), which grows with each verb the
+/// binary gains and would otherwise weigh on T1's 500,001 entries twice as
+/// hard as on T2's million. With basic attributes at most 100 bytes on T1 and
 /// T2 and 130 on T3 (P1-CORE-01's budget), and with `--attrs full` at most 130
-/// on T1 and T2 and 160 on T3 (P1-TEST-01's); the gate holds both (DEV-49). The peak moves by a few bytes per entry from run to
-/// run with how the workers' batches overlap (Linux T1 measured 128.2 to
-/// 132.6), so the highest run would fail some nights with no change. The
-/// trees are `DUSCOPE_BENCH_TREES`, else `bench/.trees`; hyperfine
-/// (`HYPERFINE`, else on the PATH) reads the peak, as the harness does. The
-/// binary is the [`shipped`] one: run it on a release build (`cargo test
-/// --release`).
+/// on T1 and T2 and 160 on T3 (P1-TEST-01's); the gate holds both (DEV-49).
+/// The whole peak per entry is printed beside it. The peak moves by a few
+/// bytes per entry from run to run with how the workers' batches overlap
+/// (Linux T1 measured 128.2 to 132.6), so the highest run would fail some
+/// nights with no change. The trees are `DUSCOPE_BENCH_TREES`, else
+/// `bench/.trees`; hyperfine (`HYPERFINE`, else on the PATH) reads the peak,
+/// as the harness does. The binary is the [`shipped`] one: run it on a
+/// release build (`cargo test --release`).
 #[test]
 #[ignore = "needs the bench trees and hyperfine; DUSCOPE_TEST_PLATFORM=1, run by nightly-bench.yml"]
 fn p1_test_01_peak_rss_per_entry_on_the_bench_trees() {
@@ -279,83 +286,120 @@ fn p1_test_01_peak_rss_per_entry_on_the_bench_trees() {
     );
     let hyperfine = std::env::var_os("HYPERFINE").unwrap_or_else(|| "hyperfine".into());
     let bin = shipped(&env);
+    let small = env.tmp_dir().join("small");
+    for dir in 0..1000 {
+        let dir = small.join(format!("d{dir:03}"));
+        fs::create_dir_all(&dir).unwrap();
+        for file in 0..4 {
+            fs::write(dir.join(format!("f{file}")), b"x").unwrap();
+        }
+    }
+    let measure =
+        |root: &Path, attrs: &str, name: &str| rss_peaks(&env, &hyperfine, &bin, root, attrs, name);
+    let tenths = |bytes: u64, entries: u64| {
+        let tenths = bytes * 10 / entries;
+        format!("{}.{}", tenths / 10, tenths % 10)
+    };
     let mut measured = 0;
     let budgets = [
         ("basic", [("T1", 100u64), ("T2", 100), ("T3", 130)]),
         ("full", [("T1", 130), ("T2", 130), ("T3", 160)]),
     ];
-    for (attrs, (tree, budget)) in budgets
-        .iter()
-        .flat_map(|(attrs, trees)| trees.iter().map(move |t| (*attrs, *t)))
-    {
-        let root = trees.join(tree);
-        if !root.is_dir() {
-            eprintln!("skipped {tree}: not built under {}", trees.display());
+    for (attrs, rows) in &budgets {
+        if !rows.iter().any(|(tree, _)| trees.join(tree).is_dir()) {
+            for (tree, _) in rows {
+                eprintln!("skipped {tree}: not built under {}", trees.display());
+            }
             continue;
         }
-        let scan = &scan_json(&env, &["--attrs", attrs, "--treemap", "never"], &root)["scan"];
-        let entries = scan["file_count"].as_u64().unwrap() + scan["dir_count"].as_u64().unwrap();
-        let export = env.tmp_dir().join(format!("{tree}-{attrs}.json"));
-        let command = format!(
-            "{} scan --attrs {attrs} --json --treemap never {}",
-            shell_quote(&bin.to_string_lossy()),
-            shell_quote(&root.to_string_lossy())
-        );
-        let out = env
-            .command(&hyperfine)
-            .args(["-N", "--runs", "5", "--warmup", "1", "--style", "none"])
-            .args(["--metrics", "time_wall_clock,memory_peak_resident"])
-            .arg("--export-json")
-            .arg(&export)
-            .arg(&command)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "hyperfine: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let result: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&export).unwrap()).unwrap();
-        // Byte counts well inside f64's integers.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let mut peaks: Vec<u64> = result["results"][0]["measurements"]
-            .as_array()
-            .map(|runs| {
-                runs.iter()
-                    .filter_map(|run| run["memory_peak_resident"]["value"].as_f64())
-                    .map(|peak| peak as u64)
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert_eq!(
-            peaks.len(),
-            5,
-            "hyperfine 2.x reports memory_peak_resident for each run"
-        );
-        peaks.sort_unstable();
-        let per_entry = |peak: u64| {
-            let tenths = peak * 10 / entries;
-            format!("{}.{}", tenths / 10, tenths % 10)
-        };
-        let runs: Vec<String> = peaks.iter().map(|&p| per_entry(p)).collect();
-        let (peak, tenths) = (peaks[2], peaks[2] * 10 / entries);
-        eprintln!(
-            "{tree} --attrs {attrs}: {entries} entries, median peak {peak} bytes, {} bytes per entry (runs {}; budget {budget})",
-            per_entry(peak),
-            runs.join(", ")
-        );
-        assert!(
-            tenths <= budget * 10,
-            "{tree} --attrs {attrs}: over {budget} bytes per entry"
-        );
-        measured += 1;
+        let (base_entries, base_peaks) = measure(&small, attrs, "small");
+        let base = base_peaks[2];
+        for &(tree, budget) in rows {
+            let root = trees.join(tree);
+            if !root.is_dir() {
+                eprintln!("skipped {tree}: not built under {}", trees.display());
+                continue;
+            }
+            let (entries, peaks) = measure(&root, attrs, tree);
+            let above = entries - base_entries;
+            let peak = peaks[2];
+            let per_entry = peak.saturating_sub(base);
+            let runs: Vec<String> = peaks
+                .iter()
+                .map(|&p| tenths(p.saturating_sub(base), above))
+                .collect();
+            eprintln!(
+                "{tree} --attrs {attrs}: {entries} entries, median peak {peak} bytes, {} bytes per entry above a {base_entries}-entry scan's {base} (runs {}; budget {budget}); {} bytes per entry in all",
+                tenths(per_entry, above),
+                runs.join(", "),
+                tenths(peak, entries)
+            );
+            assert!(
+                per_entry * 10 / above <= budget * 10,
+                "{tree} --attrs {attrs}: over {budget} bytes per entry"
+            );
+            measured += 1;
+        }
     }
     assert!(
         measured > 0 || named.is_none(),
         "no bench tree is built under {}",
         trees.display()
     );
+}
+
+/// A `--json` scan of `root` by `bin`: its entries, and the peak RSS of each
+/// of five `scan --attrs <attrs>` runs under hyperfine, lowest first.
+fn rss_peaks(
+    env: &TestEnv,
+    hyperfine: &OsString,
+    bin: &OsString,
+    root: &Path,
+    attrs: &str,
+    name: &str,
+) -> (u64, Vec<u64>) {
+    let scan = &scan_json(env, &["--attrs", attrs, "--treemap", "never"], root)["scan"];
+    let entries = scan["file_count"].as_u64().unwrap() + scan["dir_count"].as_u64().unwrap();
+    let export = env.tmp_dir().join(format!("{name}-{attrs}.json"));
+    let command = format!(
+        "{} scan --attrs {attrs} --json --treemap never {}",
+        shell_quote(&bin.to_string_lossy()),
+        shell_quote(&root.to_string_lossy())
+    );
+    let out = env
+        .command(hyperfine)
+        .args(["-N", "--runs", "5", "--warmup", "1", "--style", "none"])
+        .args(["--metrics", "time_wall_clock,memory_peak_resident"])
+        .arg("--export-json")
+        .arg(&export)
+        .arg(&command)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "hyperfine: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&export).unwrap()).unwrap();
+    // Byte counts well inside f64's integers.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mut peaks: Vec<u64> = result["results"][0]["measurements"]
+        .as_array()
+        .map(|runs| {
+            runs.iter()
+                .filter_map(|run| run["memory_peak_resident"]["value"].as_f64())
+                .map(|peak| peak as u64)
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        peaks.len(),
+        5,
+        "hyperfine 2.x reports memory_peak_resident for each run"
+    );
+    peaks.sort_unstable();
+    (entries, peaks)
 }
 
 /// `text` quoted for the shell hyperfine runs its command in.
