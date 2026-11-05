@@ -48,7 +48,23 @@ pub fn write_png(
     opts: &PictureOpts<'_>,
     out: &mut dyn Write,
 ) -> io::Result<u64> {
-    let metrics = Metrics::of(opts);
+    let (canvas, tiles) = raster(view, opts, Metrics::of(opts))?;
+    canvas.encode(out)?;
+    Ok(tiles)
+}
+
+/// The picture of the scan in `view` drawn at `metrics`, and the number of
+/// tiles painted: the PNG's pixels, and the `pixels` feature's
+/// ([`crate::pixels`]).
+///
+/// # Errors
+///
+/// When the picture has more than [`MAX_PIXELS`] pixels (`InvalidInput`).
+pub(crate) fn raster(
+    view: &dyn TreeView,
+    opts: &PictureOpts<'_>,
+    metrics: Metrics,
+) -> io::Result<(Png, u64)> {
     let (width, height) = (usize::from(metrics.width), usize::from(metrics.height));
     if (width * height) as u64 > MAX_PIXELS {
         return Err(io::Error::new(
@@ -66,16 +82,15 @@ pub fn write_png(
         font_px: to_f32(metrics.font),
     };
     let tiles = draw(view, opts, metrics, &mut canvas)?;
-    canvas.encode(out)?;
-    Ok(tiles)
+    Ok((canvas, tiles))
 }
 
 /// The pixels and what draws on them.
-struct Png {
-    width: usize,
-    height: usize,
+pub(crate) struct Png {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
     /// RGB, row by row.
-    pixels: Vec<u8>,
+    pub(crate) pixels: Vec<u8>,
     /// Each colour's 256 steps.
     tables: HashMap<Rgb, Vec<Rgb>>,
     font: Option<Font>,

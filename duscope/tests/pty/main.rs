@@ -4,4 +4,5 @@
 
 mod clean;
 mod output;
+mod pixels;
 mod view;

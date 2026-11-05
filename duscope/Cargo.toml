@@ -31,6 +31,17 @@ serde_json.workspace = true
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc.workspace = true
 
+[features]
+# `--treemap pixels` (P4-TUI-07): the static map and the viewer drawn in pixels
+# through ratatui-image, on a terminal that answers its Kitty graphics, Sixel or
+# iTerm2 probe. Off by default, and off in every build the project ships (the
+# Homebrew formula, the .deb packages, the cargo-dist archives): ratatui-image
+# brings an image codec, a Sixel quantiser and their trees, and its probe waits
+# up to two seconds on a terminal that does not answer. `cargo install duscope
+# --features pixels` builds it; a build without it answers `--treemap pixels`
+# with exit 2 and `not_compiled`.
+pixels = ["duscope-treemap/pixels"]
+
 [dev-dependencies]
 assert_cmd.workspace = true
 cargo_metadata.workspace = true
@@ -39,7 +50,9 @@ flate2.workspace = true
 jsonschema.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
-termlens.workspace = true
+# `decode`: the Kitty and Sixel images the `pixels` tests receive, back in
+# pixels (P4-TUI-07).
+termlens = { workspace = true, features = ["decode"] }
 toml.workspace = true
 
 [lints]

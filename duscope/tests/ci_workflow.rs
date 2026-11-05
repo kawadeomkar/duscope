@@ -53,6 +53,7 @@ const REQUIRED_CHECKS: &[&str] = &[
     "size (ubuntu-24.04)",
     "build-time",
     "repro",
+    "pixels",
     "changelog",
     "size-comment",
     "verify-tag",
@@ -107,6 +108,7 @@ const RECIPES: &[(&str, &str)] = &[
     ("size", "size"),
     ("repro", "repro"),
     ("platform", "platform-tests"),
+    ("pixels", "pixels"),
 ];
 
 fn read(relative: &str) -> String {

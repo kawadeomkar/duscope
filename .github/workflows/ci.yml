@@ -14,8 +14,8 @@
 # ubuntu-24.04 and ubuntu-24.04-arm; checks (macos-26), which is macOS's clippy
 # and both test legs, and platform and bench-regression on macos-26; msrv (pinned)
 # and msrv (stable); deny; fuzz-smoke for each fuzz target; docs; schemas; size on
-# macos-26 and ubuntu-24.04, and size-comment; build-time; repro; changelog. Not
-# required: intel-mac (best effort) and quick.
+# macos-26 and ubuntu-24.04, and size-comment; build-time; repro; pixels;
+# changelog. Not required: intel-mac (best effort) and quick.
 #
 # Scope (DEV-73): a stack of pull requests runs every job of each of them again
 # at each push, and a macOS runner is the scarce one (five at a time on this
@@ -485,6 +485,41 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets --locked
       - run: just test
+
+  pixels:
+    # The `pixels` feature (P4-TUI-07), which no build the project ships turns
+    # on: `just pixels` on the feature's own toolchain, the justfile's
+    # pixels_toolchain (1.90, which ratatui-image's Sixel encoder needs, past
+    # the pinned 1.88). Clippy over duscope-treemap, the one crate with code
+    # behind the feature; the binary built with it; and the tests that run the
+    # probe against mocked terminals, termlens answering as a Kitty graphics
+    # terminal, a Sixel one, iTerm2, one with neither, and one that answers
+    # nothing. The default build's answer to --treemap pixels, not_compiled, is
+    # a test of the test jobs.
+    name: pixels
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - name: Install the pixels feature's toolchain, as the justfile pins it
+        # RUSTUP_TOOLCHAIN in place of rust-toolchain.toml's 1.88 for every
+        # cargo and rustc of the job, the cache's key included.
+        run: |
+          toolchain=$(just --evaluate pixels_toolchain)
+          rustup toolchain install "$toolchain" --profile minimal --component clippy
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+          rustup run "$toolchain" rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: pixels
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: just pixels
 
   deny:
     name: deny

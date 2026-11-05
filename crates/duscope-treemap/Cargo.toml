@@ -17,6 +17,17 @@ serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 unicode-width.workspace = true
+# The `pixels` feature alone (P4-TUI-07).
+image = { workspace = true, optional = true }
+ratatui-core = { workspace = true, optional = true }
+ratatui-image = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true }
+
+[features]
+# `--treemap pixels`: the map drawn in pixels through ratatui-image's Kitty
+# graphics, Sixel and iTerm2 encoders, where the terminal answers its probe.
+# Off by default; the binary's `pixels` feature turns it on.
+pixels = ["dep:image", "dep:ratatui-core", "dep:ratatui-image", "dep:rustix"]
 
 [dev-dependencies]
 proptest.workspace = true

@@ -50,7 +50,7 @@ disagree, so a pin changes in both places in the same pull request.
 
 | Tool | Version | Installed by | Used for |
 | --- | --- | --- | --- |
-| `rustup` | 1.88 (`rust-toolchain.toml`), stable, nightly and the dated nightly `fuzz_toolchain` (justfile) | you; the toolchains by `just setup` | 1.88 builds and tests; stable builds the tools below and runs the MSRV job's second leg; the dated nightly runs `just fuzz` as CI does |
+| `rustup` | 1.88 (`rust-toolchain.toml`), stable, nightly, the dated nightly `fuzz_toolchain` and `pixels_toolchain` (1.90; justfile) | you; the toolchains by `just setup` | 1.88 builds and tests; stable builds the tools below and runs the MSRV job's second leg; the dated nightly runs `just fuzz` as CI does; 1.90 builds the `pixels` feature, whose Sixel encoder needs it, in `just pixels` |
 | `just` | any 1.x release | you | the recipes below |
 | `gh` | any 2.x release | you | pull requests |
 | `cargo-deny` | 0.20.2 | `just setup` | licences, bans, sources and advisories |
@@ -85,6 +85,7 @@ disagree, so a pin changes in both places in the same pull request.
 | `just golden` | regenerate the golden files after an intended output change |
 | `just bench` | the hyperfine harness on the seeded trees |
 | `just fuzz TARGET [SECONDS]` | one fuzz target of `fuzz/` for 60 seconds (CI's `fuzz-smoke`; `nightly-fuzz.yml` runs 600), on the dated nightly |
+| `just pixels` | the `pixels` feature on `pixels_toolchain` (CI's `pixels` job): clippy over `duscope-treemap`, the binary built with it, and its tests, which run the probe against mocked terminals |
 | `just deb [TARGET]` | build the `.deb` package of a musl target (Linux) |
 
 ## Package workflow

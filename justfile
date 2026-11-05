@@ -31,6 +31,11 @@ hyperfine_version := "2.0.0"
 # The nightly toolchain cargo fuzz runs on: a dated one, so a fuzz run reproduces (P2-TEST-01).
 # `just setup` installs it; ci.yml's fuzz-smoke and nightly-fuzz.yml read it here.
 fuzz_toolchain := "nightly-2026-10-23"
+# The toolchain the `pixels` feature builds on (P4-TUI-07): ratatui-image's
+# Sixel encoder, icy_sixel, quantises through quantette, which needs Rust 1.90,
+# past the pinned 1.88 the default build keeps. `just setup` installs it; ci.yml's
+# pixels job reads it here.
+pixels_toolchain := "1.90"
 
 default:
     @just --list
@@ -44,8 +49,9 @@ setup:
     rustup toolchain install
     rustup component add rustfmt clippy llvm-tools-preview
     # stable builds the tools below and runs the msrv job's second leg; the dated nightly runs
-    # `just fuzz`, and plain nightly `cargo +nightly fuzz`.
+    # `just fuzz`, and plain nightly `cargo +nightly fuzz`; pixels_toolchain runs `just pixels`.
     rustup toolchain install stable nightly {{fuzz_toolchain}} --profile minimal
+    rustup toolchain install {{pixels_toolchain}} --profile minimal --component clippy
     case "$(uname -s)" in
       Darwin)
         # GNU du (installed as gdu) for the du parity checks, and bash 4 or later for the test
@@ -137,6 +143,15 @@ deny *checks="licenses bans sources":
 
 test:
     cargo test --workspace
+
+# The `pixels` feature on its toolchain (CI's `pixels` job): clippy over duscope-treemap, the
+# one crate with code behind the feature; the binary built with it; and the feature's tests,
+# which run the probe against mocked terminals (Kitty graphics, Sixel, iTerm2, none, silent)
+pixels:
+    cargo +{{pixels_toolchain}} clippy --locked -p duscope-treemap --features pixels --all-targets --no-deps -- -D clippy::all
+    cargo +{{pixels_toolchain}} build --locked -p duscope --features pixels
+    cargo +{{pixels_toolchain}} test --locked -p duscope-treemap --features pixels -- p4_tui_07_
+    cargo +{{pixels_toolchain}} test --locked -p duscope --features pixels --test pixels --test pty -- p4_tui_07_
 
 # The tests of one package: `just test-pkg P2-QRY-06` runs the tests named p2_qry_06_*
 test-pkg id:
