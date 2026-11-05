@@ -552,6 +552,36 @@ pub fn read_only_volume(path: &Path) -> io::Result<bool> {
     platform::read_only(path)
 }
 
+/// A directory's modification and status-change times, in Unix
+/// nanoseconds, as [`stamp_dirs`] reads them and the walk records them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirStamp {
+    /// The last change to its entries: a name added, removed or renamed.
+    pub mtime_ns: i64,
+    /// The last change to the directory itself: those, and its mode, owner
+    /// or links.
+    pub ctime_ns: i64,
+}
+
+impl DirStamp {
+    /// The later of the two times, which `scans --check` compares with the
+    /// saved scan's for exact equality.
+    pub fn latest_ns(&self) -> i64 {
+        self.mtime_ns.max(self.ctime_ns)
+    }
+}
+
+/// The stamp of each directory at `dirs`, in their order: one call per path
+/// asking for the type and the two times alone (`statx` on Linux,
+/// `getattrlist` on macOS), not following a final symlink, with the walk's
+/// flags, so a directory nothing has touched since a walk reads as the walk
+/// recorded it. A path that is no longer a directory (a file, a link) is
+/// `ENOTDIR`; one gone, `ENOENT`. A path longer than `PATH_MAX` is read
+/// relative to its leading directories, opened a piece at a time.
+pub fn stamp_dirs<'a>(dirs: impl Iterator<Item = &'a Path>) -> Vec<io::Result<DirStamp>> {
+    platform::stamp_dirs(dirs)
+}
+
 /// The result queue holds this many directory batches per worker, as in
 /// dua-core; a worker blocks on a full queue until the sink catches up.
 const QUEUED_BATCHES_PER_WORKER: usize = 2;

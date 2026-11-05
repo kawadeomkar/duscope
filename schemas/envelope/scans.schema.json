@@ -1,7 +1,7 @@
 {
   "$defs": {
     "CheckedEntry": {
-      "description": "A saved scan `scans --check` found sound.",
+      "description": "A saved scan `scans --check` found sound, and whether its tree changed\nsince.",
       "properties": {
         "id": {
           "description": "The scan's id.",
@@ -15,12 +15,18 @@
           "const": "ok",
           "description": "What `PRAGMA quick_check` said: `ok`.",
           "type": "string"
+        },
+        "structurally_stale": {
+          "description": "Whether a directory it holds changed since: an entry added, removed\nor renamed, its mode or owner changed, or the directory gone.",
+          "type": "boolean",
+          "x-since": "0.3"
         }
       },
       "required": [
         "id",
         "index_path",
-        "quick_check"
+        "quick_check",
+        "structurally_stale"
       ],
       "type": "object"
     },

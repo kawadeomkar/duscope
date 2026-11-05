@@ -2,19 +2,24 @@
 //! first (with PATHs, those of the directories named and of directories
 //! under them); with `--prune`, the ones past keeping removed, and the
 //! temporary and spill files left behind; with `--check`, one checked for
-//! damage.
+//! damage and for changes to its tree.
 //!
 //! `--prune` keeps the five newest scans of each root and every scan under
 //! seven days old, a temporary file (`<id>.db.tmp-<pid>`) while its writer
 //! runs and for 24 hours, and a spill file for seven days. A file it cannot
-//! read as an index is left alone. `--check` runs `PRAGMA quick_check` until
-//! phase 5 adds the staleness sweep.
+//! read as an index is left alone. `--check` runs `PRAGMA quick_check`, a
+//! damaged file exiting 5 (`index_corrupt`), then sweeps every directory
+//! the scan holds (`duscope_core::check`): one that changed since makes the
+//! scan `structurally_stale`, exiting 1 (`index_stale`) with the row
+//! printed. The index directory, which the save itself wrote to, is left
+//! out of the sweep.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use duscope_core::check;
 use duscope_core::envelope::{
     CheckedEntry, Listing, ListingQuery, PrunedEntry, SCHEMA_VERSION, SavedScanEntry, Tool,
 };
@@ -347,13 +352,57 @@ fn check(
             index.root_path().display()
         )));
     }
+    // The index directory changes with every save into it: a scan of a
+    // tree that holds it would otherwise never be fresh.
+    let leave_out = [fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned())];
+    let swept = check::sweep(&index, &leave_out).map_err(core_failure)?;
+    let stale = swept.stale();
+    let id = index.meta().scan_id.to_string();
+    let root = index.root_path().to_string_lossy().into_owned();
     let entry = CheckedEntry {
-        id: index.meta().scan_id.to_string(),
+        id: id.clone(),
         index_path: index.file().to_string_lossy().into_owned(),
         quick_check: "ok",
+        structurally_stale: stale,
     };
-    let footer = format!("the saved scan {} is sound", entry.id);
-    output.listing(&listing("scans --check", dir, vec![entry]), &footer)
+    let dirs = thousands(swept.dir_count);
+    let footer = match &swept.first_changed {
+        Some(first) if stale => format!(
+            "{} of {dirs} directories changed since the scan, {} first",
+            thousands(swept.changed_count),
+            first.display()
+        ),
+        _ => format!("the saved scan {id} is sound, and its {dirs} directories are unchanged"),
+    };
+    let mut checked = listing("scans --check", dir, vec![entry]);
+    checked.ok = !stale;
+    // An import has no scan options to scan with again: a new scan of its
+    // root renews it.
+    let renewable = scanned(&index);
+    if let Some(mut hints) = Hints::new(Some(&id), Some(index.file())) {
+        let root = Some(root.as_str());
+        checked.next = match (stale, renewable) {
+            (true, true) => hints.run("rescan", root, &[]).done(),
+            (true, false) => Vec::new(),
+            (false, _) => hints.run("summary", root, &[]).run("top", root, &[]).done(),
+        };
+    }
+    output.listing(&checked, &footer)?;
+    if !stale {
+        return Ok(());
+    }
+    // The row says so already; the failure goes to stderr with the exit.
+    Err(Failure::new(
+        Exit::Runtime,
+        "index_stale",
+        format!("the saved scan {id} is stale: its tree changed since it was taken"),
+    )
+    .hint(if renewable {
+        format!("Run duscope rescan --scan {id} to measure the tree again")
+    } else {
+        format!("Run duscope scan --save {root} to measure the tree again")
+    })
+    .reported())
 }
 
 /// The listing envelope of `rows`.

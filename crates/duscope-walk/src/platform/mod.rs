@@ -210,6 +210,23 @@ pub(crate) fn firmlink(_path: &std::path::Path) -> bool {
     false
 }
 
+/// The stamp of each directory at `dirs`, in order.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn stamp_dirs<'a>(
+    dirs: impl Iterator<Item = &'a std::path::Path>,
+) -> Vec<std::io::Result<crate::DirStamp>> {
+    posix::stamp::stamp_dirs(dirs)
+}
+
+/// The stamp of each directory at `dirs`: none is read on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn stamp_dirs<'a>(
+    dirs: impl Iterator<Item = &'a std::path::Path>,
+) -> Vec<std::io::Result<crate::DirStamp>> {
+    dirs.map(|_| Err(std::io::ErrorKind::Unsupported.into()))
+        .collect()
+}
+
 /// Whether the volume holding `path` is mounted read-only.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn read_only(path: &std::path::Path) -> std::io::Result<bool> {

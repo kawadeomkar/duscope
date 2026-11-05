@@ -928,7 +928,8 @@ pub struct PrunedEntry {
     pub size_bytes: u64,
 }
 
-/// A saved scan `scans --check` found sound.
+/// A saved scan `scans --check` found sound, and whether its tree changed
+/// since.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct CheckedEntry {
@@ -939,6 +940,9 @@ pub struct CheckedEntry {
     /// What `PRAGMA quick_check` said: `ok`.
     #[cfg_attr(test, schemars(extend("const" = "ok")))]
     pub quick_check: &'static str,
+    /// Whether a directory it holds changed since: an entry added, removed
+    /// or renamed, its mode or owner changed, or the directory gone.
+    pub structurally_stale: bool,
 }
 
 /// `summary`'s answer: a scan's totals under a path, each volume's share,
@@ -1479,7 +1483,8 @@ impl Fields for PrunedEntry {
 }
 
 impl Fields for CheckedEntry {
-    const NAMES: &'static [&'static str] = &["id", "index_path", "quick_check"];
+    const NAMES: &'static [&'static str] =
+        &["id", "index_path", "quick_check", "structurally_stale"];
 }
 
 impl Fields for DiffEntry {
@@ -1693,6 +1698,7 @@ mod tests {
             id: "i".into(),
             index_path: "/i.db".into(),
             quick_check: "ok",
+            structurally_stale: false,
         });
         assert_names(&ScanErrorEntry {
             path: "/e".into(),
