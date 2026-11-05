@@ -1185,6 +1185,26 @@ fn p1_pkg_02_a_rerun_opens_no_second_bump() {
 }
 
 #[test]
+fn p1_pkg_02_the_tap_is_trusted_before_the_bump_loads_its_formula() {
+    let jobs = jobs(&read(WORKFLOW));
+    let homebrew = job(&jobs, "homebrew");
+    let script = homebrew.step_script("Open the version-bump pull request in the tap");
+    let at = |needle: &str| {
+        script
+            .find(needle)
+            .unwrap_or_else(|| panic!("the homebrew step has no `{needle}`:\n{script}"))
+    };
+    // Homebrew refuses a formula from a tap that is not trusted, as
+    // bump-formula-pr did at v0.2.0.
+    let tap = at("brew tap kawadeomkar/tap");
+    let trust = at("brew trust kawadeomkar/tap");
+    assert!(
+        tap < trust && trust < at("brew bump-formula-pr"),
+        "{script}"
+    );
+}
+
+#[test]
 fn p1_pkg_02_the_first_release_opens_the_formula_as_a_pull_request() {
     let jobs = jobs(&read(WORKFLOW));
     let homebrew = job(&jobs, "homebrew");

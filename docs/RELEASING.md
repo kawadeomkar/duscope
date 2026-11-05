@@ -190,7 +190,9 @@ unset T
 ```
 
 A failed `homebrew` job is re-run alone once the secret holds a working token
-(`gh run rerun <run> --failed`); it opens no second pull request.
+(`gh run rerun <run> --failed`); it opens no second pull request. A re-run runs the tag's copy
+of the job, so a fault in the job's own script is fixed on `main` for the next release, and
+the pull request is opened by hand with the script's commands, as v0.2.0's was.
 
 **Trusted publishing (DEV-22).** From v0.1.0 crates.io publishes through trusted publishing,
 not the long-lived `CARGO_REGISTRY_TOKEN`: no standing secret can be stolen and used to
