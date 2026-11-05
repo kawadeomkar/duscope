@@ -8,7 +8,7 @@ row due again.
 
 | Check | Program and version | Platform | Package | Last done | Result |
 | --- | --- | --- | --- | --- | --- |
-| GrandPerspective opens `export --format gpscan` | GrandPerspective 3.8.1 | macOS | P2-CLI-02 | pending | due: the author's check |
+| GrandPerspective opens `export --format gpscan` | GrandPerspective 3.8.1 | macOS | P2-CLI-02 | 2026-11-04 | passes, both measures (below) |
 | Two browsers draw `render`'s SVG alike | Safari and Firefox, or Chrome | macOS | P2-MAP-01 | pending | due: the author's check |
 
 ## GrandPerspective opens a `.gpscan`
@@ -29,6 +29,18 @@ XML), which the application opens with *File › Open Scan Data…*.
    and the hard-linked files still appear once.
 5. Record the GrandPerspective version (*GrandPerspective › About*), the date
    and the result in the table.
+
+**Last result** (2026-11-04, GrandPerspective 3.8.1 on macOS 26): both files
+open with no error and draw the tree's map; *Show Info* gives Macintosh HD,
+the saved scan's time, the volume's size and free space, and *Logical* for
+the `--size apparent` file; Movies' files are the largest tiles, where `top
+--files` puts them. GrandPerspective counts 30,075 files of the tree's
+43,137: the export leaves out the 13,061 empty files, which GrandPerspective
+drops too, and the later link of the hard-linked file, so that file counts
+once. Its physical total, 220 MB, is duscope's allocated total; its logical
+total, 137.6 MiB, is duscope's apparent total less the directories' own
+2,160,736 bytes, which APFS gives directories and the format has no place
+for.
 
 ## Two browsers draw `render`'s SVG alike
 
