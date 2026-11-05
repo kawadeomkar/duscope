@@ -10,7 +10,7 @@ change adds a fragment, `changelog.d/<ID>.md`, in the format given in
 `scripts/changelog.py` assembles the fragments into the version's dated section
 and deletes them.
 
-## [0.2.0] - 2026-11-04
+## [0.2.0] - 2026-11-05
 
 ### Added
 
