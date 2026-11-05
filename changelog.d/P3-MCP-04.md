@@ -1,0 +1,4 @@
+### Added
+- `duscope mcp` offers its first six tools. `duscope_scan` scans a directory under the roots and saves the scan, or with `max_age` returns a recent one; `duscope_scans` lists the saved scans of the roots; `duscope_summary`, `duscope_top`, `duscope_by_type` and `duscope_stale` read a saved scan, never scanning. Each tool's result is its verb's `--json` envelope, and its input schema is in `schemas/mcp/`, with `schemas/mcp/MAPPING.md` naming the verb flag each parameter sets and why the others are left out.
+- `scan --reuse AGE` prints the newest saved scan of the path taken with the same options, when it finished within AGE, instead of scanning; nothing new is saved. It is refused with the treemap and `-i`.
+- `scans PATH...` lists only the saved scans of those directories and of directories under them.

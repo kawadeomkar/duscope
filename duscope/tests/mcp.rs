@@ -3,10 +3,14 @@
 //! `duscope <verb> --json` on the fixture tree, and the roots' refusals
 //! through a tool.
 //!
-//! No shipped tool exists before P3-MCP-04 and P3-MCP-07, so the server is
-//! started with `DUSCOPE_TEST_MCP_TOOLS`, which a debug build answers with
-//! two fixture tools (`test_summary`, `test_top`) that go through the same
-//! registry, roots and runner as every tool will.
+//! The server is started with `DUSCOPE_TEST_MCP_TOOLS`, which a debug build
+//! answers with two fixture tools (`test_summary`, `test_top`) beside the
+//! shipped ones; they go through the same registry, roots and runner, and
+//! test the machinery whatever the shipped tools become.
+//!
+//! P3-MCP-04: the scan group's tools against their verbs, argument by
+//! argument, and the two verb flags they rest on: `scan --reuse` and
+//! `scans PATH...`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -20,7 +24,14 @@ use duscope_testkit::{TestEnv, golden};
 use serde_json::{Value, json};
 
 /// The tools a release build offers.
-const SHIPPED: [&str; 0] = [];
+const SHIPPED: [&str; 6] = [
+    "duscope_by_type",
+    "duscope_scan",
+    "duscope_scans",
+    "duscope_stale",
+    "duscope_summary",
+    "duscope_top",
+];
 
 /// The fixture tools a debug build adds under `DUSCOPE_TEST_MCP_TOOLS`.
 const FIXTURE_TOOLS: [&str; 2] = ["test_summary", "test_top"];
@@ -300,7 +311,10 @@ fn p3_mcp_03_structured_content_is_the_verbs_json_for_every_tool() {
                 library.clone().into(),
             ],
         ),
-    ];
+    ]
+    .into_iter()
+    .chain(scan_group_cases(&env, &home, &id))
+    .collect();
     let requests: Vec<Value> = std::iter::once(request(0, "tools/list", &json!({})))
         .chain(
             cases
@@ -523,4 +537,536 @@ fn p3_mcp_03_an_envelope_past_max_chars_comes_back_spilled() {
     );
     let whole: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
     assert_eq!(whole["returned_count"], spilled["rows"]);
+}
+
+// P3-MCP-04: the scan group.
+
+/// A tool, its arguments, and the command line that prints the same
+/// envelope.
+type Case = (&'static str, Value, Vec<OsString>);
+
+/// The command line `words`, split at spaces, then `path`.
+fn line(words: &str, path: &Path) -> Vec<OsString> {
+    words
+        .split_whitespace()
+        .map(OsString::from)
+        .chain([path.as_os_str().to_owned()])
+        .collect()
+}
+
+/// The ids of the scans saved under the test's index directory, sorted.
+fn saved_ids(env: &TestEnv) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(env.index_dir().join("scans")) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name();
+            name.to_str()?.strip_suffix(".db").map(str::to_owned)
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Saves a scan of `path` taken with `flags`: its id.
+fn save_with(env: &TestEnv, path: &Path, flags: &[&str]) -> String {
+    let out = env
+        .cmd()
+        .arg("scan")
+        .args(flags)
+        .arg(path)
+        .args(["--save", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    envelope["scan"]["id"].as_str().unwrap().to_owned()
+}
+
+/// `ids`, sorted.
+fn sorted<S: AsRef<str>>(ids: &[S]) -> Vec<String> {
+    let mut ids: Vec<String> = ids.iter().map(|id| id.as_ref().to_owned()).collect();
+    ids.sort();
+    ids
+}
+
+/// The ids of a listing's rows, sorted.
+fn listed_ids(envelope: &Value) -> Vec<String> {
+    let ids: Vec<&str> = envelope["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{envelope}"))
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect();
+    sorted(&ids)
+}
+
+/// The scan group on the fixture tree's `home`, saved as `id`, the server's
+/// one root: each tool without arguments and with every argument it takes,
+/// beside the command line that prints the same envelope.
+fn scan_group_cases(env: &TestEnv, home: &Path, id: &str) -> Vec<Case> {
+    let library = home.join("Library");
+    let first_page = cli_json(env, &line("top --no-scan --limit=2", home));
+    let first_page: Value = serde_json::from_str(&first_page).unwrap();
+    let cursor = first_page["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{first_page}"));
+    vec![
+        // A scan younger than max_age is returned, so the envelope is the
+        // saved one either way.
+        (
+            "duscope_scan",
+            json!({"max_age": "1h"}),
+            line("scan --save --reuse=1h", home),
+        ),
+        (
+            "duscope_scan",
+            json!({"root": home, "attrs": "basic", "clones": true, "one_file_system": false,
+                "max_age": "1h"}),
+            line("scan --save --attrs=basic --clones --reuse=1h", home),
+        ),
+        ("duscope_scans", json!({}), line("scans", home)),
+        (
+            "duscope_summary",
+            json!({}),
+            line("summary --no-scan", home),
+        ),
+        (
+            "duscope_summary",
+            json!({"scan_id": &id[..6], "path": "Library"}),
+            line(&format!("summary --no-scan --scan {id}"), &library),
+        ),
+        ("duscope_top", json!({}), line("top --no-scan", home)),
+        (
+            "duscope_top",
+            json!({"scan_id": id, "path": "Library", "files": true, "depth": 3,
+                "min_size": "1K", "glob": ["*"], "exclude": ["*.log", "*.tmp"],
+                "size": "apparent", "fields": ["path", "apparent_bytes"], "limit": 3}),
+            line(
+                &format!(
+                    "top --no-scan --scan {id} --files --depth=3 --min-size=1K --glob=* \
+                     --exclude=*.log --exclude=*.tmp --size=apparent \
+                     --fields=path,apparent_bytes --limit=3"
+                ),
+                &library,
+            ),
+        ),
+        (
+            "duscope_top",
+            json!({"limit": 2, "cursor": cursor}),
+            line(&format!("top --no-scan --limit=2 --cursor={cursor}"), home),
+        ),
+        (
+            "duscope_by_type",
+            json!({}),
+            line("by-type --no-scan", home),
+        ),
+        (
+            "duscope_by_type",
+            json!({"scan_id": id, "path": "Library", "examples": 1, "glob": ["*"],
+                "exclude": ["*.log"], "size": "apparent", "fields": ["class", "allocated_bytes"],
+                "limit": 2}),
+            line(
+                &format!(
+                    "by-type --no-scan --scan {id} --examples=1 --glob=* --exclude=*.log \
+                     --size=apparent --fields=class,allocated_bytes --limit=2"
+                ),
+                &library,
+            ),
+        ),
+        ("duscope_stale", json!({}), line("stale --no-scan", home)),
+        (
+            "duscope_stale",
+            json!({"scan_id": id, "path": "Library", "older_than": "1d", "min_size": "1",
+                "glob": ["*"], "exclude": ["*.log"], "size": "apparent",
+                "fields": ["path", "mtime"], "limit": 2}),
+            line(
+                &format!(
+                    "stale --no-scan --scan {id} --older-than=1d --min-size=1 --glob=* \
+                     --exclude=*.log --size=apparent --fields=path,mtime --limit=2"
+                ),
+                &library,
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn p3_mcp_04_each_tool_answers_with_its_verbs_json() {
+    let env = TestEnv::new();
+    let (home, id) = saved_home(&env);
+    let cases = scan_group_cases(&env, &home, &id);
+    for tool in SHIPPED {
+        assert!(
+            cases.iter().any(|(case, _, _)| *case == tool),
+            "{tool} has no case comparing it with its verb"
+        );
+    }
+    let requests: Vec<Value> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, (tool, arguments, _))| call(i as u64 + 1, tool, arguments))
+        .collect();
+    let served = serve(&env, &roots(&[&home]), &requests);
+    for (i, (tool, arguments, args)) in cases.iter().enumerate() {
+        let id = i as u64 + 1;
+        let result = served.result(id);
+        assert_eq!(result["isError"], false, "{tool} {arguments}: {result}");
+        assert_eq!(
+            structured_content(served.line(id)),
+            cli_json(&env, args),
+            "{tool} {arguments}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("null") && !text.contains('?'),
+            "{tool}: {text}"
+        );
+    }
+    // max_age found the saved scan: nothing new was saved.
+    assert_eq!(saved_ids(&env), vec![id]);
+}
+
+#[test]
+fn p3_mcp_04_duscope_scan_saves_a_scan_unless_max_age_finds_one() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let other = json!({"attrs": "full", "clones": false, "one_file_system": true});
+    let mut reused_other = other.clone();
+    reused_other["max_age"] = json!("1h");
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[
+            call(1, "duscope_scan", &json!({})),
+            call(2, "duscope_scan", &other),
+            call(3, "duscope_scan", &json!({"max_age": "1h"})),
+            call(4, "duscope_scan", &reused_other),
+            call(
+                5,
+                "duscope_scan",
+                &json!({"root": root.join("a"), "max_age": "1h"}),
+            ),
+        ],
+    );
+    let scan = |id: u64| {
+        let result = served.result(id);
+        assert_eq!(result["isError"], false, "{result}");
+        result["structuredContent"]["scan"].clone()
+    };
+    let (first, second) = (scan(1), scan(2));
+    assert_eq!(first["root"], root.display().to_string());
+    assert_eq!(second["attrs"], "full");
+    assert_eq!(second["device_confined"], true);
+    // max_age returns the scan taken with the same options, of that root.
+    assert_eq!(scan(3)["id"], first["id"]);
+    assert_eq!(scan(4)["id"], second["id"]);
+    let third = scan(5);
+    assert_eq!(third["root"], root.join("a").display().to_string());
+    let ids: Vec<&str> = [&first, &second, &third]
+        .iter()
+        .map(|scan| scan["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(saved_ids(&env), sorted(&ids));
+    let text = served.result(1)["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(text.contains(ids[0]), "{text}");
+}
+
+#[test]
+fn p3_mcp_04_duscope_scan_scans_only_inside_the_roots() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let cases = [
+        (json!({"root": base}), "refused_path"),
+        (json!({"root": "a"}), "refused_path"),
+        (json!({"root": root.join("link")}), "refused_path"),
+        (
+            json!({"root": root.join("a/../../outside")}),
+            "refused_path",
+        ),
+        (json!({"attrs": "all"}), "usage"),
+        (json!({"max_age": 60}), "usage"),
+    ];
+    let requests: Vec<Value> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, (arguments, _))| call(i as u64 + 1, "duscope_scan", arguments))
+        .collect();
+    let served = serve(&env, &roots(&[&root]), &requests);
+    for (i, (arguments, code)) in cases.iter().enumerate() {
+        let result = served.result(i as u64 + 1);
+        assert_eq!(result["isError"], true, "{arguments}: {result}");
+        assert_eq!(
+            result["structuredContent"]["error"]["code"], *code,
+            "{arguments}: {result}"
+        );
+    }
+    // With several roots, the call names one.
+    let served = serve(
+        &env,
+        &roots(&[&root, &base.join("outside")]),
+        &[call(1, "duscope_scan", &json!({}))],
+    );
+    let result = served.result(1);
+    assert_eq!(result["structuredContent"]["error"]["code"], "usage");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("root"),
+        "{result}"
+    );
+    assert!(saved_ids(&env).is_empty());
+}
+
+#[test]
+fn p3_mcp_04_duscope_scans_lists_the_scans_under_the_roots_alone() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let (at, under) = (save(&env, &root), save(&env, &root.join("a")));
+    let (above, outside) = (save(&env, &base), save(&env, &base.join("outside")));
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[call(1, "duscope_scans", &json!({}))],
+    );
+    let result = served.result(1);
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(
+        listed_ids(&result["structuredContent"]),
+        sorted(&[&at, &under])
+    );
+    // Each root's scans, with several; a scan above a root is not listed.
+    let served = serve(
+        &env,
+        &roots(&[&root.join("a"), &base.join("outside")]),
+        &[call(1, "duscope_scans", &json!({}))],
+    );
+    assert_eq!(
+        listed_ids(&served.result(1)["structuredContent"]),
+        sorted(&[&under, &outside])
+    );
+    assert!(!listed_ids(&served.result(1)["structuredContent"]).contains(&above));
+}
+
+#[test]
+fn p3_mcp_04_the_read_tools_never_scan_or_save() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let tools = [
+        "duscope_summary",
+        "duscope_top",
+        "duscope_by_type",
+        "duscope_stale",
+    ];
+    let requests: Vec<Value> = tools
+        .iter()
+        .enumerate()
+        .map(|(i, tool)| call(i as u64 + 1, tool, &json!({})))
+        .chain([call(9, "duscope_scans", &json!({}))])
+        .collect();
+    let served = serve(&env, &roots(&[&root]), &requests);
+    for (i, tool) in tools.iter().enumerate() {
+        let result = served.result(i as u64 + 1);
+        assert_eq!(result["isError"], true, "{tool}: {result}");
+        assert_eq!(
+            result["structuredContent"]["error"]["code"], "scan_not_found",
+            "{tool}: {result}"
+        );
+    }
+    let listing = served.result(9);
+    assert_eq!(listing["structuredContent"]["total_count"], 0, "{listing}");
+    assert!(saved_ids(&env).is_empty());
+}
+
+#[test]
+fn p3_mcp_04_stale_with_atime_reads_a_scan_with_access_times() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let full = save_with(&env, &root, &["--attrs", "full"]);
+    save(&env, &root);
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[call(
+            1,
+            "duscope_stale",
+            &json!({"atime": true, "older_than": "1h", "min_size": "1"}),
+        )],
+    );
+    let result = served.result(1);
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(result["structuredContent"]["scan"]["id"], full.as_str());
+    assert_eq!(
+        structured_content(served.line(1)),
+        cli_json(
+            &env,
+            &line(
+                "stale --no-scan --older-than=1h --min-size=1 --atime --attrs=full",
+                &root
+            )
+        )
+    );
+}
+
+#[test]
+fn p3_mcp_04_a_value_starting_with_a_dash_is_never_read_as_a_flag() {
+    let env = TestEnv::new();
+    let (home, _) = saved_home(&env);
+    let served = serve(
+        &env,
+        &roots(&[&home]),
+        &[
+            call(
+                1,
+                "duscope_top",
+                &json!({"glob": ["-x"], "exclude": ["--files"]}),
+            ),
+            call(2, "duscope_top", &json!({"cursor": "--files"})),
+            call(3, "duscope_stale", &json!({"older_than": "-1d"})),
+        ],
+    );
+    // A glob that matches no path.
+    let globbed = served.result(1);
+    assert_eq!(globbed["isError"], false, "{globbed}");
+    assert_eq!(globbed["structuredContent"]["returned_count"], 0);
+    // The verb reads each value, and refuses it as what it is.
+    assert_eq!(
+        served.result(2)["structuredContent"]["error"]["code"],
+        "invalid_cursor"
+    );
+    let age = &served.result(3)["structuredContent"]["error"];
+    assert_eq!(age["code"], "usage");
+    assert!(
+        age["message"].as_str().unwrap().contains("--older-than"),
+        "{age}"
+    );
+}
+
+#[test]
+fn p3_mcp_04_scan_reuse_prints_a_saved_scan_of_the_path_younger_than_age() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let id = save(&env, &root);
+    let scan = |flags: &[&str], path: &Path| -> Value {
+        let out = env
+            .cmd()
+            .arg("scan")
+            .args(flags)
+            .arg(path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{flags:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let reused = scan(&["--reuse", "1h", "--save"], &root);
+    assert_eq!(reused["scan"]["id"], id.as_str(), "{reused}");
+    assert_eq!(reused["scan"]["root"], root.display().to_string());
+    assert!(
+        reused["entries"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+    );
+    assert_eq!(saved_ids(&env), vec![id.clone()]);
+    // Other options, another path, or a scan older than AGE: the tree is
+    // scanned, and the scan, unsaved, has no id.
+    let fresh: [(&[&str], PathBuf); 4] = [
+        (&["--reuse", "1h", "--one-file-system"], root.clone()),
+        (&["--reuse", "1h", "--exclude", "*.tmp"], root.clone()),
+        (&["--reuse", "1h"], root.join("a")),
+        (
+            &["--reuse", "1h", "--test-now", "2099-01-01T00:00:00Z"],
+            root.clone(),
+        ),
+    ];
+    for (flags, path) in &fresh {
+        let scanned = scan(flags, path);
+        assert!(scanned["scan"]["id"].is_null(), "{flags:?}: {scanned}");
+    }
+    let out = env
+        .cmd()
+        .args(["scan", "--reuse", "soon", "--json"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let bad_age: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(bad_age["error"]["code"], "usage");
+    assert_eq!(saved_ids(&env), vec![id]);
+}
+
+#[test]
+fn p3_mcp_04_scan_reuse_draws_no_treemap_and_opens_no_viewer() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    save(&env, &root);
+    for flags in [["--treemap", "always"], ["--interactive", "--plain"]] {
+        let out = env
+            .cmd()
+            .args(["scan", "--reuse", "1h"])
+            .args(flags)
+            .arg(&root)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{flags:?}: {stderr}");
+        assert!(stderr.contains("--reuse"), "{flags:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{flags:?}");
+    }
+}
+
+#[test]
+fn p3_mcp_04_scans_lists_the_scans_of_the_paths_and_under_them() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let at = save(&env, &root);
+    let under = save(&env, &root.join("a"));
+    let outside = save(&env, &base.join("outside"));
+    let above = save(&env, &base);
+    let listed = |paths: &[&str]| -> Vec<String> {
+        let out = env
+            .cmd()
+            .current_dir(&base)
+            .arg("scans")
+            .args(paths)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{paths:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        listed_ids(&serde_json::from_slice(&out.stdout).unwrap())
+    };
+    assert_eq!(listed(&["root"]), sorted(&[&at, &under]));
+    assert_eq!(listed(&["root/a", "outside"]), sorted(&[&under, &outside]));
+    // A link is followed to the directory it names.
+    assert_eq!(listed(&["root/link"]), vec![outside.clone()]);
+    assert_eq!(listed(&[]), sorted(&[&at, &under, &outside, &above]));
+    for flags in [&["--prune", "root"][..], &["--check", &at, "root"]] {
+        let out = env.cmd().arg("scans").args(flags).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{flags:?}");
+    }
 }

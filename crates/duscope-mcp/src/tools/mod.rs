@@ -36,6 +36,25 @@ use serde_json::{Map, Value, json};
 use crate::jsonrpc::RpcError;
 use crate::roots::{Refusal, Roots, Visibility};
 
+mod by_type;
+mod scan;
+mod scans;
+mod stale;
+mod summary;
+mod top;
+
+/// The tools duscope offers.
+pub fn shipped() -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(scan::Scan),
+        Box::new(scans::Scans),
+        Box::new(summary::Summary),
+        Box::new(top::Top),
+        Box::new(by_type::ByType),
+        Box::new(stale::Stale),
+    ]
+}
+
 /// The longest tool name: Gemini CLI cuts names at 63 characters, and
 /// Claude Code drops `mcp__<server>__<tool>` past 128.
 pub const MAX_NAME_CHARS: usize = 63;
@@ -364,10 +383,10 @@ impl CallResult {
         let parsed: Value = serde_json::from_str(&outcome.json).map_err(|e| {
             RpcError::internal(format!("{} wrote no JSON envelope: {e}", tool.name()))
         })?;
-        let text = if outcome.ok {
-            tool.summary(&parsed)
-        } else {
-            error_text(&parsed)
+        let text = match parsed.get("spilled").filter(|_| outcome.ok) {
+            Some(spill) => spilled_text(spill),
+            None if outcome.ok => tool.summary(&parsed),
+            None => error_text(&parsed),
         };
         // Compact JSON holds no newline, which would end the message early;
         // anything else is written again.
@@ -411,6 +430,18 @@ fn error_text(envelope: &Value) -> String {
         Some(hint) => format!("{message}{stop} {hint}"),
         None => format!("{message}{stop}"),
     }
+}
+
+/// The text of a result the verb put in a file, past `--max-chars`: where
+/// the file is, and what to do instead.
+fn spilled_text(spill: &Value) -> String {
+    format!(
+        "The result passed the server's --max-chars: its {} rows are in {} ({} bytes), and \
+         the preview holds the first. Ask for fewer rows or fields, or read the file",
+        spill["rows"],
+        spill["path"].as_str().unwrap_or("a file"),
+        spill["bytes"]
+    )
 }
 
 /// `text` on one line: line breaks become spaces.
@@ -806,5 +837,140 @@ pub fn path_argument(
         })
 }
 
+/// What a read-only tool never changes: it reads saved scans alone.
+const READ_ONLY: Annotations = Annotations {
+    read_only: true,
+    destructive: false,
+    idempotent: true,
+};
+
+/// A verb's arguments, built from a call's: each parameter the call sets
+/// becomes its flag, a value joined to it by `=`, so that one starting with
+/// `-` is never read as a flag.
+struct CommandLine<'a> {
+    arguments: &'a Map<String, Value>,
+    args: Vec<OsString>,
+}
+
+impl<'a> CommandLine<'a> {
+    fn new(arguments: &'a Map<String, Value>) -> CommandLine<'a> {
+        CommandLine {
+            arguments,
+            args: Vec::new(),
+        }
+    }
+
+    /// `arg`, whatever the call's arguments.
+    fn push(&mut self, arg: impl Into<OsString>) -> &mut Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    /// `flag`, when the boolean `name` is true.
+    fn switch(&mut self, name: &str, flag: &str) -> &mut Self {
+        if self.arguments.get(name).and_then(Value::as_bool) == Some(true) {
+            self.push(flag);
+        }
+        self
+    }
+
+    /// `flag=VALUE`, for the string or integer `name`.
+    fn value(&mut self, name: &str, flag: &str) -> &mut Self {
+        let value = match self.arguments.get(name) {
+            Some(Value::String(text)) => text.clone(),
+            Some(Value::Number(number)) => number.to_string(),
+            _ => return self,
+        };
+        self.push(format!("{flag}={value}"))
+    }
+
+    /// `flag=VALUE` for each string in the array `name`.
+    fn each(&mut self, name: &str, flag: &str) -> &mut Self {
+        for value in self.strings(name) {
+            self.args.push(format!("{flag}={value}").into());
+        }
+        self
+    }
+
+    /// `flag=A,B,…`, for the array of strings `name` when it holds any.
+    fn joined(&mut self, name: &str, flag: &str) -> &mut Self {
+        let values = self.strings(name);
+        if !values.is_empty() {
+            self.push(format!("{flag}={}", values.join(",")));
+        }
+        self
+    }
+
+    /// The strings in the array `name`.
+    fn strings(&self, name: &str) -> Vec<String> {
+        self.arguments
+            .get(name)
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The shared parameters of the list tools: `size`, `fields`, `limit`
+    /// and, for a verb that pages, `cursor`.
+    fn list(&mut self) -> &mut Self {
+        self.value("size", "--size")
+            .joined("fields", "--fields")
+            .value("limit", "--limit")
+            .value("cursor", "--cursor")
+    }
+
+    fn invocation(self, verb: &'static str) -> Invocation {
+        Invocation {
+            verb,
+            args: self.args,
+        }
+    }
+}
+
+/// The command line of a read-only tool: `--no-scan`, so the verb never
+/// scans or saves; `--scan` and the saved scan the call names; the flags
+/// `flags` adds from the call's arguments; and last the path, bound to the
+/// roots.
+fn read_only(
+    verb: &'static str,
+    arguments: &Map<String, Value>,
+    context: &Context<'_>,
+    flags: impl FnOnce(&mut CommandLine<'_>),
+) -> Result<Invocation, Refusal> {
+    let scan = scan_argument(arguments, "scan_id", context)?;
+    let path = path_argument(arguments, "path", scan.as_ref(), context.roots)?;
+    let mut line = CommandLine::new(arguments);
+    line.push("--no-scan");
+    if let Some(scan) = scan {
+        line.push("--scan").push(scan.selector);
+    }
+    flags(&mut line);
+    line.push(path);
+    Ok(line.invocation(verb))
+}
+
+/// The text of a list verb's envelope: how many rows of how many, under
+/// which path, and how to get the next page when there is one.
+fn rows_text(envelope: &Value) -> String {
+    let path = envelope["query"]["path"].as_str().unwrap_or("the path");
+    let rows = format!(
+        "{} of {} rows under {path}",
+        envelope["returned_count"], envelope["total_count"]
+    );
+    if envelope["next_cursor"].is_string() {
+        format!("{rows}; call again with cursor set to next_cursor for the next page")
+    } else {
+        rows
+    }
+}
+
+#[cfg(test)]
+mod scan_group_tests;
 #[cfg(test)]
 mod tests;

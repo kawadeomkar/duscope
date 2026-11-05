@@ -152,10 +152,69 @@ pub fn scanned(index: &Index) -> bool {
     index.meta().source == "scan"
 }
 
+/// The newest saved scan of exactly `walk`'s path, taken with its options
+/// and `excludes`, that finished within `age`: what `scan --reuse` prints in
+/// place of scanning. `None` when there is none, or no index directory to
+/// look in.
+pub fn reusable(
+    walk: &WalkArgs,
+    excludes: &[String],
+    age: &str,
+    index_dir: Option<&Path>,
+) -> Result<Option<Source>, Failure> {
+    let age_ns = timegrammar::parse_age(age)
+        .map_err(|e| Failure::new(Exit::Usage, "usage", format!("--reuse {e}")))?;
+    let Some(dir) = index_dir
+        .map(Path::to_owned)
+        .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)))
+    else {
+        return Ok(None);
+    };
+    let now = scan::now(walk)?;
+    let cwd = std::env::current_dir().map_err(|e| {
+        Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!("cannot read the working directory: {e}"),
+        )
+    })?;
+    let path = resolve_path(&cwd, walk.path.as_deref().unwrap_or(Path::new("."))).real;
+    let q = ScanQuery {
+        index_dir: &dir,
+        path: Some(&path),
+        cwd: &cwd,
+        max_age_ns: age_ns,
+        now,
+        trust: &[],
+    };
+    let fresh = |index: &Index| {
+        index.root_path() == path
+            && now.saturating_sub(index.meta().finished_at) <= age_ns
+            && usable_with(walk, excludes, index)
+    };
+    let resolved = resolve_scan(&ScanSelector::Latest, &q, fresh).map_err(core_failure)?;
+    Ok(resolved.map(|r| {
+        let unreadable = r
+            .index
+            .unreadable_dirs(r.base, r.index.node(r.base).last_id);
+        Source::Saved {
+            index: Box::new(r.index),
+            base: r.base,
+            unreadable,
+            stale: None,
+        }
+    }))
+}
+
 /// Whether `index` holds the tree a scan with `walk`'s options would: the
 /// same excludes, filesystems, clone and link handling, and the attributes
 /// the verb may ask for; a scan, never an import.
 fn usable(walk: &WalkArgs, index: &Index) -> bool {
+    usable_with(walk, &[], index)
+}
+
+/// [`usable`], for a scan that leaves out `excludes` besides.
+fn usable_with(walk: &WalkArgs, excludes: &[String], index: &Index) -> bool {
     if !scanned(index) {
         return false;
     }
@@ -168,7 +227,7 @@ fn usable(walk: &WalkArgs, index: &Index) -> bool {
         value
     };
     let attrs = walk.attrs == AttrsArg::Basic || index.attrs() == Attrs::Full;
-    attrs && content(&scan::saved_options(walk, &[])) == content(&index.meta().options)
+    attrs && content(&scan::saved_options(walk, excludes)) == content(&index.meta().options)
 }
 
 /// `stale_index`: the saved scan finished longer ago than `--max-age`.

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "duscope_scan.input.json",
+  "title": "duscope_scan",
+  "description": "The arguments of duscope_scan, which runs `duscope scan --save`.",
+  "type": "object",
+  "properties": {
+    "root": {
+      "type": "string",
+      "description": "The directory to scan: absolute, under one of the server's roots. Default: the server's root when it has one"
+    },
+    "attrs": {
+      "type": "string",
+      "enum": [
+        "basic",
+        "full"
+      ],
+      "description": "The attributes to collect: full adds access and birth times, mode, owner and group, which duscope_stale's atime reads. Default: basic"
+    },
+    "clones": {
+      "type": "boolean",
+      "description": "Count APFS clones once (true, the default) or every clone in full (false)"
+    },
+    "one_file_system": {
+      "type": "boolean",
+      "description": "Stay on the root's filesystem. Default: false"
+    },
+    "max_age": {
+      "type": "string",
+      "description": "Return a saved scan of the root taken with these options and younger than this, a number with h, d, w or y (1h), instead of scanning again. Default: always scan"
+    }
+  },
+  "additionalProperties": false
+}

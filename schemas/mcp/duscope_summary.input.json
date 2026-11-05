@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "duscope_summary.input.json",
+  "title": "duscope_summary",
+  "description": "The arguments of duscope_summary, which runs `duscope summary --no-scan`.",
+  "type": "object",
+  "properties": {
+    "scan_id": {
+      "type": "string",
+      "description": "The saved scan to read: an id duscope_scan or duscope_scans gave (its first 4 or more characters will do), or latest. Default: the newest saved scan that holds the path and was taken with the default options"
+    },
+    "path": {
+      "type": "string",
+      "description": "A directory or file under one of the server's roots: absolute, or relative to the scan's root. Default: the scan's root, or the server's root when it has one"
+    }
+  },
+  "additionalProperties": false
+}

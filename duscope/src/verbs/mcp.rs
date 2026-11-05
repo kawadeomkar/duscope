@@ -79,7 +79,7 @@ pub fn serve(args: &McpArgs, global: &GlobalArgs, output: &OutputArgs) -> Result
 
 /// The tools the server offers.
 fn tools() -> Vec<Box<dyn duscope_mcp::tools::Tool>> {
-    let tools = Vec::new();
+    let tools = duscope_mcp::tools::shipped();
     #[cfg(debug_assertions)]
     let tools = {
         let mut tools = tools;
@@ -152,9 +152,13 @@ impl Runner for VerbRunner {
     }
 }
 
+#[cfg(test)]
+mod mapping;
+
 /// Tools for the tests alone, in debug builds under
 /// `DUSCOPE_TEST_MCP_TOOLS`: two verbs behind the machinery every tool goes
-/// through, while no shipped tool exists yet to test it with.
+/// through, kept apart from the shipped tools so that the machinery's tests
+/// stay as they are while the tools change.
 #[cfg(debug_assertions)]
 mod fixture {
     use std::ffi::OsString;
