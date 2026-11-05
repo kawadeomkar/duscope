@@ -337,3 +337,32 @@ fn p4_tui_07_the_viewer_draws_its_map_in_pixels() {
     assert!(text.contains("exit=0"), "{text}");
     assert!(!terminal.screen().alternate_screen(), "{text}");
 }
+
+#[test]
+fn p4_tui_03_a_zoom_draws_the_zoomed_folder_in_pixels() {
+    let env = TestEnv::new();
+    let home = env.fixtures().path("home");
+    let script = format!(
+        "'{}' scan -i --treemap pixels --threads 4 '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        home.display()
+    );
+    let mut terminal = Mock::new(Graphics::Kitty)
+        .builder(&env)
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap();
+    terminal
+        .wait_until(|s| s.alternate_screen() && s.graphics().kitty() == 1)
+        .unwrap();
+    // `z` zooms to the folder under the cursor and the picture follows it, as
+    // the cells under it do; `Z` comes back to the whole map, drawn again.
+    terminal.send(Key::Char('z')).unwrap();
+    terminal.wait_until(|s| s.graphics().kitty() == 2).unwrap();
+    terminal.send(Key::Char('Z')).unwrap();
+    terminal.wait_until(|s| s.graphics().kitty() == 3).unwrap();
+    terminal.send(Key::Char('q')).unwrap();
+    terminal.wait_exit().unwrap();
+    let text = terminal.screen().full_text();
+    assert!(text.contains("exit=0"), "{text}");
+}

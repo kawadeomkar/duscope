@@ -16,7 +16,7 @@ use std::num::NonZeroU16;
 use std::path::Path;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use duscope_core::query::TreeView;
+use duscope_core::query::{Subtree, TreeView};
 use duscope_core::rules::Class;
 use duscope_treemap::cells::{CellBuffer, Color, Depth};
 use duscope_treemap::paint::{ColorBy, Glyphs, PaintOpts, classes_of};
@@ -95,13 +95,13 @@ pub struct App<'a> {
     /// `Ctrl-G`. Any other key ends it and counts as itself.
     answer: bool,
     /// `--treemap pixels`: what draws the map in pixels, and the map it
-    /// drew, kept until the pane's size changes.
+    /// drew, kept until the pane's size or the zoom changes.
     pixels: Option<(Pixels, RefCell<Option<Drawn>>)>,
 }
 
-/// The map in pixels and the size it was drawn at; `None` where it could
-/// not be drawn, which leaves the cells.
-type Drawn = ((u16, u16), Option<PixelMap>);
+/// The map in pixels, and the size and zoomed root it was drawn at; `None`
+/// where it could not be drawn, which leaves the cells.
+type Drawn = ((u16, u16, u32), Option<PixelMap>);
 
 impl std::fmt::Debug for App<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -237,17 +237,24 @@ impl<'a> App<'a> {
     }
 
     /// With `--treemap pixels`, the map in pixels over its cells in the
-    /// map pane, drawn again only when the pane's size changes.
+    /// map pane, of the zoomed folder as the cells are, drawn again only
+    /// when the pane's size or the zoom changes.
     fn draw_pixels(&self, area: Rect, buf: &mut Buffer) {
         let Some((pixels, drawn)) = &self.pixels else {
             return;
         };
         let map = layout(area.width, area.height).map;
-        let size = (map.width, map.height);
+        let root = self.cursor.zoom().root();
+        let key = (map.width, map.height, root);
         let mut drawn = drawn.borrow_mut();
-        if drawn.as_ref().is_none_or(|(at, _)| *at != size) {
-            let fresh = pixels.map(self.view, &self.opts, map.width, map.height);
-            *drawn = Some((size, fresh.ok()));
+        if drawn.as_ref().is_none_or(|(at, _)| *at != key) {
+            let fresh = if root == 0 {
+                pixels.map(self.view, &self.opts, map.width, map.height)
+            } else {
+                let sub = Subtree::new(self.view, root);
+                pixels.map(&sub, &self.opts, map.width, map.height)
+            };
+            *drawn = Some((key, fresh.ok()));
         }
         if let Some((_, Some(cells))) = drawn.as_ref() {
             overlay(cells, area.x + map.x, area.y + map.y, buf);
