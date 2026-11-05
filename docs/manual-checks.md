@@ -9,7 +9,7 @@ row due again.
 | Check | Program and version | Platform | Package | Last done | Result |
 | --- | --- | --- | --- | --- | --- |
 | GrandPerspective opens `export --format gpscan` | GrandPerspective 3.8.1 | macOS | P2-CLI-02 | 2026-11-04 | passes, both measures (below) |
-| Two browsers draw `render`'s SVG alike | Safari and Firefox, or Chrome | macOS | P2-MAP-01 | pending | due: the author's check |
+| Two browsers draw `render`'s SVG alike | Safari and Firefox, or Chrome | macOS | P2-MAP-01 | 2026-11-04 | passes in Safari 27.2's WebKit and Chrome 156 (below) |
 
 ## GrandPerspective opens a `.gpscan`
 
@@ -56,6 +56,13 @@ each, labels in the system's sans-serif, and crisp edges.
    edges, with no seam along the diagonal; the labels inside their tiles;
    the legend and the totals under the map.
 4. Record the browsers' versions, the date and the result in the table.
+
+**Last result** (2026-11-04): Safari 27.2's WebKit (a `WKWebView` snapshot)
+and Chrome 156 (headless) draw both files alike, at 1× and 2×: the same
+tiles in the same places and colours, each shaded from light at its
+top-left corner to dark along its bottom and right edges with no seam on the
+diagonal, the labels inside their tiles, and the legend and totals under the
+map.
 
 ncdu needs no row: `p2_cli_02_ncdu_reads_its_export_back` has `ncdu -f` read
 the JSON export and write it out again, and CI installs ncdu on its Linux
