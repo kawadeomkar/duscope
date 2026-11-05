@@ -18,8 +18,10 @@ question from it in milliseconds, one JSON envelope per command.
   `--yes` unless a person has told you to delete those paths. Without a
   terminal and without `--yes`, `clean` returns `confirmation_required` (exit 1)
   instead of asking.
-- **Nothing is deleted outright.** `clean` moves to the Trash, and refuses
-  symlinks, mount points, the scan's root and paths outside it, item by item.
+- **Nothing is deleted outright unless asked.** `clean` moves to the Trash,
+  and refuses symlinks, mount points, the scan's root and paths outside it,
+  item by item. `--permanent` deletes for good: pass it only when a person
+  has asked for exactly that.
 - **`explain` gives facts, not verdicts:** links outside the path, clones,
   `freeable_now_bytes` and its `freeable_kind`, cache rules, git state, each
   with its `evidence` and a `confidence`. Report what it found; do not turn
@@ -53,7 +55,9 @@ question from it in milliseconds, one JSON envelope per command.
    past its 15 minutes, or naming a path that changed since the scan, is
    refused (`handle_expired`, `path_changed`).
 3. Show the plan to the person. Only on their explicit yes:
-   `duscope clean --from HANDLE --yes --json`, whose result reports
+   `duscope clean --from HANDLE --yes --json`, adding `--expect-bytes` with
+   the plan's `total_frees_bytes`, so that nothing is touched if what it
+   frees has changed since (`expectation_mismatch`); the result reports
    `trashed_bytes`.
 
 ## Which command answers which question

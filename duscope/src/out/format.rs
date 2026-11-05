@@ -171,6 +171,7 @@ pub fn error_envelope(failure: &Failure) -> ErrorEnvelope {
         "io_error" | "deadline_exceeded" | "sql_timeout" | "index_write_failed" => (true, "user"),
         "permission_denied"
         | "confirmation_required"
+        | "expectation_mismatch"
         | "trash_unavailable"
         | "untrusted_index"
         | "not_compiled"

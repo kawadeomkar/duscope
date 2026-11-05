@@ -1,5 +1,5 @@
-//! `clean`: the plan of what to move to the Trash, and, with `--yes` or
-//! `yes` typed at the prompt, moving it.
+//! `clean`: the plan of what to move to the Trash, or with `--permanent` to
+//! delete, and, with `--yes` or `yes` typed at the prompt, acting on it.
 //!
 //! The items are paths and `--from` handles from `explain --json`: a
 //! handle's MAC and expiry are checked, and its path must still hold the
@@ -9,17 +9,20 @@
 //! `scan_not_found`.
 //!
 //! A refused item makes the whole run a dry run (`refused_path`) unless
-//! `--skip-refused`. Without `--yes` nothing moves: on a terminal the plan is
+//! `--skip-refused`; so does a plan whose `total_frees_bytes` is not within
+//! 1% of `--expect-bytes` (`expectation_mismatch`), checked before anything
+//! is touched. Without `--yes` nothing moves: on a terminal the plan is
 //! shown and `yes` asked for once; otherwise, or under `--no-input`, the
 //! plan comes back with `confirmation_required`. The saved scan is not
-//! changed: after a move an `index_untouched` warning names `rescan`.
+//! changed: after a move or a deletion an `index_untouched` warning names
+//! `rescan`.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use duscope_core::clean::{CleanItem, CleanOutcome, Plan, clean_execute, clean_plan};
+use duscope_core::clean::{CleanItem, CleanOutcome, Method, Plan, clean_execute, clean_plan};
 use duscope_core::envelope::{
     CleanEnvelope, CleanQuery, CleanResult, ErrorObject, SCHEMA_VERSION, ScanBlock, Tool, Warning,
 };
@@ -67,29 +70,26 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         caches: &caches,
         env: &env,
     };
-    let mut plan = clean_plan(&items, &resolved.index, &q).map_err(core_failure)?;
+    let method = if args.permanent {
+        Method::Permanent
+    } else {
+        Method::Trash
+    };
+    let mut plan = clean_plan(&items, &resolved.index, &q, method).map_err(core_failure)?;
+    let query = query(args, &plan);
 
     let refused = plan.refused_count();
-    let blocked = refused > 0 && !args.skip_refused;
-    let moving = plan.trash_count();
+    // Nothing is touched past either: a refused item, or a plan that frees
+    // other than --expect-bytes says.
+    let mismatch = args.expect_bytes.filter(|&n| !plan.meets(n));
+    let blocked = (refused > 0 && !args.skip_refused) || mismatch.is_some();
+    let moving = plan.acting_count();
     let scan_block = block(&resolved.index);
     let mut warnings: Vec<Warning> = resolved
         .stale
         .then(|| stale_index(&resolved.index, &lookup.max_age))
         .into_iter()
         .collect();
-    let query = CleanQuery {
-        command: "clean",
-        paths: plan
-            .plan
-            .items
-            .iter()
-            .map(|item| item.path.clone())
-            .collect(),
-        handle_count: args.from.len() as u64,
-        yes: args.yes,
-        skip_refused: args.skip_refused,
-    };
 
     // On a terminal, without --yes, the plan is shown and `yes` asked for
     // once.
@@ -106,15 +106,25 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         output.clean(&shown, &plan_line(&plan, output), true)?;
         warnings.clear();
         asked = true;
-        act = out::ask("Type yes to move them to the Trash: ").is_some_and(|a| a == "yes");
+        let question = match method {
+            Method::Trash => "Type yes to move them to the Trash: ",
+            Method::Permanent => "Type yes to delete them permanently: ",
+        };
+        act = out::ask(question).is_some_and(|a| a == "yes");
     }
     let outcome = act.then(|| clean_execute(&mut plan));
     plan.plan.confirmation_required = !act && !blocked && moving > 0;
-    if outcome.is_some_and(|o| o.trashed_count > 0) {
-        warnings.push(index_untouched(&scan_block));
+    if outcome.is_some_and(|o| o.trashed_count + o.deleted_count > 0 || o.freed_bytes > 0) {
+        warnings.push(index_untouched(&scan_block, method));
     }
 
-    let failure = failure(&plan, blocked, outcome, asked);
+    let failure = failure(
+        &plan,
+        refused > 0 && !args.skip_refused,
+        mismatch,
+        outcome,
+        asked,
+    );
     let error = failure.as_ref().map(|f| match outcome {
         // An item's own error, as the plan holds it.
         Some(_) if !blocked => first_error(&plan)
@@ -130,6 +140,24 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     match failure {
         Some(failure) => Err(failure.reported()),
         None => Ok(()),
+    }
+}
+
+/// What `clean` was asked, with the items as `plan` names them.
+fn query(args: &CleanArgs, plan: &Plan) -> CleanQuery {
+    CleanQuery {
+        command: "clean",
+        paths: plan
+            .plan
+            .items
+            .iter()
+            .map(|item| item.path.clone())
+            .collect(),
+        handle_count: args.from.len() as u64,
+        yes: args.yes,
+        skip_refused: args.skip_refused,
+        permanent: args.permanent,
+        expect_bytes: args.expect_bytes,
     }
 }
 
@@ -162,30 +190,53 @@ fn block(index: &duscope_core::index::Index) -> ScanBlock {
 }
 
 /// Why the run did not do all it was asked, if it did not: a refused item
-/// (`blocked`, without `--skip-refused`), an item that could not be moved, or
-/// a plan that waits for a yes (`asked`: the prompt was answered otherwise).
+/// without `--skip-refused` (`refused`), a plan that frees other than
+/// `--expect-bytes` says (`mismatch`, the bytes expected), an item that could
+/// not be moved or deleted, or a plan that waits for a yes (`asked`: the
+/// prompt was answered otherwise).
 fn failure(
     plan: &Plan,
-    blocked: bool,
+    refused: bool,
+    mismatch: Option<u64>,
     outcome: Option<CleanOutcome>,
     asked: bool,
 ) -> Option<Failure> {
-    if blocked {
+    let (moved, verb) = match plan.method() {
+        Method::Trash => ("moved", "move"),
+        Method::Permanent => ("deleted", "delete"),
+    };
+    if refused {
+        let cannot = match plan.method() {
+            Method::Trash => "cannot be moved to the Trash",
+            Method::Permanent => "cannot be deleted",
+        };
         let message = format!(
-            "{} of the {} items cannot be moved to the Trash, so nothing was moved",
+            "{} of the {} items {cannot}, so nothing was {moved}",
             thousands(plan.refused_count() as u64),
             thousands(plan.plan.items.len() as u64)
         );
         return Some(
-            Failure::new(Exit::Runtime, "refused_path", message)
-                .hint("Rerun duscope clean with --skip-refused to move the others"),
+            Failure::new(Exit::Runtime, "refused_path", message).hint(format!(
+                "Rerun duscope clean with --skip-refused to {verb} the others"
+            )),
+        );
+    }
+    if let Some(expected) = mismatch {
+        let message = format!(
+            "the plan frees {} bytes, not within 1% of --expect-bytes {}, so nothing was {moved}",
+            thousands(plan.plan.total_frees_bytes),
+            thousands(expected)
+        );
+        return Some(
+            Failure::new(Exit::Runtime, "expectation_mismatch", message)
+                .hint("Run duscope clean without --yes and review the plan again"),
         );
     }
     if let Some(outcome) = outcome {
         return first_error(plan).map(|error| {
             let message = if outcome.failed_count > 1 {
                 format!(
-                    "{} items were not moved; the first: {}",
+                    "{} items were not {moved}; the first: {}",
                     thousands(outcome.failed_count),
                     error.message
                 )
@@ -197,14 +248,23 @@ fn failure(
             failure
         });
     }
-    (plan.trash_count() > 0).then(|| {
-        let message = if asked {
-            "the answer was not yes, so nothing was moved"
-        } else {
-            "nothing was moved: clean moves items to the Trash only with --yes"
+    (plan.acting_count() > 0).then(|| {
+        let (message, hint) = match plan.method() {
+            Method::Trash => (
+                "nothing was moved: clean moves items to the Trash only with --yes",
+                "Rerun the command with --yes to move them to the Trash",
+            ),
+            Method::Permanent => (
+                "nothing was deleted: clean deletes items only with --yes",
+                "Rerun the command with --yes to delete them permanently",
+            ),
         };
-        Failure::new(Exit::Runtime, "confirmation_required", message)
-            .hint("Rerun the command with --yes to move them to the Trash")
+        let message = if asked {
+            format!("the answer was not yes, so nothing was {moved}")
+        } else {
+            message.to_owned()
+        };
+        Failure::new(Exit::Runtime, "confirmation_required", message).hint(hint)
     })
 }
 
@@ -264,7 +324,8 @@ fn envelope(
             plan: plan.plan.clone(),
             trashed_count: outcome.trashed_count,
             trashed_bytes: outcome.trashed_bytes,
-            freed_bytes: 0,
+            deleted_count: outcome.deleted_count,
+            freed_bytes: outcome.freed_bytes,
         },
         error,
         warnings: warnings.to_vec(),
@@ -272,22 +333,25 @@ fn envelope(
     }
 }
 
-/// The first item that could not be moved: its error.
+/// The first item that could not be moved or deleted: its error.
 fn first_error(plan: &Plan) -> Option<&ErrorObject> {
     plan.plan.items.iter().find_map(|item| item.error.as_ref())
 }
 
-/// The saved scan is not changed by a move: a rescan measures the tree
-/// again.
-fn index_untouched(scan: &ScanBlock) -> Warning {
+/// The saved scan is not changed by a move or a deletion: a rescan measures
+/// the tree again.
+fn index_untouched(scan: &ScanBlock, method: Method) -> Warning {
     let hint = match scan.id.as_deref() {
         Some(id) => format!("Run duscope rescan {id} to measure the tree again"),
         None => "Run duscope scan to measure the tree again".to_owned(),
     };
+    let what = match method {
+        Method::Trash => "what moved to the Trash",
+        Method::Permanent => "what was deleted",
+    };
     Warning {
         code: "index_untouched",
-        message: "the saved scans still hold what moved to the Trash: they are never changed"
-            .to_owned(),
+        message: format!("the saved scans still hold {what}: they are never changed"),
         count: None,
         hint: Some(hint),
     }
@@ -331,16 +395,26 @@ fn next(args: &CleanArgs, plan: &Plan, acted: bool, scan: &ScanBlock) -> Vec<Str
     if args.skip_refused {
         command.push_str(" --skip-refused");
     }
+    if args.permanent {
+        command.push_str(" --permanent");
+    }
+    if let Some(n) = args.expect_bytes {
+        let _ = write!(command, " --expect-bytes {n}");
+    }
     command.push_str(" --yes");
     vec![command]
 }
 
-/// The plan in one line: what it would move.
+/// The plan in one line: what it would move or delete.
 fn plan_line(plan: &Plan, output: &Output) -> String {
     let refused = plan.refused_count();
+    let (to, freed) = match plan.method() {
+        Method::Trash => ("move to the Trash", "freed once the Trash is emptied"),
+        Method::Permanent => ("delete permanently", "freed"),
+    };
     let mut line = format!(
-        "{} to move to the Trash: {} on disk, {} freed once the Trash is emptied",
-        count(plan.trash_count(), "item"),
+        "{} to {to}: {} on disk, {} {freed}",
+        count(plan.acting_count(), "item"),
         output.units.size(plan.plan.total_allocated_bytes),
         output.units.size(plan.plan.total_frees_bytes),
     );
@@ -350,16 +424,14 @@ fn plan_line(plan: &Plan, output: &Output) -> String {
     line
 }
 
-/// The line under the table: what moved, or what would.
+/// The line under the table: what moved or was deleted, or what would be.
 fn footer(plan: &Plan, outcome: Option<CleanOutcome>, output: &Output) -> String {
-    match outcome {
-        Some(o) => {
+    let items = |n: u64| count(usize::try_from(n).unwrap_or(usize::MAX), "item");
+    match (outcome, plan.method()) {
+        (Some(o), Method::Trash) => {
             let mut line = format!(
                 "moved {} to the Trash, {} (not yet freed)",
-                count(
-                    usize::try_from(o.trashed_count).unwrap_or(usize::MAX),
-                    "item"
-                ),
+                items(o.trashed_count),
                 output.units.size(o.trashed_bytes)
             );
             if o.failed_count > 0 {
@@ -367,7 +439,21 @@ fn footer(plan: &Plan, outcome: Option<CleanOutcome>, output: &Output) -> String
             }
             line
         }
-        None => format!("{} · dry run: nothing moved", plan_line(plan, output)),
+        (Some(o), Method::Permanent) => {
+            let mut line = format!(
+                "deleted {}, {} freed",
+                items(o.deleted_count),
+                output.units.size(o.freed_bytes)
+            );
+            if o.failed_count > 0 {
+                let _ = write!(line, " · {} not deleted", thousands(o.failed_count));
+            }
+            line
+        }
+        (None, Method::Trash) => format!("{} · dry run: nothing moved", plan_line(plan, output)),
+        (None, Method::Permanent) => {
+            format!("{} · dry run: nothing deleted", plan_line(plan, output))
+        }
     }
 }
 

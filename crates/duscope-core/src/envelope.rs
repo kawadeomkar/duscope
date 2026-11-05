@@ -135,13 +135,12 @@ pub mod values {
         "outside_root",
         "read_only_volume",
     ];
-    /// What `clean`'s plan does with an item (`permanent` arrives with
-    /// `--permanent`).
-    pub const ACTIONS: [&str; 2] = ["trash", "refused"];
-    /// How `clean` deletes (`permanent` arrives with `--permanent`).
-    pub const METHODS: [&str; 1] = ["trash"];
-    /// What became of an item `clean` was told to move.
-    pub const OUTCOMES: [&str; 2] = ["trashed", "failed"];
+    /// What `clean`'s plan does with an item.
+    pub const ACTIONS: [&str; 3] = ["trash", "permanent", "refused"];
+    /// How `clean` deletes: to the Trash, or `--permanent`.
+    pub const METHODS: [&str; 2] = ["trash", "permanent"];
+    /// What became of an item `clean` was told to move or delete.
+    pub const OUTCOMES: [&str; 3] = ["trashed", "deleted", "failed"];
 }
 
 /// `values` with null, for a nullable field's values.
@@ -1241,11 +1240,12 @@ impl serde::Serialize for SqlValue {
 
 /// What `clean` prints under `--json`: the plan and what became of it, with
 /// the conventions' error object where nothing, or not everything, was moved
-/// (`ok` false): `confirmation_required`, `refused_path`, `trash_unavailable`.
+/// or deleted (`ok` false): `confirmation_required`, `refused_path`,
+/// `expectation_mismatch`, `trash_unavailable`, `path_changed`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct CleanEnvelope {
-    /// Whether every item of the plan was moved to the Trash.
+    /// Whether every item of the plan was moved to the Trash, or deleted.
     pub ok: bool,
     /// The version of the envelope's shape.
     pub schema_version: &'static str,
@@ -1281,21 +1281,31 @@ pub struct CleanQuery {
     pub yes: bool,
     /// `--skip-refused`: move what is not refused.
     pub skip_refused: bool,
+    /// `--permanent`: delete the items rather than move them to the Trash.
+    pub permanent: bool,
+    /// `--expect-bytes`: what the plan must free, within 1%, before anything
+    /// is touched; null without it.
+    pub expect_bytes: Option<u64>,
 }
 
-/// The plan, and what moving it did. Moving to the Trash frees nothing until
-/// the Trash is emptied: `trashed_bytes` counts what moved, `freed_bytes` is
-/// 0.
+/// The plan, and what acting on it did. Moving to the Trash frees nothing
+/// until the Trash is emptied: `trashed_bytes` counts what moved, and
+/// `freed_bytes` is set only by `--permanent`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct CleanResult {
-    /// What would be moved, and what is refused.
+    /// What would be moved or deleted, and what is refused.
     pub plan: CleanPlan,
     /// The items moved to the Trash.
     pub trashed_count: u64,
     /// Their bytes on disk, still taken until the Trash is emptied.
     pub trashed_bytes: u64,
-    /// The bytes freed: 0, since the Trash keeps what it holds.
+    /// The items `--permanent` deleted, each with everything under it.
+    pub deleted_count: u64,
+    /// The bytes on disk `--permanent` freed, as `du` counts them: each
+    /// inode whose last link it removed, and each directory, including what
+    /// an item that failed part way had lost by then; 0 for the Trash, which
+    /// keeps what it holds.
     pub freed_bytes: u64,
 }
 
@@ -1305,11 +1315,11 @@ pub struct CleanResult {
 pub struct CleanPlan {
     /// Each item, in the order given.
     pub items: Vec<PlanItem>,
-    /// The bytes on disk of the items to move.
+    /// The bytes on disk of the items to move or delete.
     pub total_allocated_bytes: u64,
     /// What deleting them would free now, their sharers outside them kept.
     pub total_frees_bytes: u64,
-    /// `trash`.
+    /// `trash`, or `permanent`.
     #[cfg_attr(test, schemars(extend("anyOf" = known(values::METHODS))))]
     pub method: &'static str,
     /// Whether the plan waits for `--yes`, or `yes` typed at the prompt.
@@ -1349,17 +1359,17 @@ pub struct PlanItem {
     /// The command that regenerates it, when a cache rule says so.
     #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::REGENERABLE_BY)))))]
     pub regenerable_by: Option<&'static str>,
-    /// `trash`, or `refused`.
+    /// `trash`, `permanent` (the plan's method), or `refused`.
     #[cfg_attr(test, schemars(extend("anyOf" = known(values::ACTIONS))))]
     pub action: &'static str,
     /// Why it is refused; null when it is not.
     #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::REFUSALS)))))]
     pub reason: Option<&'static str>,
-    /// `trashed` or `failed` once `clean` acted; null in a dry run and for a
-    /// refused item.
+    /// `trashed`, `deleted` or `failed` once `clean` acted; null in a dry run
+    /// and for a refused item.
     #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::OUTCOMES)))))]
     pub outcome: Option<&'static str>,
-    /// Why moving it failed; null otherwise.
+    /// Why moving or deleting it failed; null otherwise.
     pub error: Option<ErrorObject>,
 }
 

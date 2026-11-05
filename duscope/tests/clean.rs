@@ -5,6 +5,11 @@
 //! the account's Trash whatever `HOME` says, which the test environment
 //! refuses (`DUSCOPE_TEST_TRASH`). Nothing here moves a file of the shared
 //! fixture tree: its plans are dry runs.
+//!
+//! P5-CORE-03: `--permanent` deletes the test's own trees, and `du` before
+//! and after measures what went; `--expect-bytes` at the edges of its 1%.
+//! The race `--permanent` guards against is the library's test, between
+//! the plan and the deletion (`duscope-core`'s `clean` tests).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -484,5 +489,220 @@ impl Drop for Detach<'_> {
             .args(["detach", "-force"])
             .arg(&self.1)
             .output();
+    }
+}
+
+/// `du -sk` of `path`, in bytes.
+fn du(env: &TestEnv, path: &Path) -> u64 {
+    let out = env.command("du").arg("-sk").arg(path).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let kib: u64 = text.split_whitespace().next().unwrap().parse().unwrap();
+    kib * 1024
+}
+
+/// `n` with a comma between each group of three digits, as messages print
+/// it.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[test]
+fn p5_core_03_du_before_and_after_equals_freed_bytes() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    // Under dir: a directory two deep, two links of one file, and a file
+    // whose other link stays beside it, outside the plan.
+    fs::create_dir_all(root.join("dir/sub/deep")).unwrap();
+    fs::write(root.join("dir/sub/deep/c.bin"), vec![3u8; 70_000]).unwrap();
+    fs::write(root.join("dir/h1.bin"), vec![4u8; 20_000]).unwrap();
+    fs::hard_link(root.join("dir/h1.bin"), root.join("dir/sub/h2.bin")).unwrap();
+    fs::write(root.join("dir/kept.bin"), vec![5u8; 30_000]).unwrap();
+    fs::hard_link(root.join("dir/kept.bin"), root.join("kept-link.bin")).unwrap();
+    let id = save(&env, &root);
+    let file = root.join("a.bin");
+    let dir = root.join("dir");
+    // Without --yes, the plan says what it would delete, and nothing goes.
+    let plan = failed(
+        &run(&env, &["clean", s(&file), s(&dir), "--permanent", "--json"]),
+        1,
+        "confirmation_required",
+    );
+    assert_eq!(plan["query"]["permanent"], true);
+    assert_eq!(plan["result"]["plan"]["method"], "permanent");
+    assert_eq!(actions(&plan), ["permanent:", "permanent:"]);
+    assert_eq!(
+        plan["error"]["message"],
+        "nothing was deleted: clean deletes items only with --yes"
+    );
+    let next = plan["next"][0].as_str().unwrap();
+    assert!(next.ends_with(" --permanent --yes"), "{next}");
+    assert!(file.exists() && dir.exists());
+    let planned = plan["result"]["plan"]["total_frees_bytes"]
+        .as_u64()
+        .unwrap();
+
+    let before = du(&env, &root);
+    let value = ok(&run(
+        &env,
+        &["clean", s(&file), s(&dir), "--permanent", "--yes", "--json"],
+    ));
+    let after = du(&env, &root);
+    let freed = value["result"]["freed_bytes"].as_u64().unwrap();
+    assert_eq!(before - after, freed, "du {before} then {after}");
+    assert!(freed > 0);
+    // The scan is the tree as it was: the plan's figure is what went.
+    assert_eq!(freed, planned);
+    assert_eq!(value["result"]["deleted_count"], 2);
+    assert_eq!(value["result"]["trashed_count"], 0);
+    let items = &value["result"]["plan"]["items"];
+    assert_eq!(items[0]["outcome"], "deleted");
+    assert_eq!(items[1]["outcome"], "deleted");
+    assert!(fs::symlink_metadata(&file).is_err() && fs::symlink_metadata(&dir).is_err());
+    assert_eq!(
+        fs::read(root.join("kept-link.bin")).unwrap(),
+        vec![5u8; 30_000]
+    );
+    assert_eq!(value["warnings"][0]["code"], "index_untouched");
+    assert_eq!(value["next"][0], format!("duscope rescan {id}"));
+    // A refused item stops a permanent run as it does a move.
+    let out = run(
+        &env,
+        &[
+            "clean",
+            s(&root.join("kept-link.bin")),
+            s(&root.join("link")),
+            "--permanent",
+            "--yes",
+            "--json",
+        ],
+    );
+    let value = failed(&out, 1, "refused_path");
+    assert_eq!(
+        value["error"]["message"],
+        "1 of the 2 items cannot be deleted, so nothing was deleted"
+    );
+    assert!(root.join("kept-link.bin").exists());
+}
+
+#[test]
+fn p5_core_03_expect_bytes_within_one_percent_or_nothing_is_touched() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    fs::write(root.join("c.bin"), vec![3u8; 70_000]).unwrap();
+    let id = save(&env, &root);
+    let frees = |path: &Path| {
+        let plan = failed(
+            &run(&env, &["clean", s(path), "--permanent", "--json"]),
+            1,
+            "confirmation_required",
+        );
+        plan["result"]["plan"]["total_frees_bytes"]
+            .as_u64()
+            .unwrap()
+    };
+    let expect = |path: &Path, n: u64| {
+        run(
+            &env,
+            &[
+                "clean",
+                s(path),
+                "--permanent",
+                "--expect-bytes",
+                &n.to_string(),
+                "--yes",
+                "--json",
+            ],
+        )
+    };
+    // The smallest and the largest N whose 1% holds the plan's figure, and
+    // a byte past each.
+    let file = root.join("a.bin");
+    let total = frees(&file);
+    let lowest = (100 * total).div_ceil(101);
+    let highest = 100 * total / 99;
+    for n in [lowest - 1, highest + 1] {
+        let value = failed(&expect(&file, n), 1, "expectation_mismatch");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains(&thousands(total)) && message.contains(&thousands(n)),
+            "{message}"
+        );
+        // The person approved another figure: theirs to look at again.
+        assert_eq!(value["error"]["fixable_by"], "user");
+        assert_eq!(value["query"]["expect_bytes"], n);
+        assert_eq!(value["result"]["deleted_count"], 0);
+        assert_eq!(value["result"]["plan"]["confirmation_required"], false);
+        assert_eq!(value["next"], serde_json::json!([]));
+        assert!(file.exists());
+    }
+    let value = ok(&expect(&file, highest));
+    assert_eq!(value["result"]["deleted_count"], 1);
+    assert!(!file.exists());
+    let other = root.join("c.bin");
+    let total = frees(&other);
+    let value = ok(&expect(&other, (100 * total).div_ceil(101)));
+    assert_eq!(value["result"]["freed_bytes"], total);
+    assert!(!other.exists());
+
+    // The Trash too, and a dry run: the figure is checked before anything,
+    // and a plan that meets it waits for --yes as any does.
+    let dir = root.join("dir");
+    let value = failed(
+        &run(
+            &env,
+            &["clean", s(&dir), "--expect-bytes", "1", "--yes", "--json"],
+        ),
+        1,
+        "expectation_mismatch",
+    );
+    assert_eq!(value["result"]["trashed_count"], 0);
+    assert!(dir.exists());
+    let total = failed(
+        &run(&env, &["clean", s(&dir), "--json"]),
+        1,
+        "confirmation_required",
+    )["result"]["plan"]["total_frees_bytes"]
+        .as_u64()
+        .unwrap();
+    let n = total.to_string();
+    let value = failed(
+        &run(&env, &["clean", s(&dir), "--expect-bytes", &n, "--json"]),
+        1,
+        "confirmation_required",
+    );
+    assert_eq!(
+        value["next"][0],
+        format!(
+            "duscope clean {} --scan {id} --expect-bytes {n} --yes",
+            s(&dir)
+        )
+    );
+    let out = run(
+        &env,
+        &["clean", s(&dir), "--expect-bytes", &n, "--yes", "--json"],
+    );
+    if cfg!(target_os = "macos") {
+        // The test environment refuses the startup volume's Trash; the hint
+        // names the other way.
+        let value = failed(&out, 1, "trash_unavailable");
+        let hint = value["error"]["hint"].as_str().unwrap();
+        assert!(hint.contains("--permanent"), "{hint}");
+        assert!(dir.exists());
+    } else {
+        assert_eq!(ok(&out)["result"]["trashed_count"], 1);
+        assert!(!dir.exists());
     }
 }

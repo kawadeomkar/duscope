@@ -28,6 +28,7 @@ mod scheduler;
 mod tests;
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic;
@@ -46,10 +47,11 @@ pub use entry::{
     Boundary, DirId, Entry, Extents, Flags, FsEventsMark, FullAttrs, Kind, NameRef, Normalization,
     ScanEvent, Share, Skip, VolumeClass, VolumeInfo,
 };
-pub use errors::{FsEventsError, ScanError, TrashError, WalkError};
+pub use errors::{FsEventsError, RemoveError, ScanError, TrashError, WalkError};
 pub use excludes::IgnoreRules;
 pub use mem::MemProvider;
 pub use options::{Attrs, CONTAINERS, CacheRule, Counters, WalkOptions};
+pub use platform::CheckedDir;
 
 use counters::{Flushing, Slot, Timer};
 use excludes::Excludes;
@@ -551,6 +553,49 @@ pub fn cache_dir(home: &Path) -> PathBuf {
 /// [`TrashError::Unavailable`].
 pub fn move_to_trash(path: &Path) -> Result<(), TrashError> {
     platform::trash(path)
+}
+
+/// Deletes `name`, any entry but a directory (a symbolic link itself, never
+/// what it leads to), from `parent`, as `clean --permanent` does: only when
+/// its device and inode, read through `parent`'s descriptor without
+/// following a link, are `expect`. Adds to `freed` its bytes on disk when
+/// this was its last link.
+///
+/// # Errors
+///
+/// [`RemoveError::Changed`] when the entry is gone, is another device and
+/// inode, or is a directory; [`RemoveError::Io`] when it cannot be removed.
+pub fn unlink_checked(
+    parent: &CheckedDir,
+    name: &OsStr,
+    expect: (u64, u64),
+    freed: &mut u64,
+) -> Result<(), RemoveError> {
+    platform::unlink_checked(parent, name, expect, freed)
+}
+
+/// Deletes the directory `name` and everything under it from `parent`, as
+/// `clean --permanent` does: only when its device and inode are `expect`;
+/// then depth first through each directory's descriptor, each opened with
+/// `O_NOFOLLOW | O_DIRECTORY` and checked to be the directory just read,
+/// never into a directory of another device or a mount point, removed
+/// bottom up with `AT_REMOVEDIR`. Adds to `freed`, as it goes, the bytes on
+/// disk of each inode whose last link it removed and of each directory.
+///
+/// # Errors
+///
+/// [`RemoveError::Changed`] when the directory, or one under it, is gone or
+/// is not what was just read of it; [`RemoveError::Mount`] for a mount
+/// point or another device's directory under it, which stays with every
+/// directory above it; [`RemoveError::Io`] when an entry cannot be read or
+/// removed. What was removed before the failure stays removed.
+pub fn remove_dir_checked(
+    parent: &CheckedDir,
+    name: &OsStr,
+    expect: (u64, u64),
+    freed: &mut u64,
+) -> Result<(), RemoveError> {
+    platform::remove_dir_checked(parent, name, expect, freed)
 }
 
 /// Whether `path` itself is a macOS firmlink, by the system's table of them

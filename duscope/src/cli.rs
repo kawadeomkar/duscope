@@ -233,11 +233,11 @@ pub struct ExplainArgs {
     pub caches_extra: Option<PathBuf>,
 }
 
-/// `clean`'s arguments: what to move to the Trash, named by path or by a
-/// handle from `explain --json`, and whether to move it.
+/// `clean`'s arguments: what to move to the Trash or delete, named by path
+/// or by a handle from `explain --json`, and whether to act.
 #[derive(Debug, Clone, Args)]
 pub struct CleanArgs {
-    /// The paths to move to the Trash
+    /// The paths to move to the Trash (or delete, with --permanent)
     #[arg(value_name = "PATH", required_unless_present = "from")]
     pub paths: Vec<PathBuf>,
 
@@ -247,9 +247,23 @@ pub struct CleanArgs {
     #[arg(long = "from", value_name = "HANDLE")]
     pub from: Vec<String>,
 
-    /// Move the items to the Trash; without it the plan is only shown
+    /// Move the items to the Trash, or delete them; without it the plan is only shown
     #[arg(long, help_heading = "Clean")]
     pub yes: bool,
+
+    /// Delete the items rather than move them to the Trash; nothing brings them back
+    ///
+    /// Each item is checked to be what the plan saw just before it goes
+    ///
+    /// A directory goes with all under it, never through a link or across a mount
+    #[arg(long, help_heading = "Clean")]
+    pub permanent: bool,
+
+    /// Act only if the plan frees within 1% of N bytes (its total_frees_bytes)
+    ///
+    /// Otherwise nothing is touched and clean fails with expectation_mismatch
+    #[arg(long, value_parser = parse_size, value_name = "N", help_heading = "Clean")]
+    pub expect_bytes: Option<u64>,
 
     /// Never ask: without --yes, answer confirmation_required
     #[arg(long, help_heading = "Clean")]

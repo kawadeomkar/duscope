@@ -134,6 +134,34 @@ impl FsEventsError {
     }
 }
 
+/// Why an entry was not removed, or not wholly: what was removed before the
+/// failure stays removed.
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveError {
+    /// What is at `path` is not what was expected: gone, another device and
+    /// inode, or a symbolic link or a file where a directory was.
+    #[error("{} is not what the plan saw: it has gone or been replaced", path.display())]
+    Changed {
+        /// The path, the entry's or one on the way to it or under it.
+        path: PathBuf,
+    },
+    /// A mount point under the directory being removed: never entered, so
+    /// it and every directory above it stay.
+    #[error("{} is a mount point, which is never crossed", path.display())]
+    Mount {
+        /// The mount point.
+        path: PathBuf,
+    },
+    /// The system refused to open, read or remove `path`.
+    #[error("cannot remove {}: {source}", path.display())]
+    Io {
+        /// The path.
+        path: PathBuf,
+        /// Why.
+        source: io::Error,
+    },
+}
+
 /// An entry that was listed but could not be read: one `scan_errors` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanError {
