@@ -984,6 +984,7 @@ mod tests {
             total_bytes: 0,
             free_bytes: 0,
             reason,
+            fsevents: None,
         }
     }
 

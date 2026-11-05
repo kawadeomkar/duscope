@@ -311,6 +311,30 @@ pub struct VolumeInfo {
     pub free_bytes: u64,
     /// Why the walk did not enter the volume; `None` when it did.
     pub reason: Option<Skip>,
+    /// Where the volume stood in its `FSEvents` history when the walk
+    /// started, for a later rescan to ask what changed since (macOS). `None`
+    /// on Linux, for a volume the walk did not enter, for one `FSEvents`
+    /// keeps no history of, and from [`walk_with`](crate::walk_with), whose
+    /// provider may read no real filesystem.
+    pub fsevents: Option<FsEventsMark>,
+}
+
+/// A volume's place in its `FSEvents` history: the `scan_volumes` columns
+/// `fsevents_uuid`, `fsevents_event_id` and `os_build`, which a rescan hands
+/// back to [`fsevents::replay`](crate::fsevents::replay).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FsEventsMark {
+    /// The UUID of the volume's `FSEvents` database
+    /// (`FSEventsCopyUUIDForDevice`), upper-case and hyphenated; another
+    /// UUID means another history, whose event ids say nothing of this one.
+    pub uuid: String,
+    /// The system's latest event id, sampled before the walk read the root
+    /// (`FSEventsGetCurrentEventId`): every change after it has a larger id.
+    pub event_id: u64,
+    /// The build of the system that sampled it (`kern.osversion`, such as
+    /// `25G332`): an upgrade can discard the history without changing the
+    /// UUID.
+    pub os_build: String,
 }
 
 impl VolumeInfo {

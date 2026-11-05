@@ -290,5 +290,6 @@ fn describe(dev: u64, mount: Mount, total_bytes: u64, free_bytes: u64) -> Volume
         total_bytes,
         free_bytes,
         reason: None,
+        fsevents: None,
     }
 }

@@ -67,6 +67,7 @@ fn describe(fs: &libc::statfs, dev: u64) -> VolumeInfo {
         total_bytes: fs.f_blocks.saturating_mul(block),
         free_bytes: fs.f_bavail.saturating_mul(block),
         reason: None,
+        fsevents: None,
     }
 }
 

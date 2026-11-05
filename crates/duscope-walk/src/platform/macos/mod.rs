@@ -4,6 +4,7 @@
 
 mod bulk;
 mod ffi;
+pub(in crate::platform) mod fsevents;
 mod stat;
 #[cfg(test)]
 mod tests;

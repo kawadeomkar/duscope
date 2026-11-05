@@ -19,6 +19,7 @@ mod counters;
 mod entry;
 mod errors;
 mod excludes;
+pub mod fsevents;
 mod mem;
 mod options;
 mod platform;
@@ -42,10 +43,10 @@ use crossbeam_utils::CachePadded;
 
 pub use counters::{WalkPhases, WorkerCounts};
 pub use entry::{
-    Boundary, DirId, Entry, Flags, FullAttrs, Kind, NameRef, Normalization, ScanEvent, Share, Skip,
-    VolumeClass, VolumeInfo,
+    Boundary, DirId, Entry, Flags, FsEventsMark, FullAttrs, Kind, NameRef, Normalization,
+    ScanEvent, Share, Skip, VolumeClass, VolumeInfo,
 };
-pub use errors::{ScanError, TrashError, WalkError};
+pub use errors::{FsEventsError, ScanError, TrashError, WalkError};
 pub use excludes::IgnoreRules;
 pub use mem::MemProvider;
 pub use options::{Attrs, CONTAINERS, CacheRule, Counters, WalkOptions};
@@ -440,6 +441,11 @@ pub struct WalkSummary {
 /// under [`WalkOptions::fallback`], delivering every entry to `sink`.
 /// [`walk_with`] walks with a given provider.
 ///
+/// Before it reads the root it samples the system's `FSEvents` event id
+/// (macOS), and every volume it enters carries its mark at that id
+/// ([`VolumeInfo::fsevents`]): a change made after the sample has a larger
+/// id, so a rescan replaying from it misses nothing the walk did not see.
+///
 /// # Errors
 ///
 /// As [`walk_with`], and [`WalkError::NoProvider`] on a platform other
@@ -455,7 +461,13 @@ pub fn walk(
         platform::native()
     };
     let provider = provider.ok_or(WalkError::NoProvider)?;
-    walk_with(&*provider, root, opts, sink)
+    let now = fsevents::current_event_id();
+    walk_with(
+        &*provider,
+        root,
+        opts,
+        fsevents::marking(now, fsevents::mark, sink),
+    )
 }
 
 /// Sets the process up for walking: raises the descriptor limit, grows the
