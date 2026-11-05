@@ -165,6 +165,49 @@ fn p2_idx_02_a_write_failure_after_the_output_exits_1() {
     assert!(scans(&dir).is_empty());
 }
 
+/// The write starts only after the output is out (DEV-108): with stdout and
+/// stderr on one file, so that the file holds their writes in the order they
+/// were made, the envelope comes before the line of a write that fails at
+/// its first step.
+#[test]
+fn p2_idx_02_the_write_starts_after_the_output() {
+    let env = TestEnv::new();
+    if is_root(&env) {
+        duscope_testkit::skip("root writes into a read-only directory");
+        return;
+    }
+    let root = env.fixtures().case_root("extensions");
+    let dir = env.tmp_dir().join("read-only");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let both = env.tmp_dir().join("both");
+    let file = fs::File::create(&both).unwrap();
+    let status = env
+        .cmd()
+        .args(["scan", root.to_str().unwrap(), "--save", "--json"])
+        .arg("--index-dir")
+        .arg(&dir)
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .status()
+        .unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(status.code(), Some(1));
+    let text = fs::read_to_string(&both).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let envelope = lines
+        .iter()
+        .position(|line| {
+            serde_json::from_str::<serde_json::Value>(line).is_ok_and(|v| v["ok"] == true)
+        })
+        .unwrap_or_else(|| panic!("no envelope: {text}"));
+    let failure = lines
+        .iter()
+        .position(|line| line.contains("cannot write the index"))
+        .unwrap_or_else(|| panic!("no write failure: {text}"));
+    assert!(envelope < failure, "{text}");
+}
+
 #[test]
 fn p2_idx_02_the_index_dir_is_the_flag_then_the_variable_then_the_file() {
     let env = TestEnv::new();
