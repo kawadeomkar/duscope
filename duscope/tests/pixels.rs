@@ -32,7 +32,9 @@ fn p4_tui_07_the_default_build_answers_not_compiled() {
             "{args:?}: {stderr}"
         );
         assert!(
-            stderr.contains("hint: Install with cargo install duscope --features pixels"),
+            stderr.contains(
+                "hint: Install with cargo install duscope --features pixels on Rust 1.90 or later"
+            ),
             "{args:?}: {stderr}"
         );
     }

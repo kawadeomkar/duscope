@@ -192,7 +192,7 @@ fn not_compiled() -> Failure {
         "--treemap pixels needs the pixels feature, which this build does not have",
     )
     .hint(
-        "Install with cargo install duscope --features pixels, or run duscope scan --treemap always for the cell map",
+        "Install with cargo install duscope --features pixels on Rust 1.90 or later, or run duscope scan --treemap always for the cell map",
     )
 }
 
