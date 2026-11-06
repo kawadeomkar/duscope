@@ -11,7 +11,7 @@ pub(in crate::platform) mod trash;
 mod volume;
 
 pub(super) use stat::from_stat;
-pub(super) use volume::{full_disk_access_missing, host_app, mount_info, of as volume};
+pub(super) use volume::{full_disk_access_missing, host_app, mount_info, of as volume, reaches};
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -107,20 +107,42 @@ impl MacProvider {
     }
 }
 
+/// A firmlink of the System volume: its path, and the directory of the Data
+/// volume it leads to, relative to that volume's root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Firmlink {
+    source: PathBuf,
+    target: PathBuf,
+}
+
+impl Firmlink {
+    /// The firmlink a line of the system's table describes: a source path,
+    /// a tab, and its place on the Data volume. A line without that place is
+    /// read as naming the same path there, as every line of the table does.
+    fn parse(line: &[u8]) -> Option<Firmlink> {
+        let mut fields = line.split(|&b| b == b'\t');
+        let source = fields.next()?;
+        let same = source.strip_prefix(b"/").filter(|rel| !rel.is_empty())?;
+        let target = fields.next().filter(|t| !t.is_empty()).unwrap_or(same);
+        Some(Firmlink {
+            source: PathBuf::from(OsStr::from_bytes(source)),
+            target: PathBuf::from(OsStr::from_bytes(target)),
+        })
+    }
+}
+
 /// The firmlinks of the System volume (`/usr/share/firmlinks`: a source
 /// path and its place on the Data volume per line). This system table and
 /// Linux's `/proc/self/mountinfo` are the only files the scanner reads
 /// beside the `CACHEDIR.TAG` check: they describe the layout, not the data.
-fn firmlinks() -> &'static [PathBuf] {
-    static FIRMLINKS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+fn firmlinks() -> &'static [Firmlink] {
+    static FIRMLINKS: OnceLock<Vec<Firmlink>> = OnceLock::new();
     FIRMLINKS.get_or_init(|| {
         let Ok(text) = fs::read("/usr/share/firmlinks") else {
             return Vec::new();
         };
         text.split(|&b| b == b'\n')
-            .filter_map(|line| line.split(|&b| b == b'\t').next())
-            .filter(|source| source.starts_with(b"/"))
-            .map(|source| PathBuf::from(OsStr::from_bytes(source)))
+            .filter_map(Firmlink::parse)
             .collect()
     })
 }
@@ -136,7 +158,7 @@ fn data_volume() -> Option<u64> {
     static DATA: OnceLock<Option<u64>> = OnceLock::new();
     *DATA.get_or_init(|| {
         let opts = WalkOptions::default();
-        firmlinks().iter().find_map(|source| {
+        firmlinks().iter().find_map(|Firmlink { source, .. }| {
             let name = NameRef::from(source.file_name()?);
             Some(stat::entry_of_path(source, name, &opts).ok()?.dev)
         })
@@ -332,7 +354,11 @@ impl Provider for MacProvider {
         // The walk root's own path, resolved: below a followed link the
         // directory's path is the link's target, not under the root.
         let root = self.real_root(dir.ancestors().last()?.path())?;
-        let sources: Vec<&PathBuf> = firmlinks().iter().filter(|s| s.exists()).collect();
+        let sources: Vec<&PathBuf> = firmlinks()
+            .iter()
+            .map(|link| &link.source)
+            .filter(|s| s.exists())
+            .collect();
         let every = !sources.is_empty() && sources.iter().all(|source| source.starts_with(&root));
         let skip = if firmlink {
             !every && !opts.one_file_system && Path::new(DATA_MOUNT).starts_with(&root)

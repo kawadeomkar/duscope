@@ -601,6 +601,17 @@ pub fn full_disk_access_missing(home: &Path) -> bool {
     platform::full_disk_access_missing(home)
 }
 
+/// Whether a walk of `root` under `opts` reaches `path`, both absolute and
+/// resolved, by their paths: `path` is `root` or lies below it, by any path
+/// the system gives it. On macOS a directory of the Data volume has two,
+/// one through the firmlinks (`/Users/a`) and one under the volume's own
+/// mount point (`/System/Volumes/Data/Users/a`); resolving a path keeps the
+/// one given, and the walk reaches the directory by either, as its rule for
+/// the Data volume enters one or the other. Elsewhere a directory has one.
+pub fn reaches(root: &Path, path: &Path, opts: &WalkOptions) -> bool {
+    platform::reaches(root, path, opts)
+}
+
 /// The app a Full Disk Access grant for this process belongs to: on macOS
 /// the app bundle the nearest such ancestor process runs from, named by its
 /// outermost bundle (`Terminal`, `iTerm`, `Visual Studio Code`, `Claude`),

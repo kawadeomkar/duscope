@@ -263,6 +263,27 @@ pub(crate) fn full_disk_access_missing(_home: &std::path::Path) -> bool {
     tcc_denied()
 }
 
+/// Whether a walk of `root` under `opts` reaches `path`.
+#[cfg(target_os = "macos")]
+pub(crate) fn reaches(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    opts: &crate::WalkOptions,
+) -> bool {
+    macos::reaches(root, path, opts)
+}
+
+/// Whether a walk of `root` reaches `path`: a directory has one path on
+/// this platform, so `path` is `root` or lies below it.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn reaches(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    _opts: &crate::WalkOptions,
+) -> bool {
+    path.starts_with(root)
+}
+
 /// The app a Full Disk Access grant for this process belongs to.
 #[cfg(target_os = "macos")]
 pub(crate) fn host_app() -> Option<String> {

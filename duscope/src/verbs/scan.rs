@@ -570,7 +570,8 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     // before the walk meets them.
     let full_disk_access_missing = home.as_deref().is_some_and(|home| {
         let home = resolve_path(&cwd, Path::new(home)).real;
-        holds_protected_folders(&root, &home) && duscope_walk::full_disk_access_missing(&home)
+        holds_protected_folders(&root, &home, &opts)
+            && duscope_walk::full_disk_access_missing(&home)
     });
     // The walk's setup, before the interrupt watcher starts a thread.
     duscope_walk::prepare();
@@ -795,11 +796,13 @@ impl DirErrors {
     }
 }
 
-/// Whether a scan of `root` meets the folders of `home` that macOS's privacy
-/// protections cover, the Full Disk Access probe's: a root that is the home,
-/// above it (`/`) or its `Library`.
-fn holds_protected_folders(root: &Path, home: &Path) -> bool {
-    home.join("Library").starts_with(root)
+/// Whether a scan of `root` under `opts` meets the folders of `home` that
+/// macOS's privacy protections cover, the Full Disk Access probe's: a root
+/// that is the home, above it (`/`) or its `Library`, by any path the
+/// system gives them (on macOS also the Data volume's own,
+/// `/System/Volumes/Data/Users/a`, which resolving the root keeps).
+fn holds_protected_folders(root: &Path, home: &Path, opts: &WalkOptions) -> bool {
+    duscope_walk::reaches(root, &home.join("Library"), opts)
 }
 
 /// The walk options the flags ask for; `home` is the directory whose
@@ -1254,9 +1257,10 @@ mod tests {
     #[test]
     fn p5_walk_03_the_probe_runs_for_roots_holding_the_home_library() {
         let home = Path::new("/Users/a");
+        let opts = WalkOptions::default();
         for root in ["/", "/Users", "/Users/a", "/Users/a/Library"] {
             assert!(
-                super::holds_protected_folders(Path::new(root), home),
+                super::holds_protected_folders(Path::new(root), home, &opts),
                 "{root}"
             );
         }
@@ -1267,7 +1271,7 @@ mod tests {
             "/tmp",
         ] {
             assert!(
-                !super::holds_protected_folders(Path::new(root), home),
+                !super::holds_protected_folders(Path::new(root), home, &opts),
                 "{root}"
             );
         }

@@ -1,5 +1,6 @@
 //! The volume holding a path, from `statfs(2)` and `pathconf(2)`, and the
-//! platform matrix's class of its filesystem type; and what the privacy
+//! platform matrix's class of its filesystem type; whether a walk reaches a
+//! directory of the Data volume, which has two paths; and what the privacy
 //! protections let this process read of the home on it: the Full Disk
 //! Access probe, and the app a grant belongs to.
 
@@ -9,10 +10,9 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
-use super::bulk;
-use super::ffi;
+use super::{DATA_MOUNT, Firmlink, bulk, ffi, firmlinks};
 use crate::platform::posix;
-use crate::{Normalization, VolumeClass, VolumeInfo};
+use crate::{Normalization, VolumeClass, VolumeInfo, WalkOptions};
 
 /// The volume holding `path`. Free bytes are `f_bavail × f_bsize`, what an
 /// unprivileged user can still write.
@@ -119,6 +119,49 @@ fn c_chars(chars: &[libc::c_char]) -> Vec<u8> {
         .collect()
 }
 
+/// Whether a walk of `root` under `opts` reaches `path`, both absolute and
+/// resolved. A directory of the Data volume has two paths, one through a
+/// firmlink (`/Users/a`) and one under the volume's mount point
+/// (`/System/Volumes/Data/Users/a`), and resolving a path keeps the one it
+/// was given. By the provider's rule for the Data volume (`skip`), a walk
+/// reaches the directory from any root its firmlink path lies under, and
+/// from a root its mount point path lies under when that root is on the
+/// Data volume or the walk enters the mount point, which `-x` keeps out.
+pub(in crate::platform) fn reaches(root: &Path, path: &Path, opts: &WalkOptions) -> bool {
+    reaches_by(firmlinks(), root, path, opts.one_file_system)
+}
+
+/// [`reaches`], by the firmlinks of `table`.
+fn reaches_by(table: &[Firmlink], root: &Path, path: &Path, one_file_system: bool) -> bool {
+    let Some((through, data)) = data_paths(table, path) else {
+        return path.starts_with(root);
+    };
+    let enters_mount = !one_file_system || root.starts_with(DATA_MOUNT);
+    through.is_some_and(|through| through.starts_with(root))
+        || (enters_mount && data.starts_with(root))
+}
+
+/// The two paths of `path`, absolute and resolved, when it lies on the Data
+/// volume by `table`: through the firmlink that leads to it (`None` where
+/// none does) and under the volume's mount point. `None` for a path off the
+/// Data volume, which has one path.
+fn data_paths(table: &[Firmlink], path: &Path) -> Option<(Option<PathBuf>, PathBuf)> {
+    if let Ok(rel) = path.strip_prefix(DATA_MOUNT) {
+        let through = table
+            .iter()
+            .filter_map(|link| Some((link, rel.strip_prefix(&link.target).ok()?)))
+            .max_by_key(|(link, _)| link.target.components().count())
+            .map(|(link, rest)| link.source.join(rest).components().collect());
+        return Some((through, path.to_owned()));
+    }
+    let (link, rest) = table
+        .iter()
+        .filter_map(|link| Some((link, path.strip_prefix(&link.source).ok()?)))
+        .max_by_key(|(link, _)| link.source.components().count())?;
+    let data = Path::new(DATA_MOUNT).join(&link.target).join(rest);
+    Some((Some(path.to_owned()), data.components().collect()))
+}
+
 /// The folders of a home that the privacy protections (TCC) refuse to a
 /// process without Full Disk Access, which the probe opens: a heuristic,
 /// since Full Disk Access has no API.
@@ -223,7 +266,8 @@ fn app_name(path: &Path) -> Option<String> {
 mod tests {
     use std::path::Path;
 
-    use super::{app_name, full_disk_access_missing, host_app, refused};
+    use super::{app_name, full_disk_access_missing, host_app, reaches_by, refused};
+    use crate::WalkOptions;
 
     #[test]
     fn p5_walk_03_the_probe_needs_both_folders_refused() {
@@ -267,5 +311,94 @@ mod tests {
         if let Some(app) = host_app() {
             assert!(!app.is_empty() && !app.contains('/'), "{app}");
         }
+    }
+
+    #[test]
+    fn p5_walk_03_the_data_volume_path_reaches_the_home_library() {
+        let table: Vec<super::Firmlink> = [
+            b"/Users\tUsers".as_slice(),
+            b"/private\tprivate",
+            b"/System/Library/Caches\tSystem/Library/Caches",
+        ]
+        .into_iter()
+        .filter_map(super::Firmlink::parse)
+        .collect();
+        let reaches = |root: &str, path: &str, one_file_system: bool| {
+            reaches_by(&table, Path::new(root), Path::new(path), one_file_system)
+        };
+        let library = "/Users/a/Library";
+        let data_library = "/System/Volumes/Data/Users/a/Library";
+        // The Library, the home or a root above them, by either path: the
+        // walk reaches the Library through the firmlink or on the Data
+        // volume, under -x too. A home given by its Data volume path is the
+        // same directory.
+        for root in [
+            "/",
+            "/Users",
+            "/Users/a",
+            "/Users/a/Library",
+            "/System/Volumes/Data",
+            "/System/Volumes/Data/Users",
+            "/System/Volumes/Data/Users/a",
+            "/System/Volumes/Data/Users/a/Library",
+        ] {
+            for one_file_system in [false, true] {
+                for path in [library, data_library] {
+                    assert!(
+                        reaches(root, path, one_file_system),
+                        "{root} -x {one_file_system} {path}"
+                    );
+                }
+            }
+        }
+        // Above the mount point and below /: the walk meets the Library
+        // through the mount point, which -x keeps out.
+        for root in ["/System", "/System/Volumes"] {
+            for path in [library, data_library] {
+                assert!(reaches(root, path, false), "{root} {path}");
+                assert!(!reaches(root, path, true), "{root} -x {path}");
+            }
+        }
+        // Roots that hold neither path.
+        for root in [
+            "/Users/b",
+            "/Users/a/Documents",
+            "/Users/a/Library/Caches",
+            "/System/Volumes/Data/Users/b",
+            "/System/Volumes/Data/Users/a/Documents",
+            "/System/Volumes/Data/Users/a/Library/Caches",
+            "/System/Volumes/Data/private",
+            "/System/Library",
+            "/private/tmp",
+        ] {
+            for one_file_system in [false, true] {
+                for path in [library, data_library] {
+                    assert!(
+                        !reaches(root, path, one_file_system),
+                        "{root} -x {one_file_system} {path}"
+                    );
+                }
+            }
+        }
+        // A path no firmlink leads to has its one path.
+        assert!(reaches("/opt", "/opt/a", false));
+        assert!(!reaches("/System/Volumes/Data/opt", "/opt/a", false));
+        // A line without its place on the Data volume names the same path.
+        assert_eq!(
+            super::Firmlink::parse(b"/Users"),
+            super::Firmlink::parse(b"/Users\tUsers")
+        );
+        assert_eq!(super::Firmlink::parse(b""), None);
+        assert_eq!(super::Firmlink::parse(b"/"), None);
+        // The system's own table leads /Users onto the Data volume.
+        if super::firmlinks().is_empty() {
+            duscope_testkit::skip("this system has no firmlinks");
+            return;
+        }
+        assert!(super::reaches(
+            Path::new(super::DATA_MOUNT),
+            Path::new(library),
+            &WalkOptions::default()
+        ));
     }
 }

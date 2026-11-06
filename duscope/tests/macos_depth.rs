@@ -10,8 +10,8 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write as _;
-use std::os::unix::fs::symlink;
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt as _, symlink};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use duscope_testkit::{TestEnv, golden, replace_values};
@@ -209,6 +209,45 @@ fn p5_walk_03_a_refused_probe_warns_full_disk_access_missing() {
     let granted = json(&env, &[os("scan"), home.as_os_str()], &[]);
     assert!(!codes(&granted).contains(&"full_disk_access_missing".to_owned()));
     // Warnings never change the exit code; json() asserted success.
+}
+
+#[test]
+fn p5_walk_03_the_probe_runs_for_the_data_volume_path_of_the_home() {
+    let env = TestEnv::new();
+    let home = env.home();
+    fs::create_dir_all(home.join("Documents")).unwrap();
+    // macOS gives a directory of the Data volume a second path, under the
+    // volume's own mount point, which resolving a path keeps as given
+    // (`/System/Volumes/Data/private/var/...` beside `/private/var/...`).
+    // Elsewhere there is no such volume, and nothing to test.
+    let mount = Path::new("/System/Volumes/Data");
+    if !mount.is_dir() {
+        return;
+    }
+    let data = mount.join(home.strip_prefix("/").unwrap());
+    let same = match (fs::metadata(&home), fs::metadata(&data)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    };
+    if !same {
+        duscope_testkit::skip(&format!("{} is not the home", data.display()));
+        return;
+    }
+    let denied = [("DUSCOPE_TEST_TCC", "denied")];
+    // The home by its Data volume path holds the home's Library: the probe
+    // runs, and macOS (mocked) refuses.
+    let scan = json(&env, &[os("scan"), data.as_os_str()], &denied);
+    assert!(
+        codes(&scan).contains(&"full_disk_access_missing".to_owned()),
+        "{scan}"
+    );
+    // A root on that path which does not hold the Library: no probe.
+    let documents = json(
+        &env,
+        &[os("scan"), data.join("Documents").as_os_str()],
+        &denied,
+    );
+    assert!(!codes(&documents).contains(&"full_disk_access_missing".to_owned()));
 }
 
 #[test]
