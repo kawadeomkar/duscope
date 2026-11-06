@@ -271,3 +271,42 @@ fn p5_core_02_a_scan_of_the_index_directory_itself_is_swept() {
         stderr(&out)
     );
 }
+
+#[test]
+fn p5_core_02_the_hint_names_the_scan_as_it_was_found() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    // Found through --index-dir, which the environment does not name.
+    let dir = env.work_dir().join("elsewhere");
+    let flag = dir.to_str().unwrap();
+    let id = save(&env, &root, &["--index-dir", flag]);
+    fs::create_dir(root.join("docs/new")).unwrap();
+    let out = run(
+        &env,
+        &["scans", "--check", &id, "--index-dir", flag, "--json"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let hinted = format!("rescan --index-dir {flag} --scan {id}");
+    assert!(
+        stderr(&out).contains(&format!("hint: Run duscope {hinted} to measure")),
+        "{}",
+        stderr(&out)
+    );
+    // The command it names runs.
+    let renewed = run(&env, &hinted.split(' ').collect::<Vec<_>>());
+    assert!(renewed.status.success(), "{}", stderr(&renewed));
+    // A copy outside any index directory, read trusted.
+    let copy = env.work_dir().join("copy.db");
+    fs::copy(dir.join("scans").join(format!("{id}.db")), &copy).unwrap();
+    let copy = copy.to_str().unwrap();
+    let out = run(&env, &["scans", "--check", copy, "--trust", copy, "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let hinted = format!("rescan --trust {copy} --scan {copy}");
+    assert!(
+        stderr(&out).contains(&format!("hint: Run duscope {hinted} to measure")),
+        "{}",
+        stderr(&out)
+    );
+    let renewed = run(&env, &hinted.split(' ').collect::<Vec<_>>());
+    assert!(renewed.status.success(), "{}", stderr(&renewed));
+}

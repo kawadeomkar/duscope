@@ -31,7 +31,7 @@ use duscope_core::query::{
 use duscope_core::resolve::resolve_path;
 use duscope_walk::Attrs;
 
-use super::next::Hints;
+use super::next::{self, Hints};
 use super::source::{core_failure, scanned};
 use super::{Exit, Failure};
 use crate::cli::ScansArgs;
@@ -399,7 +399,10 @@ fn check(
         format!("the saved scan {id} is stale: its tree changed since it was taken"),
     )
     .hint(if renewable {
-        format!("Run duscope rescan --scan {id} to measure the tree again")
+        format!(
+            "Run {} to measure the tree again",
+            next::command("rescan", None, &[], &id, index.file())
+        )
     } else {
         format!("Run duscope scan --save {root} to measure the tree again")
     })
