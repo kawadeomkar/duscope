@@ -14,7 +14,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -79,6 +79,12 @@ fn tree(env: &TestEnv) -> PathBuf {
 fn save(env: &TestEnv, root: &Path) -> String {
     let saved = ok(&run(env, &["scan", s(root), "--save", "--json"]));
     saved["scan"]["id"].as_str().unwrap().to_owned()
+}
+
+/// The rescan `next` suggests after a clean of the saved scan `id` of
+/// `root`, in the index directory the test environment names.
+fn rescan(root: &Path, id: &str) -> String {
+    format!("duscope rescan {} --scan {id} --json", s(root))
 }
 
 /// Each item's `action` and `reason`, as `action:reason`.
@@ -385,7 +391,7 @@ fn p4_core_01_linux_a_trashed_file_round_trips() {
     assert_eq!(value["result"]["freed_bytes"], 0);
     assert_eq!(value["result"]["plan"]["confirmation_required"], false);
     assert_eq!(value["warnings"][0]["code"], "index_untouched");
-    assert_eq!(value["next"][0], format!("duscope rescan --scan {id}"));
+    assert_eq!(value["next"][0], rescan(&root, &id));
     // The link itself stays; it dangles now that a.bin, which it names, is
     // in the Trash, so `exists` (which follows it) cannot tell.
     assert!(!file.exists() && !dir.exists());
@@ -576,7 +582,7 @@ fn p5_core_03_du_before_and_after_equals_freed_bytes() {
         vec![5u8; 30_000]
     );
     assert_eq!(value["warnings"][0]["code"], "index_untouched");
-    assert_eq!(value["next"][0], format!("duscope rescan --scan {id}"));
+    assert_eq!(value["next"][0], rescan(&root, &id));
     // A refused item stops a permanent run as it does a move.
     let out = run(
         &env,
@@ -711,23 +717,119 @@ fn p5_core_03_expect_bytes_within_one_percent_or_nothing_is_touched() {
 fn p4_core_01_the_rescan_a_clean_suggests_runs_as_written() {
     let env = TestEnv::new();
     let root = tree(&env);
-    let id = save(&env, &root);
+    // Saved where a command without --index-dir does not look: the hint and
+    // `next` name the directory, as the scan was found.
+    let dir = env.work_dir().join("elsewhere");
+    let flag = s(&dir);
+    let saved = ok(&run(
+        &env,
+        &["scan", s(&root), "--save", "--index-dir", flag, "--json"],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap();
     let file = root.join("a.bin");
     let value = ok(&run(
         &env,
-        &["clean", s(&file), "--permanent", "--yes", "--json"],
+        &[
+            "clean",
+            s(&file),
+            "--permanent",
+            "--yes",
+            "--index-dir",
+            flag,
+            "--json",
+        ],
     ));
-    // `rescan` reads a bare argument as a path, so the saved scan is named
-    // with --scan, in the hint and in `next`.
-    let next = format!("duscope rescan --scan {id}");
-    assert_eq!(value["next"][0], next);
-    let hint = value["warnings"][0]["hint"].as_str().unwrap();
-    assert!(hint.contains(&next), "{hint}");
-    let mut args: Vec<&str> = next.split(' ').skip(1).collect();
-    args.push("--json");
-    let again = ok(&run(&env, &args));
+    let renew = [
+        "rescan",
+        s(&root),
+        "--index-dir",
+        flag,
+        "--scan",
+        id,
+        "--json",
+    ];
+    assert_eq!(
+        value["next"],
+        Value::from(vec![format!("duscope {}", renew.join(" "))])
+    );
+    assert_eq!(
+        value["warnings"][0]["hint"],
+        format!("Run duscope rescan --index-dir {flag} --scan {id} to measure the tree again")
+    );
+    // The command `next` holds runs, and saves a new scan.
+    let again = ok(&run(&env, &renew));
     assert!(
         again["scan"]["id"].as_str().is_some_and(|new| new != id),
         "{again}"
+    );
+}
+
+#[test]
+fn p4_core_01_a_clean_that_changed_nothing_suggests_no_rescan() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    // A directory that cannot be written: its file is not deleted.
+    let dir = root.join("dir");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let out = run(
+        &env,
+        &[
+            "clean",
+            s(&dir.join("b.bin")),
+            "--permanent",
+            "--yes",
+            "--json",
+        ],
+    );
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let value = json(&out);
+    assert_eq!(out.status.code(), Some(1), "{value}");
+    assert_eq!(value["result"]["plan"]["items"][0]["outcome"], "failed");
+    assert_eq!(value["result"]["deleted_count"], 0);
+    assert!(dir.join("b.bin").exists());
+    // Nothing went: the saved scan still matches, and the item's error says
+    // what to do.
+    assert_eq!(value["warnings"], Value::Array(Vec::new()), "{value}");
+    assert_eq!(value["next"], Value::Array(Vec::new()), "{value}");
+}
+
+#[test]
+fn p4_core_01_after_a_clean_an_import_is_renewed_by_a_new_scan() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    let file = env.tmp_dir().join("tree.json");
+    let exported = run(
+        &env,
+        &["export", s(&root), "--format", "ncdu", "-o", s(&file)],
+    );
+    assert!(exported.status.success(), "{exported:?}");
+    let imported = ok(&run(
+        &env,
+        &["import", s(&file), "--format", "ncdu", "--json"],
+    ));
+    let id = imported["scan"]["id"].as_str().unwrap();
+    let value = ok(&run(
+        &env,
+        &[
+            "clean",
+            s(&root.join("a.bin")),
+            "--scan",
+            id,
+            "--permanent",
+            "--yes",
+            "--json",
+        ],
+    ));
+    assert_eq!(value["result"]["deleted_count"], 1, "{value}");
+    // A rescan refuses an import, which has no scan options to scan with.
+    assert_eq!(value["next"], Value::Array(Vec::new()), "{value}");
+    assert_eq!(
+        value["warnings"][0]["hint"],
+        format!(
+            "Run duscope scan --save {} to measure the tree again",
+            s(&root)
+        )
     );
 }
