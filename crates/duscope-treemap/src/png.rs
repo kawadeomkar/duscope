@@ -25,7 +25,7 @@ use flate2::{Compression, Crc};
 
 use crate::Rect;
 use crate::font::{Font, Point};
-use crate::picture::{Canvas, Metrics, PictureOpts, Rgb, draw, rgb_of, shade};
+use crate::picture::{Canvas, Drawing, Metrics, PictureOpts, Rgb, Within, draw, rgb_of, shade};
 
 /// A point in pixels, x right and y down.
 type Spot = (f32, f32);
@@ -48,14 +48,14 @@ pub fn write_png(
     opts: &PictureOpts<'_>,
     out: &mut dyn Write,
 ) -> io::Result<u64> {
-    let (canvas, tiles) = raster(view, opts, Metrics::of(opts))?;
+    let (canvas, drawing) = raster(view, opts, Metrics::of(opts), &Within::default())?;
     canvas.encode(out)?;
-    Ok(tiles)
+    Ok(drawing.tiles)
 }
 
-/// The picture of the scan in `view` drawn at `metrics`, and the number of
-/// tiles painted: the PNG's pixels, and the `pixels` feature's
-/// ([`crate::pixels`]).
+/// The picture of the scan in `view` drawn at `metrics`, `within` saying
+/// where `view` stands in the scan, and what was drawn: the PNG's pixels,
+/// and the `pixels` feature's ([`crate::pixels`]).
 ///
 /// # Errors
 ///
@@ -64,7 +64,8 @@ pub(crate) fn raster(
     view: &dyn TreeView,
     opts: &PictureOpts<'_>,
     metrics: Metrics,
-) -> io::Result<(Png, u64)> {
+    within: &Within<'_>,
+) -> io::Result<(Png, Drawing)> {
     let (width, height) = (usize::from(metrics.width), usize::from(metrics.height));
     if (width * height) as u64 > MAX_PIXELS {
         return Err(io::Error::new(
@@ -81,8 +82,8 @@ pub(crate) fn raster(
         font: Font::inter(),
         font_px: to_f32(metrics.font),
     };
-    let tiles = draw(view, opts, metrics, &mut canvas)?;
-    Ok((canvas, tiles))
+    let drawing = draw(view, opts, metrics, &mut canvas, within)?;
+    Ok((canvas, drawing))
 }
 
 /// The pixels and what draws on them.

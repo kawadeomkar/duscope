@@ -159,7 +159,8 @@ struct Painter<'v, 'o, 'c, V: TreeView + ?Sized> {
     depth_base: u32,
 }
 
-/// A tile of the viewer's map, as [`paint_viewer`] drew it.
+/// A tile of the viewer's map, as [`paint_viewer`] drew it, or as the
+/// map in pixels laid it out ([`crate::pixels::Picture`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Drawn {
     /// The entry it shows; for [`DrawnKind::Small`] and
@@ -167,7 +168,8 @@ pub struct Drawn {
     pub id: u32,
     /// The folder whose block holds it.
     pub parent: u32,
-    /// Where, in half-cell units.
+    /// Where: in half-cell units on the cell map, in pixels on the
+    /// picture.
     pub rect: Rect,
     /// How it is drawn.
     pub kind: DrawnKind,
@@ -179,7 +181,8 @@ pub enum DrawnKind {
     /// One tile: a file, or a folder too small to open.
     Leaf,
     /// An outlined folder, its children inside when `open` (not at the
-    /// `--depth` cap).
+    /// `--depth` cap). The picture draws no outline: its folders whose
+    /// children are laid out inside them are open boxes.
     Box {
         /// Whether its children are drawn.
         open: bool,
@@ -193,7 +196,7 @@ pub enum DrawnKind {
 }
 
 /// Where a zoomed viewer's map stands in the scan, so that its tiles keep
-/// the colours the whole map gives them.
+/// the colours the whole map gives them, in cells and in pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Base {
     /// The depth in the scan of the map's root: 0 for the scan's root.

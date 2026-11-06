@@ -13,11 +13,17 @@
 //!   three, or gives no cell size, gets `None`: the map in cells. The
 //!   picker gives the terminal its modes back once the terminal answers;
 //!   when it does not answer, the modes are put back here.
-//! - **The picture** ([`Pixels::map`]) is `render`'s
+//! - **The picture** ([`Picture::draw`]) is `render`'s
 //!   ([`crate::picture`]), at the map's size in the terminal's pixels
 //!   (columns × the cell's width by rows × its height), without the legend
 //!   and totals under it, which the terminal's own lines carry, and with
 //!   its labels at the terminal's text size: a label's line is one row.
+//!   The viewer's picture may be of the folder it zooms to, in the whole
+//!   map's colours ([`Base`]), and notes the tiles it lays out, so that the
+//!   viewer marks its cursor in the picture itself ([`Picture::marked`]):
+//!   an accent outline around the cursor's tile and its ancestors'
+//!   outlines in the link colour, as the cell map marks them. A cursor
+//!   move encodes the marked picture again; the picture is drawn once.
 //! - **The cells** ([`PixelMap`]) are what the terminal is sent for each
 //!   cell. Kitty's placeholders fill every cell, their colour naming the
 //!   image, the image's transmission in front of the first; Sixel and
@@ -31,10 +37,18 @@
 //!
 //! Without the feature [`COMPILED`] is false, nothing here touches the
 //! terminal, and [`probe`] answers
-//! [`crate::TreemapError::PixelsNotCompiled`].
+//! [`crate::TreemapError::PixelsNotCompiled`]. A [`Picture`] is drawn and
+//! marked either way; only its encoding needs the feature.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
+
+use duscope_core::query::TreeView;
+use duscope_core::rules::Class;
+
+use crate::paint::{Base, Drawn, PaintOpts};
+use crate::picture::{MAX_SIDE, Metrics, PictureOpts, Rgb, Within, rgb_of};
+use crate::{Algorithm, Rect, TreemapError, png};
 
 /// Whether this build has the `pixels` feature.
 pub const COMPILED: bool = cfg!(feature = "pixels");
@@ -155,6 +169,257 @@ impl PixelMap {
     }
 }
 
+/// An image protocol a terminal speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    /// Kitty graphics, through Unicode placeholders.
+    Kitty,
+    /// Sixel.
+    Sixel,
+    /// iTerm2's inline images.
+    Iterm2,
+}
+
+/// A picture's pixels, ready to be encoded for the terminal: `columns` ×
+/// `rows` cells of it, in 8-bit RGB, row by row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Raster {
+    columns: u16,
+    rows: u16,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+impl Raster {
+    /// Its width in pixels.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Its height in pixels.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// The colour of the pixel at `x`, `y`; `None` outside.
+    #[must_use]
+    pub fn pixel(&self, x: u32, y: u32) -> Option<(u8, u8, u8)> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let at = 3 * (y as usize * self.width as usize + x as usize);
+        let rgb = self.pixels.get(at..at + 3)?;
+        Some((rgb[0], rgb[1], rgb[2]))
+    }
+
+    /// Fills the pixels from `x0`, `y0` up to `x1`, `y1` (not included)
+    /// with `rgb`, as far as the picture goes.
+    fn fill(&mut self, (x0, y0): (u32, u32), (x1, y1): (u32, u32), rgb: Rgb) {
+        let (x1, y1) = (x1.min(self.width), y1.min(self.height));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let width = self.width as usize;
+        for y in y0 as usize..y1 as usize {
+            let row = 3 * (y * width);
+            let Some(span) = self
+                .pixels
+                .get_mut(row + 3 * x0 as usize..row + 3 * x1 as usize)
+            else {
+                continue;
+            };
+            for pixel in span.chunks_exact_mut(3) {
+                pixel.copy_from_slice(&[rgb.0, rgb.1, rgb.2]);
+            }
+        }
+    }
+
+    /// Draws the band `thickness` pixels wide just inside `rect`'s edges
+    /// in `rgb`.
+    fn frame(&mut self, rect: Rect, thickness: u32, rgb: Rgb) {
+        let (x, y) = (u32::from(rect.x), u32::from(rect.y));
+        let (right, bottom) = (x + u32::from(rect.w), y + u32::from(rect.h));
+        let t = thickness.min(u32::from(rect.w)).min(u32::from(rect.h));
+        if t == 0 {
+            return;
+        }
+        self.fill((x, y), (right, y + t), rgb);
+        self.fill((x, bottom - t), (right, bottom), rgb);
+        self.fill((x, y + t), (x + t, bottom - t), rgb);
+        self.fill((right - t, y + t), (right, bottom - t), rgb);
+    }
+}
+
+/// The map in pixels before it is encoded: the picture of a tree at a
+/// size in cells, the tiles it laid out, and the colours it marks a cursor
+/// in.
+#[derive(Debug, Clone)]
+pub struct Picture {
+    /// A cell, in pixels.
+    cell: (u16, u16),
+    raster: Raster,
+    /// The tiles laid out, in pixels, with the picture's ids.
+    tiles: Vec<Drawn>,
+    /// The cursor's outline and fill.
+    accent: Rgb,
+    /// The cursor's ancestors' outlines.
+    link: Rgb,
+    /// The line inside the cursor's outline, which sets it off the tile.
+    crust: Rgb,
+}
+
+impl Picture {
+    /// The picture of `view` painted with `paint` (`render`'s) in
+    /// `columns` × `rows` cells of `cell` pixels (width, height): `class_of`
+    /// holds the classes of `view`'s entries by id where they are known
+    /// already, and `base` says where `view`'s root stands in the scan
+    /// (the viewer's zoom), so that its tiles keep the whole map's colours.
+    ///
+    /// # Errors
+    ///
+    /// [`TreemapError::PixelsEncode`] when the picture would be wider or
+    /// taller than [`MAX_SIDE`] pixels, or hold more than
+    /// [`png::MAX_PIXELS`].
+    pub fn draw(
+        view: &dyn TreeView,
+        paint: &PaintOpts<'_>,
+        columns: u16,
+        rows: u16,
+        cell: (u16, u16),
+        class_of: Option<&[Class]>,
+        base: Base,
+    ) -> Result<Picture, TreemapError> {
+        let (cell_w, cell_h) = cell;
+        let side = |cells: u16, cell: u16| {
+            u16::try_from(u32::from(cells) * u32::from(cell))
+                .ok()
+                .filter(|&px| px <= MAX_SIDE)
+                .ok_or_else(|| {
+                    TreemapError::PixelsEncode(format!(
+                        "{columns}×{rows} cells of {cell_w}×{cell_h} pixels pass {MAX_SIDE} pixels"
+                    ))
+                })
+        };
+        let (width, height) = (side(columns, cell_w)?, side(rows, cell_h)?);
+        let opts = PictureOpts {
+            paint: paint.clone(),
+            algorithm: Algorithm::Squarify,
+            width,
+            height,
+            title: String::new(),
+            legend: Vec::new(),
+            summary: String::new(),
+        };
+        let within = Within {
+            base,
+            class_of,
+            note: true,
+        };
+        let (canvas, drawing) = png::raster(view, &opts, metrics(&opts, cell_h), &within)
+            .map_err(|e| TreemapError::PixelsEncode(e.to_string()))?;
+        let roles = paint.pack.roles;
+        Ok(Picture {
+            cell,
+            raster: Raster {
+                columns,
+                rows,
+                width: u32::from(width),
+                height: u32::from(height),
+                pixels: canvas.pixels,
+            },
+            tiles: drawing.drawn,
+            accent: rgb_of(roles.accent),
+            link: rgb_of(roles.link),
+            crust: rgb_of(roles.crust),
+        })
+    }
+
+    /// The tiles laid out, in pixels: each entry's own (a folder whose
+    /// children are laid out inside it as an open box), each folder's pool
+    /// and files, with the ids of the view drawn.
+    #[must_use]
+    pub fn tiles(&self) -> &[Drawn] {
+        &self.tiles
+    }
+
+    /// The whole picture, in pixels.
+    #[must_use]
+    pub fn area(&self) -> Rect {
+        let side = |px: u32| u16::try_from(px).unwrap_or(u16::MAX);
+        Rect::new(0, 0, side(self.raster.width), side(self.raster.height))
+    }
+
+    /// The pixels, unmarked.
+    #[must_use]
+    pub fn raster(&self) -> &Raster {
+        &self.raster
+    }
+
+    /// The pixels, unmarked, for the encoder.
+    #[must_use]
+    pub fn into_raster(self) -> Raster {
+        self.raster
+    }
+
+    /// The pixels with a cursor's marks, as the cell map draws them: the
+    /// outlines of `links` (its ancestors' tiles) in the link colour, then
+    /// an accent outline just inside `cursor` (its tile), set off the tile
+    /// by a line of crust. A tile too small to hold the outline is filled
+    /// with the accent over every cell it touches, as the cell map fills a
+    /// tile under 2×2 cells. The outline is an eighth of a cell's height
+    /// thick (at least 2 pixels), the links half that.
+    #[must_use]
+    pub fn marked(&self, cursor: Rect, links: &[Rect]) -> Raster {
+        let mut raster = self.raster.clone();
+        let (cell_w, cell_h) = (u32::from(self.cell.0), u32::from(self.cell.1));
+        let thick = cell_h.div_ceil(8).max(2);
+        for &link in links {
+            raster.frame(link, (thick / 2).max(1), self.link);
+        }
+        let room = 2 * thick + 2;
+        if u32::from(cursor.w) >= room && u32::from(cursor.h) >= room {
+            raster.frame(cursor, thick, self.accent);
+            // Inside the outline: the cursor's tile is at least 2 × thick
+            // + 2 pixels each way.
+            let t = u16::try_from(thick).unwrap_or(0);
+            let inner = Rect::new(
+                cursor.x + t,
+                cursor.y + t,
+                cursor.w.saturating_sub(2 * t),
+                cursor.h.saturating_sub(2 * t),
+            );
+            raster.frame(inner, 1, self.crust);
+        } else if cell_w > 0 && cell_h > 0 {
+            // The cells it touches, at least one.
+            let (x, y) = (u32::from(cursor.x), u32::from(cursor.y));
+            let right = (x + u32::from(cursor.w).max(1)).div_ceil(cell_w) * cell_w;
+            let bottom = (y + u32::from(cursor.h).max(1)).div_ceil(cell_h) * cell_h;
+            raster.fill(
+                (x / cell_w * cell_w, y / cell_h * cell_h),
+                (right, bottom),
+                self.accent,
+            );
+        }
+        raster
+    }
+}
+
+/// The picture's sizes: `render`'s, with no band under the map and the
+/// labels' font at the terminal's text size, so that a label's line
+/// (1.3 em) is one row of `cell_h` pixels.
+fn metrics(opts: &PictureOpts<'_>, cell_h: u16) -> Metrics {
+    let mut metrics = Metrics::of(opts);
+    metrics.font = (u32::from(cell_h) * 10 / 13).max(8);
+    metrics.cell_w = (metrics.font * 3).div_ceil(5);
+    metrics.cell_h = (metrics.font * 13).div_ceil(10);
+    metrics.footer = false;
+    metrics.map_h = metrics.height;
+    metrics
+}
+
 pub use imp::{Pixels, probe};
 
 #[cfg(feature = "pixels")]
@@ -171,10 +436,9 @@ mod imp {
     use ratatui_image::{Image, Resize};
     use rustix::termios::{self, OptionalActions};
 
-    use super::{PixelCell, PixelMap};
-    use crate::paint::PaintOpts;
-    use crate::picture::{MAX_SIDE, Metrics, PictureOpts};
-    use crate::{Algorithm, TreemapError, png};
+    use super::{Picture, PixelCell, PixelMap, Protocol, Raster};
+    use crate::TreemapError;
+    use crate::paint::{Base, PaintOpts};
 
     /// What draws the map in pixels: ratatui-image's picker, holding the
     /// protocol (Kitty graphics, Sixel or iTerm2) and the cell size the
@@ -229,7 +493,7 @@ mod imp {
         /// # Errors
         ///
         /// [`TreemapError::PixelsEncode`] when the picture would be wider
-        /// or taller than [`MAX_SIDE`] pixels, or its encoder fails.
+        /// or taller than [`crate::picture::MAX_SIDE`] pixels, or its encoder fails.
         pub fn map(
             &self,
             view: &dyn TreeView,
@@ -237,32 +501,41 @@ mod imp {
             columns: u16,
             rows: u16,
         ) -> Result<PixelMap, TreemapError> {
+            let picture = Picture::draw(
+                view,
+                paint,
+                columns,
+                rows,
+                self.cell(),
+                None,
+                Base::default(),
+            )?;
+            self.encode(picture.into_raster())
+        }
+
+        /// The terminal's cell, in pixels (width, height).
+        #[must_use]
+        pub fn cell(&self) -> (u16, u16) {
             let font = self.picker.font_size();
-            let (cell_w, cell_h) = (font.width, font.height);
-            let side = |cells: u16, cell: u16| {
-                u16::try_from(u32::from(cells) * u32::from(cell))
-                    .ok()
-                    .filter(|&px| px <= MAX_SIDE)
-                    .ok_or_else(|| {
-                        TreemapError::PixelsEncode(format!(
-                            "{columns}×{rows} cells of {cell_w}×{cell_h} pixels pass {MAX_SIDE} pixels"
-                        ))
-                    })
-            };
-            let (width, height) = (side(columns, cell_w)?, side(rows, cell_h)?);
-            let opts = PictureOpts {
-                paint: paint.clone(),
-                algorithm: Algorithm::Squarify,
+            (font.width, font.height)
+        }
+
+        /// The cells the terminal is sent for `raster` (a [`Picture`]'s
+        /// pixels, marked or not).
+        ///
+        /// # Errors
+        ///
+        /// [`TreemapError::PixelsEncode`] when its encoder fails.
+        pub fn encode(&self, raster: Raster) -> Result<PixelMap, TreemapError> {
+            let encode = TreemapError::PixelsEncode;
+            let Raster {
+                columns,
+                rows,
                 width,
                 height,
-                title: String::new(),
-                legend: Vec::new(),
-                summary: String::new(),
-            };
-            let encode = TreemapError::PixelsEncode;
-            let (canvas, _) = png::raster(view, &opts, metrics(&opts, cell_h))
-                .map_err(|e| encode(e.to_string()))?;
-            let image = RgbImage::from_raw(u32::from(width), u32::from(height), canvas.pixels)
+                pixels,
+            } = raster;
+            let image = RgbImage::from_raw(width, height, pixels)
                 .ok_or_else(|| encode("the picture's pixels do not fill it".to_owned()))?;
             let protocol = self
                 .picker
@@ -277,19 +550,25 @@ mod imp {
             Image::new(&protocol).render(area, &mut buf);
             Ok(cells(&buf))
         }
-    }
 
-    /// The picture's sizes: `render`'s, with no band under the map and
-    /// the labels' font at the terminal's text size, so that a label's
-    /// line (1.3 em) is one row of `cell_h` pixels.
-    fn metrics(opts: &PictureOpts<'_>, cell_h: u16) -> Metrics {
-        let mut metrics = Metrics::of(opts);
-        metrics.font = (u32::from(cell_h) * 10 / 13).max(8);
-        metrics.cell_w = (metrics.font * 3).div_ceil(5);
-        metrics.cell_h = (metrics.font * 13).div_ceil(10);
-        metrics.footer = false;
-        metrics.map_h = metrics.height;
-        metrics
+        /// What draws in `protocol` on a terminal whose cell is `cell`
+        /// pixels (width, height), without asking the terminal: for tests
+        /// and benchmarks, which have none to ask. Always `Some` in a build
+        /// with the feature.
+        #[doc(hidden)]
+        #[must_use]
+        pub fn assume(protocol: Protocol, cell: (u16, u16)) -> Option<Pixels> {
+            // The only constructor that takes a cell size; the picker it
+            // makes is otherwise the one a probe makes.
+            #[allow(deprecated)]
+            let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(cell.0, cell.1));
+            picker.set_protocol_type(match protocol {
+                Protocol::Kitty => ProtocolType::Kitty,
+                Protocol::Sixel => ProtocolType::Sixel,
+                Protocol::Iterm2 => ProtocolType::Iterm2,
+            });
+            Some(Pixels { picker })
+        }
     }
 
     /// What `buf` holds, cell by cell: the cells the diff skips are
@@ -320,7 +599,7 @@ mod imp {
 
     use duscope_core::query::TreeView;
 
-    use super::PixelMap;
+    use super::{PixelMap, Protocol, Raster};
     use crate::TreemapError;
     use crate::paint::PaintOpts;
 
@@ -356,12 +635,36 @@ mod imp {
         ) -> Result<PixelMap, TreemapError> {
             match self.never {}
         }
+
+        /// The terminal's cell, in pixels.
+        #[must_use]
+        pub fn cell(&self) -> (u16, u16) {
+            match self.never {}
+        }
+
+        /// The cells the terminal is sent for `raster`.
+        ///
+        /// # Errors
+        ///
+        /// None: no [`Pixels`] exists without the feature.
+        pub fn encode(&self, _raster: Raster) -> Result<PixelMap, TreemapError> {
+            match self.never {}
+        }
+
+        /// What draws in a protocol without asking the terminal: without
+        /// the feature, nothing.
+        #[doc(hidden)]
+        #[must_use]
+        pub fn assume(_protocol: Protocol, _cell: (u16, u16)) -> Option<Pixels> {
+            None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{COMPILED, PixelCell, PixelMap};
+    use super::{COMPILED, Picture, PixelCell, PixelMap, Raster};
+    use crate::Rect;
 
     fn cell(symbol: &str, fg: Option<(u8, u8, u8)>) -> PixelCell {
         PixelCell {
@@ -472,5 +775,53 @@ mod tests {
         assert_eq!(short.get(1, 0), None);
         let long = PixelMap::new(1, 1, vec![Some(cell("a", None)), Some(cell("b", None))]);
         assert_eq!(long.to_ansi(), "\n\x1b[1A\r\x1b[0ma\x1b[0m\r\n");
+    }
+
+    #[test]
+    fn p4_tui_03_the_cursor_is_outlined_in_the_picture_and_a_small_tile_filled() {
+        let (accent, link, crust, ground) =
+            ((250, 220, 170), (110, 200, 230), (17, 17, 27), (1, 2, 3));
+        let picture = Picture {
+            cell: (10, 20),
+            raster: Raster {
+                columns: 20,
+                rows: 10,
+                width: 200,
+                height: 200,
+                pixels: [ground.0, ground.1, ground.2].repeat(200 * 200),
+            },
+            tiles: Vec::new(),
+            accent,
+            link,
+            crust,
+        };
+        // A tile of 60×40: an accent band 3 pixels thick (an eighth of a
+        // 20-pixel cell), a line of crust inside it; its ancestor's edge in
+        // the link colour, a pixel thick.
+        let marked = picture.marked(Rect::new(20, 40, 60, 40), &[Rect::new(10, 30, 120, 100)]);
+        for d in 0..3 {
+            assert_eq!(marked.pixel(50, 40 + d), Some(accent));
+            assert_eq!(marked.pixel(50, 79 - d), Some(accent));
+            assert_eq!(marked.pixel(20 + d, 60), Some(accent));
+            assert_eq!(marked.pixel(79 - d, 60), Some(accent));
+        }
+        assert_eq!(marked.pixel(50, 43), Some(crust));
+        assert_eq!(marked.pixel(50, 60), Some(ground));
+        assert_eq!(marked.pixel(100, 30), Some(link));
+        assert_eq!(marked.pixel(10, 100), Some(link));
+        assert_eq!(marked.pixel(100, 31), Some(ground));
+        // The picture itself is left as drawn.
+        assert_eq!(picture.raster().pixel(50, 40), Some(ground));
+        // A tile of 5×5 pixels has no room for the outline: the one cell it
+        // lies in is filled; one across a cell's edge fills both cells.
+        let small = picture.marked(Rect::new(23, 44, 5, 5), &[]);
+        assert_eq!(small.pixel(20, 40), Some(accent));
+        assert_eq!(small.pixel(29, 59), Some(accent));
+        assert_eq!(small.pixel(30, 40), Some(ground));
+        assert_eq!(small.pixel(20, 60), Some(ground));
+        let across = picture.marked(Rect::new(27, 44, 5, 5), &[]);
+        assert_eq!(across.pixel(20, 40), Some(accent));
+        assert_eq!(across.pixel(39, 59), Some(accent));
+        assert_eq!(across.pixel(40, 40), Some(ground));
     }
 }

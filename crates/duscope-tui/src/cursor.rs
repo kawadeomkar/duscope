@@ -24,6 +24,10 @@
 //! entry without a tile of its own is marked on the tile that holds it.
 //! The borders and titles of the cursor's ancestors, where they are boxes,
 //! take the link colour.
+//!
+//! With `--treemap pixels` the map shown is the picture, laid out in
+//! pixels: the arrows move among its tiles ([`Cursor::show`]), and the
+//! viewer draws the outlines into the picture ([`Cursor::marks`]).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -166,6 +170,9 @@ pub struct Cursor {
     layouts: RefCell<Layouts>,
     /// The map's size at the last frame, which the keys move on.
     size: Cell<(u16, u16)>,
+    /// With `--treemap pixels`, the picture's tiles at the last frame: the
+    /// map shown, which the arrows move on.
+    shown: RefCell<Option<Rc<Map>>>,
 }
 
 impl Cursor {
@@ -205,6 +212,22 @@ impl Cursor {
     #[cfg(test)]
     pub fn kept(&self) -> usize {
         self.layouts.borrow().kept()
+    }
+
+    /// Shows the cursor on `map` from now on, the tiles of the picture
+    /// drawn over the cells (`--treemap pixels`), which the arrows then
+    /// move among; `None` goes back to the cell map.
+    pub fn show(&self, map: Option<Rc<Map>>) {
+        *self.shown.borrow_mut() = map;
+    }
+
+    /// The map the arrows move on: the picture shown, where it is of the
+    /// visible root, else the cell map.
+    fn moves_on(&self, ctx: &Context<'_>) -> Rc<Map> {
+        match self.shown.borrow().as_ref() {
+            Some(map) if map.root() == self.zoom.root() => Rc::clone(map),
+            _ => self.map(ctx),
+        }
     }
 
     /// Puts the cursor on `id`, under the map's root, the path ending
@@ -292,7 +315,7 @@ impl Cursor {
         let Some(parent) = self.path.parent() else {
             return false;
         };
-        let map = self.map(ctx);
+        let map = self.moves_on(ctx);
         let view = ctx.view;
         let cursor = self.path.cursor();
         let mark = map.mark(view, cursor);
@@ -339,20 +362,9 @@ impl Cursor {
             }
         }
         let view = ctx.view;
-        // The ancestors below the map's root that are boxes.
-        let root = self.zoom.root();
-        let ancestors = self.path.ancestors();
-        let below = ancestors
-            .iter()
-            .position(|&id| id == root)
-            .map_or(ancestors.len(), |i| i + 1);
-        for &id in &ancestors[below..] {
-            if let Some(i) = map.own(id)
-                && matches!(map.tiles()[i].kind, DrawnKind::Box { .. })
-            {
-                let (x, y, w, h) = whole_cells(map.tiles()[i].rect);
-                link(canvas, area, (x, y, w, h));
-            }
+        for i in self.linked(&map) {
+            let (x, y, w, h) = whole_cells(map.tiles()[i].rect);
+            link(canvas, area, (x, y, w, h));
         }
         if view.is_empty() {
             return;
@@ -362,6 +374,40 @@ impl Cursor {
         let name = String::from_utf8_lossy(&view.name(cursor)).into_owned();
         let tag = (name, compact(node.size(ctx.opts.size)));
         mark(canvas, area, map.rect(map.mark(view, cursor)), &tag);
+    }
+
+    /// The tiles of `map` that take the link colour: the cursor's
+    /// ancestors below the map's root that are boxes, outermost first.
+    fn linked(&self, map: &Map) -> Vec<usize> {
+        let root = self.zoom.root();
+        let ancestors = self.path.ancestors();
+        let below = ancestors
+            .iter()
+            .position(|&id| id == root)
+            .map_or(ancestors.len(), |i| i + 1);
+        ancestors[below..]
+            .iter()
+            .filter_map(|&id| map.own(id))
+            .filter(|&i| matches!(map.tiles()[i].kind, DrawnKind::Box { .. }))
+            .collect()
+    }
+
+    /// The cursor's marks on `map` (a picture's tiles, in pixels): the
+    /// rectangle of the tile it is marked on, and those of its ancestors
+    /// that take the link colour, outermost first.
+    #[must_use]
+    pub fn marks(&self, map: &Map, view: &dyn duscope_core::query::TreeView) -> (Rect, Vec<Rect>) {
+        let links = self
+            .linked(map)
+            .into_iter()
+            .map(|i| map.tiles()[i].rect)
+            .collect();
+        let cursor = if view.is_empty() {
+            map.area()
+        } else {
+            map.rect(map.mark(view, self.path.cursor()))
+        };
+        (cursor, links)
     }
 }
 

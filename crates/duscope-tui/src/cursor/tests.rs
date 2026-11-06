@@ -1,6 +1,8 @@
 //! P4-TUI-03: the beam rule on random layouts, the path, the zoom and its
-//! memoised maps, the marks on the map, and scripted navigation over the
-//! canvas's example tree.
+//! memoised maps, the marks on the map, scripted navigation over the
+//! canvas's example tree, and the same in pixels (`--treemap pixels`): the
+//! marks drawn into the picture, the arrows on its tiles, the whole map's
+//! colours when zoomed and the pictures kept per root.
 
 use std::fmt::Write as _;
 use std::path::{Path as FsPath, PathBuf};
@@ -13,7 +15,7 @@ use duscope_core::query::{ArenaView, SizeKind, TreeView, children};
 use duscope_core::rollup::{RollUp, roll_up};
 use duscope_core::rules::Classes;
 use duscope_testkit::golden;
-use duscope_treemap::cells::Depth;
+use duscope_treemap::cells::{Color, Depth};
 use duscope_treemap::packs::Pack;
 use duscope_treemap::paint::{
     Base, ColorBy, DrawnKind, Glyphs, PaintOpts, classes_of, paint_unlabelled, paint_viewer,
@@ -28,7 +30,7 @@ use ratatui_core::terminal::Terminal;
 use super::{Dir, beam};
 use crate::panes::tests::{classes, mockup, opts, status};
 use crate::path::{Path, siblings};
-use crate::zoom::{Mark, Zoom};
+use crate::zoom::{KEPT_PICTURES, Map, Mark, Zoom};
 use crate::{App, Flow, snapshot};
 
 // ---------------------------------------------------------------- the beam
@@ -376,6 +378,90 @@ proptest! {
                     prop_assert!(map.block(parent).contains(&i));
                     prop_assert!(mark != shown);
                 }
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// In pixels, on random trees at random sizes, every arrow lands on
+    /// another tile of the cursor's block in the picture, the map shown,
+    /// or stays; every key leaves the cursor marked on a tile of the
+    /// picture of the map's root, or on the whole picture.
+    #[test]
+    fn p4_tui_03_every_move_in_pixels_lands_on_a_tile_of_the_picture_or_stays(
+        kids in tree_strategy(),
+        (w, h) in (80u16..170, 24u16..50),
+        (pool_files, depth) in (any::<bool>(), prop::option::of(0u32..4)),
+        keys in prop::collection::vec(0usize..12, 1..40),
+    ) {
+        const KEYS: [KeyCode; 12] = [
+            KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right,
+            KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right,
+            KeyCode::Enter, KeyCode::Backspace, KeyCode::Char('z'), KeyCode::Char('Z'),
+        ];
+        let tree = scan(&kids);
+        let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/scan"));
+        let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
+        let opts = PaintOpts {
+            pool_files,
+            depth,
+            ..opts(&mocha, &classes, ColorBy::Type)
+        };
+        let mut app = viewer(&view, opts);
+        // Small cells keep the pictures small.
+        app.draw_in_pixels_unencoded((4, 8));
+        let mut terminal = first_frame(&app, w, h);
+        for k in keys {
+            let before = app.selected();
+            let map = in_picture(&app);
+            let mark = map.mark(&view, before);
+            let flow = press(&mut app, &mut terminal, &key(KEYS[k]));
+            let after = app.selected();
+            let now = in_picture(&app);
+            prop_assert_eq!(now.root(), app.cursor().zoom().root());
+            let shown = now.mark(&view, after);
+            let rect = now.rect(shown);
+            prop_assert!(rect.w > 0 && rect.h > 0);
+            let area = now.area();
+            prop_assert!(rect.x + rect.w <= area.w && rect.y + rect.h <= area.h);
+            if k >= 8 {
+                continue;
+            }
+            // An arrow, by the beam rule on the picture's rectangles.
+            let dir = [Dir::Up, Dir::Down, Dir::Left, Dir::Right][k % 4];
+            let parent = view.node(before).parent;
+            if after == before {
+                prop_assert_eq!(flow, Flow::Wait);
+                // Nothing beyond the edge, or a pool whose largest entry
+                // is the cursor's own.
+                if before != app.cursor().zoom().root() {
+                    let candidates = map
+                        .block(parent)
+                        .iter()
+                        .copied()
+                        .filter(|&i| mark != Mark::Tile(i))
+                        .map(|i| (i, map.tiles()[i].rect));
+                    if let Some(i) = beam(map.rect(mark), dir, candidates) {
+                        prop_assert!(
+                            matches!(map.tiles()[i].kind, DrawnKind::Small | DrawnKind::Files),
+                            "stayed with {:?} beyond",
+                            map.tiles()[i]
+                        );
+                    }
+                }
+            } else {
+                prop_assert_eq!(flow, Flow::Redraw);
+                prop_assert!(Rc::ptr_eq(&map, &now));
+                prop_assert_eq!(view.node(after).parent, parent);
+                let Mark::Tile(i) = shown else {
+                    return Err(TestCaseError::fail("moved to the whole picture"));
+                };
+                prop_assert!(map.block(parent).contains(&i));
+                prop_assert!(mark != shown);
+                prop_assert!(beyond(map.rect(mark), map.tiles()[i].rect, dir));
             }
         }
     }
@@ -792,6 +878,293 @@ fn p4_tui_03_the_cursor_is_an_accent_outline_and_its_ancestors_borders_link() {
     );
 }
 
+// ------------------------------------------------------- the map in pixels
+
+/// A cell of the pictures, in pixels.
+const CELL: (u16, u16) = (10, 20);
+
+/// The tiles of the picture `app` shows, as the map the cursor moves on.
+fn in_picture(app: &App<'_>) -> Rc<Map> {
+    let shown = app.shown().unwrap();
+    let (_, tiles) = shown.as_ref().as_ref().unwrap();
+    Rc::clone(tiles)
+}
+
+fn rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        other => panic!("{other:?} is not RGB"),
+    }
+}
+
+/// The hue of `rgb`, in degrees.
+fn hue((r8, g8, b8): (u8, u8, u8)) -> f64 {
+    let (top, bottom) = (r8.max(g8).max(b8), r8.min(g8).min(b8));
+    let d = f64::from(top - bottom);
+    let (r, g, b) = (f64::from(r8), f64::from(g8), f64::from(b8));
+    let sector = if top == bottom {
+        0.0
+    } else if top == r8 {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if top == g8 {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    sector * 60.0
+}
+
+/// Which of `cycle`'s colours a tile of the picture is shaded in: the
+/// nearest in hue to its pixel by the bottom-right corner, where the
+/// shading darkens the colour without turning its hue and no label
+/// reaches.
+fn shade_of(raster: &duscope_treemap::pixels::Raster, r: Rect, cycle: &[Color]) -> usize {
+    let px = raster
+        .pixel(u32::from(r.x + r.w - 2), u32::from(r.y + r.h - 2))
+        .unwrap();
+    let at = hue(px);
+    let off = |c: &Color| {
+        let d = (hue(rgb(*c)) - at).abs();
+        d.min(360.0 - d)
+    };
+    (0..cycle.len())
+        .min_by(|&a, &b| off(&cycle[a]).total_cmp(&off(&cycle[b])))
+        .unwrap()
+}
+
+// One scene, checked step by step.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn p4_tui_03_in_pixels_the_cursor_is_marked_in_the_picture_and_moves_on_its_tiles() {
+    let tree = mockup();
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/Users/alex/Library"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = viewer(&view, opts(&mocha, &classes, ColorBy::Type));
+    app.draw_in_pixels_unencoded(CELL);
+    let mut terminal = first_frame(&app, 160, 45);
+    let (accent, link, crust) = (
+        rgb(mocha.roles.accent),
+        rgb(mocha.roles.link),
+        rgb(mocha.roles.crust),
+    );
+    // Up to com.apple.Safari, a folder inside Caches.
+    press(&mut app, &mut terminal, &key(KeyCode::Backspace));
+    let tiles = in_picture(&app);
+    let shown = app.shown().unwrap();
+    let (picture, _) = shown.as_ref().as_ref().unwrap();
+    let plain = picture.raster();
+    let marked = app.marked().unwrap();
+    let rect_of = |map: &Map, id: u32| {
+        let Mark::Tile(i) = map.mark(&view, id) else {
+            panic!("{} has no tile", name(&view, id));
+        };
+        map.tiles()[i].rect
+    };
+    let px = |r: &duscope_treemap::pixels::Raster, x: u16, y: u16| {
+        r.pixel(u32::from(x), u32::from(y)).unwrap()
+    };
+    // An accent outline 3 pixels thick (an eighth of the cell's 20, at
+    // least 2) just inside the folder's tile, a line of crust inside it.
+    let safari = rect_of(&tiles, app.selected());
+    assert_eq!(
+        tiles.tiles()[tiles.own(app.selected()).unwrap()].kind,
+        DrawnKind::Box { open: true }
+    );
+    let (mid_x, mid_y) = (safari.x + safari.w / 2, safari.y + safari.h / 2);
+    for d in 0..3 {
+        assert_eq!(px(&marked, mid_x, safari.y + d), accent);
+        assert_eq!(px(&marked, mid_x, safari.y + safari.h - 1 - d), accent);
+        assert_eq!(px(&marked, safari.x + d, mid_y), accent);
+        assert_eq!(px(&marked, safari.x + safari.w - 1 - d, mid_y), accent);
+    }
+    assert_eq!(px(&marked, mid_x, safari.y + 3), crust);
+    assert_eq!(px(&marked, safari.x + 3, mid_y), crust);
+    // Caches, its parent, outlined in the link colour, a pixel thick:
+    // along its edges where Safari's outline is not.
+    let caches = rect_of(&tiles, id_of(&view, "Caches"));
+    let in_safari = |(x, y): (u16, u16)| {
+        (safari.x..safari.x + safari.w).contains(&x) && (safari.y..safari.y + safari.h).contains(&y)
+    };
+    let edge: Vec<(u16, u16)> = (caches.x + 2..caches.x + caches.w - 2)
+        .flat_map(|x| [(x, caches.y), (x, caches.y + caches.h - 1)])
+        .chain(
+            (caches.y + 2..caches.y + caches.h - 2)
+                .flat_map(|y| [(caches.x, y), (caches.x + caches.w - 1, y)]),
+        )
+        .filter(|&p| !in_safari(p))
+        .collect();
+    assert!(edge.len() > 100, "{caches:?} {safari:?}");
+    for &(x, y) in &edge {
+        assert_eq!(px(&marked, x, y), link, "{x},{y}");
+    }
+    assert!(edge.iter().any(|&(x, y)| px(plain, x, y) != link));
+    // A pixel inside the edge is the picture's.
+    let (x, y) = edge[0];
+    let below = if y == caches.y { y + 1 } else { y - 1 };
+    if !in_safari((x, below)) {
+        assert_eq!(px(&marked, x, below), px(plain, x, below));
+    }
+    // Away from the marks the picture is as drawn.
+    let other = rect_of(&tiles, id_of(&view, "Application Support"));
+    let inside = (other.x + other.w / 2, other.y + other.h / 2);
+    assert_eq!(
+        px(&marked, inside.0, inside.1),
+        px(plain, inside.0, inside.1)
+    );
+    // An arrow moves among the picture's tiles, by the beam rule on them,
+    // and the marks move with it.
+    let parent = view.node(app.selected()).parent;
+    let own = tiles.own(app.selected());
+    let candidates: Vec<(usize, Rect)> = tiles
+        .block(parent)
+        .iter()
+        .copied()
+        .filter(|&i| own != Some(i))
+        .map(|i| (i, tiles.tiles()[i].rect))
+        .collect();
+    let (dir, code, to) = [
+        (Dir::Right, KeyCode::Right),
+        (Dir::Down, KeyCode::Down),
+        (Dir::Left, KeyCode::Left),
+        (Dir::Up, KeyCode::Up),
+    ]
+    .into_iter()
+    .find_map(|(dir, code)| beam(safari, dir, candidates.iter().copied()).map(|to| (dir, code, to)))
+    .expect("com.apple.Safari has a neighbour in the picture");
+    assert_eq!(
+        press(&mut app, &mut terminal, &key(code)),
+        Flow::Redraw,
+        "{dir:?}"
+    );
+    assert_eq!(app.selected(), tiles.tiles()[to].id, "{dir:?}");
+    let moved = app.marked().unwrap();
+    let there = tiles.tiles()[to].rect;
+    assert_eq!(px(&moved, there.x + there.w / 2, there.y), accent);
+    // Safari's outline is gone, but where Caches' is.
+    let on_caches = |(x, y): (u16, u16)| {
+        x == caches.x
+            || y == caches.y
+            || x == caches.x + caches.w - 1
+            || y == caches.y + caches.h - 1
+    };
+    let was: Vec<(u16, u16)> = (safari.x..safari.x + safari.w)
+        .flat_map(|x| [(x, safari.y), (x, safari.y + safari.h - 1)])
+        .chain(
+            (safari.y..safari.y + safari.h)
+                .flat_map(|y| [(safari.x, y), (safari.x + safari.w - 1, y)]),
+        )
+        .filter(|&p| !on_caches(p))
+        .filter(|&(x, y)| {
+            !((there.x..there.x + there.w).contains(&x)
+                && (there.y..there.y + there.h).contains(&y))
+        })
+        .collect();
+    assert!(!was.is_empty());
+    for (x, y) in was {
+        assert_eq!(px(&moved, x, y), px(plain, x, y), "{x},{y}");
+    }
+}
+
+#[test]
+fn p4_tui_03_a_zoomed_picture_keeps_the_whole_maps_colours() {
+    let tree = mockup();
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/Users/alex/Library"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let homebrew = id_of(&view, "Caches/Homebrew");
+    let bottle = id_of(
+        &view,
+        "Caches/Homebrew/downloads/llvm@19--19.1.2.arm64_sequoia.bottle.tar.gz",
+    );
+    for color_by in [ColorBy::Folder, ColorBy::Level] {
+        let mut app = viewer(&view, opts(&mocha, &classes, color_by.clone()));
+        app.draw_in_pixels_unencoded(CELL);
+        let mut terminal = first_frame(&app, 120, 40);
+        // Each leaf tile's colour on the whole map, then zoomed to
+        // Caches/Homebrew.
+        let shades = |app: &App<'_>| {
+            let shown = app.shown().unwrap();
+            let (picture, tiles) = shown.as_ref().as_ref().unwrap();
+            tiles
+                .tiles()
+                .iter()
+                .filter(|t| t.kind == DrawnKind::Leaf && t.rect.w >= 4 && t.rect.h >= 4)
+                .map(|t| (t.id, shade_of(picture.raster(), t.rect, &mocha.cycle)))
+                .collect::<std::collections::HashMap<u32, usize>>()
+        };
+        let whole = shades(&app);
+        app.jump(homebrew);
+        press(&mut app, &mut terminal, &char('z'));
+        assert_eq!(app.cursor().zoom().root(), homebrew);
+        let zoomed = shades(&app);
+        let both: Vec<u32> = zoomed
+            .keys()
+            .copied()
+            .filter(|id| whole.contains_key(id))
+            .collect();
+        assert!(both.len() >= 3, "{color_by:?}: {both:?}");
+        for id in both {
+            assert_eq!(
+                zoomed[&id],
+                whole[&id],
+                "{color_by:?}: {} takes another colour zoomed",
+                name(&view, id)
+            );
+        }
+        // Caches is the largest top-level folder; the bottle is at depth 4.
+        let expected = match color_by {
+            ColorBy::Folder => 0,
+            _ => 4,
+        };
+        assert_eq!(zoomed[&bottle], expected, "{color_by:?}");
+    }
+}
+
+#[test]
+fn p4_tui_03_pictures_are_drawn_once_per_root_and_kept() {
+    let tree = mockup();
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/Users/alex/Library"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = viewer(&view, opts(&mocha, &classes, ColorBy::Type));
+    app.draw_in_pixels_unencoded(CELL);
+    let mut terminal = first_frame(&app, 120, 40);
+    let whole = app.shown().unwrap();
+    // z draws the zoomed folder's picture; Z and 0 find the whole map's
+    // as it was drawn, and z the folder's again.
+    let safari = id_of(&view, "Caches/com.apple.Safari");
+    press(&mut app, &mut terminal, &char('z'));
+    assert_eq!(app.cursor().zoom().root(), safari);
+    let inner = app.shown().unwrap();
+    assert!(!Rc::ptr_eq(&whole, &inner));
+    press(&mut app, &mut terminal, &char('Z'));
+    assert!(Rc::ptr_eq(&whole, &app.shown().unwrap()));
+    press(&mut app, &mut terminal, &char('z'));
+    assert!(Rc::ptr_eq(&inner, &app.shown().unwrap()));
+    press(&mut app, &mut terminal, &char('0'));
+    assert!(Rc::ptr_eq(&whole, &app.shown().unwrap()));
+    assert_eq!(app.pictures_kept(), 2);
+    // The scan root's picture and the three other roots' visited last are
+    // kept: zooming to five folders in turn keeps the root's.
+    let folders: Vec<u32> = (0..view.len())
+        .filter(|&id| id != 0 && view.node(id).is_dir() && view.node(id).last_id > id)
+        .take(5)
+        .collect();
+    assert_eq!(folders.len(), 5);
+    for &folder in &folders {
+        app.jump(folder);
+        press(&mut app, &mut terminal, &char('z'));
+        press(&mut app, &mut terminal, &char('0'));
+    }
+    assert_eq!(app.pictures_kept(), KEPT_PICTURES);
+    assert!(Rc::ptr_eq(&whole, &app.shown().unwrap()));
+    // A resize draws them again.
+    terminal.backend_mut().resize(160, 45);
+    terminal
+        .draw(|f| app.draw(f.area(), f.buffer_mut()))
+        .unwrap();
+    assert!(!Rc::ptr_eq(&whole, &app.shown().unwrap()));
+    assert_eq!(app.pictures_kept(), 1);
+}
+
 // --------------------------------------------------- scripted navigation
 
 /// The script: the keys pressed in order, each named for the snapshot.
@@ -859,6 +1232,41 @@ fn folders(view: &dyn TreeView, count: usize) -> Vec<u32> {
     folders
 }
 
+/// A saved scan of T2 (`bench/.trees/T2`), in `env`'s index folder, made
+/// by the release binary; `None`, and the test skipped, without
+/// `DUSCOPE_TEST_PLATFORM=1`. A missing tree fails the test rather than
+/// passing it unmeasured.
+fn t2(env: &duscope_testkit::TestEnv) -> Option<duscope_core::index::Index> {
+    use duscope_core::index::Index;
+    use duscope_core::query::index_files;
+
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return None;
+    }
+    let tree = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/.trees/T2");
+    let tree = std::fs::canonicalize(&tree).unwrap_or_else(|e| {
+        panic!(
+            "T2 is not built at {}: {e}: run `just bench build --trees T2`",
+            tree.display()
+        )
+    });
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&tree)
+        .args(["--save", "--treemap", "never"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let files = index_files(&env.index_dir());
+    Some(Index::open(&files[0].1).unwrap())
+}
+
 /// `samples`' 50th, 90th and 99th percentiles and maximum, in µs.
 fn percentiles(samples: &mut [std::time::Duration]) -> [u128; 4] {
     samples.sort_unstable();
@@ -880,36 +1288,12 @@ fn percentiles(samples: &mut [std::time::Duration]) -> [u128; 4] {
 fn p4_tui_03_a_descend_costs_at_most_2_ms_on_t2() {
     use std::time::{Duration, Instant};
 
-    use duscope_core::index::Index;
-    use duscope_core::query::index_files;
     use duscope_testkit::TestEnv;
 
-    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
-        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
-        return;
-    }
     let env = TestEnv::new();
-    let tree = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/.trees/T2");
-    let tree = std::fs::canonicalize(&tree).unwrap_or_else(|e| {
-        panic!(
-            "T2 is not built at {}: {e}: run `just bench build --trees T2`",
-            tree.display()
-        )
-    });
-    let out = env
-        .cmd()
-        .arg("scan")
-        .arg(&tree)
-        .args(["--save", "--treemap", "never"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let files = index_files(&env.index_dir());
-    let index = Index::open(&files[0].1).unwrap();
+    let Some(index) = t2(&env) else {
+        return;
+    };
     let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
     let start = Instant::now();
     let mut app = App::new(
@@ -972,4 +1356,91 @@ fn p4_tui_03_a_descend_costs_at_most_2_ms_on_t2() {
         "descend p50 {p50} µs, p99 {p99} µs"
     );
     assert!(max <= 2000, "descend max {max} µs");
+}
+
+/// With `--treemap pixels` on T2, at 200×60 (a map of 152×55 cells), for
+/// each protocol and a cell of 10×20 and of 16×32 pixels: the frame after
+/// `z` (the folder's picture drawn), after `Z` (the whole map's picture
+/// kept, the marks encoded) and after an arrow (the marks encoded). In a
+/// build without the `pixels` feature (`cargo test --release -p
+/// duscope-tui --features duscope-treemap/pixels` has it) the pictures are
+/// drawn and marked but not encoded. Run as the descend test is. A zoom
+/// back out costs under a fifth of the first frame, which draws the whole
+/// map's picture: it is kept, not drawn again.
+#[test]
+#[ignore = "needs bench/.trees/T2 and the release binary; DUSCOPE_TEST_PLATFORM=1"]
+fn p4_tui_03_in_pixels_a_zoom_out_keeps_the_picture_on_t2() {
+    use std::time::{Duration, Instant};
+
+    use duscope_testkit::TestEnv;
+    use duscope_treemap::pixels::{Pixels, Protocol};
+
+    let env = TestEnv::new();
+    let Some(index) = t2(&env) else {
+        return;
+    };
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
+    let (w, h) = (200, 60);
+    let ms = |samples: &mut Vec<Duration>| {
+        let [p50, p90, _, max] = percentiles(samples);
+        format!("p50 {p50} µs, p90 {p90} µs, max {max} µs")
+    };
+    for cell in [(10, 20), (16, 32)] {
+        for protocol in [
+            Some(Protocol::Kitty),
+            Some(Protocol::Sixel),
+            Some(Protocol::Iterm2),
+            None,
+        ] {
+            let pixels = protocol.and_then(|p| Pixels::assume(p, cell));
+            if protocol.is_some() && pixels.is_none() {
+                continue;
+            }
+            let mut app = App::new(
+                &index,
+                opts(&mocha, &classes, ColorBy::Folder),
+                Depth::TrueColor,
+                None,
+                String::new(),
+                None,
+            );
+            match pixels {
+                Some(pixels) => app.draw_in_pixels(pixels),
+                None => app.draw_in_pixels_unencoded(cell),
+            }
+            let start = Instant::now();
+            let mut terminal = first_frame(&app, w, h);
+            let first = start.elapsed();
+            let mut timed = |app: &mut App<'_>, event: &Event| {
+                let start = Instant::now();
+                press(app, &mut terminal, event);
+                start.elapsed()
+            };
+            let (mut zooms, mut outs, mut arrows) = (Vec::new(), Vec::new(), Vec::new());
+            for &folder in &folders(&index, 12) {
+                app.jump(folder);
+                zooms.push(timed(&mut app, &char('z')));
+                outs.push(timed(&mut app, &char('Z')));
+            }
+            app.jump(index.child_dirs(0)[0].0);
+            for code in [KeyCode::Right, KeyCode::Down, KeyCode::Left, KeyCode::Up].repeat(6) {
+                arrows.push(timed(&mut app, &key(code)));
+            }
+            let name = protocol.map_or_else(|| "not encoded".to_owned(), |p| format!("{p:?}"));
+            eprintln!(
+                "{name}, cell {}×{}: first frame {} ms; z {}; Z {}; arrow {}",
+                cell.0,
+                cell.1,
+                first.as_millis(),
+                ms(&mut zooms),
+                ms(&mut outs),
+                ms(&mut arrows)
+            );
+            let [out, ..] = percentiles(&mut outs);
+            assert!(
+                out * 5 < first.as_micros(),
+                "{name}: Z p50 {out} µs against a first frame of {first:?}"
+            );
+        }
+    }
 }

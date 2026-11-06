@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use duscope_core::query::TreeView;
 
 use crate::Rect;
-use crate::picture::{Canvas, Metrics, PictureOpts, Rgb, draw, rgb_of, shade};
+use crate::picture::{Canvas, Metrics, PictureOpts, Rgb, Within, draw, rgb_of, shade};
 
 /// Writes the picture of the scan in `view` as SVG; the number of tiles
 /// painted.
@@ -55,7 +55,7 @@ pub fn write_svg(
         tiles_open: true,
         clips: 0,
     };
-    let tiles = draw(view, opts, metrics, &mut canvas)?;
+    let tiles = draw(view, opts, metrics, &mut canvas, &Within::default())?.tiles;
     canvas.close_tiles()?;
     let Svg { out, colors, .. } = canvas;
     gradients(out, &colors)?;

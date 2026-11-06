@@ -13,7 +13,9 @@
 //! cursor redraws only the marks on it, and zooming back out finds the
 //! outer map where it was left. A resize, which changes every layout,
 //! forgets them all; so must anything that changes how the map is painted
-//! (the colour mode, the pack).
+//! (the colour mode, the pack). With `--treemap pixels` the pictures are
+//! kept the same way ([`Layouts`] of them), fewer, since each holds its
+//! pixels: the scan root's and those of the three roots visited last.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -27,6 +29,31 @@ use crate::panes::Context;
 
 /// The maps kept at one size: the roots visited last.
 const KEPT: usize = 16;
+
+/// The pictures kept at one size (`--treemap pixels`): the scan root's and
+/// the three other roots visited last.
+pub const KEPT_PICTURES: usize = 4;
+
+/// Where the map of `root` stands in the scan, as `ctx` paints it: its
+/// depth, and below the scan's root the `--color-by folder` place of the
+/// top-level folder it is in, so that a zoomed map, in cells or in pixels,
+/// keeps the whole map's colours.
+#[must_use]
+pub fn base(ctx: &Context<'_>, root: u32) -> Base {
+    let view = ctx.view;
+    if root == 0 || view.is_empty() {
+        return Base::default();
+    }
+    let node = view.node(root);
+    let mut top = node;
+    while top.depth > 1 {
+        top = view.node(top.parent);
+    }
+    Base {
+        depth: node.depth,
+        folder: ctx.ranks.by_id.get(&top.id).copied(),
+    }
+}
 
 /// The visible root and the zoom stack.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -85,13 +112,16 @@ pub enum Mark {
     Tile(usize),
 }
 
-/// A map painted for a root at a size, and the tiles on it.
+/// A map painted for a root at a size, and the tiles on it: the cell map,
+/// or with `--treemap pixels` the picture's tiles, in pixels.
 #[derive(Debug)]
 pub struct Map {
     /// The root.
     root: u32,
-    /// The cells, as wide and tall as the map.
+    /// The cells, as wide and tall as the map; none for a picture's.
     pub cells: CellBuffer,
+    /// The whole map: in half-cell units, or a picture's in pixels.
+    area: Rect,
     /// The tiles drawn, with the scan's ids.
     tiles: Vec<Drawn>,
     /// The tile of each entry drawn as its own.
@@ -107,19 +137,12 @@ impl Map {
     #[must_use]
     pub fn paint(ctx: &Context<'_>, root: u32, w: u16, h: u16) -> Map {
         let view = ctx.view;
+        let base = base(ctx, root);
         let (cells, drawn) = if root == 0 || view.is_empty() {
-            paint_viewer(view, ctx.opts, w, h, ctx.class_of, Base::default())
+            paint_viewer(view, ctx.opts, w, h, ctx.class_of, base)
         } else {
             let node = view.node(root);
             let sub = Subtree::new(view, root);
-            let mut top = node;
-            while top.depth > 1 {
-                top = view.node(top.parent);
-            }
-            let base = Base {
-                depth: node.depth,
-                folder: ctx.ranks.by_id.get(&top.id).copied(),
-            };
             let range = root as usize..=node.last_id as usize;
             if let Some(classes) = ctx.class_of.get(range) {
                 paint_viewer(&sub, ctx.opts, w, h, classes, base)
@@ -128,6 +151,20 @@ impl Map {
                 paint_viewer(&sub, ctx.opts, w, h, &classes, base)
             }
         };
+        let area = Rect::new(0, 0, cells.width(), cells.height() * 2);
+        Map::of(root, cells, area, drawn)
+    }
+
+    /// The map of `root` whose tiles are `drawn`, with the ids of the
+    /// subtree at `root` (the scan's where `root` is 0), over `area`: the
+    /// cell map in `cells`, or a picture's tiles (with no cells).
+    #[must_use]
+    pub fn of(
+        root: u32,
+        cells: CellBuffer,
+        area: Rect,
+        drawn: impl IntoIterator<Item = Drawn>,
+    ) -> Map {
         let tiles: Vec<Drawn> = drawn
             .into_iter()
             .map(|d| Drawn {
@@ -152,6 +189,7 @@ impl Map {
         Map {
             root,
             cells,
+            area,
             tiles,
             own,
             blocks,
@@ -159,7 +197,7 @@ impl Map {
     }
 
     /// The root it was painted for.
-    #[cfg(test)]
+    #[must_use]
     pub fn root(&self) -> u32 {
         self.root
     }
@@ -170,10 +208,10 @@ impl Map {
         &self.tiles
     }
 
-    /// The whole map, in half-cell units.
+    /// The whole map, in half-cell units (a picture's in pixels).
     #[must_use]
     pub fn area(&self) -> Rect {
-        Rect::new(0, 0, self.cells.width(), self.cells.height() * 2)
+        self.area
     }
 
     /// The tile drawn as `id`'s own.
@@ -234,32 +272,76 @@ impl Map {
     }
 }
 
-/// The maps painted at the map's current size, the roots visited last.
-#[derive(Debug, Default)]
-pub struct Layouts {
+/// The maps painted at the map's current size, the roots visited last
+/// ([`KEPT`]); or the pictures (`--treemap pixels`), the scan root's kept
+/// whatever else is ([`Layouts::pinned`]).
+#[derive(Debug)]
+pub struct Layouts<T = Map> {
     /// The size they were painted at.
     size: (u16, u16),
-    /// The latest first.
-    maps: Vec<Rc<Map>>,
+    /// Each with its root, the latest first.
+    maps: Vec<(u32, Rc<T>)>,
+    /// How many are kept.
+    bound: usize,
+    /// Whether the scan root's is kept while another is forgotten.
+    pin: bool,
 }
 
-impl Layouts {
+impl<T> Default for Layouts<T> {
+    fn default() -> Self {
+        Layouts {
+            size: (0, 0),
+            maps: Vec::new(),
+            bound: KEPT,
+            pin: false,
+        }
+    }
+}
+
+impl<T> Layouts<T> {
+    /// At most `bound` kept, the scan root's among them once painted: when
+    /// one more is painted, the least recent of the others is forgotten.
+    #[must_use]
+    pub fn pinned(bound: usize) -> Self {
+        Layouts {
+            bound: bound.max(2),
+            pin: true,
+            ..Layouts::default()
+        }
+    }
+
     /// The map of `root` at `w`×`h`: the one kept, or one `paint` paints
     /// (and keeps). Another size forgets the maps kept.
-    pub fn get(&mut self, root: u32, w: u16, h: u16, paint: impl FnOnce() -> Map) -> Rc<Map> {
+    pub fn get(&mut self, root: u32, w: u16, h: u16, paint: impl FnOnce() -> T) -> Rc<T> {
         if self.size != (w, h) {
             self.maps.clear();
             self.size = (w, h);
         }
-        if let Some(i) = self.maps.iter().position(|m| m.root == root) {
-            let map = self.maps.remove(i);
-            self.maps.insert(0, Rc::clone(&map));
+        if let Some(i) = self.maps.iter().position(|(at, _)| *at == root) {
+            let kept = self.maps.remove(i);
+            let map = Rc::clone(&kept.1);
+            self.maps.insert(0, kept);
             return map;
         }
         let map = Rc::new(paint());
-        self.maps.insert(0, Rc::clone(&map));
-        self.maps.truncate(KEPT);
+        self.maps.insert(0, (root, Rc::clone(&map)));
+        if self.maps.len() > self.bound {
+            let last = if self.pin {
+                self.maps.iter().rposition(|(at, _)| *at != 0)
+            } else {
+                Some(self.maps.len() - 1)
+            };
+            if let Some(i) = last {
+                self.maps.remove(i);
+            }
+        }
         map
+    }
+
+    /// The size they were painted at.
+    #[cfg(test)]
+    pub fn size(&self) -> (u16, u16) {
+        self.size
     }
 
     /// How many maps are kept.

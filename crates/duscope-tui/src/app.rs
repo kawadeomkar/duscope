@@ -9,18 +9,25 @@
 //! The selection starts at the largest file, reached through the largest
 //! child at every level, as the canvas opens; the navigation keys move it
 //! and zoom the map ([`crate::cursor`]).
+//!
+//! With `--treemap pixels` the map pane shows a picture over its cells: of
+//! the zoom's root, in the whole map's colours, drawn once per root and
+//! size and kept ([`crate::zoom::Layouts`]), with the cursor's marks drawn
+//! into it and encoded again whenever they move.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::path::Path;
+use std::rc::Rc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use duscope_core::query::{Subtree, TreeView};
 use duscope_core::rules::Class;
+use duscope_treemap::Rect as Px;
 use duscope_treemap::cells::{CellBuffer, Color, Depth};
 use duscope_treemap::paint::{ColorBy, Glyphs, PaintOpts, classes_of};
-use duscope_treemap::pixels::{PixelMap, Pixels};
+use duscope_treemap::pixels::{Picture, PixelMap, Pixels};
 use ratatui_core::backend::Backend;
 use ratatui_core::buffer::{Buffer, CellDiffOption};
 use ratatui_core::layout::Rect;
@@ -34,6 +41,7 @@ use crate::panes::{self, Context, LegendRow, Ranks};
 use crate::path::Path as Selection;
 use crate::term::MIN_SIZE;
 use crate::widgets::{Canvas, Message, Notice, border};
+use crate::zoom::{self, KEPT_PICTURES, Layouts, Map};
 
 /// The key line: the six most useful bindings, and their stand-ins
 /// without UTF-8.
@@ -94,14 +102,48 @@ pub struct App<'a> {
     /// keys: `Alt-]`, then `11;rgb:` and hex digits, then `Alt-\` or
     /// `Ctrl-G`. Any other key ends it and counts as itself.
     answer: bool,
-    /// `--treemap pixels`: what draws the map in pixels, and the map it
-    /// drew, kept until the pane's size or the zoom changes.
-    pixels: Option<(Pixels, RefCell<Option<Drawn>>)>,
+    /// `--treemap pixels`: the pictures, their encoder and what was sent.
+    pixels: Option<InPixels>,
 }
 
-/// The map in pixels, and the size and zoomed root it was drawn at; `None`
-/// where it could not be drawn, which leaves the cells.
-type Drawn = ((u16, u16, u32), Option<PixelMap>);
+/// The map in pixels: what encodes it, the pictures drawn and the cells
+/// last sent. Without the `pixels` feature no [`Pixels`] exists, so
+/// neither does this, and none of the code that draws it is compiled.
+struct InPixels {
+    /// The encoder.
+    encoder: Encoder,
+    /// The terminal's cell, in pixels.
+    cell: (u16, u16),
+    /// The pictures at the map's size: the scan root's and those of the
+    /// roots visited last.
+    pictures: RefCell<Layouts<InPicture>>,
+    /// The marks last encoded, and the cells the encoder made of them:
+    /// encoded again only when the size, the zoom or the marks change.
+    sent: RefCell<Option<(Marks, Option<PixelMap>)>>,
+}
+
+/// What encodes the pictures for the terminal.
+enum Encoder {
+    /// The terminal's protocol.
+    Terminal(Pixels),
+    /// None, in tests, which look at the pictures themselves.
+    #[cfg(test)]
+    Unencoded,
+}
+
+/// A picture of the map, and its tiles as the map the cursor moves on;
+/// `None` where it could not be drawn, which leaves the cells.
+pub(crate) type InPicture = Option<(Picture, Rc<Map>)>;
+
+/// What a picture sent shows: its size in cells and its root, the
+/// cursor's tile and its ancestors' that take the link colour, in pixels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Marks {
+    size: (u16, u16),
+    root: u32,
+    cursor: Px,
+    links: Vec<Px>,
+}
 
 impl std::fmt::Debug for App<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -163,7 +205,51 @@ impl<'a> App<'a> {
     /// Draws the map in pixels with `pixels` (`--treemap pixels`), over
     /// its cells.
     pub fn draw_in_pixels(&mut self, pixels: Pixels) {
-        self.pixels = Some((pixels, RefCell::new(None)));
+        let cell = pixels.cell();
+        self.pixels = Some(InPixels {
+            encoder: Encoder::Terminal(pixels),
+            cell,
+            pictures: RefCell::new(Layouts::pinned(KEPT_PICTURES)),
+            sent: RefCell::new(None),
+        });
+    }
+
+    /// Draws the pictures of the map at a cell of `cell` pixels as
+    /// `--treemap pixels` draws them, without encoding them.
+    #[cfg(test)]
+    pub(crate) fn draw_in_pixels_unencoded(&mut self, cell: (u16, u16)) {
+        self.pixels = Some(InPixels {
+            encoder: Encoder::Unencoded,
+            cell,
+            pictures: RefCell::new(Layouts::pinned(KEPT_PICTURES)),
+            sent: RefCell::new(None),
+        });
+    }
+
+    /// The picture of the visible root at the last frame's size and its
+    /// tiles, with `--treemap pixels`.
+    #[cfg(test)]
+    pub(crate) fn shown(&self) -> Option<Rc<InPicture>> {
+        let pixels = self.pixels.as_ref()?;
+        let (w, h) = pixels.pictures.borrow().size();
+        Some(self.picture(pixels, w, h))
+    }
+
+    /// The picture shown with the cursor's marks, with `--treemap pixels`.
+    #[cfg(test)]
+    pub(crate) fn marked(&self) -> Option<duscope_treemap::pixels::Raster> {
+        let shown = self.shown()?;
+        let (picture, tiles) = shown.as_ref().as_ref()?;
+        let (cursor, links) = self.cursor.marks(tiles, self.view);
+        Some(picture.marked(cursor, &links))
+    }
+
+    /// How many pictures are kept, with `--treemap pixels`.
+    #[cfg(test)]
+    pub(crate) fn pictures_kept(&self) -> usize {
+        self.pixels
+            .as_ref()
+            .map_or(0, |pixels| pixels.pictures.borrow().kept())
     }
 
     /// The selected entry's id.
@@ -237,28 +323,85 @@ impl<'a> App<'a> {
     }
 
     /// With `--treemap pixels`, the map in pixels over its cells in the
-    /// map pane, of the zoomed folder as the cells are, drawn again only
-    /// when the pane's size or the zoom changes.
+    /// map pane: the picture of the zoomed folder, as the cells are, with
+    /// the cursor's marks, encoded again only when the pane's size, the
+    /// zoom or the marks change. The arrows move among its tiles. Where it
+    /// cannot be drawn the cells stay, the cursor marked on them.
     fn draw_pixels(&self, area: Rect, buf: &mut Buffer) {
-        let Some((pixels, drawn)) = &self.pixels else {
+        let Some(pixels) = &self.pixels else {
             return;
         };
         let map = layout(area.width, area.height).map;
-        let root = self.cursor.zoom().root();
-        let key = (map.width, map.height, root);
-        let mut drawn = drawn.borrow_mut();
-        if drawn.as_ref().is_none_or(|(at, _)| *at != key) {
-            let fresh = if root == 0 {
-                pixels.map(self.view, &self.opts, map.width, map.height)
-            } else {
-                let sub = Subtree::new(self.view, root);
-                pixels.map(&sub, &self.opts, map.width, map.height)
+        let shown = self.picture(pixels, map.width, map.height);
+        let Some((picture, tiles)) = shown.as_ref() else {
+            self.cursor.show(None);
+            return;
+        };
+        let (cursor, links) = self.cursor.marks(tiles, self.view);
+        let marks = Marks {
+            size: (map.width, map.height),
+            root: tiles.root(),
+            cursor,
+            links,
+        };
+        let mut sent = pixels.sent.borrow_mut();
+        if sent.as_ref().is_none_or(|(at, _)| *at != marks) {
+            let cells = match &pixels.encoder {
+                Encoder::Terminal(encoder) => encoder
+                    .encode(picture.marked(marks.cursor, &marks.links))
+                    .ok(),
+                #[cfg(test)]
+                Encoder::Unencoded => None,
             };
-            *drawn = Some((key, fresh.ok()));
+            *sent = Some((marks, cells));
         }
-        if let Some((_, Some(cells))) = drawn.as_ref() {
+        let cells = sent.as_ref().and_then(|(_, cells)| cells.as_ref());
+        if let Some(cells) = cells {
             overlay(cells, area.x + map.x, area.y + map.y, buf);
         }
+        // The arrows move among the tiles shown: the picture's, unless its
+        // encoder failed and the cells show through.
+        let in_picture = match pixels.encoder {
+            Encoder::Terminal(_) => cells.is_some(),
+            #[cfg(test)]
+            Encoder::Unencoded => true,
+        };
+        self.cursor.show(in_picture.then(|| Rc::clone(tiles)));
+    }
+
+    /// The picture of the visible root in `w`×`h` cells and its tiles: the
+    /// one kept, or one drawn now (and kept) with the classes the viewer
+    /// worked out once, in the whole map's colours.
+    fn picture(&self, pixels: &InPixels, w: u16, h: u16) -> Rc<InPicture> {
+        let root = self.cursor.zoom().root();
+        pixels.pictures.borrow_mut().get(root, w, h, || {
+            let base = zoom::base(&self.context(), root);
+            let drawn = if root == 0 || self.view.is_empty() {
+                Picture::draw(
+                    self.view,
+                    &self.opts,
+                    w,
+                    h,
+                    pixels.cell,
+                    Some(&self.class_of),
+                    base,
+                )
+            } else {
+                let last = self.view.node(root).last_id;
+                let classes = self.class_of.get(root as usize..=last as usize);
+                let sub = Subtree::new(self.view, root);
+                Picture::draw(&sub, &self.opts, w, h, pixels.cell, classes, base)
+            };
+            drawn.ok().map(|picture| {
+                let tiles = Map::of(
+                    root,
+                    CellBuffer::new(0, 0),
+                    picture.area(),
+                    picture.tiles().iter().copied(),
+                );
+                (picture, Rc::new(tiles))
+            })
+        })
     }
 
     /// The whole screen at `w`×`h`, at least [`MIN_SIZE`].
