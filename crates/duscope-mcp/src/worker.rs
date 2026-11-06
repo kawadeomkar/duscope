@@ -37,8 +37,12 @@
 //! returned, so no two verbs ever run at once.
 //!
 //! When the input ends, the worker answers the calls already received, then
-//! stops; when a write to the client fails, it drops the queue, cancels the
-//! running call, and stops once its verb has returned.
+//! stops. Once a write to the client has failed, from any thread, nothing
+//! more can reach it: the worker starts no request still queued, dropping
+//! each unanswered, and a running call whose progress cannot be sent is
+//! cancelled, as is the running call when the reader stops on the failure
+//! (or meets the end of the input after it). The worker stops once the
+//! running call's verb has returned.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -114,6 +118,34 @@ enum Job {
     Answer(Responder, Result<Box<RawValue>, RpcError>),
     /// A tool call.
     Call(Arc<Call>),
+}
+
+impl Job {
+    /// Whether a write to the client has failed, so that the job's answer
+    /// could not reach it. A cancelled call owes none.
+    fn output_failed(&self) -> bool {
+        match self {
+            Job::Answer(responder, _) => responder.output_failed(),
+            Job::Call(call) => call
+                .responder()
+                .as_ref()
+                .is_some_and(Responder::output_failed),
+        }
+    }
+
+    /// Ends the job unanswered, without starting it.
+    fn drop_unanswered(self) {
+        match self {
+            Job::Answer(responder, _) => {
+                debug!("dropped the answer to request {}", responder.id());
+                responder.abandon();
+            }
+            Job::Call(call) => {
+                debug!("dropped tools/call {} before it ran", call.id);
+                call.cancel();
+            }
+        }
+    }
 }
 
 /// A `tools/call`: the request, how it is answered, and what its verb
@@ -299,10 +331,7 @@ impl Worker {
         let running = state.running.clone();
         drop(state);
         for job in dropped {
-            match job {
-                Job::Answer(responder, _) => responder.abandon(),
-                Job::Call(call) => call.cancel(),
-            }
+            job.drop_unanswered();
         }
         if let Some(call) = running {
             call.cancel();
@@ -330,7 +359,8 @@ impl Drop for Worker {
 }
 
 /// The worker thread: takes each job in turn until the queue is closed and
-/// empty.
+/// empty. Once a write to the client has failed, it starts none: each is
+/// dropped unanswered.
 fn work(shared: &Shared, setup: &Setup) {
     loop {
         let job = {
@@ -353,6 +383,7 @@ fn work(shared: &Shared, setup: &Setup) {
             }
         };
         match job {
+            job if job.output_failed() => job.drop_unanswered(),
             Job::Answer(responder, outcome) => send(responder, outcome),
             Job::Call(call) => setup.run(&call),
         }
@@ -536,17 +567,26 @@ impl Setup {
 }
 
 /// Sends the call's progress, when its count has grown since the last and
-/// it is still owed an answer.
+/// it is still owed an answer. A progress that cannot be sent means its
+/// answer could not be either: the call is cancelled.
 fn report(call: &Call, reporter: &mut Reporter) {
-    let responder = call.responder();
-    let Some(responder) = responder.as_ref() else {
+    let owed = call.responder();
+    let Some(responder) = owed.as_ref() else {
         return;
     };
-    if let Some(params) = reporter.next() {
-        if let Err(e) = responder.notify(PROGRESS, Some(&params)) {
-            debug!("could not send the progress of request {}: {e}", call.id);
-        }
-    }
+    let Some(params) = reporter.next() else {
+        return;
+    };
+    let Err(e) = responder.notify(PROGRESS, Some(&params)) else {
+        return;
+    };
+    // The cancellation takes the responder.
+    drop(owed);
+    info!(
+        "request {} is told to stop: its progress could not be sent ({e})",
+        call.id
+    );
+    call.cancel();
 }
 
 /// Sends a response. A failed write stops the transport, which reports it.

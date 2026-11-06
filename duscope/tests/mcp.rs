@@ -19,8 +19,8 @@
 //!
 //! P3-MCP-05: the calls one at a time on the worker: two scans of one root
 //! in turn, a scan's progress (`DUSCOPE_TEST_MCP_PROGRESS_MS` shortens its
-//! two seconds), the deadline (`DUSCOPE_TEST_MCP_DEADLINE_MS`), and a
-//! cancelled call.
+//! two seconds), the deadline (`DUSCOPE_TEST_MCP_DEADLINE_MS`), a cancelled
+//! call, and the scans a client that died had queued.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -1632,4 +1632,33 @@ fn p3_mcp_05_a_cancelled_call_gets_no_response_and_the_next_one_runs() {
     assert_eq!(saved_ids(&env), [first.as_str().unwrap()]);
     let listed = &served.result(3)["structuredContent"]["entries"];
     assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+}
+
+#[test]
+fn p3_mcp_05_the_scans_a_dead_client_queued_never_run() {
+    let env = TestEnv::new();
+    let root = wide_tree(&env);
+    let mut child = env
+        .cmd()
+        .arg("mcp")
+        .args(roots(&[&root]))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The client died with three scans sent: nothing reads the server's
+    // output, and its input ends.
+    drop(child.stdout.take());
+    let mut stdin = child.stdin.take().unwrap();
+    for (id, dir) in [(1, "d1"), (2, "d2"), (3, "d3")] {
+        let scan = call(id, "duscope_scan", &json!({"root": root.join(dir)}));
+        writeln!(stdin, "{scan}").unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The first scan ran and its answer could not be sent; the two queued
+    // behind it never started.
+    assert_eq!(saved_ids(&env).len(), 1, "{stderr}");
 }

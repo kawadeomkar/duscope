@@ -1,14 +1,14 @@
 //! P3-MCP-05: the worker through the server and the stdio transport, over
 //! OS pipes, with fake verbs the tests hold and release: the FIFO queue
 //! while the reader answers, cancellation of a queued and of a running call,
-//! the deadline, and progress. rmcp's client (the conformance oracle)
-//! observes a call's progress, and cancels a running call once it has seen
-//! its progress. The binary's tests (`duscope/src/verbs/mcp/tests.rs`) cancel
-//! a real walk this way, since duscope-walk lies outside this crate's
-//! dependencies.
+//! the deadline, progress, and a client whose output has gone. rmcp's
+//! client (the conformance oracle) observes a call's progress, and cancels a
+//! running call once it has seen its progress. The binary's tests
+//! (`duscope/src/verbs/mcp/tests.rs`) cancel a real walk this way, since
+//! duscope-walk lies outside this crate's dependencies.
 
 use std::future::Future;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
 use std::os::fd::OwnedFd;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -29,10 +29,11 @@ use tokio::net::unix::pipe;
 
 use super::*;
 use crate::discover::PLACEHOLDER_INSTRUCTIONS;
+use crate::jsonrpc::Notification;
 use crate::roots::Roots;
 use crate::server::Server;
 use crate::tools::{Annotations, Invocation, Outcome, Registry, Runner, Tool};
-use crate::transport::Transport;
+use crate::transport::{self, Handler, Outbox, Reader, Transport};
 
 /// How long a test waits for a message or a state before it fails.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -563,6 +564,135 @@ fn p3_mcp_05_progress_goes_out_before_the_response_and_only_when_asked_for() {
     assert_eq!(client.next()["id"], 2);
     // Nothing follows a response about its request.
     assert!(client.close().is_empty());
+}
+
+/// The output of a client that has gone: every write fails, as one to a
+/// pipe whose reader has closed does.
+struct Gone;
+
+impl Write for Gone {
+    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        Err(io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Starts `server` writing to a client that has gone: the input it reads,
+/// and the running transport.
+fn start_gone(server: Server) -> (io::PipeWriter, Transport) {
+    let (server_in, client_out) = io::pipe().unwrap();
+    let transport = Transport::start(server_in, Gone, server).unwrap();
+    (client_out, transport)
+}
+
+fn send(input: &mut io::PipeWriter, message: &Value) {
+    writeln!(input, "{message}").unwrap();
+}
+
+#[test]
+fn p3_mcp_05_once_a_write_fails_the_queued_calls_never_start() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let (mut input, transport) = start_gone(server(&env, &runner, quick()));
+    send(&mut input, &call(1, "test_block", "first"));
+    send(&mut input, &call(2, "test_echo", "second"));
+    send(&mut input, &call(3, "test_echo", "third"));
+    runner.wait_for("start first");
+    // The client died: its input ends with two calls queued, and the first
+    // call's answer cannot reach it.
+    drop(input);
+    runner.latch.open();
+    let ended = transport.wait().unwrap_err();
+    assert_eq!(ended.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(
+        runner.log(),
+        ["start first", "end first"],
+        "a queued call ran"
+    );
+}
+
+#[test]
+fn p3_mcp_05_a_call_whose_progress_cannot_be_sent_is_cancelled_and_the_queue_dropped() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let (mut input, transport) = start_gone(server(&env, &runner, quick()));
+    send(&mut input, &call_with_progress(1, "test_block", "first"));
+    send(&mut input, &call(2, "test_echo", "second"));
+    // Its first progress cannot be sent, so the call is told to stop: the
+    // latch never opens.
+    runner.wait_for("stopped first");
+    drop(input);
+    let ended = transport.wait().unwrap_err();
+    assert_eq!(ended.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(
+        runner.log(),
+        ["start first", "stopped first"],
+        "the queued call ran"
+    );
+}
+
+/// A handler that keeps each request's responder for the input to answer
+/// through, and how the input ended.
+struct Keeping {
+    responders: mpsc::Sender<Responder>,
+    ended: Option<Result<(), io::ErrorKind>>,
+}
+
+impl Handler for Keeping {
+    fn request(&mut self, _: Request, responder: Responder) {
+        self.responders.send(responder).unwrap();
+    }
+
+    fn notification(&mut self, _: Notification) {}
+
+    fn end(&mut self, ended: &io::Result<()>) {
+        self.ended = Some(ended.as_ref().copied().map_err(io::Error::kind));
+    }
+}
+
+/// An input of one request that ends just as the request's answer, sent
+/// from elsewhere while the reader waits for more, fails to go out: the
+/// reader read the request and found every write sound, and next meets the
+/// end of its input.
+struct EndsAfterTheAnswer {
+    request: Cursor<Vec<u8>>,
+    responders: mpsc::Receiver<Responder>,
+}
+
+impl Read for EndsAfterTheAnswer {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.request.read(buf)?;
+        if read == 0 {
+            let responder = self.responders.try_recv().unwrap();
+            assert!(responder.respond(Ok(json!({}))).is_err());
+        }
+        Ok(read)
+    }
+}
+
+#[test]
+fn p3_mcp_05_an_input_that_ends_after_a_failed_write_ends_as_the_failure() {
+    let (responders, kept) = mpsc::channel();
+    let mut handler = Keeping {
+        responders,
+        ended: None,
+    };
+    let input = EndsAfterTheAnswer {
+        request: Cursor::new(format!("{}\n", request(1, "ping", &json!({}))).into_bytes()),
+        responders: kept,
+    };
+    let ended = transport::run(
+        Reader::new(BufReader::new(input)),
+        &Outbox::new(Gone),
+        &mut handler,
+    );
+    assert_eq!(ended.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    // The handler is not asked to answer what it still owes, which could
+    // never reach the client.
+    assert_eq!(handler.ended, Some(Err(io::ErrorKind::BrokenPipe)));
 }
 
 /// rmcp's client, recording every progress notification it receives.

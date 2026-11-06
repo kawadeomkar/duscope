@@ -191,6 +191,13 @@ impl Responder {
         self.outbox.notify(method, params)
     }
 
+    /// Whether a write to the client has failed, here or through any other
+    /// responder: nothing more can reach it, this request's response
+    /// included.
+    pub(crate) fn output_failed(&self) -> bool {
+        self.outbox.failed().is_some()
+    }
+
     /// Ends the request with no message at all, as a cancelled request must
     /// end.
     pub fn abandon(mut self) {
@@ -295,7 +302,9 @@ impl<R: BufRead> Reader<R> {
 /// the client is logged and dropped, and an empty line is skipped.
 ///
 /// Once the input ends, or a read or a write fails, the handler finishes
-/// what it owes ([`Handler::end`]) before this returns.
+/// what it owes ([`Handler::end`]) before this returns. An input that ends
+/// after a write has failed, from any thread, ends as that failure: the
+/// handler is not asked to answer anyone.
 ///
 /// Returns `Ok` at the end of the input, or the error of a failed read or of
 /// a failed write to `outbox` (after which nothing more could reach the
@@ -305,12 +314,13 @@ pub fn run<R: BufRead, H: Handler>(
     outbox: &Outbox,
     handler: &mut H,
 ) -> io::Result<()> {
-    let ended = read(reader, outbox, handler);
-    handler.end(&ended);
-    match (ended, outbox.failed()) {
+    let failed = |ended: io::Result<()>| match (ended, outbox.failed()) {
         (Ok(()), Some(kind)) => Err(io::Error::new(kind, "a write to the client failed")),
         (ended, _) => ended,
-    }
+    };
+    let ended = failed(read(reader, outbox, handler));
+    handler.end(&ended);
+    failed(ended)
 }
 
 /// [`run`]'s reading, until the input ends or a read or a write fails.
