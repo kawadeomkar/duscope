@@ -33,7 +33,7 @@ under [Auditing](#auditing) read it again.
   - `size` on `macos-26` and `ubuntu-24.04`, and `size-comment`
   - `build-time`
   - `repro`
-  - `pixels`
+  - `pixels` on `macos-26` and `ubuntu-24.04`
   - `changelog`
 
   and the jobs of [release.yml](../.github/workflows/release.yml) that run on
@@ -61,7 +61,8 @@ under [Auditing](#auditing) read it again.
   2026-11-02, with P2-IDX-03, DEV-73 folded macOS's `clippy` and both its
   `test` legs into `checks (macos-26)`, leaving 34. P2-TEST-01 adds the five
   `fuzz-smoke` checks, 39, P3-MCP-01 `fuzz-smoke (jsonrpc)`, 40, and P4-TUI-07
-  `pixels`, 41 in all below, once they merge.
+  `pixels (macos-26)` and `pixels (ubuntu-24.04)`, 42 in all below, once they
+  merge.
 
   These checks run on a pull request into `main`, and on one labelled
   `full-ci`. GitHub's stacked pull requests run as if into `main`: the pull
@@ -108,7 +109,8 @@ under [Auditing](#auditing) read it again.
         { "context": "size (ubuntu-24.04)", "app_id": 15368 },
         { "context": "build-time", "app_id": 15368 },
         { "context": "repro", "app_id": 15368 },
-        { "context": "pixels", "app_id": 15368 },
+        { "context": "pixels (macos-26)", "app_id": 15368 },
+        { "context": "pixels (ubuntu-24.04)", "app_id": 15368 },
         { "context": "changelog", "app_id": 15368 },
         { "context": "size-comment", "app_id": 15368 },
         { "context": "verify-tag", "app_id": 15368 },

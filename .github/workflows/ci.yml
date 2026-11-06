@@ -14,8 +14,9 @@
 # ubuntu-24.04 and ubuntu-24.04-arm; checks (macos-26), which is macOS's clippy
 # and both test legs, and platform and bench-regression on macos-26; msrv (pinned)
 # and msrv (stable); deny; fuzz-smoke for each fuzz target; docs; schemas; size on
-# macos-26 and ubuntu-24.04, and size-comment; build-time; repro; pixels;
-# changelog. Not required: intel-mac (best effort) and quick.
+# macos-26 and ubuntu-24.04, and size-comment; build-time; repro; pixels on
+# macos-26 and ubuntu-24.04; changelog. Not required: intel-mac (best effort)
+# and quick.
 #
 # Scope (DEV-73): a stack of pull requests runs every job of each of them again
 # at each push, and a macOS runner is the scarce one (five at a time on this
@@ -494,11 +495,16 @@ jobs:
     # behind the feature; the binary built with it; and the tests that run the
     # probe against mocked terminals, termlens answering as a Kitty graphics
     # terminal, a Sixel one, iTerm2, one with neither, and one that answers
-    # nothing. The default build's answer to --treemap pixels, not_compiled, is
-    # a test of the test jobs.
-    name: pixels
+    # nothing, and that leave it out inside tmux. It runs on both platforms, as
+    # every change builds and tests on both. The default build's answer to
+    # --treemap pixels, not_compiled, is a test of the test jobs.
+    name: pixels (${{ matrix.os }})
     if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
