@@ -786,6 +786,13 @@ fn no_links_and_no_case(point: &Path, fs_type: &str) {
         (volume.fs_type.as_str(), volume.class, volume.case_sensitive),
         (fs_type, VolumeClass::Foreign, Some(false))
     );
+    // Neither keeps an extent map: the file is not opened for one.
+    let unread = duscope_walk::extents(&point.join("file")).unwrap_err();
+    assert_eq!(
+        unread.kind(),
+        std::io::ErrorKind::Unsupported,
+        "{fs_type}: {unread}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -849,6 +856,9 @@ fn p5_walk_02_linux_foreign_filesystems_report_links_btime_and_case_as_they_are(
             assert_eq!((a.nlink, a.share), (2, Share::Hardlink));
             assert_eq!((b.nlink, b.share), (2, Share::Hardlink));
             assert_eq!((a.dev, a.ino), (b.dev, b.ino), "one inode");
+            // ntfs3's extent map is read, and shares nothing.
+            let extents = duscope_walk::extents(&ntfs.join("a")).unwrap().unwrap();
+            assert_eq!(extents.shared, 0, "{extents:?}");
             let btime = a.full.unwrap().btime_ns;
             assert!(btime.is_some(), "ntfs3 reports a creation time");
             assert_eq!(btime, created(&ntfs.join("a")));

@@ -350,7 +350,7 @@ fn p5_walk_02_clones_read_extents_where_the_scan_has_no_clone_ids() {
             assert_eq!(dir_facts.freeable_kind, Some("exact"));
         }
         Err(_) => {
-            assert!(last(&file).contains("keeps no extent map"), "{file:?}");
+            assert!(last(&file).contains("extent map is not read"), "{file:?}");
             assert_eq!(file.freeable_kind, Some("upper_bound"));
         }
     }
@@ -373,4 +373,49 @@ fn p5_walk_02_clones_read_extents_where_the_scan_has_no_clone_ids() {
     let before = facts.clone();
     shared_extents(Some(&index), id, &path, &mut facts).unwrap();
     assert_eq!(facts, before);
+}
+
+#[test]
+fn p5_walk_02_clones_read_nothing_through_a_link_put_in_after_the_scan() {
+    use super::shared_extents;
+
+    let env = TestEnv::new();
+    let tmp = fs::canonicalize(env.tmp_dir()).unwrap();
+    let root = tmp.join("swapped");
+    fs::create_dir_all(root.join("proj")).unwrap();
+    fs::write(root.join("proj/a.bin"), vec![1u8; 16 * 1024]).unwrap();
+    let mut arena = Arena::new(Attrs::Basic);
+    walk(&root, &WalkOptions::default(), |e| arena.push(e).unwrap()).unwrap();
+    let rollup = roll_up(&mut arena);
+    let mut scan = meta(&root);
+    scan.clones_unavailable = true;
+    let dir = tmp.join("index");
+    IndexWriter::write(&arena, &rollup, &scan, &dir).unwrap();
+    let index = Index::open(&index_path(&dir, &scan.scan_id)).unwrap();
+    // Since the scan, the owner of `proj` has put a link to another
+    // directory in its place, holding a file of the same name.
+    let elsewhere = tmp.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("a.bin"), vec![2u8; 16 * 1024]).unwrap();
+    fs::rename(root.join("proj"), tmp.join("proj-was")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.join("proj")).unwrap();
+    let caches = Caches::vendored();
+    let q = ExplainQuery {
+        caches: &caches,
+        env: &no_env,
+    };
+    let id = resolve_in_index(&index, &root).unwrap();
+    let mut facts = explain(&index, id, &q).unwrap();
+    shared_extents(Some(&index), id, &root, &mut facts).unwrap();
+    let last = facts.evidence.last().cloned().unwrap_or_default();
+    if matches!(duscope_walk::extents(&elsewhere.join("a.bin")), Ok(None)) {
+        // macOS reads no extent map.
+        assert!(last.contains("reads no extent map"), "{facts:?}");
+    } else {
+        // The file the scan saw is not reached: not read through the link,
+        // so not checked, and what deleting frees is an upper bound.
+        assert!(last.starts_with("fiemap: 0 of 0 files"), "{last}");
+        assert!(last.ends_with("; 1 could not be read"), "{last}");
+        assert_eq!(facts.freeable_kind, Some("upper_bound"));
+    }
 }

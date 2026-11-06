@@ -16,7 +16,8 @@ mod tests;
 
 use std::cell::RefCell;
 use std::io;
-use std::os::fd::AsFd;
+use std::mem::MaybeUninit;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::path::Path;
 
 use dents::DentBuf;
@@ -27,6 +28,35 @@ use crate::{
     Boundary, Counters, DirHandle, Entry, Flags, Flush, Kind, NameRef, Provider, STAT_BATCH,
     STREAM_CHUNK, ScanError, VolumeInfo, WalkOptions,
 };
+
+/// Filesystems by the magic number `statfs` gives as their type
+/// (`linux/magic.h`).
+mod magic {
+    pub(super) const BTRFS: u32 = 0x9123_683E;
+    pub(super) const XFS: u32 = 0x5846_5342;
+    pub(super) const BCACHEFS: u32 = 0xCA45_1A4E;
+    /// ext2 and ext3 too.
+    pub(super) const EXT4: u32 = 0xEF53;
+    pub(super) const F2FS: u32 = 0xF2F5_2010;
+    pub(super) const NTFS3: u32 = 0x7366_746E;
+}
+
+/// The magic number of the filesystem holding the file open on `fd`
+/// (`fstatfs(2)`, which a descriptor opened as a path only answers too).
+fn fs_magic(fd: BorrowedFd<'_>) -> io::Result<u32> {
+    let mut buf = MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `fd` is open for the borrow and `buf` is writable for one
+    // `struct statfs`.
+    if unsafe { libc::fstatfs(fd.as_raw_fd(), buf.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstatfs succeeded, so it filled the struct.
+    let stat = unsafe { buf.assume_init() };
+    // `f_type` is a signed long to glibc and an unsigned one to musl; the
+    // magic numbers are 32 bits either way.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(stat.f_type as u32)
+}
 
 thread_local! {
     /// Each worker's listing buffer, reused for every directory it reads.

@@ -639,10 +639,12 @@ pub fn host_app() -> Option<String> {
 /// reads them on demand: btrfs and XFS reflinks through Linux's `FIEMAP`,
 /// with read access only (the file is opened read-only and never read).
 /// `Ok(None)` where the platform keeps no such map, as macOS, whose clone
-/// ids the scan reads instead; an error where the path cannot be opened or
-/// is not a regular file (a symbolic link is not followed), and an
-/// [`io::ErrorKind::Unsupported`] one where its filesystem keeps no extent
-/// map (tmpfs, exFAT).
+/// ids the scan reads instead; an error where the path cannot be resolved
+/// without following a symbolic link in any of its components, or does not
+/// name a regular file, which is then never opened for reading; and an
+/// [`io::ErrorKind::Unsupported`] one, with nothing opened, where its
+/// filesystem keeps no extent map that is read (tmpfs, exFAT, ZFS, an
+/// overlay, a network or FUSE filesystem).
 pub fn extents(path: &Path) -> io::Result<Option<Extents>> {
     platform::extents(path)
 }

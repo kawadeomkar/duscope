@@ -309,8 +309,11 @@ pub fn explain_unindexed(path: &Path, q: &ExplainQuery<'_>) -> Result<Explain, C
 /// outside the path stay null, since the map does not say with whom an
 /// extent is shared. What deleting the path frees loses the shared bytes,
 /// as a lower bound, where it was exact or a lower bound; where a file
-/// could not be read it is an upper bound. Where the scan recorded clone
-/// ids (APFS) their facts stand and nothing is read.
+/// could not be read it is an upper bound. A path the scan recorded is
+/// read only as it was: through no symbolic link put in place of one of
+/// its directories since, and only if it is still a regular file. Where
+/// the scan recorded clone ids (APFS) their facts stand and nothing is
+/// read.
 pub fn shared_extents(
     index: Option<&Index>,
     id: u32,
@@ -365,7 +368,10 @@ pub fn shared_extents(
          other files or snapshots (with which, the map does not say)"
     );
     if no_map > 0 {
-        let _ = write!(line, "; {no_map} on a filesystem that keeps no extent map");
+        let _ = write!(
+            line,
+            "; {no_map} on a filesystem whose extent map is not read"
+        );
     }
     if failed > 0 {
         let _ = write!(line, "; {failed} could not be read");
