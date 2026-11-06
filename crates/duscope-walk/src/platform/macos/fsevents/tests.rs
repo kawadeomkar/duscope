@@ -483,7 +483,7 @@ fn p5_walk_01_a_replay_watches_the_volume_root_except_on_the_systems_own_volumes
     let beside = replayed(&[
         ("Users/other/", 0),
         ("Users/me/rootless/", MUST_SCAN_SUB_DIRS),
-        ("file-at-the-root", 0),
+        ("Users/me/rootless/a/", 0),
         ("", HISTORY_DONE),
     ]);
     assert_eq!(
@@ -494,6 +494,68 @@ fn p5_walk_01_a_replay_watches_the_volume_root_except_on_the_systems_own_volumes
             ..Replay::default()
         }
     );
+}
+
+/// A replay of `events` for the whole volume mounted at `/Volumes/X`, from
+/// the event id [`SINCE`], each event with its own id.
+fn replayed_volume(events: &[(&str, u32, u64)]) -> Replay {
+    let mut collector = Collector::new(SINCE, Vec::new(), PathBuf::from("/Volumes/X"));
+    for &(path, flags, id) in events {
+        collector.take(path.as_bytes(), flags, id);
+    }
+    collector.finish()
+}
+
+#[test]
+fn p5_walk_01_an_entry_of_the_volume_root_marks_the_root_as_changed() {
+    // As fseventsd records them on an image: a change among the root's own
+    // entries by the entry's name, every other by its directory, with a
+    // trailing slash.
+    let after = SINCE + 1;
+    let volume = replayed_volume(&[
+        ("", MOUNT, SINCE - 1),
+        ("newfile", 0, after),
+        ("renamedfile", 0, after),
+        ("olddir", 0, after),
+        ("sub/", 0, after),
+        ("sub/deep/", 0, after),
+        ("", HISTORY_DONE, after),
+    ]);
+    let x = Path::new("/Volumes/X");
+    assert_eq!(
+        volume.dirs,
+        vec![x.to_owned(), x.join("sub"), x.join("sub/deep")]
+    );
+    assert!(volume.must_scan_subdirs.is_empty() && !volume.ancestors_changed);
+    assert_eq!(volume.fallback(), None);
+    // The root's entries alone changed: the root, and none of its entries.
+    let only = replayed_volume(&[("newfile", 0, after), ("", HISTORY_DONE, after)]);
+    assert_eq!(only.dirs, vec![x.to_owned()]);
+    // A subtree to read again at an entry is the entry's own, beside its
+    // directory's entries.
+    let mounted = replayed_volume(&[("mnt", MOUNT, after), ("", HISTORY_DONE, after)]);
+    assert_eq!(mounted.dirs, vec![x.to_owned()]);
+    assert_eq!(mounted.must_scan_subdirs, vec![x.join("mnt")]);
+    assert_eq!(mounted.fallback(), None);
+    // Replaying a directory, an entry of the root, the root's own name
+    // included, is a change above it.
+    let root = Path::new("/scan/root");
+    for entry in ["Users", "elsewhere"] {
+        let above = replayed(&[(entry, 0), ("Users/me/root/a/", 0), ("", HISTORY_DONE)]);
+        assert!(above.ancestors_changed, "{entry}: {above:?}");
+        assert_eq!(above.dirs, vec![root.join("a")], "{entry}");
+    }
+    let named = replayed(&[("Users", MUST_SCAN_SUB_DIRS), ("", HISTORY_DONE)]);
+    assert_eq!(named.must_scan_subdirs, vec![root.to_owned()]);
+    assert_eq!(named.fallback(), Some(Fallback::HistoryGone));
+    // The same rule below the root, should a record name an entry there.
+    let below = replayed(&[
+        ("Users/me/root/a/file", 0),
+        ("Users/me/root", 0),
+        ("", HISTORY_DONE),
+    ]);
+    assert_eq!(below.dirs, vec![root.join("a")]);
+    assert!(below.ancestors_changed, "{below:?}");
 }
 
 #[test]
@@ -565,9 +627,14 @@ fn p5_walk_01_macos_no_log_on_an_image_gives_fsevents_disabled() {
     let volume = volumes(&mount).remove(0);
     let marked = volume.fsevents.expect("the walk marks the image's volume");
     fs::write(mount.join("dir/file"), b"bytes").unwrap();
-    let dirs = set(&mount, &["dir"]);
+    // fseventsd records a change among the root's own entries by the
+    // entry's name: the root's entries changed, not the entry's.
+    fs::write(mount.join("top"), b"bytes").unwrap();
+    let dirs = set(&mount, &["", "dir"]);
     let replayed = replay_until(volume.dev, &marked, &mount, &dirs);
     assert!(replayed.dirs.contains(&mount.join("dir")), "{replayed:?}");
+    assert!(replayed.dirs.contains(&mount), "{replayed:?}");
+    assert!(!replayed.dirs.contains(&mount.join("top")), "{replayed:?}");
     assert_eq!(replayed.fallback(), None, "{replayed:?}");
 
     // Logging off, as `touch .fseventsd/no_log` turns it off, from the

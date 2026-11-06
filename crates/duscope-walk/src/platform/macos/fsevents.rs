@@ -430,8 +430,8 @@ impl Collector {
         }
     }
 
-    /// Takes one event: its path relative to the device's root (a
-    /// directory, with a trailing slash), its flags and its id.
+    /// Takes one event: its path relative to the device's root (see
+    /// [`record`]), its flags and its id.
     ///
     /// Every record counts, whatever its id. The full history delivers the
     /// whole stored chunk that holds the mark, and a record there can keep
@@ -465,6 +465,22 @@ impl Collector {
         }
         let deep =
             flags & MUST_SCAN_SUB_DIRS != 0 || (flags & (MOUNT | UNMOUNT) != 0 && id > self.since);
+        match record(path) {
+            (dir, None) => self.mark(dir, deep),
+            // An entry of `dir` changed: `dir`'s entries are read again, and
+            // the entry's own subtree when the record asks for one.
+            (dir, Some(entry)) => {
+                self.mark(dir, false);
+                if deep {
+                    self.mark(entry, true);
+                }
+            }
+        }
+    }
+
+    /// Marks the directory `path` (relative to the device's root) changed,
+    /// or its whole subtree to read again when `deep`.
+    fn mark(&mut self, path: &[u8], deep: bool) {
         match self.place(path) {
             // The stream also reports the directories above the watched
             // one. A subtree to read again there holds the root's; a
@@ -526,11 +542,41 @@ impl Collector {
     }
 }
 
-/// `path` without leading or trailing slashes.
-fn trim_slashes(mut path: &[u8]) -> &[u8] {
+/// What a record names: the directory whose entries changed, relative to
+/// the device's root, and the entry that changed when the record names one.
+///
+/// fseventsd spells a directory with a trailing slash and the volume's root
+/// as an empty path. A change below the root is recorded at the directory
+/// that holds the changed entry (`sub/` for a file of `sub` created,
+/// removed, renamed, written, or its mode or extended attributes changed),
+/// but a change among the root's own entries by the entry's name, without
+/// a slash (`file`, `sub`). Either way the directory whose entries changed
+/// is the one that holds the entry: for a record naming an entry, its
+/// parent. Without `kFSEventStreamCreateFlagFileEvents` no record carries
+/// `ItemIsFile` or `ItemIsDir`; the slash is what tells them apart.
+fn record(path: &[u8]) -> (&[u8], Option<&[u8]>) {
+    let path = trim_slashes_front(path);
+    if path.is_empty() || path.ends_with(b"/") {
+        return (trim_slashes(path), None);
+    }
+    let parent = path
+        .iter()
+        .rposition(|&c| c == b'/')
+        .map_or(&b""[..], |slash| &path[..slash]);
+    (trim_slashes(parent), Some(path))
+}
+
+/// `path` without leading slashes.
+fn trim_slashes_front(mut path: &[u8]) -> &[u8] {
     while let Some(rest) = path.strip_prefix(b"/") {
         path = rest;
     }
+    path
+}
+
+/// `path` without leading or trailing slashes.
+fn trim_slashes(path: &[u8]) -> &[u8] {
+    let mut path = trim_slashes_front(path);
     while let Some(rest) = path.strip_suffix(b"/") {
         path = rest;
     }
