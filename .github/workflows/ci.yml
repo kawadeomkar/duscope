@@ -253,6 +253,14 @@ jobs:
         os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    # Optimised as release is, for the scan of /, without release's thin LTO
+    # and single codegen unit: over the ~90 test binaries the recipe builds,
+    # those took the macOS job to its 20-minute budget (a cold `cargo test
+    # --release --workspace --no-run` at -j3: 7 min 46 s with them, 2 min 0 s
+    # without).
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
