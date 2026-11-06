@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 
 use duscope_testkit::TestEnv;
 
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd;
+
 use super::{CheckedDir, hook, remove_dir_checked, unlink_checked};
 use crate::RemoveError;
 
@@ -25,7 +28,12 @@ fn ident(path: &Path) -> (u64, u64) {
 /// a file whose other link is outside, and a symbolic link to a file
 /// outside and one to the outside directory.
 fn tree(env: &TestEnv) -> PathBuf {
-    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("root");
+    tree_in(&fs::canonicalize(env.tmp_dir()).unwrap())
+}
+
+/// [`tree`] in the directory `dir`, as `dir/root`.
+fn tree_in(dir: &Path) -> PathBuf {
+    let root = dir.join("root");
     let item = root.join("item");
     let outside = root.join("outside");
     fs::create_dir_all(item.join("sub/deep")).unwrap();
@@ -331,39 +339,215 @@ fn p5_core_03_linux_a_mount_under_the_directory_is_never_crossed() {
         eprintln!("skipped: run as root with DUSCOPE_TEST_PLATFORM=1");
         return;
     }
-    let root = tree(&env);
-    let outside = root.join("outside");
-    // A bind mount of a directory of the same device: st_dev cannot tell it.
-    let bound = root.join("bound");
-    fs::create_dir_all(bound.join("bind")).unwrap();
-    fs::write(bound.join("before.bin"), b"x").unwrap();
-    mount(&env, &["--bind", path(&outside), path(&bound.join("bind"))]);
-    let _unbind = Unmount(&env, bound.join("bind"));
-    // A tmpfs: another device.
-    let tmpfs = root.join("tmpfs");
-    fs::create_dir_all(tmpfs.join("mnt")).unwrap();
-    mount(&env, &["-t", "tmpfs", "tmpfs", path(&tmpfs.join("mnt"))]);
-    let _unmount = Unmount(&env, tmpfs.join("mnt"));
-    fs::write(tmpfs.join("mnt/on-tmpfs.bin"), vec![7u8; 1000]).unwrap();
+    let base = fs::canonicalize(env.tmp_dir()).unwrap();
+    // The kernel the tests run on, then each kernel that does not flag a
+    // mount point: the descriptors' mounts tell it, else the mount table.
+    let mut kernels = vec![hook::Kernel::default()];
+    kernels.extend(old_kernels());
+    for (i, kernel) in kernels.into_iter().enumerate() {
+        let root = tree_in(&base.join(i.to_string()));
+        let outside = root.join("outside");
+        // A bind mount of a directory of the same device: st_dev cannot
+        // tell it.
+        let bound = root.join("bound");
+        fs::create_dir_all(bound.join("bind")).unwrap();
+        fs::write(bound.join("before.bin"), b"x").unwrap();
+        mount(&env, &["--bind", path(&outside), path(&bound.join("bind"))]);
+        let _unbind = Unmount(&env, bound.join("bind"));
+        // A tmpfs: another device.
+        let tmpfs = root.join("tmpfs");
+        fs::create_dir_all(tmpfs.join("mnt")).unwrap();
+        mount(&env, &["-t", "tmpfs", "tmpfs", path(&tmpfs.join("mnt"))]);
+        let _unmount = Unmount(&env, tmpfs.join("mnt"));
+        fs::write(tmpfs.join("mnt/on-tmpfs.bin"), vec![7u8; 1000]).unwrap();
 
-    let parent = CheckedDir::open(&root).unwrap();
-    for (dir, mount_point) in [(&bound, bound.join("bind")), (&tmpfs, tmpfs.join("mnt"))] {
-        let mut freed = 0;
-        let name = dir.file_name().unwrap();
-        let err = remove_dir_checked(&parent, name, ident(dir), &mut freed).unwrap_err();
-        assert!(
-            matches!(&err, RemoveError::Mount { path } if *path == mount_point),
-            "{err:?}"
+        // The descriptors' mounts tell the bind mount apart.
+        let (up, down) = (
+            CheckedDir::open(&bound).unwrap(),
+            CheckedDir::open(&bound.join("bind")).unwrap(),
         );
-        assert!(mount_point.is_dir());
+        assert_ne!(
+            super::mount_id(up.fd.as_fd()).unwrap(),
+            super::mount_id(down.fd.as_fd()).unwrap()
+        );
+        let _kernel = hook::as_kernel(kernel);
+        let parent = CheckedDir::open(&root).unwrap();
+        for (dir, mount_point) in [(&bound, bound.join("bind")), (&tmpfs, tmpfs.join("mnt"))] {
+            let mut freed = 0;
+            let name = dir.file_name().unwrap();
+            let err = remove_dir_checked(&parent, name, ident(dir), &mut freed).unwrap_err();
+            assert!(
+                matches!(&err, RemoveError::Mount { path } if *path == mount_point),
+                "{kernel:?}: {err:?}"
+            );
+            assert!(mount_point.is_dir());
+        }
+        outside_intact(&root);
+        assert_eq!(
+            fs::read(tmpfs.join("mnt/on-tmpfs.bin")).unwrap(),
+            [7u8; 1000]
+        );
+        // Through the bind mount, the outside directory still holds its
+        // files.
+        assert!(bound.join("bind/target.bin").exists(), "{kernel:?}");
     }
-    outside_intact(&root);
-    assert_eq!(
-        fs::read(tmpfs.join("mnt/on-tmpfs.bin")).unwrap(),
-        [7u8; 1000]
-    );
-    // Through the bind mount, the outside directory still holds its files.
-    assert!(bound.join("bind/target.bin").exists());
+    // Where nothing tells a mount point, neither directory is entered, and
+    // nothing in either is removed.
+    for (i, kernel) in nothing_tells().into_iter().enumerate() {
+        let root = tree_in(&base.join(format!("nothing-{i}")));
+        let bound = root.join("bound");
+        fs::create_dir_all(bound.join("bind")).unwrap();
+        fs::write(bound.join("before.bin"), b"x").unwrap();
+        mount(
+            &env,
+            &[
+                "--bind",
+                path(&root.join("outside")),
+                path(&bound.join("bind")),
+            ],
+        );
+        let _unbind = Unmount(&env, bound.join("bind"));
+        let _kernel = hook::as_kernel(kernel);
+        let parent = CheckedDir::open(&root).unwrap();
+        let mut freed = 0;
+        let err = remove_dir_checked(&parent, OsStr::new("bound"), ident(&bound), &mut freed)
+            .unwrap_err();
+        assert!(
+            matches!(&err, RemoveError::MountUnknown { path, .. } if *path == bound),
+            "{kernel:?}: {err:?}"
+        );
+        assert_eq!(freed, 0);
+        assert!(bound.join("before.bin").exists());
+        outside_intact(&root);
+    }
+}
+
+/// The kernels that do not flag a mount point, each with an answer left:
+/// before 5.8 (no mount-root attribute) and without `statx`, each with
+/// file handles, then with the mount table alone.
+#[cfg(target_os = "linux")]
+fn old_kernels() -> Vec<hook::Kernel> {
+    let mut kernels = Vec::new();
+    for no_handles in [false, true] {
+        for (no_mount_root, no_statx) in [(true, false), (false, true)] {
+            kernels.push(hook::Kernel {
+                no_mount_root,
+                no_statx,
+                no_handles,
+                no_mount_table: false,
+            });
+        }
+    }
+    kernels
+}
+
+/// The kernels that do not flag a mount point, without file handles or a
+/// mount table.
+#[cfg(target_os = "linux")]
+fn nothing_tells() -> Vec<hook::Kernel> {
+    old_kernels()
+        .into_iter()
+        .filter(|k| k.no_handles)
+        .map(|k| hook::Kernel {
+            no_mount_table: true,
+            ..k
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn p5_core_03_linux_a_descriptors_mount_id_is_the_one_the_mount_table_lists() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let sub = CheckedDir::open(&root.join("item/sub")).unwrap();
+    match super::mount_id(sub.fd.as_fd()) {
+        Ok(id) => assert_eq!(
+            id,
+            crate::platform::linux::Mounts::default().mnt_id_of(&root)
+        ),
+        // A temporary directory on a filesystem without file handles.
+        Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP) => {
+            eprintln!("skipped: no file handles under {}", root.display());
+        }
+        Err(e) => panic!("name_to_handle_at: {e}"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn p5_core_03_linux_a_kernel_that_flags_no_mount_point_still_removes_a_plain_tree() {
+    // The descriptors' mounts, or the mount table, find no mount point, and
+    // the tree goes as it does where statx flags one.
+    let env = TestEnv::new();
+    let base = fs::canonicalize(env.tmp_dir()).unwrap();
+    for (i, kernel) in old_kernels().into_iter().enumerate() {
+        let root = tree_in(&base.join(i.to_string()));
+        let item = root.join("item");
+        let expected = freeable(&item);
+        let _kernel = hook::as_kernel(kernel);
+        let parent = CheckedDir::open(&root).unwrap();
+        let mut freed = 0;
+        remove_dir_checked(&parent, OsStr::new("item"), ident(&item), &mut freed)
+            .unwrap_or_else(|e| panic!("{kernel:?}: {e:?}"));
+        assert!(fs::symlink_metadata(&item).is_err(), "{kernel:?}");
+        assert_eq!(freed, expected, "{kernel:?}");
+        outside_intact(&root);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn p5_core_03_linux_where_nothing_tells_a_mount_point_nothing_is_removed() {
+    let env = TestEnv::new();
+    let base = fs::canonicalize(env.tmp_dir()).unwrap();
+    for (i, kernel) in nothing_tells().into_iter().enumerate() {
+        let root = tree_in(&base.join(i.to_string()));
+        let item = root.join("item");
+        let _kernel = hook::as_kernel(kernel);
+        let parent = CheckedDir::open(&root).unwrap();
+        let mut freed = 0;
+        let err =
+            remove_dir_checked(&parent, OsStr::new("item"), ident(&item), &mut freed).unwrap_err();
+        assert!(
+            matches!(&err, RemoveError::MountUnknown { path, .. } if *path == item),
+            "{kernel:?}: {err:?}"
+        );
+        // Refused before anything in it went.
+        assert_eq!(freed, 0);
+        assert!(item.join("a.bin").exists() && item.join("sub/deep/c.bin").exists());
+        // A file needs no mount check.
+        let dir = CheckedDir::open(&item).unwrap();
+        unlink_checked(
+            &dir,
+            OsStr::new("a.bin"),
+            ident(&item.join("a.bin")),
+            &mut freed,
+        )
+        .unwrap();
+    }
+    // With the mount-root attribute (Linux 5.8 on), neither file handles nor
+    // the mount table is asked: the tree goes without them.
+    let kernel = hook::Kernel {
+        no_handles: true,
+        no_mount_table: true,
+        ..hook::Kernel::default()
+    };
+    let root = tree_in(&base.join("flagged"));
+    let item = root.join("item");
+    let parent = CheckedDir::open(&root).unwrap();
+    let flagged = super::stat_at(parent.fd.as_fd(), c"item")
+        .unwrap()
+        .mount
+        .is_some();
+    if !flagged {
+        eprintln!("this kernel's statx flags no mount root (before 5.8): the last part skipped");
+        return;
+    }
+    let _kernel = hook::as_kernel(kernel);
+    let mut freed = 0;
+    remove_dir_checked(&parent, OsStr::new("item"), ident(&item), &mut freed).unwrap();
+    assert!(fs::symlink_metadata(&item).is_err());
 }
 
 #[cfg(target_os = "linux")]

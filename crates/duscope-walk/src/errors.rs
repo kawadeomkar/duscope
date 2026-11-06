@@ -152,6 +152,22 @@ pub enum RemoveError {
         /// The mount point.
         path: PathBuf,
     },
+    /// A directory under the one being removed, or that one, whose mount
+    /// nothing can tell (Linux before 5.8, or without `statx`, where
+    /// neither a file handle nor the mount table answers): never entered,
+    /// as a mount point would not be, so it and every directory above it
+    /// stay.
+    #[error(
+        "cannot tell whether {} is a mount point: the kernel reports no mount-root attribute \
+         or file handle, and the mount table cannot be read ({source})",
+        path.display()
+    )]
+    MountUnknown {
+        /// The directory.
+        path: PathBuf,
+        /// Why the mount table could not be read.
+        source: io::Error,
+    },
     /// The system refused to open, read or remove `path`.
     #[error("cannot remove {}: {source}", path.display())]
     Io {

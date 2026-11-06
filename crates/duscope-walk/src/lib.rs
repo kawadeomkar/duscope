@@ -578,17 +578,20 @@ pub fn unlink_checked(
 /// `clean --permanent` does: only when its device and inode are `expect`;
 /// then depth first through each directory's descriptor, each opened with
 /// `O_NOFOLLOW | O_DIRECTORY` and checked to be the directory just read,
-/// never into a directory of another device or a mount point, removed
-/// bottom up with `AT_REMOVEDIR`. Adds to `freed`, as it goes, the bytes on
-/// disk of each inode whose last link it removed and of each directory.
+/// never into a directory of another device or a mount point (nor one
+/// whose mount nothing can tell), removed bottom up with `AT_REMOVEDIR`.
+/// Adds to `freed`, as it goes, the bytes on disk of each inode whose last
+/// link it removed and of each directory.
 ///
 /// # Errors
 ///
 /// [`RemoveError::Changed`] when the directory, or one under it, is gone or
 /// is not what was just read of it; [`RemoveError::Mount`] for a mount
-/// point or another device's directory under it, which stays with every
-/// directory above it; [`RemoveError::Io`] when an entry cannot be read or
-/// removed. What was removed before the failure stays removed.
+/// point or another device's directory under it, and
+/// [`RemoveError::MountUnknown`] for a directory whose mount nothing can
+/// tell, either of which stays with every directory above it;
+/// [`RemoveError::Io`] when an entry cannot be read or removed. What was
+/// removed before the failure stays removed.
 pub fn remove_dir_checked(
     parent: &CheckedDir,
     name: &OsStr,

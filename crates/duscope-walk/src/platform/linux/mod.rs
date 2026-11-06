@@ -9,7 +9,7 @@ mod mounts;
 mod statx;
 pub(in crate::platform) mod trash;
 
-pub(super) use mounts::Mounts;
+pub(super) use mounts::{Mounts, mount_point_under};
 pub(super) use statx::from_stat;
 #[cfg(test)]
 mod tests;

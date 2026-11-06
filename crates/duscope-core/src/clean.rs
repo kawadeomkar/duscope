@@ -476,9 +476,10 @@ fn plan_item(
 /// - **`--permanent`.** The item is deleted through descriptors, by
 ///   `duscope-walk`'s [`unlink_checked`](duscope_walk::unlink_checked) and
 ///   [`remove_dir_checked`](duscope_walk::remove_dir_checked); a change on
-///   the way to it or under it is `path_changed`, a mount point under it
-///   `refused_path`, and what was deleted before a failure stays deleted and
-///   counts in `freed_bytes`.
+///   the way to it or under it is `path_changed`, a mount point under it,
+///   or a directory whose mount the system cannot tell, `refused_path`, and
+///   what was deleted before a failure stays deleted and counts in
+///   `freed_bytes`.
 pub fn clean_execute(plan: &mut Plan) -> CleanOutcome {
     let mut outcome = CleanOutcome::default();
     let method = plan.method;
@@ -590,6 +591,20 @@ fn removal_error(item: &Path, error: &RemoveError) -> ErrorObject {
                 "Run umount {} first, then duscope clean again",
                 path.display()
             )),
+            false,
+            "user",
+        ),
+        RemoveError::MountUnknown { path, .. } => error_object(
+            "refused_path",
+            if path == item {
+                format!("{error}, so nothing in it was deleted")
+            } else {
+                format!(
+                    "{error}, so it and the directories above it in {} were left",
+                    item.display()
+                )
+            },
+            Some("Rerun duscope clean without --permanent to move it to the Trash instead"),
             false,
             "user",
         ),

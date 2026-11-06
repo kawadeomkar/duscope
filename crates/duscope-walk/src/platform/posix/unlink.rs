@@ -11,10 +11,16 @@
 //!   following a link, and remove nothing unless they are the expected ones.
 //! - **Under a directory.** Each subdirectory is opened relative to its
 //!   parent with `O_NOFOLLOW | O_DIRECTORY` and checked to be the directory
-//!   just read; a symbolic link is removed as an entry, never followed; a
-//!   directory on another device, or a mount point (Linux reports a bind
-//!   mount of the same device as one), is never entered. Directories are
-//!   emptied depth first and removed bottom up with `AT_REMOVEDIR`.
+//!   just read; a symbolic link is removed as an entry, never followed.
+//!   Directories are emptied depth first and removed bottom up with
+//!   `AT_REMOVEDIR`.
+//! - **Never across a mount.** A directory on another device is never
+//!   entered, nor a mount point of the same device (a bind mount), which
+//!   only Linux has: its `statx` flags one from 5.8. Where it does not
+//!   (an older kernel, or no `statx`), each directory's mount is compared
+//!   with its parent's through their descriptors once it is opened, and
+//!   before anything in it is removed ([`MountCheck`]); a directory whose
+//!   mount nothing can tell is never entered either.
 //! - **What it frees.** Each removal adds the bytes on disk of each inode
 //!   whose last link it removed, and of each directory, as `du` counts them.
 //!
@@ -140,8 +146,10 @@ pub fn unlink_checked(
 /// [`RemoveError::Changed`] when the directory, or one under it, is gone or
 /// is not what was just read of it; [`RemoveError::Mount`] for a mount
 /// point or a directory of another device under it, which stays with every
-/// directory above it; [`RemoveError::Io`] when an entry cannot be read or
-/// removed. What was removed before the failure stays removed.
+/// directory above it; [`RemoveError::MountUnknown`] for a directory whose
+/// mount nothing can tell, which is never entered either;
+/// [`RemoveError::Io`] when an entry cannot be read or removed. What was
+/// removed before the failure stays removed.
 pub fn remove_dir_checked(
     parent: &CheckedDir,
     name: &OsStr,
@@ -153,7 +161,7 @@ pub fn remove_dir_checked(
     if !stat.dir {
         return Err(RemoveError::Changed { path });
     }
-    if stat.mount || stat.dev != parent.dev {
+    if stat.mount == Some(true) || stat.dev != parent.dev {
         return Err(RemoveError::Mount { path });
     }
     let fd = open_child(parent.fd.as_fd(), name.as_bytes(), &path)?;
@@ -164,7 +172,14 @@ pub fn remove_dir_checked(
     if opened.ident() != expect {
         return Err(RemoveError::Changed { path });
     }
-    empty(fd, opened.dev, &path, freed)?;
+    // Before anything in it is removed: where nothing can tell whether it
+    // is a mount point, nothing is.
+    let mut mounts = MountCheck::default();
+    let mnt = match stat.mount {
+        Some(_) => None,
+        None => mounts.check(parent.fd.as_fd(), &mut None, fd.as_fd(), &path)?,
+    };
+    empty(fd, opened.dev, mnt, &path, &mut mounts, freed)?;
     super::with_c_name(name.as_bytes(), |c_name| {
         remove_at(parent.fd.as_fd(), c_name, libc::AT_REMOVEDIR)
     })
@@ -173,12 +188,14 @@ pub fn remove_dir_checked(
     Ok(())
 }
 
-/// A directory being emptied: its descriptor, its device, the names left
-/// to remove, and its own name in the directory above (none for the
-/// directory [`remove_dir_checked`] removes itself).
+/// A directory being emptied: its descriptor, its device, its mount id
+/// once read ([`MountCheck`]), the names left to remove, and its own name
+/// in the directory above (none for the directory [`remove_dir_checked`]
+/// removes itself).
 struct Level {
     fd: OwnedFd,
     dev: u64,
+    mnt: Option<u64>,
     bytes: u64,
     names: std::vec::IntoIter<NameRef>,
     path: PathBuf,
@@ -186,15 +203,23 @@ struct Level {
 }
 
 /// Removes everything in the directory open on `fd`, at `path` on device
-/// `dev`, depth first with a stack rather than recursion, so a deep tree
-/// costs a descriptor a level and no stack frames. Each directory's names
-/// are read whole before any is removed: a listing read while entries go
-/// may skip some.
-fn empty(fd: OwnedFd, dev: u64, path: &Path, freed: &mut u64) -> Result<(), RemoveError> {
+/// `dev` (on the mount `mnt`, when its id was read), depth first with a
+/// stack rather than recursion, so a deep tree costs a descriptor a level
+/// and no stack frames. Each directory's names are read whole before any
+/// is removed: a listing read while entries go may skip some.
+fn empty(
+    fd: OwnedFd,
+    dev: u64,
+    mnt: Option<u64>,
+    path: &Path,
+    mounts: &mut MountCheck,
+    freed: &mut u64,
+) -> Result<(), RemoveError> {
     let names = list(fd.as_fd(), path)?;
     let mut stack = vec![Level {
         fd,
         dev,
+        mnt,
         bytes: 0,
         names: names.into_iter(),
         path: path.to_owned(),
@@ -236,7 +261,7 @@ fn empty(fd: OwnedFd, dev: u64, path: &Path, freed: &mut u64) -> Result<(), Remo
                 }
             };
         if stat.dir {
-            if stat.mount || stat.dev != level.dev {
+            if stat.mount == Some(true) || stat.dev != level.dev {
                 return Err(RemoveError::Mount { path: child });
             }
             let fd = match open_at(level.fd.as_fd(), name.as_bytes(), &child) {
@@ -252,10 +277,15 @@ fn empty(fd: OwnedFd, dev: u64, path: &Path, freed: &mut u64) -> Result<(), Remo
             if opened.ident() != stat.ident() {
                 return Err(RemoveError::Changed { path: child });
             }
+            let mnt = match stat.mount {
+                Some(_) => None,
+                None => mounts.check(level.fd.as_fd(), &mut level.mnt, fd.as_fd(), &child)?,
+            };
             let names = list(fd.as_fd(), &child)?;
             stack.push(Level {
                 fd,
                 dev: opened.dev,
+                mnt,
                 bytes: opened.bytes,
                 names: names.into_iter(),
                 path: child,
@@ -363,9 +393,13 @@ struct Stat {
     nlink: u64,
     /// Bytes on disk, `st_blocks` × 512, as `du` counts them.
     bytes: u64,
-    /// A mount point or an automount point (Linux, from `statx`): never
-    /// entered, whatever its device.
-    mount: bool,
+    /// Whether it is a mount point or an automount point, where the read
+    /// says (Linux's `statx` from 5.8; an automount point from its first
+    /// version): one is never entered, whatever its device. `None` where
+    /// it does not say (`statx` before 5.8, `fstatat`, macOS's `lstat`):
+    /// a directory is then entered only once [`MountCheck`] has found it
+    /// on its parent's mount.
+    mount: Option<bool>,
 }
 
 impl Stat {
@@ -386,7 +420,7 @@ impl Stat {
             bytes: u64::try_from(stat.st_blocks)
                 .unwrap_or(0)
                 .saturating_mul(512),
-            mount: false,
+            mount: None,
         }
     }
 }
@@ -453,6 +487,12 @@ fn stat_fd(fd: BorrowedFd<'_>) -> io::Result<Stat> {
 #[cfg(target_os = "linux")]
 fn statx(dir: BorrowedFd<'_>, name: &CStr, flags: c_int) -> io::Result<Stat> {
     const MASK: u32 = libc::STATX_TYPE | libc::STATX_INO | libc::STATX_NLINK | libc::STATX_BLOCKS;
+    #[cfg(test)]
+    let kernel = hook::kernel();
+    #[cfg(test)]
+    if kernel.no_statx {
+        return Err(io::Error::from_raw_os_error(libc::ENOSYS));
+    }
     let mut buf = std::mem::MaybeUninit::<libc::statx>::uninit();
     loop {
         // The system call itself, as the provider makes it: the musl that
@@ -472,10 +512,26 @@ fn statx(dir: BorrowedFd<'_>, name: &CStr, flags: c_int) -> io::Result<Stat> {
         };
         if rc == 0 {
             // SAFETY: statx succeeded, so it filled the struct.
-            let stx = unsafe { buf.assume_init() };
-            let attribute = |bit: c_int| {
-                let bit = u64::from(bit.cast_unsigned());
-                stx.stx_attributes_mask & bit != 0 && stx.stx_attributes & bit != 0
+            #[cfg_attr(not(test), allow(unused_mut))]
+            let mut stx = unsafe { buf.assume_init() };
+            // Before 5.8 the mask holds neither bit.
+            #[cfg(test)]
+            if kernel.no_mount_root {
+                stx.stx_attributes_mask &= !u64::from(
+                    (libc::STATX_ATTR_MOUNT_ROOT | libc::STATX_ATTR_AUTOMOUNT).cast_unsigned(),
+                );
+            }
+            let bit = |attribute: c_int| u64::from(attribute.cast_unsigned());
+            let set = |attribute: c_int| stx.stx_attributes & bit(attribute) != 0;
+            // The kernel flags an automount point from statx's first version
+            // (4.11), but puts the bit in the mask, with the mount root's,
+            // only from 5.8: before, an unflagged directory may be either.
+            let mount = if set(libc::STATX_ATTR_AUTOMOUNT) {
+                Some(true)
+            } else if stx.stx_attributes_mask & bit(libc::STATX_ATTR_MOUNT_ROOT) != 0 {
+                Some(set(libc::STATX_ATTR_MOUNT_ROOT))
+            } else {
+                None
             };
             return Ok(Stat {
                 dev: libc::makedev(stx.stx_dev_major, stx.stx_dev_minor),
@@ -483,8 +539,7 @@ fn statx(dir: BorrowedFd<'_>, name: &CStr, flags: c_int) -> io::Result<Stat> {
                 dir: u32::from(stx.stx_mode) & libc::S_IFMT == libc::S_IFDIR,
                 nlink: u64::from(stx.stx_nlink),
                 bytes: stx.stx_blocks.saturating_mul(512),
-                mount: attribute(libc::STATX_ATTR_MOUNT_ROOT)
-                    || attribute(libc::STATX_ATTR_AUTOMOUNT),
+                mount,
             });
         }
         let error = io::Error::last_os_error();
@@ -492,6 +547,169 @@ fn statx(dir: BorrowedFd<'_>, name: &CStr, flags: c_int) -> io::Result<Stat> {
             return Err(error);
         }
     }
+}
+
+/// How a removal tells whether a directory it has just opened is a mount
+/// point of its parent's device (a bind mount), where `statx` did not say.
+///
+/// Linux, in order:
+/// - **The descriptors' mounts.** `name_to_handle_at(2)` names the mount
+///   a descriptor is on (Linux 2.6.39): the directory is on its parent's
+///   mount, or it is a mount point. The answer is the descriptor's own,
+///   so no mount made meanwhile can change it.
+/// - **The mount table.** Where that call fails (a filesystem without file
+///   handles before 6.5, a sandbox that refuses the call), the process's
+///   mount table (`/proc/self/mountinfo`), read once for the directory:
+///   a mount point listed at it or under it fails the removal before
+///   anything there is removed, and none listed lets the walk go on under
+///   it without asking again.
+/// - **Neither.** The directory is never entered:
+///   [`RemoveError::MountUnknown`].
+#[derive(Debug, Default)]
+struct MountCheck {
+    /// A directory the mount table held no mount point at or under when it
+    /// was read: what is under it is on its mount.
+    #[cfg(target_os = "linux")]
+    clear: Option<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl MountCheck {
+    /// Whether the directory open on `fd`, at `path`, just opened in the
+    /// directory open on `up`, is on `up`'s mount: its mount id when it is
+    /// and the ids were read (`up`'s kept in `up_mnt`), for the directories
+    /// under it to compare with.
+    ///
+    /// # Errors
+    ///
+    /// [`RemoveError::Mount`] when it is a mount point, or the mount table
+    /// lists one at it or under it; [`RemoveError::MountUnknown`] when
+    /// neither the descriptors nor the mount table can tell.
+    fn check(
+        &mut self,
+        up: BorrowedFd<'_>,
+        up_mnt: &mut Option<u64>,
+        fd: BorrowedFd<'_>,
+        path: &Path,
+    ) -> Result<Option<u64>, RemoveError> {
+        if self
+            .clear
+            .as_deref()
+            .is_some_and(|clear| path.starts_with(clear))
+        {
+            return Ok(None);
+        }
+        let up_id = match *up_mnt {
+            Some(id) => Ok(id),
+            None => mount_id(up),
+        };
+        if let Ok((up_id, id)) = up_id.and_then(|up_id| Ok((up_id, mount_id(fd)?))) {
+            *up_mnt = Some(up_id);
+            return if id == up_id {
+                Ok(Some(id))
+            } else {
+                Err(RemoveError::Mount {
+                    path: path.to_owned(),
+                })
+            };
+        }
+        match mount_point_under(path) {
+            Ok(Some(point)) => Err(RemoveError::Mount { path: point }),
+            Ok(None) => {
+                self.clear = Some(path.to_owned());
+                Ok(None)
+            }
+            Err(source) => Err(RemoveError::MountUnknown {
+                path: path.to_owned(),
+                source,
+            }),
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl MountCheck {
+    /// Whether the directory just opened is on its parent's mount: on
+    /// macOS, always, once its device is its parent's. Every mount there
+    /// has a device of its own (its own `f_fsid`, which its entries'
+    /// `st_dev` reports, nullfs's included), and there are no bind mounts.
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
+    fn check(
+        &mut self,
+        _up: BorrowedFd<'_>,
+        _up_mnt: &mut Option<u64>,
+        _fd: BorrowedFd<'_>,
+        _path: &Path,
+    ) -> Result<Option<u64>, RemoveError> {
+        Ok(None)
+    }
+}
+
+/// The id of the mount the descriptor `fd` is on, as `name_to_handle_at(2)`
+/// gives it beside a handle (since Linux 2.6.39; the id mountinfo lists).
+/// Fails where the call is refused (a seccomp sandbox) or the filesystem
+/// has no file handles (`EOPNOTSUPP`, before Linux 6.5).
+#[cfg(target_os = "linux")]
+fn mount_id(fd: BorrowedFd<'_>) -> io::Result<u64> {
+    /// `struct file_handle` with room for the longest handle,
+    /// `MAX_HANDLE_SZ`.
+    #[repr(C)]
+    struct Handle {
+        bytes: u32,
+        kind: c_int,
+        data: [u8; 128],
+    }
+    #[cfg(test)]
+    if hook::kernel().no_handles {
+        return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+    }
+    let mut handle = Handle {
+        bytes: 128,
+        kind: 0,
+        data: [0; 128],
+    };
+    // Mount ids are never negative: -1 is one the call did not write.
+    let mut id: c_int = -1;
+    loop {
+        // The system call itself, as for statx: the musl that release
+        // builds link statically may have no wrapper.
+        // SAFETY: `fd` is open for the borrow, the empty name is
+        // NUL-terminated, `handle` is writable for a `struct file_handle`
+        // with the `bytes` of handle it declares, and `id` for one int; the
+        // arguments are the system call's, in its order.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_name_to_handle_at,
+                fd.as_raw_fd(),
+                c"".as_ptr(),
+                &raw mut handle,
+                &raw mut id,
+                libc::AT_EMPTY_PATH,
+            )
+        };
+        if rc != 0 {
+            let error = io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                // No handle for this inode, or a longer one than the
+                // buffer: the mount id is written all the same.
+                Some(libc::EOVERFLOW) => {}
+                _ => return Err(error),
+            }
+        }
+        return u64::try_from(id).map_err(|_| io::Error::other("no mount id"));
+    }
+}
+
+/// The mount point nearest `dir` at it or under it in the mount table, read
+/// now; an error where the table cannot be read.
+#[cfg(target_os = "linux")]
+fn mount_point_under(dir: &Path) -> io::Result<Option<PathBuf>> {
+    #[cfg(test)]
+    if hook::kernel().no_mount_table {
+        return Err(io::Error::from_raw_os_error(libc::ENOENT));
+    }
+    crate::platform::linux::mount_point_under(dir)
 }
 
 /// A test's hook into a removal, called with each path just before it is
@@ -530,6 +748,60 @@ pub(crate) mod hook {
                 step(path);
             }
         });
+    }
+
+    /// What the kernel answers a removal, as a test makes it: an older or
+    /// more confined kernel than the one the tests run on (Linux).
+    #[cfg(target_os = "linux")]
+    #[derive(Debug, Clone, Copy, Default)]
+    #[allow(clippy::struct_excessive_bools)] // four answers, each on or off
+    pub(crate) struct Kernel {
+        /// `statx` reports no mount-root attribute in its mask, as before
+        /// Linux 5.8.
+        pub(crate) no_mount_root: bool,
+        /// `statx` fails with `ENOSYS`, as in a sandbox that refuses it.
+        pub(crate) no_statx: bool,
+        /// `name_to_handle_at` fails with `EOPNOTSUPP`, as on a filesystem
+        /// without file handles or in a sandbox that refuses the call.
+        pub(crate) no_handles: bool,
+        /// `/proc/self/mountinfo` cannot be read, as without `/proc`.
+        pub(crate) no_mount_table: bool,
+    }
+
+    #[cfg(target_os = "linux")]
+    thread_local! {
+        static KERNEL: std::cell::Cell<Kernel> = const {
+            std::cell::Cell::new(Kernel {
+                no_mount_root: false,
+                no_statx: false,
+                no_handles: false,
+                no_mount_table: false,
+            })
+        };
+    }
+
+    /// Makes the kernel answer as `kernel` says on this thread until the
+    /// returned guard drops.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn as_kernel(kernel: Kernel) -> KernelGuard {
+        KERNEL.with(|k| k.set(kernel));
+        KernelGuard
+    }
+
+    /// Gives the kernel back its own answers when dropped.
+    #[cfg(target_os = "linux")]
+    pub(crate) struct KernelGuard;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for KernelGuard {
+        fn drop(&mut self) {
+            KERNEL.with(|k| k.set(Kernel::default()));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn kernel() -> Kernel {
+        KERNEL.with(std::cell::Cell::get)
     }
 }
 

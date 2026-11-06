@@ -14,9 +14,9 @@ use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 
 use duscope_testkit::TestEnv;
-use duscope_walk::{Attrs, WalkOptions, walk};
+use duscope_walk::{Attrs, RemoveError, WalkOptions, walk};
 
-use super::{CleanItem, Method, clean_execute, clean_plan, within_one_percent};
+use super::{CleanItem, Method, clean_execute, clean_plan, removal_error, within_one_percent};
 use crate::CoreError;
 use crate::arena::Arena;
 use crate::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
@@ -412,4 +412,44 @@ fn p5_core_03_a_directory_swapped_for_a_symlink_after_the_plan_removes_nothing_o
     assert_eq!(fs::read(root.join("dir.away/b.bin")).unwrap(), [2u8; 5000]);
     assert_eq!(fs::metadata(outside.join("b.bin")).unwrap().nlink(), 2);
     assert_eq!(fs::read(outside.join("precious.bin")).unwrap(), [8u8; 6000]);
+}
+
+#[test]
+fn p5_core_03_a_directory_whose_mount_cannot_be_told_is_refused() {
+    let item = Path::new("/home/u/chroot");
+    let unknown = |path: &Path| RemoveError::MountUnknown {
+        path: path.to_owned(),
+        source: std::io::ErrorKind::NotFound.into(),
+    };
+    // The item itself: nothing in it was deleted.
+    let error = removal_error(item, &unknown(item));
+    assert_eq!(
+        (error.code, error.retryable, error.fixable_by),
+        ("refused_path", false, "user")
+    );
+    assert!(
+        error
+            .message
+            .starts_with("cannot tell whether /home/u/chroot is a mount point")
+            && error.message.ends_with("so nothing in it was deleted"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        error.hint.as_deref(),
+        Some("Rerun duscope clean without --permanent to move it to the Trash instead")
+    );
+    // A directory under it: it stays with the directories above it.
+    let error = removal_error(item, &unknown(&item.join("home/data")));
+    assert_eq!(error.code, "refused_path");
+    assert!(
+        error
+            .message
+            .contains("/home/u/chroot/home/data is a mount point")
+            && error
+                .message
+                .ends_with("so it and the directories above it in /home/u/chroot were left"),
+        "{}",
+        error.message
+    );
 }

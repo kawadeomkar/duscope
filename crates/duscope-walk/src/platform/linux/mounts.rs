@@ -330,6 +330,35 @@ impl Mounts {
     }
 }
 
+/// The mount point nearest `dir` at it or under it in this process's
+/// mount table, read now: how `clean --permanent` tells a bind mount of
+/// the same device under a directory where neither `statx` nor a file
+/// handle can. `dir` is a real path, as the table's are.
+///
+/// # Errors
+///
+/// When the table cannot be read, or lists no mount holding `dir` (not a
+/// table to trust).
+pub(in crate::platform) fn mount_point_under(dir: &Path) -> io::Result<Option<PathBuf>> {
+    nearest_under(&parse_mountinfo(&fs::read("/proc/self/mountinfo")?), dir)
+}
+
+/// The mount point in `table` nearest `dir` at it or under it, comparing
+/// whole components.
+fn nearest_under(table: &[Mount], dir: &Path) -> io::Result<Option<PathBuf>> {
+    if !table.iter().any(|m| dir.starts_with(&m.path)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the mount table lists no mount holding the directory",
+        ));
+    }
+    Ok(table
+        .iter()
+        .filter(|m| m.path.starts_with(dir))
+        .min_by_key(|m| m.path.components().count())
+        .map(|m| m.path.clone()))
+}
+
 /// The size and the bytes free of the filesystem holding `path`, from
 /// `statvfs`: free bytes are `f_bavail × f_frsize`.
 fn sizes(path: &std::ffi::CStr) -> io::Result<(u64, u64)> {
@@ -372,7 +401,7 @@ fn describe(dev: u64, mount: Mount, total_bytes: u64, free_bytes: u64) -> Volume
 mod tests {
     use std::path::Path;
 
-    use super::{Mount, case_sensitive, parse_mountinfo, subvolume_of};
+    use super::{Mount, case_sensitive, nearest_under, parse_mountinfo, subvolume_of};
 
     /// The mounts of a pool `tank` (its root dataset, a child, a snapshot
     /// mounted under `.zfs`, and a bind mount of the child), a second pool,
@@ -449,6 +478,31 @@ mod tests {
             m.options.retain(|o| !o.starts_with("subvolid="));
         }
         assert!(subvolume_of(&outer, &inner));
+    }
+
+    #[test]
+    fn p5_core_03_the_mount_table_names_a_mount_point_at_or_under_a_directory() {
+        let table = parse_mountinfo(TABLE);
+        let under = |dir: &str| nearest_under(&table, Path::new(dir)).unwrap();
+        // The directory itself, and the nearest of several under it.
+        assert_eq!(under("/data/mnt"), Some("/data/mnt".into()));
+        assert_eq!(under("/tank"), Some("/tank".into()));
+        assert_eq!(under("/srv"), Some("/srv/home".into()));
+        assert_eq!(
+            under("/tank/home/.zfs"),
+            Some("/tank/home/.zfs/snapshot/daily".into())
+        );
+        // Whole components: /tank/ho is not above /tank/home.
+        assert_eq!(under("/tank/ho"), None);
+        assert_eq!(under("/data/bound/dir"), None);
+        assert_eq!(under("/home/u"), None);
+        // A table without a mount holding the directory is not trusted.
+        assert!(nearest_under(&[], Path::new("/home/u")).is_err());
+        let data_only: Vec<Mount> = table
+            .into_iter()
+            .filter(|m| m.path == Path::new("/data"))
+            .collect();
+        assert!(nearest_under(&data_only, Path::new("/home/u")).is_err());
     }
 
     #[test]
