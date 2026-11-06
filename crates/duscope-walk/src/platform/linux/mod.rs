@@ -41,6 +41,9 @@ mod magic {
     pub(super) const NTFS3: u32 = 0x7366_746E;
 }
 
+/// The filesystems whose `STATX_SUBVOL` numbers their own subvolumes.
+const SUBVOLUMES: [u32; 2] = [magic::BTRFS, magic::BCACHEFS];
+
 /// The magic number of the filesystem holding the file open on `fd`
 /// (`fstatfs(2)`, which a descriptor opened as a path only answers too).
 fn fs_magic(fd: BorrowedFd<'_>) -> io::Result<u32> {
@@ -128,9 +131,10 @@ impl LinuxProvider {
     /// `fd`), is another subvolume than `dir`'s: a btrfs or ZFS mount root
     /// the mount table names as another subvolume or dataset of the
     /// filesystem around it; else another subvolume id (`STATX_SUBVOL`,
-    /// Linux 6.10; `dir`'s own read once into `dir_subvol`, and only when
-    /// a child reports one); else, before 6.10, another device inside the
-    /// same mount, which is how btrfs tells its subvolumes apart.
+    /// Linux 6.10), where `dir` is on a filesystem that numbers its
+    /// subvolumes (`dir`'s own read once into `dir_subvol`, and only when
+    /// a child reports one); else another device inside the same mount,
+    /// which is how btrfs tells its subvolumes apart before 6.10.
     fn subvolume(
         &self,
         fd: std::os::fd::BorrowedFd<'_>,
@@ -144,15 +148,21 @@ impl LinuxProvider {
                 && entry.mnt_id != dir.mnt_id()
                 && self.mounts.subvolume_mount(dir, entry.name.as_bytes());
         }
-        if stx.stx_mask & libc::STATX_SUBVOL != 0 {
-            let parent = *dir_subvol.get_or_init(|| {
+        if stx.stx_mask & libc::STATX_SUBVOL != 0
+            && let Some(parent) = *dir_subvol.get_or_init(|| {
+                // An overlay passes its layers' subvolume ids through, which
+                // say nothing of the overlay's own directories.
+                if !fs_magic(fd).is_ok_and(|m| SUBVOLUMES.contains(&m)) {
+                    return None;
+                }
                 #[cfg(test)]
                 for counter in [&self.statx_calls, &self.subvol_reads] {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 statx::subvol_of(fd)
-            });
-            return parent.is_some_and(|p| p != stx.stx_subvol);
+            })
+        {
+            return parent != stx.stx_subvol;
         }
         entry.mnt_id != 0 && entry.mnt_id == dir.mnt_id() && entry.dev != dir.dev()
     }

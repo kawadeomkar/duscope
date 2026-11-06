@@ -5,7 +5,9 @@
 //! so they are ignored by default and run with `DUSCOPE_TEST_PLATFORM=1`
 //! (`just check-full`; the CI platform job runs them under sudo). On Linux
 //! they need root: without it they skip, except in CI, where a missing
-//! prerequisite fails the test (`duscope_testkit::skip`).
+//! prerequisite fails the test (`duscope_testkit::skip`), unless it is a
+//! filesystem driver the platform job found the kernel lacks and named
+//! (`duscope_testkit::skip_fs`).
 //!
 //! The file selects tests with `cfg(target_os)`, which the scanner keeps
 //! inside `src/platform/` elsewhere: building and mounting a filesystem
@@ -545,7 +547,7 @@ fn p5_walk_02_linux_btrfs_subvolumes_are_boundaries_and_reflinks_share_extents()
         &[],
         &fs_root,
     ) {
-        duscope_testkit::skip(&format!("no btrfs here ({why})"));
+        duscope_testkit::skip_fs("btrfs", &format!("no btrfs here ({why})"));
         return;
     }
     run(
@@ -629,6 +631,50 @@ fn p5_walk_02_linux_btrfs_subvolumes_are_boundaries_and_reflinks_share_extents()
     );
 
     assert_reflinked(&fs_root.join("sub"), &fs_root.join("plain/file"));
+
+    overlay_across_subvolumes(&env, &mut mounted, &fs_root, &work.join("merged"));
+}
+
+/// An overlay at `merged` with its lower layer in the btrfs subvolume
+/// `sub` of `fs_root` and its upper layer in the top-level one: its
+/// directories are the overlay's, and none is a subvolume, though from
+/// Linux 6.10 the overlay passes its layers' subvolume ids through.
+#[cfg(target_os = "linux")]
+fn overlay_across_subvolumes(
+    env: &TestEnv,
+    mounted: &mut Mounted<'_>,
+    fs_root: &Path,
+    merged: &Path,
+) {
+    use duscope_walk::{Boundary, Flags};
+
+    fs::create_dir_all(fs_root.join("sub/lower/only-below")).unwrap();
+    for dir in ["plain/upper", "plain/work"] {
+        fs::create_dir_all(fs_root.join(dir)).unwrap();
+    }
+    fs::create_dir_all(merged).unwrap();
+    let options = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        fs_root.join("sub/lower").display(),
+        fs_root.join("plain/upper").display(),
+        fs_root.join("plain/work").display()
+    );
+    if let Err(why) = attempt(
+        env,
+        "mount",
+        &[&"-t", &"overlay", &"overlay", &"-o", &options, &merged],
+    ) {
+        duscope_testkit::skip_fs("overlay", &format!("no overlayfs here ({why})"));
+        return;
+    }
+    mounted.points.push(merged.to_owned());
+    fs::create_dir(merged.join("made-above")).unwrap();
+    let seen = walk_root(merged, &WalkOptions::default());
+    for name in ["only-below", "made-above"] {
+        let entry = &seen.entries[&merged.join(name)];
+        assert_eq!(entry.boundary, Boundary::None, "{name}");
+        assert!(!entry.flags.contains(Flags::SUBVOLUME), "{name}");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -654,7 +700,7 @@ fn p5_walk_02_linux_xfs_reflinks_share_extents() {
         &[],
         &point,
     ) {
-        duscope_testkit::skip(&format!("no XFS with reflinks here ({why})"));
+        duscope_testkit::skip_fs("xfs", &format!("no XFS with reflinks here ({why})"));
         return;
     }
     write_synced(&point.join("orig"), 1024 * 1024);
@@ -706,7 +752,7 @@ fn p5_walk_02_linux_an_overlay_is_entered_and_confined_by_its_own_mount() {
             &root.join("merged"),
         ],
     ) {
-        duscope_testkit::skip(&format!("no overlayfs here ({why})"));
+        duscope_testkit::skip_fs("overlay", &format!("no overlayfs here ({why})"));
         return;
     }
     let _mounted = Mounted {
@@ -828,7 +874,7 @@ fn p5_walk_02_linux_foreign_filesystems_report_links_btime_and_case_as_they_are(
             &point,
         ) {
             Ok(()) => no_links_and_no_case(&point, fs_type),
-            Err(why) => duscope_testkit::skip(&format!("no {fs_type} here ({why})")),
+            Err(why) => duscope_testkit::skip_fs(fs_type, &format!("no {fs_type} here ({why})")),
         }
     }
 
@@ -878,7 +924,7 @@ fn p5_walk_02_linux_foreign_filesystems_report_links_btime_and_case_as_they_are(
             let volume = walk_root(&ntfs, &WalkOptions::default()).volumes[0].clone();
             assert_eq!(volume.case_sensitive, Some(false), "nocase");
         }
-        Err(why) => duscope_testkit::skip(&format!("no NTFS (ntfs3) here ({why})")),
+        Err(why) => duscope_testkit::skip_fs("ntfs3", &format!("no NTFS (ntfs3) here ({why})")),
     }
 }
 
@@ -911,7 +957,7 @@ fn p5_walk_02_linux_a_squashfs_image_is_read_only() {
         )
     });
     if let Err(why) = made {
-        duscope_testkit::skip(&format!("no squashfs here ({why})"));
+        duscope_testkit::skip_fs("squashfs", &format!("no squashfs here ({why})"));
         return;
     }
     let _mounted = Mounted {

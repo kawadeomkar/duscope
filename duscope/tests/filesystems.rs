@@ -4,7 +4,9 @@
 //! item on a read-only squashfs image. Platform tests: they mount images as
 //! root, so they are ignored by default and run with
 //! `DUSCOPE_TEST_PLATFORM=1` (`just platform-tests`; CI's platform job runs
-//! them under sudo).
+//! them under sudo). A filesystem that cannot be mounted fails a test in CI
+//! unless the platform job found the kernel has no driver for it and named
+//! it (`duscope_testkit::skip_fs`).
 //!
 //! The file selects its tests with `cfg(target_os)`, as the walker's
 //! platform tests do: the filesystems are Linux's, and so are the commands
@@ -181,7 +183,7 @@ fn p5_walk_02_linux_explain_clones_reports_shared_extents_on_reflinks() {
         let point = work.join(name);
         match loop_mount(&env, &mut mounted, size, mkfs, &point) {
             Ok(()) => clones_on_a_reflink(&env, &point),
-            Err(why) => duscope_testkit::skip(&format!("no {name} here ({why})")),
+            Err(why) => duscope_testkit::skip_fs(name, &format!("no {name} here ({why})")),
         }
     }
 }
@@ -199,7 +201,7 @@ fn p5_walk_02_linux_summary_lists_btrfs_subvolumes() {
         points: Vec::new(),
     };
     if let Err(why) = loop_mount(&env, &mut mounted, "256M", &["mkfs.btrfs", "-q"], &point) {
-        duscope_testkit::skip(&format!("no btrfs here ({why})"));
+        duscope_testkit::skip_fs("btrfs", &format!("no btrfs here ({why})"));
         return;
     }
     for sub in ["home", "home/nested"] {
@@ -297,7 +299,7 @@ fn p5_walk_02_linux_clean_refuses_an_item_on_a_read_only_image() {
         )
     });
     if let Err(why) = made {
-        duscope_testkit::skip(&format!("no squashfs here ({why})"));
+        duscope_testkit::skip_fs("squashfs", &format!("no squashfs here ({why})"));
         return;
     }
     let _mounted = Mounted {
