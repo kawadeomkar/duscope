@@ -115,14 +115,19 @@ fn p5_core_02_a_changed_directory_exits_1_with_index_stale() {
         "{said}"
     );
     // A mode changed and a directory gone count as well; --plain says so
-    // in its third field.
+    // in its last field, after the three it had before.
     fs::set_permissions(root.join("docs"), Permissions::from_mode(0o700)).unwrap();
     fs::remove_dir_all(root.join("build")).unwrap();
     let out = run(&env, &["scans", "--check", &id, "--plain"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     let plain = String::from_utf8_lossy(&out.stdout);
     let fields: Vec<&str> = plain.trim_end().split('\t').collect();
-    assert_eq!(fields[..3], [id.as_str(), "ok", "true"], "{plain}");
+    let file = env.index_dir().join("scans").join(format!("{id}.db"));
+    assert_eq!(
+        fields,
+        [id.as_str(), "ok", file.to_str().unwrap(), "true"],
+        "{plain}"
+    );
     assert!(
         stderr(&out).contains("5 of 7 directories changed"),
         "{}",

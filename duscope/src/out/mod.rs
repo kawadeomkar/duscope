@@ -622,8 +622,10 @@ impl Row for PrunedEntry {
 }
 
 impl Row for CheckedEntry {
+    // A field added after a release goes last, so the fields scripts read
+    // keep their places.
     const FIELDS: &'static [&'static str] =
-        &["id", "quick_check", "structurally_stale", "index_path"];
+        &["id", "quick_check", "index_path", "structurally_stale"];
     const COLUMNS: &'static [&'static str] = &["Id", "Check", "Tree", "Path"];
 
     fn plain(&self) -> Vec<Cow<'_, [u8]>> {
@@ -635,8 +637,8 @@ impl Row for CheckedEntry {
         vec![
             Cow::Borrowed(self.id.as_bytes()),
             Cow::Borrowed(self.quick_check.as_bytes()),
-            Cow::Borrowed(stale),
             Cow::Borrowed(self.index_path.as_bytes()),
+            Cow::Borrowed(stale),
         ]
     }
 
