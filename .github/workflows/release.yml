@@ -655,6 +655,9 @@ jobs:
           version=${TAG#v}
           url="https://github.com/kawadeomkar/duscope/archive/refs/tags/$TAG.tar.gz"
           brew tap kawadeomkar/tap
+          # Homebrew loads a third-party tap's formulae only once the tap is
+          # trusted: bump-formula-pr refused the untrusted tap at v0.2.0.
+          brew trust kawadeomkar/tap
           tap="$(brew --repository kawadeomkar/tap)"
           formula="$tap/Formula/duscope.rb"
           if [[ -f $formula ]] && grep -qF "\"$url\"" "$formula"; then
