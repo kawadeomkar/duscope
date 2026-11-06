@@ -4,7 +4,8 @@
 //! records, and the replay of a history from a mark.
 //!
 //! A replay opens a stream on the volume's device
-//! (`FSEventStreamCreateRelativeToDevice`), limited to one directory and
+//! (`FSEventStreamCreateRelativeToDevice`), watching the volume's root (on
+//! the running system's own volumes, the caller's directory alone) and
 //! starting at the mark's event id with the full history
 //! (`kFSEventStreamCreateFlagFullHistory`), schedules it on a serial
 //! dispatch queue, and collects what the callback delivers until
@@ -78,6 +79,9 @@ const UTF8: u32 = 0x0800_0100;
 const SINCE_NOW: u64 = u64::MAX;
 /// `kFSEventStreamCreateFlagFullHistory` (macOS 10.15).
 const FULL_HISTORY: u32 = 0x0000_0080;
+/// `MNT_EXT_ROOT_DATA_VOL` of `<sys/mount.h>`, in `f_flags_ext`: the Data
+/// volume of the running system's volume group.
+const MNT_EXT_ROOT_DATA_VOL: u32 = 0x0000_0001;
 
 /// The event flags of `<FSEvents/FSEvents.h>` a replay reads.
 pub(super) const MUST_SCAN_SUB_DIRS: u32 = 0x0000_0001;
@@ -240,7 +244,7 @@ pub(in crate::platform) fn replay(
         )),
         done: Condvar::new(),
     });
-    let mut stream = Stream::open(device, &place.watched, mark.event_id, &shared)
+    let mut stream = Stream::open(device, place.stream_path(), mark.event_id, &shared)
         .ok_or(FsEventsError::Stream { dev })?;
     if !stream.start() {
         return Err(FsEventsError::Stream { dev });
@@ -311,6 +315,30 @@ pub(super) struct Place {
     pub(super) mount_point: PathBuf,
     /// No leading or trailing slash; empty at the mount point.
     pub(super) watched: Vec<u8>,
+    /// The volume is one of the running system's own: `/` (`MNT_ROOTFS`)
+    /// or its Data volume (`MNT_EXT_ROOT_DATA_VOL`), mounted when it boots
+    /// and unmounted only when it shuts down.
+    pub(super) system: bool,
+}
+
+impl Place {
+    /// What a replay's stream watches, relative to the device's root.
+    ///
+    /// The volume's root, for the collector to keep what is at or above
+    /// `watched`: fseventsd records a mount as a `Mount` event there and
+    /// sends it only to a stream that watches the root. A stream on
+    /// `watched` alone never learns that the volume was attached again
+    /// since the mark, perhaps after changes made where nothing logged
+    /// them (attached with `-nobrowse`, or on another system).
+    ///
+    /// `watched` alone on the running system's own volumes. They cannot be
+    /// attached again while it runs, fseventsd keeps their history across
+    /// a restart, and the Data volume's whole history is too long to read:
+    /// ten million event ids of it, minutes on a busy Mac, take 14 to 18 s
+    /// against the 1.3 s of one directory's.
+    pub(super) fn stream_path(&self) -> &[u8] {
+        if self.system { &self.watched } else { b"" }
+    }
 }
 
 /// Places the directory `under`.
@@ -344,6 +372,8 @@ pub(super) fn locate(under: &Path) -> io::Result<Place> {
         dev: ffi::fsid_dev(&fs),
         mount_point: PathBuf::from(OsStr::from_bytes(&mount)),
         watched: watched.to_vec(),
+        system: fs.f_flags & libc::MNT_ROOTFS.cast_unsigned() != 0
+            || fs.f_flags_ext & MNT_EXT_ROOT_DATA_VOL != 0,
     })
 }
 
@@ -364,7 +394,8 @@ fn relative<'a>(path: &'a [u8], mount: &[u8]) -> Option<&'a [u8]> {
 pub(super) struct Collector {
     /// The mark's event id.
     since: u64,
-    /// The directory the stream watches, relative to the device's root.
+    /// The caller's directory, relative to the device's root; the stream
+    /// watches it or the volume's root ([`Place::stream_path`]).
     watched: Vec<u8>,
     /// That directory as the caller spelled it.
     root: PathBuf,
@@ -435,8 +466,8 @@ impl Collector {
         let deep =
             flags & MUST_SCAN_SUB_DIRS != 0 || (flags & (MOUNT | UNMOUNT) != 0 && id > self.since);
         match self.place(path) {
-            // The stream also reports the directories above the one it
-            // watches. A subtree to read again there holds the root's; a
+            // The stream also reports the directories above the watched
+            // one. A subtree to read again there holds the root's; a
             // plain change there renamed, removed or added an entry beside
             // the path to the root, perhaps one on it.
             Some(Placed::Above) if deep => {

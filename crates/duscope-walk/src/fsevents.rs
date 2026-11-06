@@ -49,6 +49,14 @@ pub fn volume_uuid(dev: u64) -> Option<String> {
 /// stream on the device from that id with the full history and collects
 /// until `HistoryDone`, for at most `timeout` ([`REPLAY_TIMEOUT`]).
 ///
+/// The stream watches the volume's root, where fseventsd records the
+/// volume being mounted: a volume attached again since the mark, perhaps
+/// after changes nothing logged (attached with `-nobrowse`, or on another
+/// system), gives [`Fallback::HistoryGone`] whatever directory `under`
+/// is. On the running system's own volumes (`/` and its Data volume),
+/// which are mounted again only by a restart and whose whole history is
+/// too long to read, it watches `under` alone.
+///
 /// The full history delivers the whole stored chunk that holds the mark,
 /// and a record there can keep an id older than a change it holds, so every
 /// record counts: a directory changed shortly before the scan may be listed
@@ -83,11 +91,12 @@ pub struct Replay {
     pub dirs: Vec<PathBuf>,
     /// The directories whose whole subtree must be read again: a
     /// `MustScanSubDirs` event (events coalesced up the tree, or lost), or a
-    /// volume mounted or unmounted there after the mark. `root` itself
-    /// among them means the replay cannot narrow the rescan.
+    /// volume mounted or unmounted there after the mark (`root`, for the
+    /// replayed volume itself mounted again). `root` itself among them
+    /// means the replay cannot narrow the rescan.
     pub must_scan_subdirs: Vec<PathBuf>,
-    /// A directory above `root` changed its own entries. The stream reports
-    /// the directories on the way down to the one it watches, and such a
+    /// A directory above `root` changed its own entries. The history
+    /// holds the directories on the way down to `root` too, and such a
     /// change can be `root` itself renamed, removed or put in place of
     /// another, which nothing below it records: the caller checks that
     /// `root` is still the directory the scan read (its `ctime`). Other

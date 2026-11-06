@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use duscope_testkit::TestEnv;
 
 use super::{
-    Collector, EVENT_IDS_WRAPPED, HISTORY_DONE, KERNEL_DROPPED, MOUNT, MUST_SCAN_SUB_DIRS, UNMOUNT,
-    USER_DROPPED, current_event_id, locate, mark, no_log, spell_uuid, volume_uuid,
+    Collector, EVENT_IDS_WRAPPED, HISTORY_DONE, KERNEL_DROPPED, MOUNT, MUST_SCAN_SUB_DIRS, Place,
+    UNMOUNT, USER_DROPPED, current_event_id, locate, mark, no_log, spell_uuid, volume_uuid,
 };
 use crate::fsevents::{Fallback, REPLAY_TIMEOUT, Replay, replay};
 use crate::{FsEventsError, FsEventsMark, ScanEvent, VolumeInfo, WalkOptions, walk};
@@ -447,6 +447,56 @@ fn p5_walk_01_event_flags_widen_or_void_the_replay() {
 }
 
 #[test]
+fn p5_walk_01_a_replay_watches_the_volume_root_except_on_the_systems_own_volumes() {
+    let env = TestEnv::new();
+    let root = env.root().join("tree");
+    fs::create_dir(&root).unwrap();
+    // The test's directory is on the boot Data volume, and `/` is the
+    // sealed System volume: the running system's own, watched below the
+    // root.
+    for dir in [root.as_path(), Path::new("/")] {
+        let place = locate(dir).unwrap();
+        assert!(place.system, "{}", dir.display());
+        assert_eq!(place.stream_path(), place.watched.as_slice());
+    }
+    // Any other volume is watched from its root, where its mounts are.
+    let other = Place {
+        dev: 1,
+        mount_point: PathBuf::from("/Volumes/X"),
+        watched: b"Users/me/root".to_vec(),
+        system: false,
+    };
+    assert_eq!(other.stream_path(), b"");
+    // There the volume mounted again after the mark voids the replay of a
+    // directory below its root; mounted before it, it was in place for the
+    // walk.
+    let remounted = replayed_at(&[("", MOUNT, SINCE + 1), ("", HISTORY_DONE, SINCE + 2)]);
+    assert_eq!(
+        remounted.must_scan_subdirs,
+        vec![PathBuf::from("/scan/root")]
+    );
+    assert_eq!(remounted.fallback(), Some(Fallback::HistoryGone));
+    let mounted = replayed_at(&[("", MOUNT, SINCE - 1), ("", HISTORY_DONE, SINCE + 2)]);
+    assert!(mounted.must_scan_subdirs.is_empty() && mounted.ancestors_changed);
+    assert_eq!(mounted.fallback(), None);
+    // Beside the directory, the rest of the volume counts for nothing.
+    let beside = replayed(&[
+        ("Users/other/", 0),
+        ("Users/me/rootless/", MUST_SCAN_SUB_DIRS),
+        ("file-at-the-root", 0),
+        ("", HISTORY_DONE),
+    ]);
+    assert_eq!(
+        beside,
+        Replay {
+            root: PathBuf::from("/scan/root"),
+            history_done: true,
+            ..Replay::default()
+        }
+    );
+}
+
+#[test]
 fn p5_walk_01_uuids_are_spelled_as_core_foundation_spells_them() {
     let bytes = [
         0x83, 0x32, 0xa5, 0xa0, 0x30, 0x24, 0x4b, 0xb2, 0xab, 0x99, 0xd8, 0xab, 0x8f, 0xc0, 0xae,
@@ -535,5 +585,92 @@ fn p5_walk_01_macos_no_log_on_an_image_gives_fsevents_disabled() {
         Some("fsevents_disabled")
     );
     assert_eq!(volumes(&mount).remove(0).fsevents, None, "nothing to mark");
+    drop(detach);
+}
+
+/// A remount the history did not log, replayed from a directory below the
+/// volume's root: the image is marked, changed while attached with
+/// `-nobrowse` (fseventsd keeps no history of it then), and attached as
+/// before. The UUID is the same; the one record of the gap is the `Mount`
+/// event at the volume's root, which a stream watching the directory alone
+/// never receives.
+#[test]
+#[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_walk_01_macos_a_remount_since_the_mark_voids_a_replay_below_the_root() {
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    let work = fs::canonicalize(env.tmp_dir()).unwrap().join("image");
+    let mount = work.join("mnt");
+    fs::create_dir_all(&mount).unwrap();
+    let image = work.join("image.dmg");
+    env.hdiutil(&[
+        &"create",
+        &"-ov",
+        &"-size",
+        &"16m",
+        &"-fs",
+        &"APFS",
+        &"-volname",
+        &"DUSCOPE",
+        &image,
+    ]);
+    env.hdiutil(&[&"attach", &"-mountpoint", &mount, &image]);
+    let detach = Detach(&env, mount.clone());
+    let dev = locate(&mount).unwrap().dev;
+    wait_for("the image's FSEvents history", || {
+        volume_uuid(dev).is_some()
+    });
+    let deep = mount.join("sub/deep");
+    fs::create_dir_all(&deep).unwrap();
+    let volume = volumes(&mount).remove(0);
+    let marked = volume.fsevents.expect("the walk marks the image's volume");
+    let place = locate(&deep).unwrap();
+    assert!(!place.system, "an image is not the system's own volume");
+    assert_eq!(place.watched, b"sub/deep");
+    let unchanged = replay(volume.dev, &marked, &deep, REPLAY_TIMEOUT).unwrap();
+    assert_eq!(unchanged.fallback(), None, "{unchanged:?}");
+
+    // Changed while fseventsd logs nothing, then attached as before.
+    env.hdiutil(&[&"detach", &mount]);
+    env.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &mount, &image]);
+    let dev = locate(&mount).unwrap().dev;
+    assert_eq!(volume_uuid(dev), None, "no history under -nobrowse");
+    fs::write(deep.join("offline"), b"bytes").unwrap();
+    env.hdiutil(&[&"detach", &mount]);
+    env.hdiutil(&[&"attach", &"-mountpoint", &mount, &image]);
+    let dev = locate(&mount).unwrap().dev;
+    wait_for("the image's FSEvents history", || {
+        volume_uuid(dev).is_some()
+    });
+    assert_eq!(
+        volume_uuid(dev).as_ref(),
+        Some(&marked.uuid),
+        "the same history"
+    );
+    // The replay of the mount point sees the remount once fseventsd has
+    // numbered it; the replay of the directory below must see it too.
+    wait_for("the remount in the history", || {
+        replay(dev, &marked, &mount, REPLAY_TIMEOUT)
+            .unwrap()
+            .fallback()
+            .is_some()
+    });
+    for under in [&mount, &deep] {
+        let replayed = replay(dev, &marked, under, REPLAY_TIMEOUT).unwrap();
+        assert_eq!(
+            &replayed.must_scan_subdirs,
+            &[under.clone()],
+            "{replayed:?}"
+        );
+        assert_eq!(
+            replayed.fallback(),
+            Some(Fallback::HistoryGone),
+            "{}: {replayed:?}",
+            under.display()
+        );
+    }
     drop(detach);
 }
