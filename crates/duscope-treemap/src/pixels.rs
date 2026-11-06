@@ -24,15 +24,33 @@
 //!   iTerm2 draw the whole picture from the first cell, which covers the
 //!   others. The viewer copies them into its frame, and the static map
 //!   writes them with [`PixelMap::to_ansi`].
+//! - **Inside tmux** ([`inside_tmux`]) the probe is not run: the picker
+//!   would first run `tmux set -p allow-passthrough on`, another program,
+//!   which the binary never runs, changing an option of the pane that
+//!   outlives duscope.
 //!
 //! Without the feature [`COMPILED`] is false, nothing here touches the
 //! terminal, and [`probe`] answers
 //! [`crate::TreemapError::PixelsNotCompiled`].
 
+use std::ffi::OsString;
 use std::fmt::Write as _;
 
 /// Whether this build has the `pixels` feature.
 pub const COMPILED: bool = cfg!(feature = "pixels");
+
+/// Whether duscope runs inside tmux, read from the environment through
+/// `var`: `TERM` starting with `tmux` or `TERM_PROGRAM` of `tmux`, as
+/// ratatui-image's picker reads it, or `TMUX`, which tmux sets in each of
+/// its panes. There the picker runs `tmux set -p allow-passthrough on`,
+/// and waits for it, before it asks the terminal anything; so [`probe`]
+/// does not ask, and the map stays in cells.
+#[must_use]
+pub fn inside_tmux(var: impl Fn(&str) -> Option<OsString>) -> bool {
+    var("TMUX").is_some_and(|v| !v.is_empty())
+        || var("TERM").is_some_and(|v| v.as_encoded_bytes().starts_with(b"tmux"))
+        || var("TERM_PROGRAM").is_some_and(|v| v == "tmux")
+}
 
 /// What a terminal is sent for one cell of a map drawn in pixels.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,14 +185,20 @@ mod imp {
     }
 
     /// Asks the terminal which image protocol it speaks; `None` where it
-    /// speaks none of the three, or stdin and stdout are not both
-    /// terminals, which leaves the map in cells.
+    /// speaks none of the three, where stdin and stdout are not both
+    /// terminals, and inside tmux ([`inside_tmux`](super::inside_tmux)),
+    /// where nothing is asked, which leaves the map in cells.
     ///
     /// # Errors
     ///
     /// Never in a build with the feature.
     pub fn probe() -> Result<Option<Pixels>, TreemapError> {
         if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+            return Ok(None);
+        }
+        // The picker would run tmux, and turn on an option of the pane
+        // that outlives the process.
+        if super::inside_tmux(|name| std::env::var_os(name)) {
             return Ok(None);
         }
         // The picker turns echo and line editing off while it waits, and
@@ -357,6 +381,36 @@ mod tests {
                 crate::TreemapError::PixelsNotCompiled
             );
         }
+    }
+
+    #[test]
+    fn p4_tui_07_tmux_is_known_by_its_environment() {
+        let inside = |vars: &[(&str, &str)]| {
+            super::inside_tmux(|name| {
+                vars.iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| (*v).into())
+            })
+        };
+        // Each of the picker's two signs, and tmux's own, alone.
+        assert!(inside(&[("TERM", "tmux-256color")]));
+        assert!(inside(&[("TERM", "tmux")]));
+        assert!(inside(&[("TERM_PROGRAM", "tmux")]));
+        assert!(inside(&[("TMUX", "/tmp/tmux-501/default,4242,0")]));
+        assert!(inside(&[
+            ("TERM", "screen-256color"),
+            ("TMUX", "/tmp/tmux-501/default,4242,0"),
+        ]));
+        // Outside tmux, and an empty `TMUX`.
+        assert!(!inside(&[]));
+        assert!(!inside(&[("TERM", "xterm-256color")]));
+        assert!(!inside(&[
+            ("TERM", "xterm-kitty"),
+            ("TERM_PROGRAM", "iTerm.app")
+        ]));
+        assert!(!inside(&[("TERM", "screen-256color")]));
+        assert!(!inside(&[("TERM_PROGRAM", "tmux-like")]));
+        assert!(!inside(&[("TMUX", "")]));
     }
 
     #[test]

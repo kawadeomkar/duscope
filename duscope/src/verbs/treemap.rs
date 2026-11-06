@@ -201,7 +201,9 @@ fn not_compiled() -> Failure {
 /// (`-o`), where stdin and stdout are not both a terminal (the probe asks
 /// on one and reads the answer on the other), where the colours are off
 /// or the terminal's own (a picture has colours, and none of the
-/// terminal's), and where the terminal answers none of the protocols.
+/// terminal's), inside tmux (where the probe would run `tmux` and turn on
+/// an option of the pane: [`pixels::inside_tmux`]), and where the terminal
+/// answers none of the protocols.
 pub(super) fn pixels(style: &Style, output: &Output) -> Result<Drawing, Failure> {
     if output.file.is_some() {
         return Ok(Drawing::Cells("the map is written to a file"));
@@ -212,6 +214,11 @@ pub(super) fn pixels(style: &Style, output: &Output) -> Result<Drawing, Failure>
     if colourless(&style.pack) {
         return Ok(Drawing::Cells(
             "a picture is drawn in a theme's colours, and the map's colours are off or the terminal's own",
+        ));
+    }
+    if pixels::inside_tmux(|name| std::env::var_os(name)) {
+        return Ok(Drawing::Cells(
+            "inside tmux the probe would turn on tmux's allow-passthrough option",
         ));
     }
     match pixels::probe() {

@@ -245,6 +245,11 @@ and it needs Rust 1.90 or later:
 cargo install duscope --locked --features pixels
 ```
 
+Inside tmux the map stays in cells, with a warning: asking the terminal
+through tmux would mean running `tmux set -p allow-passthrough on`, which
+changes the pane's settings for every program after duscope, and duscope
+runs no other program.
+
 ### From source
 
 It needs [rustup](https://rustup.rs), which installs the toolchain pinned in

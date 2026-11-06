@@ -3,10 +3,13 @@
 //! graphics query, one whose device attributes name Sixel, iTerm2 (named
 //! by `TERM_PROGRAM`, as the picker reads it), one with no image protocol,
 //! and one that answers nothing. Each declares a cell of 10×20 pixels where
-//! it draws images, so the picture of a 100×25-cell map is 1000×500.
+//! it draws images, so the picture of a 100×25-cell map is 1000×500. Inside
+//! tmux the probe is not run, so no `tmux` command runs either.
 
 #![cfg(feature = "pixels")]
 
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 use duscope_testkit::{TestEnv, duscope_bin};
@@ -200,6 +203,70 @@ fn p4_tui_07_a_terminal_without_images_gets_the_cell_map() {
             format!("duscope: warn: --treemap pixels: {why}, so the map is drawn in cells");
         assert!(words.contains(&warning), "{text}");
         assert!(text.contains("next: duscope top"), "{text}");
+    }
+}
+
+#[test]
+fn p4_tui_07_inside_tmux_the_map_stays_in_cells_and_no_tmux_runs() {
+    let env = TestEnv::new();
+    let tree = env.fixtures().case_root(CASE);
+    // A `tmux` first on PATH that records each run: inside tmux,
+    // ratatui-image's picker runs `tmux set -p allow-passthrough on`
+    // before it asks the terminal anything.
+    let bin = env.tmp_dir().join("fake-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let ran = env.tmp_dir().join("tmux-ran");
+    let tmux = bin.join("tmux");
+    fs::write(
+        &tmux,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", ran.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = env
+        .vars()
+        .into_iter()
+        .find(|(name, _)| name == "PATH")
+        .map(|(_, path)| path.into_string().unwrap())
+        .unwrap_or_default();
+    let path = format!("{}:{path}", bin.display());
+    // The two variables the picker reads, and the one tmux sets in every
+    // pane, each alone, in a terminal that would answer Kitty graphics.
+    for (name, value) in [
+        ("TERM", "tmux-256color"),
+        ("TERM_PROGRAM", "tmux"),
+        ("TMUX", "/tmp/tmux-501/default,4242,0"),
+    ] {
+        let mut terminal = Mock::new(Graphics::Kitty)
+            .builder(&env)
+            .env("PATH", &path)
+            .env(name, value)
+            .args(["scan", "--treemap", "pixels", "--threads", "4"])
+            .arg(&tree)
+            .spawn(duscope_bin())
+            .unwrap();
+        let status = terminal.wait_exit().unwrap();
+        let screen = terminal.screen();
+        let text = screen.full_text();
+        assert!(status.success(), "{name}={value}:\n{text}");
+        assert!(
+            !ran.exists(),
+            "{name}={value}: tmux ran: {:?}",
+            fs::read_to_string(&ran)
+        );
+        assert!(screen.graphics().is_empty(), "{name}={value}:\n{text}");
+        // The warning, wrapped at the terminal's width, wherever it breaks.
+        let bare = |s: &str| s.split_whitespace().collect::<String>();
+        let warning = "duscope: warn: --treemap pixels: inside tmux the probe would turn on \
+                       tmux's allow-passthrough option, so the map is drawn in cells";
+        assert!(
+            bare(&text).contains(&bare(warning)),
+            "{name}={value}:\n{text}"
+        );
+        assert!(
+            text.contains("next: duscope top"),
+            "{name}={value}:\n{text}"
+        );
     }
 }
 
