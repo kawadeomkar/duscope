@@ -1599,6 +1599,9 @@ fn p3_mcp_05_a_call_past_its_deadline_is_deadline_exceeded() {
     );
     assert!(served.result(2)["tools"].is_array());
     assert_eq!(served.output.status.code(), Some(0), "{}", served.stderr);
+    // The deadline stopped the scan's walk, so it saved nothing; the server
+    // exits only once the verb has returned.
+    assert!(saved_ids(&env).is_empty(), "{}", served.stderr);
 }
 
 #[test]

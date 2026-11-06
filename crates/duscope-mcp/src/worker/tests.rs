@@ -113,27 +113,59 @@ impl Latch {
         self.opened.notify_all();
     }
 
-    /// Waits until the latch is open (`true`), or `stop` returns true
-    /// (`false`), for `PATIENCE` at most.
-    fn wait(&self, stop: impl Fn() -> bool) -> bool {
+    /// Waits until the latch is open, or `stop` returns true, for
+    /// `PATIENCE` at most.
+    fn wait(&self, stop: impl Fn() -> bool) -> Waited {
         let started = Instant::now();
         let mut open = self.open.lock().unwrap();
-        while !*open && !stop() && started.elapsed() < PATIENCE {
+        loop {
+            if *open {
+                return Waited::Opened;
+            }
+            if stop() {
+                return Waited::Stopped;
+            }
+            if started.elapsed() >= PATIENCE {
+                return Waited::OutOfPatience;
+            }
             open = self
                 .opened
                 .wait_timeout(open, Duration::from_millis(1))
                 .unwrap()
                 .0;
         }
-        *open
+    }
+}
+
+/// How a fake verb's wait ended, which it logs: `end`, `stopped` or
+/// `timed out`. A verb told to stop logs `stopped` only when it saw its
+/// flag, so a test that waits for `stopped` fails if the flag was never set,
+/// rather than passing once the wait has run out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Waited {
+    /// The test opened the latch, or the verb does not wait.
+    Opened,
+    /// The call's flag was set.
+    Stopped,
+    /// Neither, within `PATIENCE`.
+    OutOfPatience,
+}
+
+impl Waited {
+    fn word(self) -> &'static str {
+        match self {
+            Waited::Opened => "end",
+            Waited::Stopped => "stopped",
+            Waited::OutOfPatience => "timed out",
+        }
     }
 }
 
 /// The fake verbs, and what the test reads back from them.
 #[derive(Clone)]
 struct TestRunner {
-    /// What the verbs did, in order: `start LABEL`, `end LABEL`,
-    /// `stopped LABEL`.
+    /// What the verbs did, in order: `start LABEL`, then `end LABEL`,
+    /// `stopped LABEL` or `timed out LABEL` ([`Waited`]).
     log: Arc<Mutex<Vec<String>>>,
     latch: Arc<Latch>,
 }
@@ -177,7 +209,7 @@ impl Runner for TestRunner {
         let label = invocation.args[0].to_string_lossy().into_owned();
         self.note(format!("start {label}"));
         let stopped = call.cancel.load(Ordering::Relaxed);
-        let ended = match invocation.verb {
+        let waited = match invocation.verb {
             "block" => {
                 call.entries.fetch_add(1, Ordering::Relaxed);
                 self.latch.wait(|| call.cancel.load(Ordering::Relaxed))
@@ -188,11 +220,13 @@ impl Runner for TestRunner {
                     thread::sleep(Duration::from_millis(5));
                     call.entries.fetch_add(1, Ordering::Relaxed);
                 }
-                true
+                Waited::Opened
             }
-            _ => !stopped,
+            _ if stopped => Waited::Stopped,
+            _ => Waited::Opened,
         };
-        self.note(format!("{} {label}", if ended { "end" } else { "stopped" }));
+        self.note(format!("{} {label}", waited.word()));
+        let ended = waited == Waited::Opened;
         Outcome {
             json: json!({"ok": ended, "label": label}).to_string(),
             ok: ended,
