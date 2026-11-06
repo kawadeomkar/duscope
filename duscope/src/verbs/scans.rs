@@ -12,7 +12,7 @@
 //! the scan holds (`duscope_core::check`): one that changed since makes the
 //! scan `structurally_stale`, exiting 1 (`index_stale`) with the row
 //! printed. The index directory, which the save itself wrote to, is left
-//! out of the sweep.
+//! out of the sweep with everything under it, but never the scan's root.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -372,6 +372,7 @@ fn check(
             thousands(swept.changed_count),
             first.display()
         ),
+        _ if stale => format!("the saved scan {id} holds no directory to compare with its tree"),
         _ => format!("the saved scan {id} is sound, and its {dirs} directories are unchanged"),
     };
     let mut checked = listing("scans --check", dir, vec![entry]);

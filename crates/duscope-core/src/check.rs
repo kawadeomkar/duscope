@@ -6,10 +6,24 @@
 //! differs; one that is gone, is no longer a directory, or cannot be read
 //! differs too, since nothing then says it is as the scan found it. A file
 //! written in place under an unchanged directory does not: the sweep is
-//! structural, and costs one call per directory, never a rescan. A change
-//! that lands within the filesystem's timestamp granularity of the
-//! directory's previous one (a clock tick on a Linux kernel without
-//! fine-grained timestamps) reads as none.
+//! structural, and costs one call per directory, never a rescan.
+//!
+//! A directory touched while the scan ran counts as changed, whatever it
+//! reads now (mlocate's rule): its recorded time lies between the scan's
+//! start, less two seconds, and its finish, plus two seconds. The
+//! walk reads a directory's times before it lists the directory, and a
+//! second change in the same clock tick as the first (a few milliseconds
+//! on a Linux kernel without fine-grained timestamps, two seconds on FAT)
+//! leaves the times as the walk read them: such a change would otherwise
+//! read as none for good. The bounds are `scan_meta.started_at` and
+//! `finished_at`, which every index holds; they are the system clock's,
+//! but in a scan taken with the test clock (`--test-now`, or
+//! `DUSCOPE_TEST_NOW` in a debug build), where the window lies around that
+//! clock instead.
+//!
+//! A scan that followed symbolic links recorded a link to a directory as
+//! the directory: its directories are read following links, as its walk
+//! read them.
 //!
 //! A directory under a name no listing returns (empty, `.`, `..`, or with a
 //! slash: an index file no scan wrote) is not read, and counts as changed,
@@ -29,12 +43,20 @@ use crate::query::TreeView;
 /// a chunk are held at once, never a whole scan's.
 const CHUNK: usize = 4096;
 
+/// How far before the scan's start and after its finish a directory's
+/// recorded time still counts as touched while the scan ran: the coarsest
+/// timestamps a directory gets (two seconds for a modification on FAT, one
+/// on HFS+ and on ext3's small inodes, a clock tick on a Linux kernel
+/// without fine-grained timestamps), and a clock a little off between the
+/// scan and the filesystem.
+const TOUCHED_MARGIN_NS: i64 = 2_000_000_000;
+
 /// What the sweep found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sweep {
-    /// The directories read again.
+    /// The directories compared: read again, or counted as changed unread.
     pub dir_count: u64,
-    /// Those that differ from the scan.
+    /// Those that differ from the scan, or were touched while it ran.
     pub changed_count: u64,
     /// The first of them in the scan's order (pre-order: an ancestor before
     /// what lies under it).
@@ -42,9 +64,11 @@ pub struct Sweep {
 }
 
 impl Sweep {
-    /// Whether the tree changed since the scan: `structurally_stale`.
+    /// Whether the tree changed since the scan: `structurally_stale`. A
+    /// sweep that compared no directory cannot say the tree is unchanged,
+    /// and is stale too.
     pub fn stale(&self) -> bool {
-        self.changed_count > 0
+        self.changed_count > 0 || self.dir_count == 0
     }
 }
 
@@ -62,20 +86,30 @@ fn listable(name: &[u8]) -> bool {
     !name.is_empty() && name != b"." && name != b".." && !name.contains(&b'/')
 }
 
-/// Sweeps every directory `index` holds, but those at or under one of
-/// `leave_out`, absolute paths with no symlinks (the index directory, whose
-/// files a save adds to).
+/// Sweeps every directory `index` holds, but those strictly under its root
+/// and at or under one of `leave_out`, absolute paths with no symlinks (the
+/// index directory, whose files a save adds to). The root is always read:
+/// where it lies at or under one of `leave_out`, it is the only directory
+/// read.
 ///
 /// # Errors
 ///
-/// [`CoreError::IndexCorrupt`] when the index's directories cannot be read.
+/// [`CoreError::IndexCorrupt`] when the index's directories or its scan
+/// options cannot be read.
 pub fn sweep(index: &Index, leave_out: &[PathBuf]) -> Result<Sweep, CoreError> {
     let started = Instant::now();
     let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
         file: index.file().display().to_string(),
         message: e.to_string(),
     };
+    let (options, _) = crate::rescan::options(index)?;
+    let meta = index.meta();
+    // Touched while the scan ran, with the margin on either side.
+    let touched = meta.started_at.saturating_sub(TOUCHED_MARGIN_NS)
+        ..=meta.finished_at.saturating_add(TOUCHED_MARGIN_NS);
     let root = index.root_path().to_owned();
+    // A root inside a directory left out: everything under it is too.
+    let root_left_out = leave_out.iter().any(|out| root.starts_with(out));
     let mut found = Sweep {
         dir_count: 0,
         changed_count: 0,
@@ -116,10 +150,11 @@ pub fn sweep(index: &Index, leave_out: &[PathBuf]) -> Result<Sweep, CoreError> {
                 }
                 parent.join(std::ffi::OsStr::from_bytes(&name))
             }
-            // The root, and only it, has no ancestor in the scan.
+            // The root, and only it, has no ancestor in the scan; it is
+            // never left out.
             None => root.clone(),
         };
-        if leave_out.iter().any(|out| out == &path) {
+        if !ancestors.is_empty() && (root_left_out || leave_out.iter().any(|out| out == &path)) {
             skip_to = Some(last_id);
             continue;
         }
@@ -128,15 +163,20 @@ pub fn sweep(index: &Index, leave_out: &[PathBuf]) -> Result<Sweep, CoreError> {
         if last_id > id {
             ancestors.push((last_id, path.clone()));
         }
+        let latest = mtime.max(ctime);
+        let during = touched.contains(&latest);
+        if during {
+            log::debug!("{}: touched while the scan ran", path.display());
+        }
         chunk.push(Pending {
             path,
-            latest_ns: unread_to.is_none().then_some(mtime.max(ctime)),
+            latest_ns: (unread_to.is_none() && !during).then_some(latest),
         });
         if chunk.len() == CHUNK {
-            compare(&mut chunk, &mut found);
+            compare(&mut chunk, options.follow_symlinks, &mut found);
         }
     }
-    compare(&mut chunk, &mut found);
+    compare(&mut chunk, options.follow_symlinks, &mut found);
     // The sweep's cost, the index read included, for -v.
     log::info!(
         "swept {} directories in {:.3} s: {} changed",
@@ -147,11 +187,12 @@ pub fn sweep(index: &Index, leave_out: &[PathBuf]) -> Result<Sweep, CoreError> {
     Ok(found)
 }
 
-/// Reads the stamps of the directories in `chunk`, compares each with the
-/// scan's, and empties it.
-fn compare(chunk: &mut Vec<Pending>, found: &mut Sweep) {
+/// Reads the stamps of the directories in `chunk`, following links when
+/// the scan did, compares each with the scan's, and empties it.
+fn compare(chunk: &mut Vec<Pending>, follow_symlinks: bool, found: &mut Sweep) {
     let read = chunk.iter().filter(|p| p.latest_ns.is_some());
-    let mut stamps = duscope_walk::stamp_dirs(read.map(|p| p.path.as_path())).into_iter();
+    let mut stamps =
+        duscope_walk::stamp_dirs(read.map(|p| p.path.as_path()), follow_symlinks).into_iter();
     for pending in chunk.drain(..) {
         found.dir_count += 1;
         // The stamps are of the directories read, in order.
@@ -182,18 +223,34 @@ mod tests {
     use duscope_testkit::TestEnv;
     use duscope_walk::{Attrs, WalkOptions, walk};
 
-    use super::sweep;
+    use super::{TOUCHED_MARGIN_NS, sweep};
     use crate::arena::Arena;
     use crate::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
     use crate::rollup::roll_up;
 
-    /// Scans `root` and saves the scan under `dir`.
+    /// Scans `root` and saves the scan under `dir`, as one that started
+    /// and finished at the epoch, long before the tree was made.
     fn save(root: &Path, dir: &Path) -> Index {
+        save_timed(root, dir, None)
+    }
+
+    /// Now, Unix nanoseconds.
+    fn now_ns() -> i64 {
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        i64::try_from(since.as_nanos()).unwrap()
+    }
+
+    /// Scans `root` and saves the scan under `dir`; with `started`, as a
+    /// scan that started then and finished when the walk did.
+    fn save_timed(root: &Path, dir: &Path, started: Option<i64>) -> Index {
         let mut arena = Arena::new(Attrs::Basic);
         walk(root, &WalkOptions::default(), |event| {
             arena.push(event).unwrap();
         })
         .unwrap();
+        let finished = started.map_or(0, |_| now_ns());
         let rollup = roll_up(&mut arena);
         let id = ScanId::parse("c4ec0000c4ec").unwrap();
         let root = root.as_os_str().as_bytes().to_vec();
@@ -201,8 +258,8 @@ mod tests {
             scan_id: id.clone(),
             root: root.clone(),
             root_as_given: root,
-            started_at: 0,
-            finished_at: 0,
+            started_at: started.unwrap_or(0),
+            finished_at: finished,
             options: "{}".to_owned(),
             platform: duscope_walk::system(),
             scanning_uid: 0,
@@ -330,5 +387,60 @@ mod tests {
         let found = sweep(&index, std::slice::from_ref(&dir)).unwrap();
         assert_eq!(found.changed_count, 1);
         assert_eq!(found.first_changed.as_deref(), Some(&*root.join("e")));
+    }
+
+    #[test]
+    fn p5_core_02_a_directory_touched_while_the_scan_ran_counts_as_changed() {
+        let env = TestEnv::new();
+        let root = tree(&env);
+        // The tree older than the margin when the scan starts.
+        let margin = std::time::Duration::from_nanos(TOUCHED_MARGIN_NS.unsigned_abs());
+        std::thread::sleep(margin + std::time::Duration::from_millis(100));
+        let started = now_ns();
+        // Changed once the scan started, before the walk read it: the walk
+        // records the new times, and a second change in the same clock tick
+        // after the read would leave them as recorded.
+        fs::write(root.join("a/b/new"), b"").unwrap();
+        let index = save_timed(&root, &env.tmp_dir(), Some(started));
+        let found = sweep(&index, &[]).unwrap();
+        assert_eq!(found.dir_count, 8);
+        assert_eq!(found.changed_count, 1, "{found:?}");
+        assert_eq!(found.first_changed.as_deref(), Some(&*root.join("a/b")));
+        assert!(found.stale());
+    }
+
+    #[test]
+    fn p5_core_02_the_root_is_read_even_inside_a_directory_left_out() {
+        let env = TestEnv::new();
+        let root = tree(&env);
+        let index = save(&root, &env.tmp_dir());
+        settle();
+        // The root is the index directory, or lies under it: the root is
+        // read, and nothing under it.
+        for out in [root.clone(), env.work_dir()] {
+            let found = sweep(&index, std::slice::from_ref(&out)).unwrap();
+            assert_eq!((found.dir_count, found.changed_count), (1, 0), "{out:?}");
+            assert!(!found.stale());
+        }
+        fs::create_dir(root.join("new")).unwrap();
+        let found = sweep(&index, std::slice::from_ref(&root)).unwrap();
+        assert_eq!(found.first_changed.as_deref(), Some(&*root));
+        assert!(found.stale());
+    }
+
+    #[test]
+    fn p5_core_02_a_sweep_that_compares_no_directory_is_stale() {
+        let env = TestEnv::new();
+        let root = tree(&env);
+        let index = save(&root, &env.tmp_dir());
+        let file = index.file().to_owned();
+        drop(index);
+        // A crafted file without directories.
+        let db = rusqlite::Connection::open(&file).unwrap();
+        db.execute("DELETE FROM dirs", []).unwrap();
+        drop(db);
+        let found = sweep(&Index::open(&file).unwrap(), &[]).unwrap();
+        assert_eq!((found.dir_count, found.changed_count), (0, 0));
+        assert!(found.stale());
     }
 }

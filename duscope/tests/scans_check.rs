@@ -192,3 +192,77 @@ fn p5_core_02_the_index_directory_inside_the_tree_is_left_out() {
         stderr(&out)
     );
 }
+
+#[test]
+fn p5_core_02_a_scan_that_followed_links_checks_fresh() {
+    let env = TestEnv::new();
+    let root = env.work_dir().join("linked");
+    fs::create_dir_all(root.join("real")).unwrap();
+    std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+    // The walk records the link as the directory it leads to.
+    let id = save(&env, &root, &["--follow-symlinks"]);
+    let out = run(&env, &["scans", "--check", &id, "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("its 3 directories are unchanged"),
+        "{}",
+        stderr(&out)
+    );
+    // A change under the target shows through both names.
+    fs::create_dir(root.join("real/new")).unwrap();
+    let out = run(&env, &["scans", "--check", &id, "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("2 of 3 directories changed"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn p5_core_02_a_scan_of_the_index_directory_itself_is_swept() {
+    let env = TestEnv::new();
+    let dir = env.work_dir().join("index-and-root");
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, Permissions::from_mode(0o700)).unwrap();
+    let flag = dir.to_str().unwrap();
+    let first = save(&env, &dir, &["--index-dir", flag]);
+    // The first save into the directory made its scans/ after the walk:
+    // the root changed.
+    let out = run(
+        &env,
+        &["scans", "--check", &first, "--index-dir", flag, "--json"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    // A rescan, scans/ already there: only scans/, left out, changes.
+    let renewed = run(
+        &env,
+        &["rescan", "--scan", &first, "--index-dir", flag, "--json"],
+    );
+    assert!(renewed.status.success(), "{}", stderr(&renewed));
+    let id = envelope(&renewed)["scan"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::thread::sleep(Duration::from_millis(25));
+    let out = run(
+        &env,
+        &["scans", "--check", &id, "--index-dir", flag, "--json"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // The root is still read: a directory added to it makes the scan stale.
+    fs::create_dir(dir.join("new")).unwrap();
+    let out = run(
+        &env,
+        &["scans", "--check", &id, "--index-dir", flag, "--json"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(envelope(&out)["entries"][0]["structurally_stale"], true);
+    assert!(
+        stderr(&out).contains(&format!(
+            "1 of 1 directories changed since the scan, {flag} first"
+        )),
+        "{}",
+        stderr(&out)
+    );
+}

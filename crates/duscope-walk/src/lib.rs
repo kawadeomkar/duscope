@@ -573,13 +573,20 @@ impl DirStamp {
 
 /// The stamp of each directory at `dirs`, in their order: one call per path
 /// asking for the type and the two times alone (`statx` on Linux,
-/// `getattrlist` on macOS), not following a final symlink, with the walk's
-/// flags, so a directory nothing has touched since a walk reads as the walk
-/// recorded it. A path that is no longer a directory (a file, a link) is
-/// `ENOTDIR`; one gone, `ENOENT`. A path longer than `PATH_MAX` is read
-/// relative to its leading directories, opened a piece at a time.
-pub fn stamp_dirs<'a>(dirs: impl Iterator<Item = &'a Path>) -> Vec<io::Result<DirStamp>> {
-    platform::stamp_dirs(dirs)
+/// `getattrlist` on macOS), with the walk's flags, so a directory nothing
+/// has touched since a walk reads as the walk recorded it. A final symlink
+/// is not followed, unless `follow_symlinks` says the walk followed links
+/// ([`WalkOptions::follow_symlinks`]): that walk records a link to a
+/// directory as the directory, under the link's name, and the pieces of a
+/// long path are then opened through links too. A path that is no longer a
+/// directory (a file, a link not followed) is `ENOTDIR`; one gone,
+/// `ENOENT`. A path longer than `PATH_MAX` is read relative to its leading
+/// directories, opened a piece at a time.
+pub fn stamp_dirs<'a>(
+    dirs: impl Iterator<Item = &'a Path>,
+    follow_symlinks: bool,
+) -> Vec<io::Result<DirStamp>> {
+    platform::stamp_dirs(dirs, follow_symlinks)
 }
 
 /// The result queue holds this many directory batches per worker, as in

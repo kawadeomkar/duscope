@@ -214,14 +214,16 @@ pub(crate) fn firmlink(_path: &std::path::Path) -> bool {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn stamp_dirs<'a>(
     dirs: impl Iterator<Item = &'a std::path::Path>,
+    follow_symlinks: bool,
 ) -> Vec<std::io::Result<crate::DirStamp>> {
-    posix::stamp::stamp_dirs(dirs)
+    posix::stamp::stamp_dirs(dirs, follow_symlinks)
 }
 
 /// The stamp of each directory at `dirs`: none is read on this platform.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn stamp_dirs<'a>(
     dirs: impl Iterator<Item = &'a std::path::Path>,
+    _follow_symlinks: bool,
 ) -> Vec<std::io::Result<crate::DirStamp>> {
     dirs.map(|_| Err(std::io::ErrorKind::Unsupported.into()))
         .collect()

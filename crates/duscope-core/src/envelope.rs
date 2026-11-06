@@ -940,8 +940,9 @@ pub struct CheckedEntry {
     /// What `PRAGMA quick_check` said: `ok`.
     #[cfg_attr(test, schemars(extend("const" = "ok")))]
     pub quick_check: &'static str,
-    /// Whether a directory it holds changed since: an entry added, removed
-    /// or renamed, its mode or owner changed, or the directory gone.
+    /// Whether a directory it holds changed since, or while the scan ran:
+    /// an entry added, removed or renamed, its mode or owner changed, or
+    /// the directory gone.
     pub structurally_stale: bool,
 }
 

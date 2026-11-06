@@ -1,8 +1,10 @@
 //! The directory sweep of `scans --check`: each directory's modification
 //! and status-change times, read again by path with one call that asks for
-//! them and the type alone (`statx` on Linux, `getattrlist` on macOS),
-//! never following a final symlink, with the walk's flags, so a directory
-//! nothing touched reads exactly as the walk recorded it.
+//! them and the type alone (`statx` on Linux, `getattrlist` on macOS), with
+//! the walk's flags, so a directory nothing touched reads exactly as the
+//! walk recorded it. A final symlink is never followed, unless the scan
+//! followed links (`--follow-symlinks`): its walk records a link to a
+//! directory as that directory, under the link's name.
 //!
 //! A path at or beyond `PATH_MAX`, which the walk reaches through its
 //! parents' descriptors, is read the same way: its leading directories are
@@ -19,23 +21,40 @@ use crate::DirStamp;
 /// The longest path, its terminating NUL included, one call takes.
 const PATH_MAX: usize = libc::PATH_MAX as usize;
 
-/// The stamp of each directory at `dirs`, in order.
-pub(crate) fn stamp_dirs<'a>(dirs: impl Iterator<Item = &'a Path>) -> Vec<io::Result<DirStamp>> {
+/// The stamp of each directory at `dirs`, in order, following symbolic
+/// links when `follow_symlinks`.
+pub(crate) fn stamp_dirs<'a>(
+    dirs: impl Iterator<Item = &'a Path>,
+    follow_symlinks: bool,
+) -> Vec<io::Result<DirStamp>> {
     // One buffer for every path's C string: a sweep reads a path for each
     // directory of a scan, and an allocation each would cost more than the
     // copy.
     let mut buf = Vec::new();
-    dirs.map(|dir| stamp_path(dir.as_os_str().as_bytes(), PATH_MAX, &mut buf))
-        .collect()
+    dirs.map(|dir| {
+        stamp_path(
+            dir.as_os_str().as_bytes(),
+            PATH_MAX,
+            follow_symlinks,
+            &mut buf,
+        )
+    })
+    .collect()
 }
 
 /// The stamp of the directory at `path`, read in one call when it is
 /// shorter than `limit` bytes with its NUL, else relative to its leading
-/// directories, opened in pieces that are.
-fn stamp_path(path: &[u8], limit: usize, buf: &mut Vec<u8>) -> io::Result<DirStamp> {
+/// directories, opened in pieces that are; a final symlink, of the path or
+/// of a piece, followed when `follow`.
+fn stamp_path(path: &[u8], limit: usize, follow: bool, buf: &mut Vec<u8>) -> io::Result<DirStamp> {
     if path.len() < limit {
-        return stamp_at(None, c_str(path, buf)?);
+        return stamp_at(None, c_str(path, buf)?, follow);
     }
+    let open = if follow {
+        super::OPEN_DIR & !libc::O_NOFOLLOW
+    } else {
+        super::OPEN_DIR
+    };
     let mut dir: Option<OwnedFd> = None;
     let mut rest = path;
     while rest.len() >= limit {
@@ -46,11 +65,15 @@ fn stamp_path(path: &[u8], limit: usize, buf: &mut Vec<u8>) -> io::Result<DirSta
             .rposition(|&b| b == b'/')
             .filter(|&cut| cut > 0)
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENAMETOOLONG))?;
-        let opened = super::open_at(dir.as_ref().map(AsFd::as_fd), c_str(&rest[..cut], buf)?)?;
+        let opened = super::open_with(
+            dir.as_ref().map(AsFd::as_fd),
+            c_str(&rest[..cut], buf)?,
+            open,
+        )?;
         dir = Some(opened);
         rest = &rest[cut + 1..];
     }
-    stamp_at(dir.as_ref().map(AsFd::as_fd), c_str(rest, buf)?)
+    stamp_at(dir.as_ref().map(AsFd::as_fd), c_str(rest, buf)?, follow)
 }
 
 /// `bytes` as a C string in `buf`.
@@ -75,17 +98,20 @@ fn not_a_directory() -> io::Error {
 
 /// The stamp of `name` relative to the directory open on `dir` (`None`:
 /// the working directory, so an absolute path reads alone): `statx(2)` with
-/// the walk's flags, asking for the type and the two times.
+/// the walk's flags, asking for the type and the two times, following a
+/// final symlink only when `follow`.
 #[cfg(target_os = "linux")]
-fn stamp_at(dir: Option<BorrowedFd<'_>>, name: &CStr) -> io::Result<DirStamp> {
+fn stamp_at(dir: Option<BorrowedFd<'_>>, name: &CStr, follow: bool) -> io::Result<DirStamp> {
     use std::mem::MaybeUninit;
     use std::os::fd::AsRawFd;
 
     const MASK: u32 = libc::STATX_TYPE | libc::STATX_MTIME | libc::STATX_CTIME;
-    // As the walk reads an entry: never follow a final symlink, never
-    // trigger an automount, take a network client's cached attributes.
-    const FLAGS: libc::c_int =
-        libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT | libc::AT_STATX_DONT_SYNC;
+    // As the walk reads an entry: never follow a final symlink (but under
+    // --follow-symlinks, as the walk reads a link's target), never trigger
+    // an automount, take a network client's cached attributes.
+    let flags = libc::AT_NO_AUTOMOUNT
+        | libc::AT_STATX_DONT_SYNC
+        | if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
     let at = dir.map_or(libc::AT_FDCWD, |fd| fd.as_raw_fd());
     let mut buf = MaybeUninit::<libc::statx>::uninit();
     let stx = loop {
@@ -99,7 +125,7 @@ fn stamp_at(dir: Option<BorrowedFd<'_>>, name: &CStr) -> io::Result<DirStamp> {
                 libc::SYS_statx,
                 at,
                 name.as_ptr(),
-                FLAGS,
+                flags,
                 MASK,
                 buf.as_mut_ptr(),
             )
@@ -137,10 +163,11 @@ struct Record([u8; 64]);
 /// The stamp of `name` relative to the directory open on `dir` (`None`:
 /// the working directory, so an absolute path reads alone):
 /// `getattrlistat(2)` asking for the object type and the two times, not
-/// following a final symlink, as the walk reads an entry. A filesystem that
-/// cannot answer it, or answers without one of them, is asked with `lstat`.
+/// following a final symlink unless `follow`, as the walk reads an entry. A
+/// filesystem that cannot answer it, or answers without one of them, is
+/// asked with `fstatat`.
 #[cfg(target_os = "macos")]
-fn stamp_at(dir: Option<BorrowedFd<'_>>, name: &CStr) -> io::Result<DirStamp> {
+fn stamp_at(dir: Option<BorrowedFd<'_>>, name: &CStr, follow: bool) -> io::Result<DirStamp> {
     use std::os::fd::AsRawFd;
 
     /// `VDIR` of `enum vtype` (`<sys/vnode.h>`).
@@ -168,7 +195,11 @@ fn stamp_at(dir: Option<BorrowedFd<'_>>, name: &CStr) -> io::Result<DirStamp> {
                 (&raw mut attrs).cast(),
                 record.0.as_mut_ptr().cast(),
                 record.0.len(),
-                libc::c_ulong::from(libc::FSOPT_NOFOLLOW),
+                if follow {
+                    0
+                } else {
+                    libc::c_ulong::from(libc::FSOPT_NOFOLLOW)
+                },
             )
         };
         if rc == 0 {
@@ -200,9 +231,10 @@ fn stamp_at(dir: Option<BorrowedFd<'_>>, name: &CStr) -> io::Result<DirStamp> {
         Err(e) if !unsupported(&e) => Err(e),
         // Refused, or answered without every attribute.
         _ => {
-            let stat = match dir {
-                Some(dir) => super::lstat_at(dir, name)?,
-                None => super::lstat(name)?,
+            let stat = match (dir, follow) {
+                (Some(dir), false) => super::lstat_at(dir, name)?,
+                (None, false) => super::lstat(name)?,
+                (_, true) => stat_following(at, name)?,
             };
             if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
                 return Err(not_a_directory());
@@ -211,6 +243,27 @@ fn stamp_at(dir: Option<BorrowedFd<'_>>, name: &CStr) -> io::Result<DirStamp> {
                 mtime_ns: time_ns(stat.st_mtime, stat.st_mtime_nsec),
                 ctime_ns: time_ns(stat.st_ctime, stat.st_ctime_nsec),
             })
+        }
+    }
+}
+
+/// `fstatat(2)` of `name` relative to `at`, following a final symlink.
+#[cfg(target_os = "macos")]
+fn stat_following(at: libc::c_int, name: &CStr) -> io::Result<libc::stat> {
+    use std::mem::MaybeUninit;
+
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    loop {
+        // SAFETY: `at` is AT_FDCWD or a descriptor open for the caller's
+        // borrow, `name` is NUL-terminated, and `stat` is writable for one
+        // `struct stat`.
+        if unsafe { libc::fstatat(at, name.as_ptr(), stat.as_mut_ptr(), 0) } == 0 {
+            // SAFETY: fstatat succeeded, so it filled the struct.
+            return Ok(unsafe { stat.assume_init() });
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
         }
     }
 }
@@ -241,9 +294,14 @@ mod tests {
 
     /// Every directory a walk of `root` records, by path.
     fn walked_dirs(root: &Path) -> BTreeMap<PathBuf, Entry> {
+        walked_dirs_with(root, &WalkOptions::default())
+    }
+
+    /// Every directory a walk of `root` with `opts` records, by path.
+    fn walked_dirs_with(root: &Path, opts: &WalkOptions) -> BTreeMap<PathBuf, Entry> {
         let mut paths: BTreeMap<DirId, PathBuf> = BTreeMap::new();
         let mut dirs = BTreeMap::new();
-        walk(root, &WalkOptions::default(), |event| {
+        walk(root, opts, |event| {
             if let ScanEvent::Entry(entry) = event {
                 let path = if entry.dir == Some(DirId::ROOT) {
                     root.to_owned()
@@ -263,7 +321,11 @@ mod tests {
     }
 
     fn stamp(path: &Path) -> std::io::Result<DirStamp> {
-        stamp_dirs(std::iter::once(path)).pop().unwrap()
+        stamp_dirs(std::iter::once(path), false).pop().unwrap()
+    }
+
+    fn stamp_following(path: &Path) -> std::io::Result<DirStamp> {
+        stamp_dirs(std::iter::once(path), true).pop().unwrap()
     }
 
     /// A tree of a few directories, a file and two links.
@@ -299,7 +361,7 @@ mod tests {
         let dirs = walked_dirs(&root);
         assert_eq!(dirs.len(), 6, "{:?}", dirs.keys());
         let paths: Vec<&Path> = dirs.keys().map(PathBuf::as_path).collect();
-        let stamps = stamp_dirs(paths.iter().copied());
+        let stamps = stamp_dirs(paths.iter().copied(), false);
         assert_eq!(stamps.len(), paths.len());
         for ((path, entry), stamp) in dirs.iter().zip(stamps) {
             let stamp = stamp.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -352,8 +414,65 @@ mod tests {
         assert_eq!(errno("gone"), Some(libc::ENOENT));
         // One failure leaves the others' stamps in their places.
         let paths = [root.join("a"), root.join("gone"), root.join("e")];
-        let stamps = stamp_dirs(paths.iter().map(PathBuf::as_path));
+        let stamps = stamp_dirs(paths.iter().map(PathBuf::as_path), false);
         assert!(stamps[0].is_ok() && stamps[1].is_err() && stamps[2].is_ok());
+    }
+
+    #[test]
+    fn p5_core_02_stamp_dirs_follows_links_as_a_walk_that_followed_them() {
+        let env = TestEnv::new();
+        let root = small_tree(&env);
+        symlink("a/file", root.join("link-to-file")).unwrap();
+        // A walk that follows links records the link to a directory as
+        // that directory, under the link's name, and the directories
+        // under it under the link too.
+        let opts = WalkOptions {
+            follow_symlinks: true,
+            ..WalkOptions::default()
+        };
+        let dirs = walked_dirs_with(&root, &opts);
+        let link = root.join("link-to-dir");
+        assert!(dirs.contains_key(&link.join("b/c")), "{:?}", dirs.keys());
+        let paths: Vec<&Path> = dirs.keys().map(PathBuf::as_path).collect();
+        for ((path, entry), stamp) in dirs.iter().zip(stamp_dirs(paths.iter().copied(), true)) {
+            let stamp = stamp.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert_eq!(
+                (stamp.mtime_ns, stamp.ctime_ns),
+                (entry.mtime_ns, entry.ctime_ns),
+                "{}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            stamp_following(&link).unwrap(),
+            stamp(&root.join("a")).unwrap()
+        );
+        // Without following, the link is itself, no directory.
+        assert_eq!(
+            stamp(&link).unwrap_err().raw_os_error(),
+            Some(libc::ENOTDIR)
+        );
+        // Followed, a link to a file is still no directory, and one to
+        // nothing is gone.
+        let errno = |rel: &str| stamp_following(&root.join(rel)).unwrap_err().raw_os_error();
+        assert_eq!(errno("link-to-file"), Some(libc::ENOTDIR));
+        assert_eq!(errno("dangling"), Some(libc::ENOENT));
+        // A long path whose piece ends at the link opens the piece through
+        // it when following, and refuses it otherwise (`ELOOP` on Linux,
+        // `ENOTDIR` on macOS, which `O_DIRECTORY` decides first).
+        let deep = link.join("b");
+        let bytes = deep.as_os_str().as_bytes();
+        let limit = link.as_os_str().len() + 1;
+        let mut buf = Vec::new();
+        assert_eq!(
+            stamp_path(bytes, limit, true, &mut buf).unwrap(),
+            stamp(&root.join("a/b")).unwrap()
+        );
+        let refused = stamp_path(bytes, limit, false, &mut buf).unwrap_err();
+        assert!(
+            matches!(refused.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -371,18 +490,18 @@ mod tests {
         for rel in ["a", "a/b", "a/b/c", "e"] {
             let path = root.join(rel);
             let bytes = path.as_os_str().as_bytes();
-            let whole = stamp_path(bytes, PATH_MAX, &mut buf).unwrap();
+            let whole = stamp_path(bytes, PATH_MAX, false, &mut buf).unwrap();
             // The root in one piece, then the rest; and one piece per
             // component, or nearly.
             for limit in [root.as_os_str().len() + 1, longest + 2] {
-                let pieces = stamp_path(bytes, limit, &mut buf)
+                let pieces = stamp_path(bytes, limit, false, &mut buf)
                     .unwrap_or_else(|e| panic!("{} in pieces of {limit}: {e}", path.display()));
                 assert_eq!(pieces, whole, "{} in pieces of {limit}", path.display());
             }
         }
         // No piece can be cut short enough.
         let path = root.join("a/b/c");
-        let error = stamp_path(path.as_os_str().as_bytes(), 2, &mut buf).unwrap_err();
+        let error = stamp_path(path.as_os_str().as_bytes(), 2, false, &mut buf).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::ENAMETOOLONG));
     }
 
@@ -413,7 +532,7 @@ mod tests {
         let deepest = dirs.keys().map(|p| p.as_os_str().len()).max().unwrap();
         assert!(deepest > PATH_MAX, "{deepest} bytes");
         let paths: Vec<&Path> = dirs.keys().map(PathBuf::as_path).collect();
-        for ((path, entry), stamp) in dirs.iter().zip(stamp_dirs(paths.iter().copied())) {
+        for ((path, entry), stamp) in dirs.iter().zip(stamp_dirs(paths.iter().copied(), false)) {
             let stamp = stamp.unwrap_or_else(|e| panic!("{} bytes: {e}", path.as_os_str().len()));
             assert_eq!(
                 (stamp.mtime_ns, stamp.ctime_ns),

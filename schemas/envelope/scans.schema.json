@@ -17,7 +17,7 @@
           "type": "string"
         },
         "structurally_stale": {
-          "description": "Whether a directory it holds changed since: an entry added, removed\nor renamed, its mode or owner changed, or the directory gone.",
+          "description": "Whether a directory it holds changed since, or while the scan ran:\nan entry added, removed or renamed, its mode or owner changed, or\nthe directory gone.",
           "type": "boolean",
           "x-since": "0.3"
         }
