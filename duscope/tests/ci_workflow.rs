@@ -696,6 +696,28 @@ fn p1_test_01_the_platform_job_runs_the_ignored_tests_as_root() {
     );
 }
 
+#[test]
+fn p1_test_01_the_platform_job_builds_the_tests_without_lto() {
+    let jobs = jobs(&read(WORKFLOW));
+    let platform = jobs
+        .iter()
+        .find(|j| j.id == "platform")
+        .expect("ci.yml has no `platform` job");
+    // Release's thin LTO and single codegen unit, over every test binary the
+    // recipe builds, took the macOS job to its 20-minute budget; the tests
+    // keep release's optimisation without them.
+    for setting in [
+        "      CARGO_PROFILE_RELEASE_LTO: \"off\"",
+        "      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: \"16\"",
+    ] {
+        assert!(
+            platform.lines.iter().any(|line| line == setting),
+            "the platform job does not set {}",
+            setting.trim()
+        );
+    }
+}
+
 /// The `run: |` script of the step with this name in `job`, dedented.
 fn step_script(job: &Job, name: &str) -> String {
     let mut lines = job
