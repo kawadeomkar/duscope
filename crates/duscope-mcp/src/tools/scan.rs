@@ -2,10 +2,13 @@
 //! (`scan --save`), or returns a saved scan of it younger than `max_age`
 //! (`--reuse`).
 
+use std::time::Duration;
+
 use serde_json::{Map, Value};
 
 use super::{Annotations, CommandLine, Context, Invocation, Tool, path_argument};
 use crate::roots::Refusal;
+use crate::worker;
 
 /// `scan --save [--attrs SET] [--clones | --no-clones] [--one-file-system]
 /// [--reuse AGE] ROOT`.
@@ -33,6 +36,10 @@ impl Tool for Scan {
             destructive: false,
             idempotent: false,
         }
+    }
+
+    fn deadline(&self) -> Duration {
+        worker::SCAN_DEADLINE
     }
 
     fn invocation(

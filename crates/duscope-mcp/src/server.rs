@@ -15,25 +15,37 @@
 //! served side by side in one process; the only state is the version an
 //! `initialize` answered. The methods are `server/discover`, `ping`, and,
 //! once the server has its [`Tools`], `tools/list` and `tools/call`.
+//!
+//! A `tools/call` runs on the [`worker`](crate::worker), one at a time and
+//! in the order received, while the reader answers `ping`,
+//! `server/discover` and `tools/list` at once and reads
+//! `notifications/cancelled`; the answers to the other requests wait for
+//! the calls received before them.
 
 use std::fmt;
+use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use log::debug;
+use log::{debug, info};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
 use crate::discover::{self, ServerConfig};
-use crate::jsonrpc::{Notification, Request, RpcError};
+use crate::jsonrpc::{Id, Notification, Request, RpcError};
 use crate::legacy;
 use crate::roots::Roots;
-use crate::tools::{Context, ListedTool, Registry, Runner};
+use crate::tools::{ListedTool, Registry, Runner};
 use crate::transport::{Handler, Responder};
+use crate::worker::{Timing, Worker};
 
 /// How long a client may keep a `tools/list` result, in milliseconds: an
 /// hour. The tools do not change while the process runs.
 pub const TOOLS_TTL_MS: u64 = 3_600_000;
+
+/// The requests the reader answers at once, whatever a tool call is doing.
+const AT_ONCE: [&str; 3] = ["ping", "server/discover", "tools/list"];
 
 /// The duscope MCP server.
 #[derive(Debug)]
@@ -42,7 +54,10 @@ pub struct Server {
     /// The version an `initialize` answered, for the requests that carry
     /// none.
     session: Option<&'static str>,
-    tools: Option<Tools>,
+    tools: Option<Arc<Tools>>,
+    timing: Timing,
+    /// Started with the first tool call.
+    worker: Option<Worker>,
 }
 
 /// The tools a server offers, and what they run with.
@@ -69,7 +84,7 @@ impl fmt::Debug for Tools {
 
 /// The revision a request speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Revision {
+pub(crate) enum Revision {
     /// It names its version in `_meta` (2026-07-28).
     PerRequest,
     /// It belongs to an `initialize` session (2025-11-25).
@@ -88,6 +103,14 @@ struct ToolList<'a> {
     cache_scope: Option<&'static str>,
 }
 
+/// How a request is answered.
+enum Answer {
+    /// With this, once the requests before it allow.
+    Now(Result<Box<RawValue>, RpcError>),
+    /// On the worker: a tool call, in the revision it speaks.
+    Call(Revision),
+}
+
 impl Server {
     /// A server describing itself as `config` says, with no tools.
     pub fn new(config: ServerConfig) -> Server {
@@ -95,6 +118,8 @@ impl Server {
             config,
             session: None,
             tools: None,
+            timing: Timing::default(),
+            worker: None,
         }
     }
 
@@ -104,44 +129,90 @@ impl Server {
         self.config = self
             .config
             .with_capability("tools", json!({ "listChanged": false }));
-        self.tools = Some(tools);
+        self.tools = Some(Arc::new(tools));
         self
     }
 
-    fn answer(&mut self, request: &Request) -> Result<Box<RawValue>, RpcError> {
+    /// The same server, reporting progress and timing tool calls as
+    /// `timing` says.
+    #[must_use]
+    pub fn with_timing(mut self, timing: Timing) -> Server {
+        self.timing = timing;
+        self
+    }
+
+    fn answer(&mut self, request: &Request) -> Answer {
         let params = request.params.as_ref();
         if request.method == "initialize" {
-            let result = legacy::initialize(&self.config, params)?;
-            self.session = Some(discover::LEGACY);
-            debug!("initialized at {}", discover::LEGACY);
-            return written(serde_json::value::to_raw_value(&result));
+            let result = legacy::initialize(&self.config, params).and_then(|result| {
+                self.session = Some(discover::LEGACY);
+                debug!("initialized at {}", discover::LEGACY);
+                written(serde_json::value::to_raw_value(&result))
+            });
+            return Answer::Now(result);
         }
         let (revision, version) = match discover::request_version(params) {
             Some(Ok(version)) => (Revision::PerRequest, version),
-            Some(Err(error)) => return Err(error),
+            Some(Err(error)) => return Answer::Now(Err(error)),
             None => match self.session {
                 Some(version) => (Revision::Session, version),
                 None if request.method == "ping" => (Revision::Session, discover::LEGACY),
                 None => {
-                    return Err(RpcError::invalid_params(
+                    return Answer::Now(Err(RpcError::invalid_params(
                         "_meta[\"io.modelcontextprotocol/protocolVersion\"] is missing: send \
                          it, with the client's capabilities, on every request (2026-07-28), or \
                          call initialize first (2025-11-25)",
-                    ));
+                    )));
                 }
             },
         };
         debug!("{} at {version}", request.method.escape_debug());
-        self.call(revision, &request.method, params)
+        if request.method == "tools/call" && self.tools.is_some() {
+            return Answer::Call(revision);
+        }
+        Answer::Now(self.call(revision, &request.method))
     }
 
-    /// Every method: its result, as the revision writes it.
-    fn call(
-        &self,
-        revision: Revision,
-        method: &str,
-        params: Option<&Map<String, Value>>,
-    ) -> Result<Box<RawValue>, RpcError> {
+    /// The worker, started on first use.
+    fn worker(&mut self) -> io::Result<&Worker> {
+        match (&mut self.worker, &self.tools) {
+            (Some(worker), _) => Ok(worker),
+            (worker @ None, Some(tools)) => Ok(worker.insert(Worker::start(
+                Arc::clone(tools),
+                self.config.clone(),
+                self.timing,
+            )?)),
+            (None, None) => Err(io::Error::other("the server has no tools to run")),
+        }
+    }
+
+    /// `notifications/cancelled`: the call it names, queued or running, is
+    /// cancelled and never answered.
+    fn cancelled(&self, params: Option<&Map<String, Value>>) {
+        let Some(id) = params
+            .and_then(|params| params.get("requestId"))
+            .and_then(Id::from_value)
+        else {
+            debug!("ignored a cancellation that names no request");
+            return;
+        };
+        let reason = params
+            .and_then(|params| params.get("reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("no reason given");
+        match &self.worker {
+            Some(worker) if worker.cancel(&id) => {
+                info!("cancelled request {id}: {}", reason.escape_debug());
+            }
+            _ => debug!(
+                "ignored the cancellation of request {id}: no call of that id is waiting or running"
+            ),
+        }
+    }
+
+    /// Every method but `initialize` and a `tools/call` the server runs: its
+    /// result, as the revision writes it.
+    fn call(&self, revision: Revision, method: &str) -> Result<Box<RawValue>, RpcError> {
         match (method, revision, &self.tools) {
             ("ping", _, _) => self.finish(revision, &Map::new()),
             ("server/discover", Revision::PerRequest, _) => {
@@ -158,40 +229,30 @@ impl Server {
                     },
                 )
             }
-            ("tools/call", _, Some(tools)) => {
-                let context = Context {
-                    roots: &tools.roots,
-                    index_dir: &tools.index_dir,
-                };
-                let result = tools
-                    .registry
-                    .call(params, &context, tools.runner.as_ref())?;
-                debug!(
-                    "tools/call answered{}",
-                    if result.is_error() {
-                        " with an error"
-                    } else {
-                        ""
-                    }
-                );
-                self.finish(revision, &result)
-            }
             (method, _, _) => Err(RpcError::method_not_found(method)),
         }
     }
 
-    /// `body` as the result `revision` sends: 2026-07-28's marked complete
-    /// and naming the server, 2025-11-25's as it is.
     fn finish<T: Serialize>(
         &self,
         revision: Revision,
         body: &T,
     ) -> Result<Box<RawValue>, RpcError> {
-        written(match revision {
-            Revision::PerRequest => discover::complete(&self.config, body),
-            Revision::Session => serde_json::value::to_raw_value(body),
-        })
+        finish(&self.config, revision, body)
     }
+}
+
+/// `body` as the result `revision` sends: 2026-07-28's marked complete and
+/// naming the server `config` describes, 2025-11-25's as it is.
+pub(crate) fn finish<T: Serialize>(
+    config: &ServerConfig,
+    revision: Revision,
+    body: &T,
+) -> Result<Box<RawValue>, RpcError> {
+    written(match revision {
+        Revision::PerRequest => discover::complete(config, body),
+        Revision::Session => serde_json::value::to_raw_value(body),
+    })
 }
 
 /// A result written as JSON, or the internal error that it could not be.
@@ -199,12 +260,32 @@ fn written(result: serde_json::Result<Box<RawValue>>) -> Result<Box<RawValue>, R
     result.map_err(|e| RpcError::internal(format!("cannot write the result: {e}")))
 }
 
+/// Sends a response. A failed write stops the transport, which reports it.
+fn send(responder: Responder, outcome: Result<Box<RawValue>, RpcError>) {
+    let id = responder.id().clone();
+    if let Err(e) = responder.respond_raw(outcome) {
+        debug!("could not answer request {id}: {e}");
+    }
+}
+
 impl Handler for Server {
     fn request(&mut self, request: Request, responder: Responder) {
-        let outcome = self.answer(&request);
-        // A failed write stops the transport, which reports it.
-        if let Err(e) = responder.respond_raw(outcome) {
-            debug!("could not answer request {}: {e}", request.id);
+        match self.answer(&request) {
+            Answer::Call(revision) => match self.worker() {
+                Ok(worker) => worker.call(request, revision, responder),
+                Err(e) => send(
+                    responder,
+                    Err(RpcError::internal(format!(
+                        "cannot start the thread that runs the tools: {e}"
+                    ))),
+                ),
+            },
+            Answer::Now(outcome) => match &self.worker {
+                Some(worker) if !AT_ONCE.contains(&request.method.as_str()) => {
+                    worker.answer(responder, outcome);
+                }
+                _ => send(responder, outcome),
+            },
         }
     }
 
@@ -213,7 +294,17 @@ impl Handler for Server {
             "notifications/initialized" => {
                 debug!("the client finished the initialize handshake");
             }
+            "notifications/cancelled" => self.cancelled(notification.params.as_ref()),
             method => debug!("ignored notification {}", method.escape_debug()),
+        }
+    }
+
+    fn end(&mut self, ended: &io::Result<()>) {
+        if let Some(worker) = self.worker.take() {
+            match ended {
+                Ok(()) => worker.finish(),
+                Err(_) => worker.abort(),
+            }
         }
     }
 }

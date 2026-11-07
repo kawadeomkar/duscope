@@ -34,7 +34,7 @@ const KEPT_BUFFER_BYTES: usize = 1024 * 1024;
 /// The reader thread's name, which panics and debuggers show.
 pub const READER_THREAD: &str = "duscope-mcp-reader";
 
-/// What the server does with each message the transport accepts. Both
+/// What the server does with each message the transport accepts. Its
 /// methods run on the reader thread, which reads nothing more until they
 /// return.
 pub trait Handler {
@@ -45,6 +45,13 @@ pub trait Handler {
 
     /// A notification, which is never answered.
     fn notification(&mut self, notification: Notification);
+
+    /// The input has ended (`Ok`), or reading it or writing to the client
+    /// failed (`Err`): the handler finishes the requests it still owes an
+    /// answer before [`run`] returns. The default has nothing to finish.
+    fn end(&mut self, ended: &io::Result<()>) {
+        let _ = ended;
+    }
 }
 
 /// The output side: every message to the client is written through it, a
@@ -178,6 +185,19 @@ impl Responder {
         }
     }
 
+    /// Sends a notification about the request ahead of its response, such
+    /// as its progress.
+    pub fn notify(&self, method: &str, params: Option<&Value>) -> io::Result<()> {
+        self.outbox.notify(method, params)
+    }
+
+    /// Whether a write to the client has failed, here or through any other
+    /// responder: nothing more can reach it, this request's response
+    /// included.
+    pub(crate) fn output_failed(&self) -> bool {
+        self.outbox.failed().is_some()
+    }
+
     /// Ends the request with no message at all, as a cancelled request must
     /// end.
     pub fn abandon(mut self) {
@@ -281,10 +301,30 @@ impl<R: BufRead> Reader<R> {
 /// that is not one valid message gets its error response, a response from
 /// the client is logged and dropped, and an empty line is skipped.
 ///
+/// Once the input ends, or a read or a write fails, the handler finishes
+/// what it owes ([`Handler::end`]) before this returns. An input that ends
+/// after a write has failed, from any thread, ends as that failure: the
+/// handler is not asked to answer anyone.
+///
 /// Returns `Ok` at the end of the input, or the error of a failed read or of
 /// a failed write to `outbox` (after which nothing more could reach the
 /// client).
 pub fn run<R: BufRead, H: Handler>(
+    reader: Reader<R>,
+    outbox: &Outbox,
+    handler: &mut H,
+) -> io::Result<()> {
+    let failed = |ended: io::Result<()>| match (ended, outbox.failed()) {
+        (Ok(()), Some(kind)) => Err(io::Error::new(kind, "a write to the client failed")),
+        (ended, _) => ended,
+    };
+    let ended = failed(read(reader, outbox, handler));
+    handler.end(&ended);
+    failed(ended)
+}
+
+/// [`run`]'s reading, until the input ends or a read or a write fails.
+fn read<R: BufRead, H: Handler>(
     mut reader: Reader<R>,
     outbox: &Outbox,
     handler: &mut H,
