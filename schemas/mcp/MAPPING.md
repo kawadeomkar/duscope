@@ -328,6 +328,7 @@ the roots, so a scan whose root lies above a root is compared at that root.
 | `PATH` | `path` | absolute, or relative to the scan's root |
 | `--scan` | `scan_id` | `latest` or an id, never an index file |
 | `--errors` | — | lists the unreadable directories of a whole scan, which for a scan above a root lie outside the roots |
+| `--clones` | — | opens every file under the path to read its extent map: a cost on demand that the tool, which answers from the saved scan, does not take |
 | `--max-age` | — | the `stale_index` warning's threshold: the configuration's, or 7d |
 | `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
 | `--test-now` | — | hidden: for tests |

@@ -7,9 +7,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use duscope_core::envelope::{
-    ObjectEnvelope, ObjectQuery, SCHEMA_VERSION, Summary, SummaryVolume, Tool, VolumeEntry,
+    ObjectEnvelope, ObjectQuery, SCHEMA_VERSION, Summary, SummarySubvolume, SummaryVolume, Tool,
+    VolumeEntry,
 };
-use duscope_core::query::{self, SizeKind};
+use duscope_core::query::{self, SizeKind, TreeView};
 
 use super::Failure;
 use super::next::Hints;
@@ -19,6 +20,7 @@ use crate::cli::SummaryArgs;
 use crate::out::{Output, thousands};
 
 /// `summary`.
+#[allow(clippy::too_many_lines)] // the answer's fields, in their order
 pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     let source = source::source(&args.walk, &args.index, index_dir)?;
     let size = scan::size_kind(&args.walk);
@@ -34,6 +36,7 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
     let bytes = query::summary(&*view, &unentered);
     let root = view.node(0);
     let root_path = view.root_path().to_owned();
+    let subvolumes = sidebar(&*view, &bytes.subvolumes, &block.volumes);
     drop(view);
     let path_bytes = root_path.as_os_str().as_bytes().to_vec();
     let path = root_path.to_string_lossy().into_owned();
@@ -78,6 +81,7 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
         path,
         path_bytes,
         volumes,
+        subvolumes,
         allocated_bytes: bytes.allocated,
         apparent_bytes: bytes.apparent,
         du_compatible_bytes: bytes.du_compatible,
@@ -152,6 +156,49 @@ fn volume(v: &VolumeEntry, share: query::VolumeBytes) -> SummaryVolume {
     }
 }
 
+/// The sidebar: each subvolume of `shares` in `view`, by its path.
+fn sidebar(
+    view: &(impl TreeView + ?Sized),
+    shares: &[query::SubvolumeBytes],
+    volumes: &[VolumeEntry],
+) -> Vec<SummarySubvolume> {
+    shares
+        .iter()
+        .map(|share| subvolume(volumes, &query::abs_path(view, share.id), share))
+        .collect()
+}
+
+/// A subvolume at `path` with the bytes found on it: on the volume mounted
+/// there when it is mounted on its own (a ZFS dataset, whose referenced
+/// bytes its size and free space give), else on the volume around it.
+fn subvolume(
+    volumes: &[VolumeEntry],
+    path: &[u8],
+    share: &query::SubvolumeBytes,
+) -> SummarySubvolume {
+    let path = String::from_utf8_lossy(path).into_owned();
+    let own = volumes.iter().find(|v| v.mount_point == path);
+    let around = || {
+        volumes
+            .iter()
+            .filter(|v| Path::new(&path).starts_with(&v.mount_point))
+            .max_by_key(|v| v.mount_point.len())
+    };
+    let fs_type = own
+        .or_else(around)
+        .map(|v| v.fs_type.clone())
+        .unwrap_or_default();
+    SummarySubvolume {
+        referenced_bytes: own
+            .and_then(|v| query::referenced(&v.fs_type, v.total_bytes, v.free_bytes)),
+        path,
+        fs_type,
+        allocated_bytes: share.allocated,
+        apparent_bytes: share.apparent,
+        du_compatible_bytes: share.du_compatible,
+    }
+}
+
 /// The answer for people: one line each, name and value.
 fn people(s: &Summary, output: &Output, size: SizeKind) -> Vec<(String, String)> {
     let bytes = |n: u64| output.units.size(n);
@@ -198,6 +245,20 @@ fn people(s: &Summary, output: &Output, size: SizeKind) -> Vec<(String, String)>
         lines.push((
             "volume".to_owned(),
             format!("{} ({}) · {state}{room}", v.mount_point, v.fs_type),
+        ));
+    }
+    for v in &s.subvolumes {
+        let referenced = v
+            .referenced_bytes
+            .map_or_else(String::new, |n| format!(" · {} referenced", bytes(n)));
+        lines.push((
+            "subvolume".to_owned(),
+            format!(
+                "{} ({}) · {}{referenced}",
+                v.path,
+                v.fs_type,
+                shown(v.allocated_bytes, v.apparent_bytes)
+            ),
         ));
     }
     if s.error_count > 0 {

@@ -540,7 +540,15 @@ impl Arena {
             Share::MayShare => self.may_share.push(index),
             Share::None | Share::Hardlink => {}
         }
-        if is_dir && (entry.boundary != Boundary::None || idx == 0) {
+        // A subvolume inside its parent's mount (btrfs) lies on that
+        // mount's volume; one mounted on its own (a ZFS dataset, a btrfs
+        // subvolume mount) is a volume of its own, as any mount is.
+        let crossing = match entry.boundary {
+            Boundary::None => idx == 0,
+            Boundary::Subvolume => idx == 0 || entry.flags.contains(Flags::MOUNT_ROOT),
+            Boundary::Mount | Boundary::Firmlink | Boundary::Bind => true,
+        };
+        if is_dir && crossing {
             self.crossings.push(Crossing {
                 entry: index,
                 boundary: entry.boundary,

@@ -265,9 +265,39 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install exfatprogs
+      - name: Install the filesystems' tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -y -q exfatprogs
+        run: |
+          # mkfs for the exFAT, FAT, btrfs, XFS and NTFS images, mksquashfs for
+          # the read-only one (P5-WALK-02), and the kernel's extra modules,
+          # which hold ntfs3 and exfat on Ubuntu's generic kernel. The runners'
+          # Azure kernel has no extra package: its base modules package holds
+          # btrfs, xfs, exfat, ntfs3 and overlay, and vfat and squashfs are
+          # built in.
+          sudo apt-get update -q
+          sudo apt-get install -y -q exfatprogs dosfstools btrfs-progs xfsprogs ntfs-3g squashfs-tools
+          sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" || echo "no linux-modules-extra package for $(uname -r)"
+      - name: Probe the kernel's filesystems
+        if: runner.os == 'Linux'
+        run: |
+          # Each filesystem the platform tests mount, loaded if it is a module.
+          # One the kernel has no driver for is named in a warning here and in
+          # DUSCOPE_TEST_MISSING_FS, and the part of a test that mounts it
+          # skips; a mount that fails for any other reason fails its test
+          # (DEV-58).
+          missing=()
+          for fs in btrfs xfs exfat vfat ntfs3 squashfs overlay; do
+            grep -qw "$fs" /proc/filesystems || sudo modprobe -q "$fs" || true
+            if grep -qw "$fs" /proc/filesystems; then
+              echo "$fs: the kernel has a driver"
+            else
+              missing+=("$fs")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            echo "::warning title=Filesystems missing::kernel $(uname -r) has no driver for ${missing[*]}: the platform tests' parts that mount them skip"
+            echo "DUSCOPE_TEST_MISSING_FS=${missing[*]}" >> "$GITHUB_ENV"
+          fi
       - name: The platform tests, as root
         run: |
           # Built as the runner's user; each test binary runs under sudo, which

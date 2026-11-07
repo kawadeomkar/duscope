@@ -111,10 +111,18 @@ platform-tests:
       p4_core_01_macos_a_trashed_file_round_trips_on_an_image
       platform::macos::fsevents::tests::p5_walk_01_macos_no_log_on_an_image_gives_fsevents_disabled
       platform::macos::fsevents::tests::p5_walk_01_macos_a_remount_since_the_mark_voids_a_replay_below_the_root
+      p5_walk_02_linux_btrfs_subvolumes_are_boundaries_and_reflinks_share_extents
+      p5_walk_02_linux_xfs_reflinks_share_extents
+      p5_walk_02_linux_an_overlay_is_entered_and_confined_by_its_own_mount
+      p5_walk_02_linux_foreign_filesystems_report_links_btime_and_case_as_they_are
+      p5_walk_02_linux_a_squashfs_image_is_read_only
+      p5_walk_02_linux_explain_clones_reports_shared_extents_on_reflinks
+      p5_walk_02_linux_summary_lists_btrfs_subvolumes
+      p5_walk_02_linux_clean_refuses_an_item_on_a_read_only_image
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Five are built on Linux and eight on macOS; a renamed test must not drop out unnoticed.
-    expected=$([[ $(uname -s) == Darwin ]] && echo 8 || echo 5)
+    # Thirteen are built on Linux and eight on macOS; a renamed test must not drop out unnoticed.
+    expected=$([[ $(uname -s) == Darwin ]] && echo 8 || echo 13)
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
     [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
     cargo_test -- --ignored --exact "${tests[@]}"

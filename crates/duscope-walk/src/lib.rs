@@ -43,7 +43,7 @@ use crossbeam_utils::CachePadded;
 
 pub use counters::{WalkPhases, WorkerCounts};
 pub use entry::{
-    Boundary, DirId, Entry, Flags, FsEventsMark, FullAttrs, Kind, NameRef, Normalization,
+    Boundary, DirId, Entry, Extents, Flags, FsEventsMark, FullAttrs, Kind, NameRef, Normalization,
     ScanEvent, Share, Skip, VolumeClass, VolumeInfo,
 };
 pub use errors::{FsEventsError, ScanError, TrashError, WalkError};
@@ -632,6 +632,21 @@ pub fn reaches(root: &Path, path: &Path, opts: &WalkOptions) -> bool {
 /// on other platforms.
 pub fn host_app() -> Option<String> {
     platform::host_app()
+}
+
+/// The extents of the regular file at `path`, and of those the bytes the
+/// filesystem shares with another file or a snapshot, as `explain --clones`
+/// reads them on demand: btrfs and XFS reflinks through Linux's `FIEMAP`,
+/// with read access only (the file is opened read-only and never read).
+/// `Ok(None)` where the platform keeps no such map, as macOS, whose clone
+/// ids the scan reads instead; an error where the path cannot be resolved
+/// without following a symbolic link in any of its components, or does not
+/// name a regular file, which is then never opened for reading; and an
+/// [`io::ErrorKind::Unsupported`] one, with nothing opened, where its
+/// filesystem keeps no extent map that is read (tmpfs, exFAT, ZFS, an
+/// overlay, a network or FUSE filesystem).
+pub fn extents(path: &Path) -> io::Result<Option<Extents>> {
+    platform::extents(path)
 }
 
 /// The result queue holds this many directory batches per worker, as in

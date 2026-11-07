@@ -862,6 +862,33 @@ impl TreeView for Index {
         })
     }
 
+    /// From `dirs.flags`: the directories flagged `subvolume` (bit 7).
+    fn subvolume_roots(&self, dir: u32) -> Vec<crate::query::VolumeRoot> {
+        const _: () = assert!(Flags::SUBVOLUME.bits() == 128);
+        let last = self.node(dir).last_id;
+        let read = || -> rusqlite::Result<Vec<crate::query::VolumeRoot>> {
+            let mut stmt = self.db.prepare(
+                "SELECT id, last_id, dev, cum_allocated, cum_apparent, cum_du_compatible \
+                 FROM dirs WHERE id BETWEEN ?1 AND ?2 AND flags & 128 != 0 ORDER BY id",
+            )?;
+            stmt.query_map([dir, last], |row| {
+                Ok(crate::query::VolumeRoot {
+                    id: row.get(0)?,
+                    last: row.get(1)?,
+                    dev: unsigned(row.get(2)?),
+                    allocated: unsigned(row.get(3)?),
+                    apparent: unsigned(row.get(4)?),
+                    du_compatible: unsigned(row.get(5)?),
+                })
+            })?
+            .collect()
+        };
+        read().unwrap_or_else(|e| {
+            self.fail(&e);
+            Vec::new()
+        })
+    }
+
     /// Through the partial index `files_dataless`, whose condition the query
     /// spells as it is; a later link of a dataless file counts once.
     fn dataless(&self, dir: u32) -> Dataless {

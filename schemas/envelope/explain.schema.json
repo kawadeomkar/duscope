@@ -289,12 +289,13 @@
           ]
         },
         "is_clone": {
-          "description": "Whether a file is a member of a clone group; null for a directory,\nand where the scan recorded no clone ids (it did not count clones,\nor the filesystem has none: every one but APFS).",
+          "description": "Whether a file is a member of a clone group; under `--clones` where\nthe scan recorded no clone ids, whether its filesystem shares any of\nits extents with another file or a snapshot (btrfs, XFS). Null for a\ndirectory, and where neither says (the scan did not count clones, or\nthe filesystem has none: every one but APFS, short of `--clones`).",
           "type": [
             "boolean",
             "null"
           ],
           "x-platforms": [
+            "linux",
             "macos"
           ]
         },

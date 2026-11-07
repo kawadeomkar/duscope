@@ -297,6 +297,20 @@ pub(crate) fn host_app() -> Option<String> {
     None
 }
 
+/// The extents of the file at `path`, through `FIEMAP`.
+#[cfg(target_os = "linux")]
+pub(crate) fn extents(path: &std::path::Path) -> std::io::Result<Option<crate::Extents>> {
+    linux::fiemap::extents(path).map(Some)
+}
+
+/// The extents of the file at `path`: no extent map is read on this
+/// platform.
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)] // `Some` where the platform reads one
+pub(crate) fn extents(_path: &std::path::Path) -> std::io::Result<Option<crate::Extents>> {
+    Ok(None)
+}
+
 /// The size of the terminal on stdout: unknown on this platform.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {

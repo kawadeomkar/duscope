@@ -174,7 +174,7 @@ sockets, FIFOs and devices.
 | `mtime` | INTEGER | no | modification time |
 | `ctime` | INTEGER | no | inode change time |
 | `atime` | INTEGER | yes | access time; NULL unless the scan ran with `--attrs full`; unreliable under `noatime` and `relatime` |
-| `btime` | INTEGER | yes | creation time; NULL unless `--attrs full`, and on a filesystem that keeps none (Linux reports it for ext4, XFS, btrfs, ZFS, F2FS, bcachefs and ntfs3) |
+| `btime` | INTEGER | yes | creation time; NULL unless `--attrs full`, and on a filesystem that keeps none (Linux reports it for ext4, XFS, btrfs, ZFS, F2FS, bcachefs, ntfs3, exFAT and FAT) |
 | `mode` | INTEGER | yes | `st_mode`, file type and permission bits; NULL unless `--attrs full` |
 | `uid` | INTEGER | yes | owner's user id; NULL unless `--attrs full` |
 | `gid` | INTEGER | yes | owner's group id; NULL unless `--attrs full` |

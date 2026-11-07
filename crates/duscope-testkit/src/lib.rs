@@ -98,6 +98,37 @@ fn skip_when(ci: bool, why: &str) {
     eprintln!("skipped: {why}");
 }
 
+/// The variable CI's platform job sets to the filesystems its runner's
+/// kernel has no driver for, space-separated, after probing each one the
+/// platform tests mount and naming those it lacks in the job's log.
+pub const MISSING_FS: &str = "DUSCOPE_TEST_MISSING_FS";
+
+/// [`skip`] for a check that could not mount a `fs_type` filesystem, `why`
+/// saying what failed. Where [`MISSING_FS`] names `fs_type`, the platform
+/// job found that the kernel has no driver for it and said so in its log,
+/// so the check skips, in CI too. Otherwise it is [`skip`]: a mount that
+/// fails in CI for any other reason fails the test.
+///
+/// # Panics
+///
+/// In CI, unless [`MISSING_FS`] names `fs_type`.
+pub fn skip_fs(fs_type: &str, why: &str) {
+    skip_fs_when(
+        in_ci(),
+        std::env::var(MISSING_FS).ok().as_deref(),
+        fs_type,
+        why,
+    );
+}
+
+fn skip_fs_when(ci: bool, missing: Option<&str>, fs_type: &str, why: &str) {
+    if missing.is_some_and(|m| m.split_ascii_whitespace().any(|f| f == fs_type)) {
+        eprintln!("skipped: the kernel has no {fs_type} driver ({MISSING_FS}): {why}");
+        return;
+    }
+    skip_when(ci, why);
+}
+
 /// The duscope binary of the current build: beside the `deps/` directory
 /// that holds the running test executable.
 ///
@@ -658,7 +689,7 @@ impl Fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::{ci_says, skip_when};
+    use super::{ci_says, skip_fs_when, skip_when};
 
     #[test]
     fn p1_test_01_ci_is_any_value_but_empty_0_or_false() {
@@ -679,5 +710,35 @@ mod tests {
     #[should_panic(expected = "skipped in CI, which must run this check: no exFAT")]
     fn p1_test_01_a_skip_in_ci_fails_the_test() {
         skip_when(true, "no exFAT");
+    }
+
+    #[test]
+    fn p5_walk_02_a_filesystem_ci_found_no_driver_for_skips_in_ci() {
+        skip_fs_when(
+            true,
+            Some("ntfs3"),
+            "ntfs3",
+            "mount: unknown filesystem type",
+        );
+        skip_fs_when(
+            true,
+            Some("exfat ntfs3"),
+            "ntfs3",
+            "mount: unknown filesystem type",
+        );
+        skip_fs_when(false, None, "btrfs", "mkfs.btrfs: not found");
+    }
+
+    #[test]
+    #[should_panic(expected = "skipped in CI, which must run this check: no btrfs")]
+    fn p5_walk_02_a_mount_failing_in_ci_for_another_reason_fails_the_test() {
+        // ntfs3 lacks a driver; btrfs has one, so its failure is real.
+        skip_fs_when(true, Some("ntfs3"), "btrfs", "no btrfs");
+    }
+
+    #[test]
+    #[should_panic(expected = "skipped in CI, which must run this check: no NTFS")]
+    fn p5_walk_02_a_missing_driver_ci_did_not_name_fails_the_test() {
+        skip_fs_when(true, None, "ntfs3", "no NTFS");
     }
 }

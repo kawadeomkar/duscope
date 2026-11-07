@@ -763,9 +763,11 @@ pub struct Explain {
     pub nlink: Option<u64>,
     /// Links of the inodes under the path that lie outside it.
     pub links_outside_subtree: Option<u64>,
-    /// Whether a file is a member of a clone group; null for a directory,
-    /// and where the scan recorded no clone ids (it did not count clones,
-    /// or the filesystem has none: every one but APFS).
+    /// Whether a file is a member of a clone group; under `--clones` where
+    /// the scan recorded no clone ids, whether its filesystem shares any of
+    /// its extents with another file or a snapshot (btrfs, XFS). Null for a
+    /// directory, and where neither says (the scan did not count clones, or
+    /// the filesystem has none: every one but APFS, short of `--clones`).
     pub is_clone: Option<bool>,
     /// The members of a file's clone group; null when it is none's.
     pub clone_group_size: Option<u64>,
@@ -961,6 +963,9 @@ pub struct Summary {
     pub path_bytes: Vec<u8>,
     /// The volumes the scan met under the path.
     pub volumes: Vec<SummaryVolume>,
+    /// The subvolumes the scan met under the path, the path included:
+    /// btrfs subvolumes and ZFS datasets, each with the bytes on it.
+    pub subvolumes: Vec<SummarySubvolume>,
     /// Bytes on disk, hard links and clones counted once.
     pub allocated_bytes: u64,
     /// Apparent bytes.
@@ -1025,6 +1030,28 @@ pub struct SummaryVolume {
     /// Why not, when it did not.
     #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::SKIP_REASONS)))))]
     pub reason: Option<&'static str>,
+}
+
+/// A subvolume's share in `summary`: a btrfs subvolume or a ZFS dataset.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct SummarySubvolume {
+    /// Where it starts, absolute.
+    pub path: String,
+    /// Its filesystem.
+    pub fs_type: String,
+    /// Bytes on disk the scan found on it, less the subvolumes and volumes
+    /// below it.
+    pub allocated_bytes: u64,
+    /// Apparent bytes.
+    pub apparent_bytes: u64,
+    /// Bytes as `du` counts them.
+    pub du_compatible_bytes: u64,
+    /// What the filesystem says the subvolume itself holds, at the scan's
+    /// start: a ZFS dataset's referenced bytes, its size less its free space
+    /// as it reports them; null for a btrfs subvolume, whose size and free
+    /// space are the whole filesystem's.
+    pub referenced_bytes: Option<u64>,
 }
 
 /// A change `diff` found.

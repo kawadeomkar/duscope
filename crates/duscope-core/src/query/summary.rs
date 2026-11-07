@@ -7,6 +7,10 @@
 //! root), less those of the volumes that start below it. A mount point the
 //! scan did not enter starts nothing: its directory's own bytes stay in the
 //! volume around it.
+//!
+//! The sidebar of subvolumes (btrfs subvolumes, ZFS datasets) counts each
+//! the same way: its totals, less those of the subvolumes and the volumes
+//! that start below it.
 
 use std::path::Path;
 
@@ -42,6 +46,19 @@ pub struct VolumeBytes {
     pub du_compatible: u64,
 }
 
+/// The bytes one subvolume holds under the root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SubvolumeBytes {
+    /// The directory where it starts, in the view.
+    pub id: u32,
+    /// Bytes on disk.
+    pub allocated: u64,
+    /// Apparent bytes.
+    pub apparent: u64,
+    /// Bytes as `du` counts them.
+    pub du_compatible: u64,
+}
+
 /// What `summary` counts under the root of a view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummaryBytes {
@@ -56,6 +73,8 @@ pub struct SummaryBytes {
     pub dataless: u64,
     /// Each volume's share, one per device.
     pub volumes: Vec<VolumeBytes>,
+    /// Each subvolume's share, in id order.
+    pub subvolumes: Vec<SubvolumeBytes>,
 }
 
 /// The bytes under the root of `view`; `unentered` names the devices of the
@@ -68,6 +87,7 @@ pub fn summary(view: &(impl TreeView + ?Sized), unentered: &[u64]) -> SummaryByt
             du_compatible: 0,
             dataless: 0,
             volumes: Vec::new(),
+            subvolumes: Vec::new(),
         };
     }
     let node = view.node(0);
@@ -78,7 +98,62 @@ pub fn summary(view: &(impl TreeView + ?Sized), unentered: &[u64]) -> SummaryByt
         du_compatible: roots.first().map_or(node.allocated, |r| r.du_compatible),
         dataless: view.dataless_bytes(0),
         volumes: shares(&roots, unentered),
+        subvolumes: subvolume_shares(&view.subvolume_roots(0), &roots, unentered),
     }
+}
+
+/// Each subvolume's share of `subvolumes`: its totals less those of the
+/// subvolumes and the entered volumes (`volumes`, the root's own first,
+/// which starts nothing below the root) that start directly below it. A
+/// subvolume mounted on its own is in both lists, once.
+pub fn subvolume_shares(
+    subvolumes: &[VolumeRoot],
+    volumes: &[VolumeRoot],
+    unentered: &[u64],
+) -> Vec<SubvolumeBytes> {
+    let mut starts: Vec<(VolumeRoot, bool)> = subvolumes.iter().map(|r| (*r, true)).collect();
+    starts.extend(
+        volumes
+            .iter()
+            .skip(1)
+            .filter(|r| !unentered.contains(&r.dev) && !subvolumes.iter().any(|s| s.id == r.id))
+            .map(|r| (*r, false)),
+    );
+    starts.sort_unstable_by_key(|(r, _)| r.id);
+    let mut out = Vec::new();
+    // The starts in id order, each less the starts directly below it.
+    let mut open: Vec<(VolumeRoot, bool, SubvolumeBytes)> = Vec::new();
+    let close = |open: &mut Vec<(VolumeRoot, bool, SubvolumeBytes)>,
+                 out: &mut Vec<SubvolumeBytes>| {
+        if let Some((_, true, own)) = open.pop() {
+            out.push(own);
+        }
+    };
+    for (root, subvolume) in starts {
+        while open
+            .last()
+            .is_some_and(|(outer, _, _)| root.id > outer.last)
+        {
+            close(&mut open, &mut out);
+        }
+        if let Some((_, _, outer)) = open.last_mut() {
+            outer.allocated = outer.allocated.saturating_sub(root.allocated);
+            outer.apparent = outer.apparent.saturating_sub(root.apparent);
+            outer.du_compatible = outer.du_compatible.saturating_sub(root.du_compatible);
+        }
+        let own = SubvolumeBytes {
+            id: root.id,
+            allocated: root.allocated,
+            apparent: root.apparent,
+            du_compatible: root.du_compatible,
+        };
+        open.push((root, subvolume, own));
+    }
+    while !open.is_empty() {
+        close(&mut open, &mut out);
+    }
+    out.sort_unstable_by_key(|s| s.id);
+    out
 }
 
 /// Each volume's share of `roots` (the root first), one per device; the
@@ -128,6 +203,14 @@ pub fn shares(roots: &[VolumeRoot], unentered: &[u64]) -> Vec<VolumeBytes> {
         close(&mut open, &mut volumes);
     }
     volumes
+}
+
+/// What a filesystem says the subvolume mounted on its own with `total`
+/// and `free` bytes holds itself: a ZFS dataset reports its referenced
+/// bytes and its available ones as its size and its free space. `None`
+/// elsewhere: a btrfs subvolume reports the whole filesystem's.
+pub fn referenced(fs_type: &str, total: u64, free: u64) -> Option<u64> {
+    (fs_type == "zfs" && total > 0).then(|| total.saturating_sub(free))
 }
 
 /// A volume as [`unaccounted`] weighs it.
@@ -308,5 +391,69 @@ mod unaccounted_tests {
         let subvol = ["rw".to_owned(), "subvol=/@home".to_owned()];
         let home = [volume("/home", 200, 100, 40, &subvol)];
         assert_eq!(unaccounted(Path::new("/home"), &home), None);
+    }
+}
+
+#[cfg(test)]
+mod subvolume_tests {
+    use super::{SubvolumeBytes, VolumeRoot, referenced, subvolume_shares};
+
+    fn root(id: u32, last: u32, dev: u64, n: u64) -> VolumeRoot {
+        VolumeRoot {
+            id,
+            last,
+            dev,
+            allocated: n,
+            apparent: n,
+            du_compatible: n,
+        }
+    }
+
+    fn own(id: u32, n: u64) -> SubvolumeBytes {
+        SubvolumeBytes {
+            id,
+            allocated: n,
+            apparent: n,
+            du_compatible: n,
+        }
+    }
+
+    #[test]
+    fn p5_walk_02_a_subvolume_holds_what_starts_on_it_less_what_starts_below() {
+        // The root's volume (0..=20); a btrfs subvolume at 2 holding a
+        // nested one at 4 and a tmpfs mounted at 8; a ZFS dataset mounted at
+        // 12, a subvolume and a volume both; a mount point at 18 the scan did
+        // not enter.
+        let volumes = [
+            root(0, 20, 1, 1_000),
+            root(8, 9, 2, 50),
+            root(12, 17, 3, 300),
+            root(18, 18, 4, 4),
+        ];
+        let subvolumes = [
+            root(2, 10, 0, 500),
+            root(4, 6, 0, 100),
+            root(12, 17, 0, 300),
+            root(14, 15, 0, 20),
+        ];
+        assert_eq!(
+            subvolume_shares(&subvolumes, &volumes, &[4]),
+            [own(2, 350), own(4, 100), own(12, 280), own(14, 20)]
+        );
+        // The path itself a subvolume: what lies below it starts nothing
+        // above it.
+        let at_root = [root(0, 20, 0, 1_000), root(4, 6, 0, 100)];
+        assert_eq!(
+            subvolume_shares(&at_root, &[root(0, 20, 1, 1_000)], &[]),
+            [own(0, 900), own(4, 100)]
+        );
+        assert_eq!(subvolume_shares(&[], &volumes, &[]), []);
+    }
+
+    #[test]
+    fn p5_walk_02_a_zfs_dataset_references_its_size_less_its_free_space() {
+        assert_eq!(referenced("zfs", 1_000, 400), Some(600));
+        assert_eq!(referenced("zfs", 0, 0), None, "sizes unknown");
+        assert_eq!(referenced("btrfs", 1_000, 400), None, "the filesystem's");
     }
 }

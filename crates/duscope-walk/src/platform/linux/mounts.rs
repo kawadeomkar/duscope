@@ -17,9 +17,15 @@ use crate::{DirHandle, Entry, Kind, NameRef, Normalization, VolumeClass, VolumeI
 pub(super) struct Mount {
     /// The mount id (the reusable one, `STATX_MNT_ID`).
     pub(super) id: u64,
+    /// The mounted filesystem's device (`major:minor`), which every mount
+    /// of one filesystem shares: its bind mounts, and a btrfs filesystem's
+    /// subvolumes mounted on their own.
+    pub(super) fs_dev: u64,
     /// Where it is mounted.
     pub(super) path: PathBuf,
     pub(super) fs_type: String,
+    /// What is mounted: a device, or for ZFS the dataset (`pool/name`).
+    pub(super) source: String,
     /// The per-mount options, then the superblock's.
     pub(super) options: Vec<String>,
 }
@@ -32,9 +38,15 @@ pub(super) fn parse_mountinfo(text: &[u8]) -> Vec<Mount> {
         .filter_map(|line| {
             let fields: Vec<&[u8]> = line.split(|&b| b == b' ').collect();
             let id = std::str::from_utf8(fields.first()?).ok()?.parse().ok()?;
+            let (major, minor) = std::str::from_utf8(fields.get(2)?).ok()?.split_once(':')?;
+            let fs_dev = libc::makedev(major.parse().ok()?, minor.parse().ok()?);
             let path = PathBuf::from(OsStr::from_bytes(&unescape(fields.get(4)?)));
             let dash = fields.iter().position(|&f| f == b"-")?;
             let fs_type = String::from_utf8_lossy(fields.get(dash + 1)?).into_owned();
+            let source = fields
+                .get(dash + 2)
+                .map(|s| String::from_utf8_lossy(&unescape(s)).into_owned())
+                .unwrap_or_default();
             let mut options = split_options(fields.get(5)?);
             options.extend(
                 fields
@@ -44,8 +56,10 @@ pub(super) fn parse_mountinfo(text: &[u8]) -> Vec<Mount> {
             );
             Some(Mount {
                 id,
+                fs_dev,
                 path,
                 fs_type,
+                source,
                 options,
             })
         })
@@ -104,16 +118,54 @@ pub(super) fn class(fs_type: &str) -> VolumeClass {
     }
 }
 
-/// Whether names on a filesystem differ by case alone: not on exFAT and
-/// FAT, not on NTFS mounted with `nocase`; unknown for HFS+, whose HFSX
-/// variant is case-sensitive; yes elsewhere.
+/// Whether names on a filesystem differ by case alone, from its type and
+/// its mount options: not on exFAT, FAT and HFS, not on NTFS mounted with
+/// `nocase`, not on a ZFS dataset whose options say `caseinsensitive`
+/// (`casemixed` compares bytes on Linux); unknown for HFS+, whose HFSX
+/// variant is case-sensitive, which only its volume header says; yes
+/// elsewhere.
 pub(super) fn case_sensitive(fs_type: &str, options: &[String]) -> Option<bool> {
+    let has = |option: &str| options.iter().any(|o| o == option);
     match fs_type {
-        "exfat" | "vfat" | "msdos" | "fat" => Some(false),
-        "ntfs" | "ntfs3" => Some(!options.iter().any(|o| o == "nocase")),
-        "hfs" | "hfsplus" => None,
+        "exfat" | "vfat" | "msdos" | "fat" | "hfs" => Some(false),
+        "ntfs" | "ntfs3" => Some(!has("nocase")),
+        "zfs" => Some(!has("caseinsensitive")),
+        "hfsplus" => None,
         _ => Some(true),
     }
+}
+
+/// Whether `inner`, mounted inside `outer`, is another subvolume of the
+/// filesystem `outer` is on: for btrfs, the same filesystem (its device)
+/// with another subvolume (`subvolid`, or `subvol` where the kernel lists
+/// no id); for ZFS, another dataset or snapshot of the same pool. A bind
+/// mount of the same subvolume or dataset is not one.
+pub(super) fn subvolume_of(outer: &Mount, inner: &Mount) -> bool {
+    if outer.fs_type != inner.fs_type {
+        return false;
+    }
+    match inner.fs_type.as_str() {
+        "btrfs" => {
+            fn subvolume(m: &Mount) -> Option<&str> {
+                option(m, "subvolid").or_else(|| option(m, "subvol"))
+            }
+            outer.fs_dev == inner.fs_dev
+                && matches!((subvolume(outer), subvolume(inner)), (Some(a), Some(b)) if a != b)
+        }
+        "zfs" => {
+            let pool = |m: &Mount| m.source.split(['/', '@']).next().map(str::to_owned);
+            pool(outer) == pool(inner) && outer.source != inner.source
+        }
+        _ => false,
+    }
+}
+
+/// The value of the mount option `key=value` of `mount`.
+fn option<'m>(mount: &'m Mount, key: &str) -> Option<&'m str> {
+    mount
+        .options
+        .iter()
+        .find_map(|o| o.strip_prefix(key)?.strip_prefix('='))
 }
 
 /// The mount table one provider reads from `/proc/self/mountinfo`, for one
@@ -178,6 +230,28 @@ impl Mounts {
             }
         };
         Ok(real_root.join(below).join(OsStr::from_bytes(name)))
+    }
+
+    /// Whether the mount root `name` in `dir` is another subvolume of the
+    /// filesystem `dir` is on ([`subvolume_of`]): a btrfs subvolume or a
+    /// ZFS dataset mounted on its own. Both mounts are found by path in the
+    /// table, which the mount root's own `statx` cannot name (its unique
+    /// mount id is not the one mountinfo lists); false where either is not
+    /// found.
+    pub(in crate::platform) fn subvolume_mount(&self, dir: &DirHandle, name: &[u8]) -> bool {
+        let Ok(inner) = self.real(dir, name) else {
+            return false;
+        };
+        let Some(outer) = inner.parent() else {
+            return false;
+        };
+        match (
+            self.lookup(outer, None, false),
+            self.lookup(&inner, None, true),
+        ) {
+            (Ok(outer), Ok(inner)) => outer.id != inner.id && subvolume_of(&outer, &inner),
+            _ => false,
+        }
     }
 
     /// The mount id of the mount holding `path`, by path, for kernels whose
@@ -291,5 +365,108 @@ fn describe(dev: u64, mount: Mount, total_bytes: u64, free_bytes: u64) -> Volume
         free_bytes,
         reason: None,
         fsevents: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{Mount, case_sensitive, parse_mountinfo, subvolume_of};
+
+    /// The mounts of a pool `tank` (its root dataset, a child, a snapshot
+    /// mounted under `.zfs`, and a bind mount of the child), a second pool,
+    /// and a btrfs filesystem with a subvolume mounted on its own, as
+    /// ZFS and btrfs list them.
+    const TABLE: &[u8] = b"\
+29 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n\
+40 29 0:50 / /tank rw,noatime shared:20 - zfs tank rw,xattr,noacl,casesensitive\n\
+41 40 0:51 / /tank/home rw,noatime shared:21 - zfs tank/home rw,xattr,noacl,caseinsensitive\n\
+42 41 0:52 / /tank/home/.zfs/snapshot/daily rw,relatime shared:22 - zfs tank/home@daily ro,xattr,noacl,casesensitive\n\
+43 29 0:51 / /srv/home rw,noatime shared:21 - zfs tank/home rw,xattr,noacl,caseinsensitive\n\
+44 40 0:53 / /tank/other rw,noatime shared:23 - zfs other rw,xattr,noacl,casemixed\n\
+50 29 0:42 / /data rw,relatime shared:30 - btrfs /dev/loop0 rw,space_cache=v2,subvolid=5,subvol=/\n\
+51 50 0:42 /sub /data/mnt rw,relatime shared:31 - btrfs /dev/loop0 rw,space_cache=v2,subvolid=256,subvol=/sub\n\
+52 50 0:42 /dir /data/bound rw,relatime shared:30 - btrfs /dev/loop0 rw,space_cache=v2,subvolid=5,subvol=/\n\
+53 50 0:61 / /data/other rw,relatime shared:32 - btrfs /dev/loop1 rw,space_cache=v2,subvolid=256,subvol=/sub\n";
+
+    fn mount(table: &[Mount], path: &str) -> Mount {
+        table
+            .iter()
+            .find(|m| m.path == Path::new(path))
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn p5_walk_02_mountinfo_names_the_filesystem_and_its_source() {
+        let table = parse_mountinfo(TABLE);
+        assert_eq!(table.len(), 10);
+        let home = mount(&table, "/tank/home");
+        assert_eq!(
+            (home.id, home.fs_dev, home.source.as_str()),
+            (41, libc::makedev(0, 51), "tank/home")
+        );
+        let sub = mount(&table, "/data/mnt");
+        assert_eq!(
+            (sub.fs_dev, sub.source.as_str()),
+            (libc::makedev(0, 42), "/dev/loop0")
+        );
+        assert!(sub.options.iter().any(|o| o == "subvolid=256"));
+    }
+
+    #[test]
+    fn p5_walk_02_zfs_datasets_of_one_pool_are_subvolumes() {
+        let table = parse_mountinfo(TABLE);
+        let at = |path| mount(&table, path);
+        // A child dataset and a snapshot of the same pool.
+        assert!(subvolume_of(&at("/tank"), &at("/tank/home")));
+        assert!(subvolume_of(
+            &at("/tank/home"),
+            &at("/tank/home/.zfs/snapshot/daily")
+        ));
+        // Another pool's dataset, and a pool entered from ext4, are mounts.
+        assert!(!subvolume_of(&at("/tank"), &at("/tank/other")));
+        assert!(!subvolume_of(&at("/"), &at("/tank")));
+        // The same dataset mounted twice is not another dataset.
+        assert!(!subvolume_of(&at("/tank/home"), &at("/srv/home")));
+    }
+
+    #[test]
+    fn p5_walk_02_a_btrfs_subvolume_mounted_on_its_own_is_a_subvolume() {
+        let table = parse_mountinfo(TABLE);
+        let at = |path| mount(&table, path);
+        assert!(subvolume_of(&at("/data"), &at("/data/mnt")));
+        // A bind mount inside the same subvolume, and another filesystem's
+        // subvolume, are mounts.
+        assert!(!subvolume_of(&at("/data"), &at("/data/bound")));
+        assert!(!subvolume_of(&at("/data"), &at("/data/other")));
+        assert!(!subvolume_of(&at("/"), &at("/data")));
+        // Where the kernel lists no subvolume id, the subvolume's path.
+        let mut outer = at("/data");
+        let mut inner = at("/data/mnt");
+        for m in [&mut outer, &mut inner] {
+            m.options.retain(|o| !o.starts_with("subvolid="));
+        }
+        assert!(subvolume_of(&outer, &inner));
+    }
+
+    #[test]
+    fn p5_walk_02_case_comes_from_the_type_and_the_mount_options() {
+        let table = parse_mountinfo(TABLE);
+        let case = |path| {
+            let m = mount(&table, path);
+            case_sensitive(&m.fs_type, &m.options)
+        };
+        assert_eq!(case("/tank"), Some(true));
+        assert_eq!(case("/tank/home"), Some(false), "caseinsensitive");
+        assert_eq!(case("/tank/other"), Some(true), "casemixed");
+        assert_eq!(case("/data"), Some(true));
+        for foreign in ["exfat", "vfat", "msdos", "hfs"] {
+            assert_eq!(case_sensitive(foreign, &[]), Some(false), "{foreign}");
+        }
+        assert_eq!(case_sensitive("ntfs3", &[]), Some(true));
+        assert_eq!(case_sensitive("ntfs3", &["nocase".to_owned()]), Some(false));
+        assert_eq!(case_sensitive("hfsplus", &[]), None, "HFSX is sensitive");
     }
 }

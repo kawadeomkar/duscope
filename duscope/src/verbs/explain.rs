@@ -13,7 +13,8 @@ use duscope_core::envelope::{
 use duscope_core::handle::{Handle, HandlePayload, Key, LIFETIME_NS};
 use duscope_core::index::Index;
 use duscope_core::query::{
-    ExplainQuery, ScanSelector, SizeKind, abs_path, clock, explain, explain_unindexed, timegrammar,
+    ExplainQuery, ScanSelector, SizeKind, abs_path, clock, explain, explain_unindexed,
+    shared_extents, timegrammar,
 };
 use duscope_core::resolve::resolve_path;
 
@@ -57,33 +58,35 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
         caches: &caches,
         env: &env,
     };
-    let (scan, file, mut result, warnings) = match lookup.resolve(&selector, Some(&path))? {
-        Some(r) => {
-            let facts = explain(&r.index, r.base, &q).map_err(core_failure)?;
-            let warnings = r
-                .stale
-                .then(|| stale_index(&r.index, &lookup.max_age))
-                .into_iter()
-                .collect();
-            let size = if r.index.meta().size_kind == "apparent" {
-                SizeKind::Apparent
-            } else {
-                SizeKind::Allocated
-            };
-            let file = r.index.file().to_owned();
-            (
-                Some(saved_block(&r.index, size)),
-                Some(file),
-                facts,
-                warnings,
-            )
+    let resolved = lookup.resolve(&selector, Some(&path))?;
+    let (scan, file, mut result, warnings) = if let Some(r) = resolved {
+        let mut facts = explain(&r.index, r.base, &q).map_err(core_failure)?;
+        if args.clones {
+            shared_extents(Some(&r.index), r.base, &path, &mut facts).map_err(core_failure)?;
         }
-        None => (
-            None,
-            None,
-            explain_unindexed(&path, &q).map_err(core_failure)?,
-            Vec::new(),
-        ),
+        let warnings = r
+            .stale
+            .then(|| stale_index(&r.index, &lookup.max_age))
+            .into_iter()
+            .collect();
+        let size = if r.index.meta().size_kind == "apparent" {
+            SizeKind::Apparent
+        } else {
+            SizeKind::Allocated
+        };
+        let file = r.index.file().to_owned();
+        (
+            Some(saved_block(&r.index, size)),
+            Some(file),
+            facts,
+            warnings,
+        )
+    } else {
+        let mut facts = explain_unindexed(&path, &q).map_err(core_failure)?;
+        if args.clones {
+            shared_extents(None, 0, &path, &mut facts).map_err(core_failure)?;
+        }
+        (None, None, facts, Vec::new())
     };
     result.handle = handle(output, lookup.dir.as_deref(), &path, &result, scan.as_ref());
     let path = path.to_string_lossy().into_owned();
@@ -220,14 +223,17 @@ fn people(e: &Explain, output: &Output) -> Vec<(String, String)> {
         lines.push(("links outside".to_owned(), thousands(outside)));
     }
     if e.is_clone == Some(true) || e.clone_members_outside.is_some_and(|n| n > 0) {
-        lines.push((
-            "clones".to_owned(),
-            format!(
+        // An extent map (`--clones` on btrfs, XFS) says that extents are
+        // shared, not with whom.
+        let clones = match (e.clone_group_size, e.clone_members_outside) {
+            (None, None) => "shares extents with other files or snapshots".to_owned(),
+            (size, outside) => format!(
                 "group of {} · {} outside",
-                e.clone_group_size.map_or("-".to_owned(), thousands),
-                e.clone_members_outside.map_or("-".to_owned(), thousands)
+                size.map_or("-".to_owned(), thousands),
+                outside.map_or("-".to_owned(), thousands)
             ),
-        ));
+        };
+        lines.push(("clones".to_owned(), clones));
     }
     if let (Some(bytes), Some(kind)) = (e.freeable_now_bytes, e.freeable_kind) {
         lines.push((
