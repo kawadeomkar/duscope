@@ -291,7 +291,9 @@ pub struct ScansArgs {
     #[arg(long, conflicts_with = "check")]
     pub prune: bool,
 
-    /// Check a saved scan's file for damage
+    /// Check a saved scan's file for damage, and its tree for changes since
+    ///
+    /// Reads each directory the scan holds again: exit 1 (index_stale) if one changed
     #[arg(long, value_name = "SCAN")]
     pub check: Option<String>,
 

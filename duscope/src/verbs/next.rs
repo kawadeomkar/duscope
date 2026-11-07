@@ -182,6 +182,21 @@ impl Hints {
     }
 }
 
+/// `duscope <verb> [path] <flags> <the scan>` for a person to run: the
+/// saved scan `id`, whose index is `file`, named as the envelope's hints
+/// name it (`--scan <id>`, with `--index-dir` or `--trust` where a command
+/// without them would not find it), without their `--json`. An error's or
+/// a footer's hint names a scan this way. A path that is not UTF-8 is
+/// written lossily.
+pub fn command(verb: &str, path: Option<&str>, flags: &[&str], id: &str, file: &Path) -> String {
+    let scan = selector(id, file);
+    let mut args = vec![verb];
+    args.extend(path);
+    args.extend(flags);
+    args.extend(scan.iter().map(String::as_str));
+    line(args)
+}
+
 /// The flags that name scan `id` in `file`: `--scan <id>` for an index in
 /// the directory a command reads without `--index-dir`, with
 /// `--index-dir` for one in another, and `--trust <file> --scan <file>`
@@ -272,7 +287,7 @@ fn line<'a>(args: impl IntoIterator<Item = &'a str>) -> String {
 mod tests {
     use std::path::Path;
 
-    use super::{Hints, line, selector};
+    use super::{Hints, command, line, selector};
 
     #[test]
     fn p2_cli_01_a_hint_is_a_runnable_command_line() {
@@ -300,6 +315,29 @@ mod tests {
         assert_eq!(
             selector("3f9a0c1d2e3f", Path::new("/tmp/copy.db")),
             ["--trust", "/tmp/copy.db", "--scan", "/tmp/copy.db"]
+        );
+    }
+
+    #[test]
+    fn p5_core_02_a_command_for_a_person_names_the_scan_as_the_hints_do() {
+        let file = Path::new("/elsewhere/scans/3f9a0c1d2e3f.db");
+        assert_eq!(
+            command("rescan", None, &[], "3f9a0c1d2e3f", file),
+            "duscope rescan --index-dir /elsewhere --scan 3f9a0c1d2e3f"
+        );
+        assert_eq!(
+            command("top", Some("/a b"), &["--files"], "3f9a0c1d2e3f", file),
+            "duscope top '/a b' --files --index-dir /elsewhere --scan 3f9a0c1d2e3f"
+        );
+        assert_eq!(
+            command(
+                "rescan",
+                None,
+                &[],
+                "3f9a0c1d2e3f",
+                Path::new("/tmp/copy.db")
+            ),
+            "duscope rescan --trust /tmp/copy.db --scan /tmp/copy.db"
         );
     }
 }

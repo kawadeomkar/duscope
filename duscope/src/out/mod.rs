@@ -622,14 +622,23 @@ impl Row for PrunedEntry {
 }
 
 impl Row for CheckedEntry {
-    const FIELDS: &'static [&'static str] = &["id", "quick_check", "index_path"];
-    const COLUMNS: &'static [&'static str] = &["Id", "Check", "Path"];
+    // A field added after a release goes last, so the fields scripts read
+    // keep their places.
+    const FIELDS: &'static [&'static str] =
+        &["id", "quick_check", "index_path", "structurally_stale"];
+    const COLUMNS: &'static [&'static str] = &["Id", "Check", "Tree", "Path"];
 
     fn plain(&self) -> Vec<Cow<'_, [u8]>> {
+        let stale: &[u8] = if self.structurally_stale {
+            b"true"
+        } else {
+            b"false"
+        };
         vec![
             Cow::Borrowed(self.id.as_bytes()),
             Cow::Borrowed(self.quick_check.as_bytes()),
             Cow::Borrowed(self.index_path.as_bytes()),
+            Cow::Borrowed(stale),
         ]
     }
 
@@ -637,6 +646,12 @@ impl Row for CheckedEntry {
         vec![
             self.id.clone(),
             self.quick_check.to_owned(),
+            if self.structurally_stale {
+                "changed"
+            } else {
+                "unchanged"
+            }
+            .to_owned(),
             printable(&self.index_path).into_owned(),
         ]
     }

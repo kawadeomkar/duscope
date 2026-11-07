@@ -113,7 +113,7 @@ enum ExplainOutput {
 }
 
 // `scans`: the saved scans, or with `--prune` the files removed, or with
-// `--check` the scans found sound.
+// `--check` the scan checked.
 #[derive(JsonSchema)]
 #[serde(untagged)]
 #[allow(dead_code, clippy::large_enum_variant)]

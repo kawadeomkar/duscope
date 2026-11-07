@@ -2,6 +2,7 @@
 //! raising the descriptor limit.
 
 pub(crate) mod signal;
+pub(crate) mod stamp;
 pub(crate) mod system;
 pub(crate) mod winsize;
 
@@ -229,10 +230,17 @@ pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
 /// `ENFILE` the worker parks, retrying with a growing pause, for up to two
 /// seconds.
 fn open_at(dir: Option<BorrowedFd<'_>>, path: &CStr) -> io::Result<OwnedFd> {
+    open_with(dir, path, OPEN_DIR)
+}
+
+/// [`open_at`] with `flags` in place of [`OPEN_DIR`]: the sweep of a scan
+/// that followed symbolic links opens the pieces of a long path through
+/// them.
+fn open_with(dir: Option<BorrowedFd<'_>>, path: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
     let dir = dir.map_or(libc::AT_FDCWD, |dir| dir.as_raw_fd());
     // SAFETY: `dir` is open for the borrow or is AT_FDCWD, and `path` is a
     // NUL-terminated C string that outlives the call.
-    parked(|| unsafe { libc::openat(dir, path.as_ptr(), OPEN_DIR) })
+    parked(|| unsafe { libc::openat(dir, path.as_ptr(), flags) })
 }
 
 /// Opens `dir` to read it: relative to its parent's descriptor while the
