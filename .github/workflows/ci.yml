@@ -76,23 +76,26 @@ env:
   LYCHEE_SHA256: "1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a"
   # Cold release build budgets in seconds, one per CPU model of the shared
   # ubuntu-24.04 runners (P1-REL-01, DEV-59, DEV-62): each model's slowest cold
-  # build plus 10%, rounded up, and below the spec's 90 s ceiling (DEV-66). Not
-  # the median: runners of one model differ by up to a fifth, and the second
-  # build below runs on the same runner. With thin LTO (Cargo.toml), the
-  # slowest of 48 builds on 24 runners (run 41263307388, 2026-11-01, of
-  # p2-qry-04-explain at 223cc43): EPYC 7763 74.9 s (22 builds), Xeon Platinum
-  # 8370C 74.0 s (2), EPYC 9V74 71.5 s (8), Xeon 6973P-C 64.9 s (2), Xeon
-  # Platinum 8573C 64.3 s (4), EPYC 9V45 57.5 s (10). A model not listed is
-  # held to the largest budget, with a notice to add it. A build over its
-  # budget is measured once more before the job fails (DEV-53). The size budget
-  # lives in the justfile as size_budget.
+  # build plus 10%, rounded up, and below the spec's 90 s ceiling (DEV-66), so
+  # at most 89 (DEV-129). Not the median: runners of one model differ by up to
+  # a fifth, and the second build below runs on the same runner. Measured at
+  # the top of the stack #180-#189 (1271bd3): the slowest of 48 builds on 24
+  # runners (run 42358592127, 2026-11-07), or of that stack's and #191's own
+  # build-time jobs (2026-11-06) where one was slower: EPYC 7763 83.0 s (28
+  # builds; 87.4 s in CI), Xeon Platinum 8370C 84.0 s (2; 84.8 s in CI), EPYC
+  # 9V74 78.1 s (10), Xeon Platinum 8573C 79.4 s (2; 90.9 s in CI), EPYC 9V45
+  # 64.7 s (6; 70.3 s in CI). Xeon 6973P-C, which no runner had, is its 64.9 s
+  # of DEV-87 grown by the others' median 12.5%. A model not listed is held to
+  # the largest budget, with a notice to add it. A build over its budget is
+  # measured once more before the job fails (DEV-53). The size budget lives in
+  # the justfile as size_budget.
   BUILD_TIME_BUDGETS: |
-    AMD EPYC 7763 64-Core Processor=83
-    Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz=82
-    AMD EPYC 9V74 80-Core Processor=79
-    Intel(R) Xeon(R) 6973P-C=72
-    INTEL(R) XEON(R) PLATINUM 8573C=71
-    AMD EPYC 9V45 96-Core Processor=64
+    AMD EPYC 7763 64-Core Processor=89
+    Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz=89
+    AMD EPYC 9V74 80-Core Processor=86
+    Intel(R) Xeon(R) 6973P-C=81
+    INTEL(R) XEON(R) PLATINUM 8573C=89
+    AMD EPYC 9V45 96-Core Processor=78
 
 jobs:
   fmt:
