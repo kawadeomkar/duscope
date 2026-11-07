@@ -75,10 +75,10 @@ env:
   LYCHEE_SHA256: "1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a"
   # Cold release build budgets in seconds, one per CPU model of the shared
   # ubuntu-24.04 runners (P1-REL-01, DEV-59, DEV-62): each model's slowest cold
-  # build plus 10%, rounded up, and below the spec's 90 s ceiling (DEV-66), so
-  # at most 89 (DEV-129). Not the median: runners of one model differ by up to
-  # a fifth, and the second build below runs on the same runner. Measured at
-  # the top of the stack #180-#189 (1271bd3): the slowest of 48 builds on 24
+  # build plus 10%, rounded up, and below the spec's 90 s ceiling, so at most
+  # 89 (DEV-66). Not the median: runners of one model differ by up to a fifth,
+  # and the second build below runs on the same runner. Measured again at the
+  # top of the stack #180-#189 (1271bd3; DEV-129): the slowest of 48 builds on 24
   # runners (run 42358592127, 2026-11-07), or of that stack's and #191's own
   # build-time jobs (2026-11-06) where one was slower: EPYC 7763 83.0 s (28
   # builds; 87.4 s in CI), Xeon Platinum 8370C 84.0 s (2; 84.8 s in CI), EPYC
