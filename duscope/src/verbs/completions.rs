@@ -288,9 +288,9 @@ mod tests {
         let mut command = Cli::command();
         command.build();
         // Every flag the clap tree hides, so a flag hidden later is checked
-        // too; the test-only and later-phase ones are among them.
+        // too; the test-only ones are among them.
         let hidden = hidden_flags(&command);
-        for flag in ["--provider", "--test-now", "--skip-containers"] {
+        for flag in ["--provider", "--test-now"] {
             assert!(hidden.iter().any(|h| h == flag), "{flag}: {hidden:?}");
         }
         for shell in [

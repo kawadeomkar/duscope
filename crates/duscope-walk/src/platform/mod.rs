@@ -242,6 +242,61 @@ pub(crate) fn read_only(_path: &std::path::Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
+/// Whether a test run asked that the Full Disk Access probe meet the
+/// refusal of macOS's privacy protections on both its folders
+/// (`DUSCOPE_TEST_TCC=denied`, honoured in debug builds only, as
+/// `DUSCOPE_TEST_NOW` is).
+fn tcc_denied() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("DUSCOPE_TEST_TCC").is_some_and(|v| v == "denied")
+}
+
+/// Whether this process lacks Full Disk Access, by the probe of `home`.
+#[cfg(target_os = "macos")]
+pub(crate) fn full_disk_access_missing(home: &std::path::Path) -> bool {
+    macos::full_disk_access_missing(home, tcc_denied())
+}
+
+/// Whether this process lacks Full Disk Access: there is no such grant on
+/// this platform, so only a test's `DUSCOPE_TEST_TCC` says so.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn full_disk_access_missing(_home: &std::path::Path) -> bool {
+    tcc_denied()
+}
+
+/// Whether a walk of `root` under `opts` reaches `path`.
+#[cfg(target_os = "macos")]
+pub(crate) fn reaches(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    opts: &crate::WalkOptions,
+) -> bool {
+    macos::reaches(root, path, opts)
+}
+
+/// Whether a walk of `root` reaches `path`: a directory has one path on
+/// this platform, so `path` is `root` or lies below it.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn reaches(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    _opts: &crate::WalkOptions,
+) -> bool {
+    path.starts_with(root)
+}
+
+/// The app a Full Disk Access grant for this process belongs to.
+#[cfg(target_os = "macos")]
+pub(crate) fn host_app() -> Option<String> {
+    macos::host_app()
+}
+
+/// The app a Full Disk Access grant for this process belongs to: there are
+/// no such grants on this platform.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn host_app() -> Option<String> {
+    None
+}
+
 /// The size of the terminal on stdout: unknown on this platform.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {

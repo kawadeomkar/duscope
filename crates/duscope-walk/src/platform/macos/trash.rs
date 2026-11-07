@@ -70,5 +70,5 @@ pub(in crate::platform) fn trash(path: &Path, guarded: bool) -> Result<(), Trash
 /// of them: a lookup by path resolves a firmlink to the Data volume's
 /// directory, whose flags do not carry `SF_FIRMLINK`.
 pub(in crate::platform) fn firmlink(path: &Path) -> bool {
-    super::firmlinks().iter().any(|source| source == path)
+    super::firmlinks().iter().any(|link| link.source == path)
 }

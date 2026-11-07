@@ -39,9 +39,11 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use unicode_normalization::UnicodeNormalization;
 
 use super::scanid::ScanId;
-use super::writer::{EXCLUDED, EXCLUDED_CACHE, LATER_LINK, ScanMeta, UPPER_BOUND};
+use super::writer::{
+    EXCLUDED, EXCLUDED_CACHE, LATER_LINK, SKIPPED_CONTAINERS, ScanMeta, UPPER_BOUND,
+};
 use crate::CoreError;
-use crate::query::{Node, TreeView};
+use crate::query::{Dataless, Node, TreeView};
 
 /// The major version of the index this build reads.
 const MAJOR: u32 = 2;
@@ -359,7 +361,8 @@ impl Index {
     }
 
     /// The directories the excludes kept the scan out of: each one's id and
-    /// why (`excluded` or `excluded_cache`), in id order.
+    /// why (`excluded`, `excluded_cache` or `skipped_containers`), in id
+    /// order.
     pub fn excluded(&self) -> Vec<(u32, &'static str)> {
         if self.meta.excluded_count == 0 {
             return Vec::new();
@@ -373,7 +376,9 @@ impl Index {
                 .prepare("SELECT id, flags FROM dirs WHERE flags & 3072 != 0 ORDER BY id")?;
             let rows = stmt.query_map([], |row| {
                 let flags: u32 = row.get(1)?;
-                let reason = if flags & EXCLUDED_CACHE != 0 {
+                let reason = if flags & SKIPPED_CONTAINERS != 0 {
+                    "skipped_containers"
+                } else if flags & EXCLUDED_CACHE != 0 {
                     "excluded_cache"
                 } else {
                     "excluded"
@@ -859,25 +864,29 @@ impl TreeView for Index {
 
     /// Through the partial index `files_dataless`, whose condition the query
     /// spells as it is; a later link of a dataless file counts once.
-    fn dataless_bytes(&self, dir: u32) -> u64 {
+    fn dataless(&self, dir: u32) -> Dataless {
         const _: () = assert!(Flags::DATALESS.bits() == 4);
         let last = self.node(dir).last_id;
         self.db
             .query_row(
                 &format!(
-                    "SELECT COALESCE(SUM(apparent), 0) FROM files \
+                    "SELECT COUNT(*), COALESCE(SUM(apparent), 0), \
+                     COALESCE(SUM(allocated * charged), 0) FROM files \
                      WHERE id BETWEEN ?1 AND ?2 AND flags & 4 != 0 AND flags & {LATER_LINK} = 0"
                 ),
                 rusqlite::params![dir, last],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_or_else(
-                |e| {
-                    self.fail(&e);
-                    0
+                |row| {
+                    Ok(Dataless {
+                        files: unsigned(row.get(0)?),
+                        apparent: unsigned(row.get(1)?),
+                        allocated: unsigned(row.get(2)?),
+                    })
                 },
-                unsigned,
             )
+            .unwrap_or_else(|e| {
+                self.fail(&e);
+                Dataless::default()
+            })
     }
 
     /// From `dirs_parent_name`: a directory's subdirectories are rows that

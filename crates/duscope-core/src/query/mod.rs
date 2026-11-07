@@ -222,12 +222,47 @@ pub trait TreeView {
 
     /// The logical size of the dataless files under `dir`.
     fn dataless_bytes(&self, dir: u32) -> u64 {
-        let last = self.node(dir).last_id;
-        (dir..=last)
-            .map(|id| self.node(id))
-            .filter(|node| !node.is_dir() && node.flags.contains(Flags::DATALESS))
-            .map(|node| node.apparent)
-            .sum()
+        self.dataless(dir).apparent
+    }
+
+    /// The dataless files under `dir` (`dir` itself, when it is one): how
+    /// many, their logical size and the bytes they hold on disk; a later
+    /// link of one counts once.
+    fn dataless(&self, dir: u32) -> Dataless {
+        dataless_nodes(self, dir)
+    }
+}
+
+/// The dataless files under `dir` of `view`, read a node at a time.
+fn dataless_nodes(view: &(impl TreeView + ?Sized), dir: u32) -> Dataless {
+    let last = view.node(dir).last_id;
+    (dir..=last)
+        .map(|id| view.node(id))
+        .filter(|node| !node.is_dir() && !node.linked_away && node.flags.contains(Flags::DATALESS))
+        .fold(Dataless::default(), |sum, node| sum.add(&node))
+}
+
+/// The dataless files of a subtree: cloud placeholders (iCloud, Dropbox,
+/// `OneDrive`) whose content is not on the disk, so deleting one frees no
+/// space here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dataless {
+    /// How many there are.
+    pub files: u64,
+    /// Their logical size: apparent bytes.
+    pub apparent: u64,
+    /// The bytes on disk of those charged to the subtree, little or none.
+    pub allocated: u64,
+}
+
+impl Dataless {
+    /// The tally with `node`, a dataless file, added.
+    fn add(self, node: &Node) -> Dataless {
+        Dataless {
+            files: self.files + 1,
+            apparent: self.apparent + node.apparent,
+            allocated: self.allocated + if node.charged { node.allocated } else { 0 },
+        }
     }
 }
 
@@ -365,6 +400,30 @@ impl TreeView for ArenaView<'_> {
         );
         roots
     }
+
+    /// The whole tree's in one pass over the arena's records, which a scan's
+    /// `dataless_present` warning asks for, far cheaper than a node each;
+    /// a subtree's as the default reads it.
+    fn dataless(&self, dir: u32) -> Dataless {
+        if dir != 0 {
+            return dataless_nodes(self, dir);
+        }
+        let charges = self.rollup.charges();
+        let mut sum = Dataless::default();
+        for entry in self.arena.entries() {
+            if entry.dir.is_none()
+                && entry.flags.contains(Flags::DATALESS)
+                && !charges.linked_away(entry.idx)
+            {
+                sum.files += 1;
+                sum.apparent += entry.apparent;
+                if charges.charged(entry.idx) {
+                    sum.allocated += entry.allocated;
+                }
+            }
+        }
+        sum
+    }
 }
 
 /// The subtree of a view at one of its directories, as a view of its own:
@@ -470,8 +529,8 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
             .collect()
     }
 
-    fn dataless_bytes(&self, dir: u32) -> u64 {
-        self.view.dataless_bytes(dir + self.base)
+    fn dataless(&self, dir: u32) -> Dataless {
+        self.view.dataless(dir + self.base)
     }
 }
 

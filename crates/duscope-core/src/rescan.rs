@@ -45,6 +45,11 @@ pub struct ScanOptions {
     /// where no cache rule decides what the scan reads.
     #[serde(default)]
     pub caches_extra: Option<String>,
+    /// Whether `--skip-containers` left the home's containers out. Written
+    /// only when it did, so a scan without it records the options a scan of
+    /// an earlier build did, and either answers for the other.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_containers: bool,
     /// The worker threads asked for; 0 for the platform's default.
     #[serde(default)]
     pub threads: usize,
@@ -55,6 +60,11 @@ pub struct ScanOptions {
 
 fn counted() -> bool {
     true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes a reference
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn allocated() -> String {
@@ -96,6 +106,7 @@ mod tests {
             ignore_files: Vec::new(),
             exclude_caches: true,
             caches_extra: Some("/home/a/caches.toml".to_owned()),
+            skip_containers: false,
             threads: 4,
             size_kind: "apparent".to_owned(),
         };
@@ -106,5 +117,19 @@ mod tests {
         assert!(older.clones && !older.exclude_caches && older.caches_extra.is_none());
         assert_eq!(older.size_kind, "allocated");
         assert_eq!(older.excludes, ["a"]);
+    }
+
+    #[test]
+    fn p5_walk_03_skip_containers_is_recorded_only_when_set() {
+        let options = |json: &str| -> ScanOptions { serde_json::from_str(json).unwrap() };
+        let mut plain = options(r#"{"excludes": []}"#);
+        assert!(!plain.skip_containers);
+        // Without the flag the options read as an earlier build wrote them,
+        // so its saved scans still answer a verb.
+        assert!(!plain.to_json().contains("skip_containers"));
+        plain.skip_containers = true;
+        let json = plain.to_json();
+        assert!(json.contains(r#""skip_containers":true"#), "{json}");
+        assert!(options(&json).skip_containers);
     }
 }

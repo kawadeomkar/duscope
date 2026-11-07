@@ -75,7 +75,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--pool-files` | — | the treemap's |
 | `--min-tile` | — | the treemap's |
 | `--interactive` | — | the terminal viewer |
-| `--skip-containers` | — | hidden: a later phase's |
+| `--skip-containers` | — | a scan taken with excludes is read only by a call that repeats them, which the read tools cannot |
 | `--provider` | — | hidden: for tests |
 | `--test-now` | — | hidden: for tests |
 
@@ -111,7 +111,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--exclude-from` | — | the tool never scans |
 | `--ignore-from` | — | the tool never scans |
 | `--exclude-caches` | — | the tool never scans |
-| `--skip-containers` | — | hidden: a later phase's |
+| `--skip-containers` | — | the tool never scans |
 | `--provider` | — | hidden: for tests |
 | `--test-now` | — | hidden: for tests |
 
@@ -160,7 +160,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--exclude-from` | — | the tool never scans |
 | `--ignore-from` | — | the tool never scans |
 | `--exclude-caches` | — | the tool never scans |
-| `--skip-containers` | — | hidden: a later phase's |
+| `--skip-containers` | — | the tool never scans |
 | `--provider` | — | hidden: for tests |
 | `--test-now` | — | hidden: for tests |
 
@@ -209,7 +209,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--exclude-from` | — | the tool never scans |
 | `--ignore-from` | — | the tool never scans |
 | `--exclude-caches` | — | the tool never scans |
-| `--skip-containers` | — | hidden: a later phase's |
+| `--skip-containers` | — | the tool never scans |
 | `--provider` | — | hidden: for tests |
 | `--test-now` | — | hidden: for tests |
 
@@ -257,7 +257,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--exclude-from` | — | the tool never scans |
 | `--ignore-from` | — | the tool never scans |
 | `--exclude-caches` | — | the tool never scans |
-| `--skip-containers` | — | hidden: a later phase's |
+| `--skip-containers` | — | the tool never scans |
 | `--provider` | — | hidden: for tests |
 | `--test-now` | — | hidden: for tests |
 
@@ -317,7 +317,7 @@ the roots, so a scan whose root lies above a root is compared at that root.
 | `--exclude-from` | — | the tool never scans |
 | `--ignore-from` | — | the tool never scans |
 | `--exclude-caches` | — | the tool never scans |
-| `--skip-containers` | — | hidden: a later phase's |
+| `--skip-containers` | — | the tool never scans |
 | `--provider` | — | hidden: for tests |
 | `--test-now` | — | hidden: for tests |
 
@@ -357,7 +357,7 @@ the roots, so a scan whose root lies above a root is compared at that root.
 | `--exclude-from` | — | the tool never scans |
 | `--ignore-from` | — | the tool never scans |
 | `--exclude-caches` | — | the tool never scans |
-| `--skip-containers` | — | hidden: a later phase's |
+| `--skip-containers` | — | the tool never scans |
 | `--provider` | — | hidden: for tests |
 | `--test-now` | — | hidden: for tests |
 

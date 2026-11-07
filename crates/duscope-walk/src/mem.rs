@@ -51,6 +51,8 @@ struct Node {
     tagged: bool,
     /// A symbolic link's target, when the tree says where it leads.
     target: Option<PathBuf>,
+    /// A cloud placeholder whose content is not on the disk.
+    dataless: bool,
 }
 
 impl MemProvider {
@@ -93,6 +95,16 @@ impl MemProvider {
     /// Adds a regular file of `size` bytes at `path`.
     pub fn file(&mut self, path: impl AsRef<Path>, size: u64) -> &mut MemProvider {
         self.add(path.as_ref(), Kind::File, size)
+    }
+
+    /// Adds a dataless file at `path`: a cloud placeholder (iCloud, Dropbox,
+    /// `OneDrive`) of `size` bytes whose content is not on the disk, so it
+    /// allocates nothing and is flagged [`Flags::DATALESS`], as the macOS
+    /// provider reads one.
+    pub fn dataless(&mut self, path: impl AsRef<Path>, size: u64) -> &mut MemProvider {
+        self.add(path.as_ref(), Kind::File, size);
+        self.node_mut(path.as_ref()).dataless = true;
+        self
     }
 
     /// Adds a symbolic link at `path` with a target of `target_len` bytes.
@@ -200,6 +212,7 @@ impl MemProvider {
                 stat_errno: None,
                 tagged: false,
                 target: None,
+                dataless: false,
             },
         );
     }
@@ -250,7 +263,11 @@ impl Node {
             dir: None,
             kind: self.kind,
             apparent: self.size,
-            allocated: self.size.div_ceil(BLOCK) * BLOCK,
+            allocated: if self.dataless {
+                0
+            } else {
+                self.size.div_ceil(BLOCK) * BLOCK
+            },
             mtime_ns: TIME_NS,
             ctime_ns: TIME_NS,
             nlink,
@@ -259,7 +276,11 @@ impl Node {
             mnt_id: DEV,
             share: Share::None,
             boundary: Boundary::None,
-            flags: Flags::empty(),
+            flags: if self.dataless {
+                Flags::DATALESS
+            } else {
+                Flags::empty()
+            },
             full: (opts.attrs == Attrs::Full).then_some(FullAttrs {
                 atime_ns: TIME_NS,
                 btime_ns: Some(TIME_NS),

@@ -256,7 +256,7 @@ Created after the rows are inserted:
 | `files_mtime` | `files (mtime)` | files by age |
 | `dirs_errors` | `dirs (id) WHERE errors IS NOT NULL` | the unreadable directories of a subtree, counted without reading every row |
 | `dirs_excluded` | `dirs (id) WHERE flags & 3072 != 0` | the directories the excludes kept the scan out of (flags bits 10 and 11) |
-| `files_dataless` | `files (id) WHERE flags & 4 != 0` | the dataless files (flags bit 2), which `summary` adds up without reading every file |
+| `files_dataless` | `files (id) WHERE flags & 4 != 0` | the dataless files (flags bit 2), which `summary`, `explain` and the `dataless_present` warning add up without reading every file |
 
 There is no name or extension index, and no path column: a path is resolved
 through `parent_id`, and a directory's own files are an id range. For the
@@ -267,7 +267,7 @@ prefers the range even where the index is thousands of times faster.
 ## Flags
 
 `dirs.flags` and `files.flags` hold these bits. A bit a platform cannot set
-stays 0; bits 9 to 11 are set on directories only, and bit 12 on files only.
+stays 0; bits 9 to 11 and 13 are set on directories only, and bit 12 on files only.
 
 | Bit | Value | Name | Set on | Meaning |
 | --- | --- | --- | --- | --- |
@@ -284,6 +284,7 @@ stays 0; bits 9 to 11 are set on directories only, and bit 12 on files only.
 | 10 | 1024 | excluded | macOS, Linux | the scan listed the directory but did not enter it, because an exclude pattern matched it |
 | 11 | 2048 | excluded_cache | macOS, Linux | the scan listed the directory but did not enter it, because a cache rule matched it (`--exclude-caches`) |
 | 12 | 4096 | later_link | macOS, Linux | a later link of a hard-linked file: its bytes, apparent ones too, count at its first link |
+| 13 | 8192 | skipped_containers | macOS, Linux | the scan listed the directory but did not enter it, because it is one of the home's containers (`--skip-containers`); always set beside bit 10, so a reader that knows no bit 13 reads it as excluded |
 
 ## Accounting
 
@@ -310,7 +311,7 @@ stays 0; bits 9 to 11 are set on directories only, and bit 12 on files only.
 | `started_at` | INTEGER | when the scan started |
 | `finished_at` | INTEGER | when it finished |
 | `attrs` | TEXT | `basic`, or `full` when the scan collected `atime`, `btime`, `mode`, `uid` and `gid` |
-| `options` | TEXT | the scan's options as JSON: `clones`, `one_file_system`, `include_network`, `follow_symlinks`, `excludes`, `exclude_files` and `ignore_files` (absolute), `exclude_caches`, `caches_extra` (the extra cache rules under `exclude_caches`, else null), `threads`, `size_kind`; `rescan` scans with them again, and a key a file lacks reads as its default |
+| `options` | TEXT | the scan's options as JSON: `clones`, `one_file_system`, `include_network`, `follow_symlinks`, `excludes`, `exclude_files` and `ignore_files` (absolute), `exclude_caches`, `caches_extra` (the extra cache rules under `exclude_caches`, else null), `skip_containers` (present, and true, only when the scan left the home's containers out), `threads`, `size_kind`; `rescan` scans with them again, and a key a file lacks reads as its default |
 | `platform` | TEXT | the operating system and its kernel or Darwin version |
 | `scanning_uid` | INTEGER | the user id the scan ran as |
 | `thread_count` | INTEGER | the worker threads the walk ran |
@@ -320,7 +321,7 @@ stays 0; bits 9 to 11 are set on directories only, and bit 12 on files only.
 | `unaccounted_bytes` | INTEGER | for a root that is a mount point, the volume's used bytes the scan did not find; NULL for any other root |
 | `error_count` | INTEGER | directories and entries the scan could not read |
 | `vanished_count` | INTEGER | entries that disappeared during the scan |
-| `excluded_count` | INTEGER | files left out and directories not entered because an exclude or cache rule matched them |
+| `excluded_count` | INTEGER | files left out and directories not entered because an exclude or cache rule matched them, or `--skip-containers` left them out |
 | `clones_unavailable` | INTEGER | 1 when clones were to be counted on a filesystem that reports no clone ids (every one but APFS) |
 | `n_entries` | INTEGER | rows in `dirs` and `files` together |
 | `incremental` | INTEGER | 1 when an incremental rescan wrote the file |

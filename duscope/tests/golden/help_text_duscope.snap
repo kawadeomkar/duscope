@@ -87,6 +87,9 @@ Scan:
       --exclude-caches
           Don't enter cache directories (node_modules, target, .venv, …)
 
+      --skip-containers
+          Don't enter ~/Library/Containers or ~/Library/Group Containers
+
       --exclude <GLOB>
           Don't enter directories matching this glob
 

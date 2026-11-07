@@ -445,6 +445,9 @@ pub enum Skip {
     Excluded,
     /// A cache directory, under `--exclude-caches`.
     ExcludedCache,
+    /// `~/Library/Containers` or `~/Library/Group Containers`, under
+    /// `--skip-containers`.
+    Containers,
 }
 
 impl Skip {
@@ -459,6 +462,7 @@ impl Skip {
             Skip::BindCycle => "bind_cycle",
             Skip::Excluded => "excluded",
             Skip::ExcludedCache => "excluded_cache",
+            Skip::Containers => "skipped_containers",
         }
     }
 }

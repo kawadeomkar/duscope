@@ -15,7 +15,8 @@ use std::path::PathBuf;
 pub use reader::{Index, IndexVolume};
 pub use scanid::{ScanId, random_bytes};
 pub use writer::{
-    EXCLUDED, EXCLUDED_CACHE, FIRMLINK, IndexWriter, LATER_LINK, ScanMeta, UPPER_BOUND, index_path,
+    EXCLUDED, EXCLUDED_CACHE, FIRMLINK, IndexWriter, LATER_LINK, SKIPPED_CONTAINERS, ScanMeta,
+    UPPER_BOUND, index_path,
 };
 
 /// The index version this build writes and reads: major.minor, apart from the

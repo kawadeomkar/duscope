@@ -76,7 +76,7 @@ pub mod values {
     /// `attrs`.
     pub const ATTRS: [&str; 2] = ["basic", "full"];
     /// Why the scan did not enter a volume or directory.
-    pub const SKIP_REASONS: [&str; 7] = [
+    pub const SKIP_REASONS: [&str; 8] = [
         "firmlinked",
         "kernel",
         "network",
@@ -84,9 +84,10 @@ pub mod values {
         "bind_cycle",
         "excluded",
         "excluded_cache",
+        "skipped_containers",
     ];
     /// Why a directory was excluded.
-    pub const EXCLUDE_REASONS: [&str; 2] = ["excluded", "excluded_cache"];
+    pub const EXCLUDE_REASONS: [&str; 3] = ["excluded", "excluded_cache", "skipped_containers"];
     /// A row's `flags`.
     pub const FLAGS: [&str; 11] = [
         "sparse",
@@ -261,7 +262,8 @@ pub struct ScanBlock {
     /// Every volume the scan met, entered or not.
     pub volumes: Vec<VolumeEntry>,
     /// Files left out and directories not entered by the excludes
-    /// (`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`).
+    /// (`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`,
+    /// `--skip-containers`).
     pub excluded_count: u64,
     /// Each directory the excludes kept the scan out of, path bytewise.
     pub excluded: Vec<ExcludedEntry>,
@@ -273,7 +275,8 @@ pub struct ScanBlock {
 pub struct ExcludedEntry {
     /// Its absolute path, as lossy UTF-8.
     pub path: String,
-    /// `excluded` (a glob or ignore pattern) or `excluded_cache`.
+    /// `excluded` (a glob or ignore pattern), `excluded_cache` or
+    /// `skipped_containers`.
     #[cfg_attr(test, schemars(extend("anyOf" = known(values::EXCLUDE_REASONS))))]
     pub reason: &'static str,
 }
@@ -1737,6 +1740,7 @@ mod tests {
             Skip::BindCycle,
             Skip::Excluded,
             Skip::ExcludedCache,
+            Skip::Containers,
         ];
         let names: Vec<&str> = skips.iter().map(|s| s.as_str()).collect();
         assert_eq!(names, values::SKIP_REASONS);

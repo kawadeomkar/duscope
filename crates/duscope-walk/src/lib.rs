@@ -48,7 +48,7 @@ pub use entry::{
 pub use errors::{ScanError, TrashError, WalkError};
 pub use excludes::IgnoreRules;
 pub use mem::MemProvider;
-pub use options::{Attrs, CacheRule, Counters, WalkOptions};
+pub use options::{Attrs, CONTAINERS, CacheRule, Counters, WalkOptions};
 
 use counters::{Flushing, Slot, Timer};
 use excludes::Excludes;
@@ -413,7 +413,8 @@ pub struct WalkSummary {
     /// Entries and directories that disappeared between being listed and
     /// being read ([`ScanEvent::Vanished`]).
     pub vanished: u64,
-    /// Files left out and directories not entered by the excludes.
+    /// Files left out and directories not entered by the excludes, and the
+    /// containers not entered under [`WalkOptions::skip_containers`].
     pub excluded: u64,
     /// Directories listed but not entered ([`ScanEvent::Skipped`]).
     pub skipped_dirs: u64,
@@ -589,6 +590,38 @@ pub fn stamp_dirs<'a>(
     platform::stamp_dirs(dirs, follow_symlinks)
 }
 
+/// Whether this process lacks macOS's Full Disk Access, by the heuristic
+/// probe of `home`'s privacy-protected folders (`~/Library/Mail` and
+/// `~/Library/Safari`): opening both fails with `EPERM`, the refusal of
+/// macOS's privacy protections (TCC), where a missing folder fails with
+/// `ENOENT` and an unreadable one with `EACCES`. Never on Linux, which has
+/// no such protection. A debug build under `DUSCOPE_TEST_TCC=denied` answers
+/// as TCC would refuse both, on every platform, for the tests.
+pub fn full_disk_access_missing(home: &Path) -> bool {
+    platform::full_disk_access_missing(home)
+}
+
+/// Whether a walk of `root` under `opts` reaches `path`, both absolute and
+/// resolved, by their paths: `path` is `root` or lies below it, by any path
+/// the system gives it. On macOS a directory of the Data volume has two,
+/// one through the firmlinks (`/Users/a`) and one under the volume's own
+/// mount point (`/System/Volumes/Data/Users/a`); resolving a path keeps the
+/// one given, and the walk reaches the directory by either, as its rule for
+/// the Data volume enters one or the other. Elsewhere a directory has one.
+pub fn reaches(root: &Path, path: &Path, opts: &WalkOptions) -> bool {
+    platform::reaches(root, path, opts)
+}
+
+/// The app a Full Disk Access grant for this process belongs to: on macOS
+/// the app bundle the nearest such ancestor process runs from, named by its
+/// outermost bundle (`Terminal`, `iTerm`, `Visual Studio Code`, `Claude`),
+/// since the privacy protections hold a command to the grant of the app
+/// that started it. `None` when no ancestor runs from an app bundle, and
+/// on other platforms.
+pub fn host_app() -> Option<String> {
+    platform::host_app()
+}
+
 /// The result queue holds this many directory batches per worker, as in
 /// dua-core; a worker blocks on a full queue until the sink catches up.
 const QUEUED_BATCHES_PER_WORKER: usize = 2;
@@ -723,6 +756,9 @@ struct Walk<'a, P: ?Sized> {
     mounts: Mutex<HashMap<u64, Met>>,
     /// What the walk leaves out, when it leaves anything out.
     excludes: Option<Excludes<'a>>,
+    /// The identities, `(dev, ino)`, of the containers the walk lists
+    /// without entering ([`WalkOptions::skip_containers`]).
+    containers: Vec<(u64, u64)>,
     /// What the walk counts: [`WalkOptions::counters`], or nothing when it
     /// asks for listing times alone and the provider cannot tell them apart.
     counters: Counters,
@@ -827,6 +863,7 @@ pub fn walk_with<P: Provider + ?Sized>(
             },
         )])),
         excludes: Excludes::new(opts),
+        containers: containers(provider, opts),
         counters,
         slots: (counters != Counters::Off)
             .then(|| (0..threads).map(|_| CachePadded::default()).collect()),
@@ -866,6 +903,22 @@ pub fn walk_with<P: Provider + ?Sized>(
             Err(WalkError::Cancelled)
         }
     })
+}
+
+/// The identities of the containers under [`WalkOptions::skip_containers`]'s
+/// home, as `provider` reads them, so the walk tells them by the same
+/// device and inode its entries carry, however it reaches them. A
+/// container that is not there, or not a directory, is none.
+fn containers<P: Provider + ?Sized>(provider: &P, opts: &WalkOptions) -> Vec<(u64, u64)> {
+    let Some(home) = &opts.skip_containers else {
+        return Vec::new();
+    };
+    CONTAINERS
+        .iter()
+        .filter_map(|rel| provider.root(&home.join(rel), opts).ok())
+        .filter(|entry| entry.kind == Kind::Dir)
+        .map(|entry| (entry.dev, entry.ino))
+        .collect()
 }
 
 /// Hands one directory's batch to the sink: its entries, its errors, then
@@ -1289,6 +1342,10 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     _ => (dir.path.join(entry.name.as_os_str()), dir.kept_fd()),
                 };
                 let mut skip = excluded;
+                if skip.is_none() && self.containers.contains(&(entry.dev, entry.ino)) {
+                    adopted.excluded += 1;
+                    skip = Some(Skip::Containers);
+                }
                 if skip.is_none() {
                     let met = adopted.volumes.len();
                     skip = self.decide(dir, entry, &path, &mut adopted.volumes);
