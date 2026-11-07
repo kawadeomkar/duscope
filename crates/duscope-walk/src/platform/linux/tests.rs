@@ -460,3 +460,39 @@ fn p5_walk_04_listing_is_timed_apart_from_statx() {
         "{phases:?} > {busy:?}"
     );
 }
+
+#[test]
+fn p5_walk_01_linux_keeps_no_fsevents_history() {
+    let env = TestEnv::new();
+    assert_eq!(crate::fsevents::current_event_id(), None);
+    let mut volumes = Vec::new();
+    crate::walk(env.root(), &WalkOptions::default(), |event| {
+        if let ScanEvent::Volume(volume) = event {
+            volumes.push(volume);
+        }
+    })
+    .unwrap();
+    assert!(!volumes.is_empty());
+    for volume in &volumes {
+        assert_eq!(volume.fsevents, None, "{volume:?}");
+        assert_eq!(crate::fsevents::volume_uuid(volume.dev), None);
+    }
+    let mark = crate::FsEventsMark {
+        uuid: "8332A5A0-3024-4BB2-AB99-D8AB8FC0AECC".to_owned(),
+        event_id: 1,
+        os_build: "25G332".to_owned(),
+    };
+    let error = crate::fsevents::replay(
+        volumes[0].dev,
+        &mark,
+        env.root(),
+        crate::fsevents::REPLAY_TIMEOUT,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, crate::FsEventsError::Unsupported),
+        "{error}"
+    );
+    // No check failed: a rescan here is a full scan without a reason.
+    assert_eq!(error.fallback(), None);
+}

@@ -316,3 +316,63 @@ pub(crate) fn cancel_on_interrupt(
 pub(crate) fn fallback() -> Option<Box<dyn Provider>> {
     None
 }
+
+/// The system's latest `FSEvents` event id.
+#[cfg(target_os = "macos")]
+pub(crate) fn fsevents_now() -> Option<u64> {
+    macos::fsevents::current_event_id()
+}
+
+/// The system's latest `FSEvents` event id: there is none on this platform.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn fsevents_now() -> Option<u64> {
+    None
+}
+
+/// The UUID of the `FSEvents` database of the volume on `dev`.
+#[cfg(target_os = "macos")]
+pub(crate) fn fsevents_uuid(dev: u64) -> Option<String> {
+    macos::fsevents::volume_uuid(dev)
+}
+
+/// The UUID of a volume's `FSEvents` database: there is none on this
+/// platform.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn fsevents_uuid(_dev: u64) -> Option<String> {
+    None
+}
+
+/// The `FSEvents` mark of the volume on `dev` at the event id `now`.
+#[cfg(target_os = "macos")]
+pub(crate) fn fsevents_mark(dev: u64, now: u64) -> Option<crate::FsEventsMark> {
+    macos::fsevents::mark(dev, now)
+}
+
+/// A volume's `FSEvents` mark: there is none on this platform.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn fsevents_mark(_dev: u64, _now: u64) -> Option<crate::FsEventsMark> {
+    None
+}
+
+/// The `FSEvents` history of the volume on `dev` below `under`, from
+/// `mark`.
+#[cfg(target_os = "macos")]
+pub(crate) fn fsevents_replay(
+    dev: u64,
+    mark: &crate::FsEventsMark,
+    under: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<crate::fsevents::Replay, crate::FsEventsError> {
+    macos::fsevents::replay(dev, mark, under, timeout)
+}
+
+/// A volume's `FSEvents` history: there is none on this platform.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn fsevents_replay(
+    _dev: u64,
+    _mark: &crate::FsEventsMark,
+    _under: &std::path::Path,
+    _timeout: std::time::Duration,
+) -> Result<crate::fsevents::Replay, crate::FsEventsError> {
+    Err(crate::FsEventsError::Unsupported)
+}

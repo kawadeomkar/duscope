@@ -1,7 +1,9 @@
 //! The macOS calls the provider makes, as safe wrappers, and the constants
 //! of `<sys/attr.h>`, `<sys/stat.h>`, `<sys/vnode.h>` and
 //! `<sys/resource.h>` that the `libc` crate does not declare. Every `unsafe`
-//! block of the macOS provider is in this file.
+//! block of the macOS provider is in this file; the `FSEvents`,
+//! `CoreFoundation` and libdispatch calls, which `libc` does not declare,
+//! are in `fsevents.rs`.
 
 use std::ffi::CStr;
 use std::io;
@@ -282,4 +284,52 @@ pub(super) fn fstatfs(fd: BorrowedFd<'_>) -> io::Result<libc::statfs> {
     retry(|| unsafe { libc::fstatfs(fd.as_raw_fd(), stat.as_mut_ptr()) })?;
     // SAFETY: fstatfs succeeded, so it filled the struct.
     Ok(unsafe { stat.assume_init() })
+}
+
+/// The path of the file open on `fd` with no firmlink in it
+/// (`F_GETPATH_NOFIRMLINK`): `/System/Volumes/Data/Users/a` for what
+/// `/Users/a` reaches, the spelling `FSEvents` uses below a volume's mount
+/// point.
+pub(super) fn nofirmlink_path(fd: BorrowedFd<'_>) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: `fd` is open for the borrow, and F_GETPATH_NOFIRMLINK writes
+    // at most MAXPATHLEN (PATH_MAX) bytes, a NUL included, into `buf`,
+    // which is that long.
+    retry(|| unsafe {
+        libc::fcntl(
+            fd.as_raw_fd(),
+            libc::F_GETPATH_NOFIRMLINK,
+            buf.as_mut_ptr().cast::<libc::c_char>(),
+        )
+    })?;
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(len);
+    Ok(buf)
+}
+
+/// The build of the running system (`kern.osversion`, such as `25G332`);
+/// `None` when it cannot be read.
+pub(super) fn os_build() -> Option<String> {
+    let name = c"kern.osversion";
+    let mut buf = [0u8; 64];
+    let mut len = buf.len();
+    // SAFETY: `name` is NUL-terminated; sysctlbyname writes at most `len`
+    // bytes into `buf`, which is that long, and stores the length it wrote
+    // in `len`; no new value is given.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let value = buf.get(..len)?;
+    let value = value.split(|&b| b == 0).next()?;
+    let build = std::str::from_utf8(value).ok()?;
+    (!build.is_empty()).then(|| build.to_owned())
 }

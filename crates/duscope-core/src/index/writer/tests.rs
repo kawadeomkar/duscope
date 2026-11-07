@@ -276,3 +276,48 @@ fn p2_idx_02_scan_ids_are_twelve_hex_digits() {
         crate::index::random_bytes().unwrap()
     );
 }
+
+#[test]
+fn p5_walk_01_scan_volumes_keep_each_volumes_fsevents_mark() {
+    let env = duscope_testkit::TestEnv::new();
+    let mut tree = MemProvider::new("/t");
+    tree.file("a", 1);
+    let mark = duscope_walk::FsEventsMark {
+        uuid: "8332A5A0-3024-4BB2-AB99-D8AB8FC0AECC".to_owned(),
+        event_id: 2_694_539_488,
+        os_build: "25G332".to_owned(),
+    };
+    let marked = (
+        Some(mark.uuid.clone()),
+        Some(2_694_539_488),
+        Some(mark.os_build.clone()),
+    );
+    for (name, fsevents, columns) in [
+        ("marked", Some(mark), marked),
+        ("unmarked", None, (None, None, None)),
+    ] {
+        let mut arena = Arena::new(Attrs::Basic);
+        walk_with(&tree, Path::new("/t"), &WalkOptions::default(), |event| {
+            let event = match event {
+                duscope_walk::ScanEvent::Volume(mut volume) => {
+                    volume.fsevents = fsevents.clone();
+                    duscope_walk::ScanEvent::Volume(volume)
+                }
+                event => event,
+            };
+            arena.push(event).unwrap();
+        })
+        .unwrap();
+        let rollup = roll_up(&mut arena);
+        let id = IndexWriter::write(&arena, &rollup, &meta(name), &env.index_dir()).unwrap();
+        let db = Connection::open(index_path(&env.index_dir(), &id)).unwrap();
+        let row: (Option<String>, Option<i64>, Option<String>) = db
+            .query_row(
+                "SELECT fsevents_uuid, fsevents_event_id, os_build FROM scan_volumes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, columns, "{name}");
+    }
+}

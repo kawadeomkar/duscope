@@ -346,6 +346,7 @@ fn p1_core_03_links_on_an_overlay_are_not_deduplicated() {
         total_bytes: 0,
         free_bytes: 0,
         reason: None,
+        fsevents: None,
     };
     let (arena, rollup) = rolled(vec![link("x", 1), link("y", 2)], Some(overlay));
     assert_eq!(rollup.charges().hardlinks(&arena).count(), 0);

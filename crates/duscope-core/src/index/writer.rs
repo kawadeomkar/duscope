@@ -291,13 +291,15 @@ fn meta_rows(
     Ok(())
 }
 
-/// `scan_volumes`: every volume the walk met.
+/// `scan_volumes`: every volume the walk met, each entered one with its
+/// place in its `FSEvents` history where the platform keeps one (macOS).
 fn volume_rows(tx: &Transaction<'_>, arena: &Arena) -> rusqlite::Result<()> {
     let mut row = tx.prepare(
         "INSERT INTO scan_volumes VALUES \
-         (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL, ?10, ?11, ?12)",
+         (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
     )?;
     for v in arena.volumes() {
+        let mark = v.fsevents.as_ref();
         row.execute(params![
             signed(v.dev),
             signed(v.mnt_id),
@@ -308,6 +310,9 @@ fn volume_rows(tx: &Transaction<'_>, arena: &Arena) -> rusqlite::Result<()> {
             v.reason.map(Skip::as_str),
             v.case_sensitive,
             v.normalization.as_str(),
+            mark.map(|m| m.uuid.as_str()),
+            mark.map(|m| signed(m.event_id)),
+            mark.map(|m| m.os_build.as_str()),
             signed(v.total_bytes),
             signed(v.free_bytes),
             v.options.join(","),

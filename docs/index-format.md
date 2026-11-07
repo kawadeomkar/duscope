@@ -120,9 +120,9 @@ disks.
 | `reason` | TEXT | yes | why the scan did not enter it: `firmlinked`, `kernel`, `network`, `one_file_system` or `bind_cycle`; NULL when it did |
 | `case_sensitive` | INTEGER | yes | 1 when names that differ only by case are different names; NULL where it cannot be told without entering the volume |
 | `normalization` | TEXT | no | `insensitive` when the NFC and NFD forms of a name are the same name (APFS, HFS+), else `none` |
-| `fsevents_uuid` | TEXT | yes | macOS: the volume's FSEvents UUID, for incremental rescans; NULL on Linux, on the sealed System volume and where macOS gives none |
-| `fsevents_event_id` | INTEGER | yes | macOS: the volume's latest FSEvents event id when the scan started; NULL where `fsevents_uuid` is |
-| `os_build` | TEXT | yes | macOS: the build of the system the event id was read under, since event ids do not carry over an upgrade; NULL where `fsevents_uuid` is |
+| `fsevents_uuid` | TEXT | yes | macOS: the UUID of the volume's FSEvents database, upper-case and hyphenated, for incremental rescans; NULL on Linux, for a volume the scan did not enter, and where macOS keeps no history of the volume (logging turned off with `.fseventsd/no_log`, a disk image attached with `-nobrowse`) |
+| `fsevents_event_id` | INTEGER | yes | macOS: the system's latest FSEvents event id, read before the scan read anything, so every later change has a larger id; NULL where `fsevents_uuid` is |
+| `os_build` | TEXT | yes | macOS: the build of the system the event id was read under (`kern.osversion`), since an upgrade can discard the history; NULL where `fsevents_uuid` is |
 | `total_bytes` | INTEGER | yes | the volume's size when the scan met it |
 | `free_bytes` | INTEGER | yes | the bytes free on it for an unprivileged user |
 | `options` | TEXT | yes | its mount options, comma-separated (`rw,noatime`), which tell whether access times are kept |

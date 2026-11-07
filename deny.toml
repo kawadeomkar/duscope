@@ -80,7 +80,7 @@ deny = [
     { crate = "reqwest", reason = "the binary opens no network socket: no HTTP crates" },
     { crate = "hyper", reason = "the binary opens no network socket: no HTTP crates" },
     { crate = "openssl", reason = "no network and no C beyond SQLite and libc" },
-    { crate = "objc2-core-services", reason = "FSEvents goes through eleven hand-written externs (D36)" },
+    { crate = "objc2-core-services", reason = "FSEvents goes through fourteen hand-written externs (D36)" },
     { crate = "catppuccin", reason = "the palettes are vendored hex tables (D36)" },
     { crate = "supports-color", reason = "duscope decides colour in its own order (D36)" },
     { crate = "terminal_size", reason = "crossterm already reports the terminal size (D36)" },

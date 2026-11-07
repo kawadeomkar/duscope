@@ -337,6 +337,7 @@ impl Provider for MemProvider {
             total_bytes: 1 << 40,
             free_bytes: 1 << 39,
             reason: None,
+            fsevents: None,
         })
     }
 

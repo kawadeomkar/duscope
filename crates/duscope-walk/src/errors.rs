@@ -1,4 +1,4 @@
-//! The crate's error enum and the per-entry error record.
+//! The crate's error enums and the per-entry error record.
 
 use std::io;
 use std::path::PathBuf;
@@ -41,6 +41,97 @@ pub enum TrashError {
     /// The item could not be read or moved.
     #[error("{0}")]
     Failed(String),
+}
+
+/// Why [`fsevents::replay`](crate::fsevents::replay) read no history.
+#[derive(Debug, thiserror::Error)]
+pub enum FsEventsError {
+    /// The platform keeps no `FSEvents` history.
+    #[error("FSEvents history exists only on macOS")]
+    Unsupported,
+    /// The directory to replay cannot be opened or placed on its volume.
+    #[error("cannot read {}: {source}", path.display())]
+    Path {
+        /// The directory.
+        path: PathBuf,
+        /// The error opening or placing it.
+        source: io::Error,
+    },
+    /// The directory is on another device than the one the mark is of.
+    #[error("{} is on device {found}, not device {dev}", path.display())]
+    OtherDevice {
+        /// The directory.
+        path: PathBuf,
+        /// The device of the mark.
+        dev: u64,
+        /// The device the directory is on.
+        found: u64,
+    },
+    /// `FSEvents` logging is off on the volume: `.fseventsd/no_log` exists
+    /// at its root.
+    #[error("FSEvents logging is off on the volume at {} (.fseventsd/no_log)", mount_point.display())]
+    Disabled {
+        /// Where the volume is mounted.
+        mount_point: PathBuf,
+    },
+    /// The device's history is no longer kept (no `FSEvents` UUID).
+    #[error("device {dev} has no FSEvents history")]
+    NoHistory {
+        /// The device.
+        dev: u64,
+    },
+    /// The device's history is another one than the mark's.
+    #[error("device {dev} has the FSEvents history {found}, not {recorded}")]
+    OtherHistory {
+        /// The device.
+        dev: u64,
+        /// The mark's UUID.
+        recorded: String,
+        /// The UUID now.
+        found: String,
+    },
+    /// The system was upgraded or replaced since the mark.
+    #[error("the system is build {found:?}, not {recorded}, which took the mark")]
+    OtherSystem {
+        /// The mark's build.
+        recorded: String,
+        /// The build now; empty when it cannot be read.
+        found: String,
+    },
+    /// The system's event ids are behind the mark's.
+    #[error("the latest FSEvents event id {current} is behind the mark's {since}")]
+    IdsBehind {
+        /// The mark's event id.
+        since: u64,
+        /// The system's latest.
+        current: u64,
+    },
+    /// The stream could not be created or started.
+    #[error("cannot open an FSEvents stream on device {dev}")]
+    Stream {
+        /// The device.
+        dev: u64,
+    },
+}
+
+impl FsEventsError {
+    /// The reason a rescan gives for its full scan; `None` where the
+    /// platform keeps no history, which is no failed check.
+    #[must_use]
+    pub fn fallback(&self) -> Option<crate::fsevents::Fallback> {
+        use crate::fsevents::Fallback;
+        match self {
+            FsEventsError::Unsupported => None,
+            FsEventsError::Path { .. }
+            | FsEventsError::OtherDevice { .. }
+            | FsEventsError::NoHistory { .. }
+            | FsEventsError::OtherHistory { .. } => Some(Fallback::VolumeChanged),
+            FsEventsError::Disabled { .. } => Some(Fallback::FseventsDisabled),
+            FsEventsError::OtherSystem { .. }
+            | FsEventsError::IdsBehind { .. }
+            | FsEventsError::Stream { .. } => Some(Fallback::HistoryGone),
+        }
+    }
 }
 
 /// An entry that was listed but could not be read: one `scan_errors` row.
