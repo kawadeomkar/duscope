@@ -18,6 +18,10 @@ use crate::Provider;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use posix::DirFd;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use posix::unlink::CheckedDir;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use posix::unlink::{remove_dir_checked, unlink_checked};
 
 /// A directory's open descriptor: none is opened on this platform.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -389,4 +393,54 @@ pub(crate) fn fsevents_replay(
     _timeout: std::time::Duration,
 ) -> Result<crate::fsevents::Replay, crate::FsEventsError> {
     Err(crate::FsEventsError::Unsupported)
+}
+
+/// A directory opened to remove entries from: none is opened on this
+/// platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[derive(Debug)]
+pub struct CheckedDir {
+    never: std::convert::Infallible,
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+impl CheckedDir {
+    /// Opens the directory `path`: not on this platform.
+    ///
+    /// # Errors
+    ///
+    /// Always, `Unsupported`.
+    pub fn open(path: &std::path::Path) -> Result<CheckedDir, crate::RemoveError> {
+        Err(crate::RemoveError::Io {
+            path: path.to_owned(),
+            source: std::io::ErrorKind::Unsupported.into(),
+        })
+    }
+
+    /// The directory's path.
+    pub fn path(&self) -> &std::path::Path {
+        match self.never {}
+    }
+}
+
+/// Removes an entry: there is no directory to remove it from here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn unlink_checked(
+    parent: &CheckedDir,
+    _name: &std::ffi::OsStr,
+    _expect: (u64, u64),
+    _freed: &mut u64,
+) -> Result<(), crate::RemoveError> {
+    match parent.never {}
+}
+
+/// Removes a directory: there is no directory to remove it from here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn remove_dir_checked(
+    parent: &CheckedDir,
+    _name: &std::ffi::OsStr,
+    _expect: (u64, u64),
+    _freed: &mut u64,
+) -> Result<(), crate::RemoveError> {
+    match parent.never {}
 }

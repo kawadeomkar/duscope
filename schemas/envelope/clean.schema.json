@@ -18,18 +18,19 @@
           "anyOf": [
             {
               "enum": [
-                "trash"
+                "trash",
+                "permanent"
               ]
             },
             {
               "type": "string"
             }
           ],
-          "description": "`trash`.",
+          "description": "`trash`, or `permanent`.",
           "type": "string"
         },
         "total_allocated_bytes": {
-          "description": "The bytes on disk of the items to move.",
+          "description": "The bytes on disk of the items to move or delete.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -57,6 +58,15 @@
           "description": "The verb.",
           "type": "string"
         },
+        "expect_bytes": {
+          "description": "`--expect-bytes`: what the plan must free, within 1%, before anything\nis touched; null without it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "handle_count": {
           "description": "How many items came from `--from` handles.",
           "format": "uint64",
@@ -69,6 +79,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "permanent": {
+          "description": "`--permanent`: delete the items rather than move them to the Trash.",
+          "type": "boolean"
         },
         "skip_refused": {
           "description": "`--skip-refused`: move what is not refused.",
@@ -84,22 +98,30 @@
         "paths",
         "handle_count",
         "yes",
-        "skip_refused"
+        "skip_refused",
+        "permanent",
+        "expect_bytes"
       ],
       "type": "object"
     },
     "CleanResult": {
-      "description": "The plan, and what moving it did. Moving to the Trash frees nothing until\nthe Trash is emptied: `trashed_bytes` counts what moved, `freed_bytes` is\n0.",
+      "description": "The plan, and what acting on it did. Moving to the Trash frees nothing\nuntil the Trash is emptied: `trashed_bytes` counts what moved, and\n`freed_bytes` is set only by `--permanent`.",
       "properties": {
+        "deleted_count": {
+          "description": "The items `--permanent` deleted, each with everything under it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "freed_bytes": {
-          "description": "The bytes freed: 0, since the Trash keeps what it holds.",
+          "description": "The bytes on disk `--permanent` freed, as `du` counts them: each\ninode whose last link it removed, and each directory, including what\nan item that failed part way had lost by then; 0 for the Trash, which\nkeeps what it holds.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "plan": {
           "$ref": "#/$defs/CleanPlan",
-          "description": "What would be moved, and what is refused."
+          "description": "What would be moved or deleted, and what is refused."
         },
         "trashed_bytes": {
           "description": "Their bytes on disk, still taken until the Trash is emptied.",
@@ -118,6 +140,7 @@
         "plan",
         "trashed_count",
         "trashed_bytes",
+        "deleted_count",
         "freed_bytes"
       ],
       "type": "object"
@@ -236,6 +259,7 @@
             {
               "enum": [
                 "trash",
+                "permanent",
                 "refused"
               ]
             },
@@ -243,7 +267,7 @@
               "type": "string"
             }
           ],
-          "description": "`trash`, or `refused`.",
+          "description": "`trash`, `permanent` (the plan's method), or `refused`.",
           "type": "string"
         },
         "allocated_bytes": {
@@ -261,7 +285,7 @@
               "type": "null"
             }
           ],
-          "description": "Why moving it failed; null otherwise."
+          "description": "Why moving or deleting it failed; null otherwise."
         },
         "frees_bytes": {
           "description": "What deleting it would free now: its bytes less those a link or\nclone member outside it keeps; null where that is not known (a\ndirectory no saved scan holds).",
@@ -329,6 +353,7 @@
             {
               "enum": [
                 "trashed",
+                "deleted",
                 "failed",
                 null
               ]
@@ -337,7 +362,7 @@
               "type": "string"
             }
           ],
-          "description": "`trashed` or `failed` once `clean` acted; null in a dry run and for a\nrefused item.",
+          "description": "`trashed`, `deleted` or `failed` once `clean` acted; null in a dry run\nand for a refused item.",
           "type": [
             "string",
             "null"
@@ -710,7 +735,7 @@
   },
   "$id": "clean.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "What `clean` prints under `--json`: the plan and what became of it, with\nthe conventions' error object where nothing, or not everything, was moved\n(`ok` false): `confirmation_required`, `refused_path`, `trash_unavailable`.",
+  "description": "What `clean` prints under `--json`: the plan and what became of it, with\nthe conventions' error object where nothing, or not everything, was moved\nor deleted (`ok` false): `confirmation_required`, `refused_path`,\n`expectation_mismatch`, `trash_unavailable`, `path_changed`.",
   "properties": {
     "error": {
       "anyOf": [
@@ -731,7 +756,7 @@
       "type": "array"
     },
     "ok": {
-      "description": "Whether every item of the plan was moved to the Trash.",
+      "description": "Whether every item of the plan was moved to the Trash, or deleted.",
       "type": "boolean"
     },
     "query": {

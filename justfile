@@ -119,10 +119,12 @@ platform-tests:
       p5_walk_02_linux_explain_clones_reports_shared_extents_on_reflinks
       p5_walk_02_linux_summary_lists_btrfs_subvolumes
       p5_walk_02_linux_clean_refuses_an_item_on_a_read_only_image
+      platform::posix::unlink::tests::p5_core_03_linux_a_mount_under_the_directory_is_never_crossed
+      platform::posix::unlink::tests::p5_core_03_macos_a_mounted_image_under_the_directory_is_never_crossed
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Thirteen are built on Linux and eight on macOS; a renamed test must not drop out unnoticed.
-    expected=$([[ $(uname -s) == Darwin ]] && echo 8 || echo 13)
+    # Fourteen are built on Linux and nine on macOS; a renamed test must not drop out unnoticed.
+    expected=$([[ $(uname -s) == Darwin ]] && echo 9 || echo 14)
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
     [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
     cargo_test -- --ignored --exact "${tests[@]}"

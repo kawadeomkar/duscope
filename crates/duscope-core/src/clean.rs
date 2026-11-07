@@ -1,4 +1,5 @@
-//! `clean`: the plan of what to move to the Trash, and moving it.
+//! `clean`: the plan of what to move to the Trash or delete, and acting on
+//! it.
 //!
 //! A plan is made against one saved scan. An item's facts come from it, as
 //! `explain` reads them: its bytes, its links outside it and the command
@@ -16,10 +17,18 @@
 //! (`--yes`, the prompt) is the binary's to decide, which calls
 //! [`clean_execute`] only then.
 //!
-//! Nothing here deletes: [`clean_execute`] moves each item to the Trash
-//! through `duscope-walk`, after checking that what is at its path is still
-//! what the plan saw (its device and inode), and never falls back to
-//! removing it.
+//! A plan's [`Method`] is the Trash or `--permanent`. [`clean_execute`]
+//! moves each item to the Trash through `duscope-walk`, after checking that
+//! what is at its path is still what the plan saw (its device and inode),
+//! and never falls back to removing it. With `--permanent` it deletes each
+//! item through `duscope-walk`'s descriptor walk: every component of the
+//! path opened without following a symbolic link, the item's device and
+//! inode checked again before anything is removed, a directory emptied
+//! bottom up, never across a mount; only then is `freed_bytes` counted, as
+//! the bytes on disk of each inode whose last link went.
+//!
+//! [`within_one_percent`] is `--expect-bytes`' test, made before anything is
+//! touched.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -28,7 +37,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use duscope_walk::{Flags, Kind, ScanEvent, TrashError, WalkOptions};
+use duscope_walk::{CheckedDir, Flags, Kind, RemoveError, ScanEvent, TrashError, WalkOptions};
 
 use crate::CoreError;
 use crate::envelope::{CleanPlan, ErrorObject, Explain, PlanItem, name_fields};
@@ -47,11 +56,33 @@ pub struct CleanItem {
     pub handle: Option<(u64, u64)>,
 }
 
+/// How a plan acts on its items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    /// Move them to the Trash, which keeps them until it is emptied.
+    Trash,
+    /// Delete them (`--permanent`).
+    Permanent,
+}
+
+impl Method {
+    /// Its name in the plan: `method`, and the `action` of each item not
+    /// refused.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Trash => "trash",
+            Method::Permanent => "permanent",
+        }
+    }
+}
+
 /// A plan: the envelope's, and what each item was when planned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     /// The plan as the envelope prints it.
     pub plan: CleanPlan,
+    /// How it acts.
+    method: Method,
     /// Each item's `(dev, ino)` when planned, in the plan's order.
     idents: Vec<(u64, u64)>,
 }
@@ -66,37 +97,61 @@ impl Plan {
             .count()
     }
 
-    /// The items the plan would move.
-    pub fn trash_count(&self) -> usize {
+    /// The items the plan would move or delete: those not refused.
+    pub fn acting_count(&self) -> usize {
         self.plan
             .items
             .iter()
-            .filter(|item| item.action == "trash")
+            .filter(|item| item.action != "refused")
             .count()
+    }
+
+    /// How the plan acts.
+    pub fn method(&self) -> Method {
+        self.method
+    }
+
+    /// Whether what the plan frees, its `total_frees_bytes`, lies within
+    /// 1% of `expected` (`--expect-bytes`).
+    pub fn meets(&self, expected: u64) -> bool {
+        within_one_percent(self.plan.total_frees_bytes, expected)
     }
 }
 
-/// What moving a plan did.
+/// Whether `bytes` lies within 1% of `expected`, either way, the bounds
+/// included: `|bytes - expected| <= expected / 100`, in exact arithmetic.
+pub fn within_one_percent(bytes: u64, expected: u64) -> bool {
+    100 * u128::from(bytes.abs_diff(expected)) <= u128::from(expected)
+}
+
+/// What acting on a plan did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CleanOutcome {
     /// The items moved to the Trash.
     pub trashed_count: u64,
     /// Their bytes on disk.
     pub trashed_bytes: u64,
-    /// The items that could not be moved.
+    /// The items deleted, each with everything under it.
+    pub deleted_count: u64,
+    /// The bytes on disk deleting freed: each inode whose last link went,
+    /// and each directory, as `du` counts them; a deletion that failed part
+    /// way counts what it removed.
+    pub freed_bytes: u64,
+    /// The items that could not be moved or deleted, or not wholly.
     pub failed_count: u64,
 }
 
 /// The plan for `items` against `index`, the saved scan whose root they
-/// should lie under. A path that does not exist, or whose device and inode
-/// are not those of its handle, fails the plan ([`CoreError::ScanNotFound`],
-/// [`CoreError::PathChanged`]), as does an item named twice or inside
-/// another ([`CoreError::CleanOverlap`]): `clean` acts on all or none of a
-/// list.
+/// should lie under, acting by `method`. A path that does not exist, or
+/// whose device and inode are not those of its handle, fails the plan
+/// ([`CoreError::ScanNotFound`], [`CoreError::PathChanged`]), as does an
+/// item named twice or inside another ([`CoreError::CleanOverlap`]): `clean`
+/// acts on all or none of a list.
 pub fn clean_plan(
     items: &[CleanItem],
     index: &Index,
     q: &ExplainQuery<'_>,
+    method: Method,
 ) -> Result<Plan, CoreError> {
     let mut metas = Vec::with_capacity(items.len());
     for item in items {
@@ -132,21 +187,22 @@ pub fn clean_plan(
             facts.allocated_bytes = walked(&item.path);
         }
         let reason = refusal(&item.path, meta, index, id, under_root);
-        planned.push(plan_item(&item.path, meta, &facts, reason));
+        planned.push(plan_item(&item.path, meta, &facts, reason, method));
         ids.push(id);
     }
     plan_frees(index, &ids, &mut planned)?;
-    let moving = planned.iter().filter(|item| item.action == "trash");
-    let total_allocated_bytes = moving.clone().map(|item| item.allocated_bytes).sum();
-    let total_frees_bytes = moving.map(|item| item.frees_bytes.unwrap_or(0)).sum();
+    let acting = planned.iter().filter(|item| item.action != "refused");
+    let total_allocated_bytes = acting.clone().map(|item| item.allocated_bytes).sum();
+    let total_frees_bytes = acting.map(|item| item.frees_bytes.unwrap_or(0)).sum();
     Ok(Plan {
         plan: CleanPlan {
             items: planned,
             total_allocated_bytes,
             total_frees_bytes,
-            method: "trash",
+            method: method.as_str(),
             confirmation_required: true,
         },
+        method,
         idents: metas.iter().map(|m| (m.dev(), m.ino())).collect(),
     })
 }
@@ -284,7 +340,7 @@ fn plan_frees(
         .zip(planned.iter())
         .enumerate()
         .filter_map(|(i, (id, item))| {
-            let id = (*id).filter(|_| item.action == "trash")?;
+            let id = (*id).filter(|_| item.action != "refused")?;
             Some((i, id, index.node(id).last_id))
         })
         .collect();
@@ -373,6 +429,7 @@ fn plan_item(
     meta: &std::fs::Metadata,
     facts: &Explain,
     reason: Option<&'static str>,
+    method: Method,
 ) -> PlanItem {
     let path_bytes = path.as_os_str().as_bytes().to_vec();
     let name = path.file_name().unwrap_or(OsStr::new("/")).as_bytes();
@@ -398,55 +455,51 @@ fn plan_item(
         nlink: facts.nlink,
         links_outside_subtree: facts.links_outside_subtree,
         regenerable_by: facts.regenerable_by,
-        action: if reason.is_some() { "refused" } else { "trash" },
+        action: if reason.is_some() {
+            "refused"
+        } else {
+            method.as_str()
+        },
         reason,
         outcome: None,
         error: None,
     }
 }
 
-/// Moves each item the plan would move to the Trash, recording its outcome:
-/// `trashed`, or `failed` with why. An item whose path no longer holds what
-/// the plan saw (gone, or another device and inode) is `path_changed` and
-/// left alone; one whose volume has no Trash is `trash_unavailable` and left
-/// where it is: nothing is ever removed in its place.
+/// Acts on each item the plan does not refuse, by its method, recording its
+/// outcome: `trashed` or `deleted`, or `failed` with why.
+///
+/// - **The Trash.** An item whose path no longer holds what the plan saw
+///   (gone, or another device and inode) is `path_changed` and left alone;
+///   one whose volume has no Trash is `trash_unavailable` and left where it
+///   is: nothing is ever removed in its place.
+/// - **`--permanent`.** The item is deleted through descriptors, by
+///   `duscope-walk`'s [`unlink_checked`](duscope_walk::unlink_checked) and
+///   [`remove_dir_checked`](duscope_walk::remove_dir_checked); a change on
+///   the way to it or under it is `path_changed`, a mount point under it,
+///   or a directory whose mount the system cannot tell, `refused_path`, and
+///   what was deleted before a failure stays deleted and counts in
+///   `freed_bytes`.
 pub fn clean_execute(plan: &mut Plan) -> CleanOutcome {
     let mut outcome = CleanOutcome::default();
+    let method = plan.method;
     for (item, &ident) in plan.plan.items.iter_mut().zip(&plan.idents) {
-        if item.action != "trash" {
+        if item.action == "refused" {
             continue;
         }
-        let path = Path::new(OsStr::from_bytes(&item.path_bytes));
-        let now = std::fs::symlink_metadata(path).map(|m| (m.dev(), m.ino()));
-        let moved = match now {
-            Ok(now) if now == ident => duscope_walk::move_to_trash(path).map_err(|e| match e {
-                TrashError::Unavailable(message) => error_object(
-                    "trash_unavailable",
-                    message,
-                    Some("Delete it yourself with rm if it should go: its volume has no Trash"),
-                    false,
-                    "user",
-                ),
-                TrashError::Failed(message) => {
-                    error_object("io_error", message, None, false, "user")
-                }
-            }),
-            _ => Err(error_object(
-                "path_changed",
-                format!(
-                    "{} is not what the plan saw: it has gone or been replaced",
-                    item.path
-                ),
-                Some("Run duscope clean again to plan what is there now"),
-                true,
-                "agent",
-            )),
+        let done = match method {
+            Method::Trash => trash(item, ident),
+            Method::Permanent => delete(item, ident, &mut outcome.freed_bytes),
         };
-        match moved {
-            Ok(()) => {
+        match done {
+            Ok(()) if method == Method::Trash => {
                 item.outcome = Some("trashed");
                 outcome.trashed_count += 1;
                 outcome.trashed_bytes += item.allocated_bytes;
+            }
+            Ok(()) => {
+                item.outcome = Some("deleted");
+                outcome.deleted_count += 1;
             }
             Err(error) => {
                 item.outcome = Some("failed");
@@ -456,6 +509,124 @@ pub fn clean_execute(plan: &mut Plan) -> CleanOutcome {
         }
     }
     outcome
+}
+
+/// Moves `item` to the Trash when its path still holds `ident`.
+fn trash(item: &PlanItem, ident: (u64, u64)) -> Result<(), ErrorObject> {
+    let path = Path::new(OsStr::from_bytes(&item.path_bytes));
+    match std::fs::symlink_metadata(path).map(|m| (m.dev(), m.ino())) {
+        Ok(now) if now == ident => duscope_walk::move_to_trash(path).map_err(|e| match e {
+            TrashError::Unavailable(message) => error_object(
+                "trash_unavailable",
+                message,
+                Some("Rerun duscope clean with --permanent to delete it: its volume has no Trash"),
+                false,
+                "user",
+            ),
+            TrashError::Failed(message) => error_object("io_error", message, None, false, "user"),
+        }),
+        _ => Err(changed(&item.path)),
+    }
+}
+
+/// Deletes `item`, adding to `freed` the bytes on disk its deletion frees:
+/// its parent directory opened from `/` one component at a time without
+/// following a symbolic link, then the item itself, through that
+/// directory's descriptor, only when its device and inode are still
+/// `ident`, the plan's; a directory with everything under it, bottom up,
+/// never through a link or across a mount.
+fn delete(item: &PlanItem, ident: (u64, u64), freed: &mut u64) -> Result<(), ErrorObject> {
+    let path = Path::new(OsStr::from_bytes(&item.path_bytes));
+    // The plan refuses `/`, the one path without both.
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(changed(&item.path));
+    };
+    CheckedDir::open(parent)
+        .and_then(|dir| {
+            if item.kind == "dir" {
+                duscope_walk::remove_dir_checked(&dir, name, ident, freed)
+            } else {
+                duscope_walk::unlink_checked(&dir, name, ident, freed)
+            }
+        })
+        .map_err(|e| removal_error(path, &e))
+}
+
+/// The error object of a deletion of `item` that failed with `error`.
+fn removal_error(item: &Path, error: &RemoveError) -> ErrorObject {
+    match error {
+        RemoveError::Changed { path } if path == item => changed(&item.to_string_lossy()),
+        RemoveError::Changed { path } => {
+            let message = if item.starts_with(path) {
+                format!(
+                    "{}, on the way to {}, is no longer the directory the plan saw, so nothing \
+                     was deleted",
+                    path.display(),
+                    item.display()
+                )
+            } else {
+                format!(
+                    "{} changed while {} was being deleted, so the deletion stopped there",
+                    path.display(),
+                    item.display()
+                )
+            };
+            error_object(
+                "path_changed",
+                message,
+                Some("Run duscope clean again to plan what is there now"),
+                true,
+                "agent",
+            )
+        }
+        RemoveError::Mount { path } => error_object(
+            "refused_path",
+            format!(
+                "{} is a mount point or another volume, which clean never crosses: it and the \
+                 directories above it in {} were left",
+                path.display(),
+                item.display()
+            ),
+            Some(&format!(
+                "Run umount {} first, then duscope clean again",
+                path.display()
+            )),
+            false,
+            "user",
+        ),
+        RemoveError::MountUnknown { path, .. } => error_object(
+            "refused_path",
+            if path == item {
+                format!("{error}, so nothing in it was deleted")
+            } else {
+                format!(
+                    "{error}, so it and the directories above it in {} were left",
+                    item.display()
+                )
+            },
+            Some("Rerun duscope clean without --permanent to move it to the Trash instead"),
+            false,
+            "user",
+        ),
+        RemoveError::Io { path, source } => error_object(
+            "io_error",
+            format!("cannot delete {}: {source}", path.display()),
+            None,
+            false,
+            "user",
+        ),
+    }
+}
+
+/// `path_changed` for the item at `path`.
+fn changed(path: &str) -> ErrorObject {
+    error_object(
+        "path_changed",
+        format!("{path} is not what the plan saw: it has gone or been replaced"),
+        Some("Run duscope clean again to plan what is there now"),
+        true,
+        "agent",
+    )
 }
 
 /// An error object for an item.

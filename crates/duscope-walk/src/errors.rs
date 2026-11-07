@@ -134,6 +134,50 @@ impl FsEventsError {
     }
 }
 
+/// Why an entry was not removed, or not wholly: what was removed before the
+/// failure stays removed.
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveError {
+    /// What is at `path` is not what was expected: gone, another device and
+    /// inode, or a symbolic link or a file where a directory was.
+    #[error("{} is not what the plan saw: it has gone or been replaced", path.display())]
+    Changed {
+        /// The path, the entry's or one on the way to it or under it.
+        path: PathBuf,
+    },
+    /// A mount point under the directory being removed: never entered, so
+    /// it and every directory above it stay.
+    #[error("{} is a mount point, which is never crossed", path.display())]
+    Mount {
+        /// The mount point.
+        path: PathBuf,
+    },
+    /// A directory under the one being removed, or that one, whose mount
+    /// nothing can tell (Linux before 5.8, or without `statx`, where
+    /// neither a file handle nor the mount table answers): never entered,
+    /// as a mount point would not be, so it and every directory above it
+    /// stay.
+    #[error(
+        "cannot tell whether {} is a mount point: the kernel reports no mount-root attribute \
+         or file handle, and the mount table cannot be read ({source})",
+        path.display()
+    )]
+    MountUnknown {
+        /// The directory.
+        path: PathBuf,
+        /// Why the mount table could not be read.
+        source: io::Error,
+    },
+    /// The system refused to open, read or remove `path`.
+    #[error("cannot remove {}: {source}", path.display())]
+    Io {
+        /// The path.
+        path: PathBuf,
+        /// Why.
+        source: io::Error,
+    },
+}
+
 /// An entry that was listed but could not be read: one `scan_errors` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanError {

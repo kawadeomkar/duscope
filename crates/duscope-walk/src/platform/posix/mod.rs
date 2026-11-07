@@ -4,6 +4,7 @@
 pub(crate) mod signal;
 pub(crate) mod stamp;
 pub(crate) mod system;
+pub(crate) mod unlink;
 pub(crate) mod winsize;
 
 use std::ffi::{CStr, CString};
