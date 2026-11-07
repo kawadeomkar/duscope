@@ -236,6 +236,20 @@ Cargo builds it with its default release settings: duscope's release profile
 (link-time optimisation, symbols stripped) applies only to builds inside this
 repository, so the binary is larger than the prebuilt ones.
 
+The `pixels` feature adds `--treemap pixels`: the map drawn in pixels on a
+terminal that shows images through Kitty graphics, Sixel or iTerm2's inline
+images, asked for only when the flag is given. No prebuilt package has it,
+and it needs Rust 1.90 or later:
+
+```sh
+cargo install duscope --locked --features pixels
+```
+
+Inside tmux the map stays in cells, with a warning: asking the terminal
+through tmux would mean running `tmux set -p allow-passthrough on`, which
+changes the pane's settings for every program after duscope, and duscope
+runs no other program.
+
 ### From source
 
 It needs [rustup](https://rustup.rs), which installs the toolchain pinned in

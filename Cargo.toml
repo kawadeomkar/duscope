@@ -61,11 +61,24 @@ quick-xml = { version = "=0.42.0", default-features = false }
 # crate without its widget set, and its crossterm backend, pinned together.
 ratatui-core = { version = "=0.1.2", default-features = false, features = ["std"] }
 ratatui-crossterm = { version = "=0.1.2", default-features = false, features = ["crossterm_0_29"] }
+# The pixel treemap behind the `pixels` feature (P4-TUI-07): the picker that
+# asks the terminal for Kitty graphics, Sixel or iTerm2, and their encoders.
+# Default features off: no chafa (a C library), no `image` default codecs (its
+# `png` stays, which the crate asks for) and no crossterm backend for ratatui.
+ratatui-image = { version = "11.1.0", default-features = false }
+# The picture handed to ratatui-image's encoders, as the image crate's RGB
+# buffer: the version ratatui-image asks for, with no codec of its own (the
+# `png` ratatui-image turns on stays).
+image = { version = "=0.25.10", default-features = false }
 # The index (P2-IDX-02): `bundled` compiles the SQLite the binary ships, with
 # the features duscope does not use left out (.cargo/config.toml); `functions`,
 # `hooks` and `limits` for the `query --sql` sandbox (P2-QRY-07). 0.40.2 is
 # the newest release the 1.88 toolchain builds: 0.41 needs 1.89.
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "functions", "hooks", "limits"] }
+# The `pixels` feature's guard on the terminal's modes around the picker's
+# probe (P4-TUI-07): the version crossterm already brings, with the features it
+# already turns on.
+rustix = { version = "1.1.5", default-features = false, features = ["std", "termios"] }
 # Scan ids: SHA-256 of the root, the start time and 8 random bytes.
 sha2 = { version = "=0.11.1", default-features = false }
 thiserror = "2.0.21"

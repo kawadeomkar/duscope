@@ -1,7 +1,8 @@
 //! The crate's error enum.
 
-/// Why a treemap input was refused: so far, a user's theme file
-/// ([`crate::packs::Pack::from_toml`]). Each variant names the file.
+/// Why a treemap input was refused: a user's theme file
+/// ([`crate::packs::Pack::from_toml`]), each variant naming the file; or
+/// why the map could not be drawn in pixels ([`crate::pixels`]).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TreemapError {
     /// The file is not TOML, or not in the theme file's shape.
@@ -67,4 +68,11 @@ pub enum TreemapError {
         /// Each clash as `role = class`.
         clashes: Vec<String>,
     },
+    /// `--treemap pixels` in a build without the `pixels` feature.
+    #[error("--treemap pixels needs the pixels feature, which this build does not have")]
+    PixelsNotCompiled,
+    /// The map could not be drawn in pixels: too large a picture, or its
+    /// encoder failed.
+    #[error("the picture could not be encoded for the terminal: {0}")]
+    PixelsEncode(String),
 }

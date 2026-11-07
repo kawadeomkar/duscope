@@ -14,7 +14,9 @@ targets = [
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
 ]
-# Both Cargo features (`system-sqlite`, `pixels`) are shipped configurations.
+# Both Cargo features (`system-sqlite`, `pixels`) are configurations people
+# build, so their trees are checked too, though no shipped build turns `pixels`
+# on (P4-TUI-07).
 all-features = true
 # Dev-dependencies stay in the graph, so the licence, source and advisory
 # checks hold test-only crates too: their build scripts and proc-macros run on
@@ -57,6 +59,18 @@ multiple-versions = "deny"
 # crossterm) still build on syn 2, where clap, serde and thiserror are on syn 3.
 skip = [
     { crate = "syn@2", reason = "a procedural-macro library run at compile time for strum_macros and derive_more-impl; none of it reaches the binary (DEV-71)" },
+    # The `pixels` feature's tree (P4-TUI-07), which no build the project ships
+    # turns on: ratatui-image 11.1.0, its newest release, and image's png codec
+    # are a release behind the versions the rest of the tree uses. None of them
+    # is in a default build (`cargo tree -e normal` without the feature).
+    { crate = "thiserror@1", reason = "ratatui-image's error type, behind the pixels feature only (P4-TUI-07)" },
+    { crate = "thiserror-impl@1", reason = "thiserror 1's derive, for ratatui-image, behind the pixels feature only (P4-TUI-07)" },
+    { crate = "rustix@0.38", reason = "the terminal calls of ratatui-image's probe, behind the pixels feature only (P4-TUI-07)" },
+    { crate = "linux-raw-sys@0.4", reason = "rustix 0.38's Linux system calls, for ratatui-image, behind the pixels feature only (P4-TUI-07)" },
+    { crate = "rand@0.8", reason = "ratatui-image's Kitty image ids, behind the pixels feature only (P4-TUI-07)" },
+    { crate = "rand_core@0.6", reason = "rand 0.8's core, for ratatui-image, behind the pixels feature only (P4-TUI-07)" },
+    { crate = "getrandom@0.2", reason = "rand 0.8's source of randomness, for ratatui-image, behind the pixels feature only (P4-TUI-07)" },
+    { crate = "miniz_oxide@0.8", reason = "the inflater png 0.18 (through image, for ratatui-image) names beside flate2's 0.9, behind the pixels feature only (P4-TUI-07)" },
 ]
 deny = [
     { crate = "tokio", reason = "the binary is synchronous; tokio comes only with rmcp, a dev-dependency (D36)" },

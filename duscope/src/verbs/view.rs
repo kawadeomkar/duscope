@@ -16,7 +16,7 @@ use duscope_core::query::{self, ScanSelector, TreeView};
 use duscope_tui::{App, Background, MIN_SIZE, Tui};
 
 use super::{Exit, Failure, scan, source, treemap};
-use crate::cli::{ColorBy, IndexArgs, MinTile, ScanArgs, ViewArgs, WalkArgs};
+use crate::cli::{ColorBy, IndexArgs, MinTile, ScanArgs, TreemapWhen, ViewArgs, WalkArgs};
 use crate::out::{Format, Output};
 
 /// The hint of every refusal.
@@ -41,6 +41,7 @@ pub fn run(args: &ViewArgs, index_dir: Option<&Path>, output: &Output) -> Result
         depth: None,
         min_tile: None,
         pool_files: false,
+        pixels: false,
     };
     let view = source.view();
     show(
@@ -80,6 +81,7 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         depth: args.depth,
         min_tile: args.min_tile,
         pool_files: args.pool_files,
+        pixels: args.treemap == Some(TreemapWhen::Pixels),
     };
     show(
         &scanned.view(),
@@ -98,6 +100,8 @@ struct Look<'a> {
     depth: Option<u32>,
     min_tile: Option<MinTile>,
     pool_files: bool,
+    /// `--treemap pixels` (`scan -i`).
+    pixels: bool,
 }
 
 /// Refuses what the viewer cannot draw on: stdout is not a terminal (a
@@ -186,6 +190,13 @@ fn show(
     let mut tui = Tui::enter(probe).map_err(|e| terminal_failure(&e))?;
     let light = tui.background().map(|b| b == Background::Light);
     let style = treemap::viewer_style(look.theme, output.color, light)?;
+    // The pixel probe needs the terminal held and its events not yet read;
+    // a build without the feature compiles none of it.
+    let drawing = if duscope_treemap::pixels::COMPILED && look.pixels {
+        Some(treemap::pixels(&style, output)?)
+    } else {
+        None
+    };
     let opts = style.paint_opts(
         look.color_by,
         look.depth,
@@ -199,6 +210,12 @@ fn show(
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from);
     let mut app = App::new(view, opts, style.depth(), home.as_deref(), summary, warning);
+    let mut in_cells = None;
+    match drawing {
+        Some(treemap::Drawing::Pixels(found)) => app.draw_in_pixels(found),
+        Some(treemap::Drawing::Cells(why)) => in_cells = Some(why),
+        None => {}
+    }
     duscope_tui::run(tui.terminal(), &mut app, || {
         assert!(
             !test_panic,
@@ -208,6 +225,9 @@ fn show(
     })
     .map_err(|e| terminal_failure(&e))?;
     drop(tui);
+    if let Some(why) = in_cells {
+        log::warn!("--treemap pixels: {why}, so the map was drawn in cells");
+    }
     if !output.quiet {
         crate::out::warn(warnings);
     }

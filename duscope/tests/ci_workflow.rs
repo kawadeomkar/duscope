@@ -53,6 +53,8 @@ const REQUIRED_CHECKS: &[&str] = &[
     "size (ubuntu-24.04)",
     "build-time",
     "repro",
+    "pixels (macos-26)",
+    "pixels (ubuntu-24.04)",
     "changelog",
     "size-comment",
     "verify-tag",
@@ -107,6 +109,7 @@ const RECIPES: &[(&str, &str)] = &[
     ("size", "size"),
     ("repro", "repro"),
     ("platform", "platform-tests"),
+    ("pixels", "pixels"),
 ];
 
 fn read(relative: &str) -> String {
@@ -877,4 +880,30 @@ fn p0_ci_01_each_cpu_model_has_its_build_budget() {
         ),
         "{stdout}"
     );
+}
+
+/// P4-TUI-07: the `pixels` job builds the feature and runs its tests on both
+/// first-class platforms, as every change builds and tests on both.
+#[test]
+fn p4_tui_07_the_pixels_job_runs_on_both_platforms() {
+    let jobs = jobs(&read(WORKFLOW));
+    let job = jobs
+        .iter()
+        .find(|job| job.id == "pixels")
+        .expect("ci.yml has no `pixels` job");
+    let runners: BTreeSet<String> = match job_key(job, "runs-on") {
+        Some("${{ matrix.os }}") => job
+            .matrix()
+            .into_iter()
+            .filter(|(key, _)| key == "os")
+            .map(|(_, os)| os)
+            .collect(),
+        other => other.map(str::to_owned).into_iter().collect(),
+    };
+    for os in ["macos-26", "ubuntu-24.04"] {
+        assert!(
+            runners.contains(os),
+            "the pixels job does not run on {os}: {runners:?}"
+        );
+    }
 }

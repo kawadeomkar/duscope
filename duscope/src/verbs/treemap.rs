@@ -1,15 +1,19 @@
 //! The static treemap `scan` draws on a terminal (or with `--treemap
 //! always`): the theme, the colour depth and the glyphs decided from the
-//! flags and the environment, the frame painted by `duscope-treemap`.
+//! flags and the environment, the frame painted by `duscope-treemap`. With
+//! `--treemap pixels` (the `pixels` feature) the map above the frame's
+//! lines is drawn in pixels where the terminal answers the probe.
 
 use std::ffi::OsString;
+use std::io::{self, IsTerminal};
 
 use duscope_core::envelope::Warning;
 use duscope_core::query::{self, ByTypeQuery, Filters, TreeView, timegrammar};
 use duscope_core::rules::{Class, Classes};
-use duscope_treemap::cells::{Color, Depth};
+use duscope_treemap::cells::{CellBuffer, Color, Depth};
 use duscope_treemap::packs::Pack;
 use duscope_treemap::paint::{ColorBy, Footer, Glyphs, LsColors, PaintOpts, frame};
+use duscope_treemap::pixels::{self, Pixels};
 
 use super::scan::{self, Scanned};
 use super::{Exit, Failure};
@@ -27,6 +31,16 @@ pub struct Style {
     glyphs: Glyphs,
     /// `LS_COLORS`, read when `--color-by lscolors` asks for it.
     ls_colors: LsColors,
+    /// `--treemap pixels`.
+    pixels: bool,
+}
+
+/// What `--treemap pixels` draws the map with.
+pub(super) enum Drawing {
+    /// The terminal's image protocol.
+    Pixels(Pixels),
+    /// Cells, and why.
+    Cells(&'static str),
 }
 
 /// The variables the map's look depends on, read once, so the decisions
@@ -155,21 +169,72 @@ impl Style {
     }
 }
 
-/// The map's style for `args`: refuses `--treemap pixels` (`not_compiled`)
-/// and a theme that is neither a pack nor a readable theme file (`usage`).
+/// The map's style for `args`: refuses `--treemap pixels` in a build
+/// without the `pixels` feature (`not_compiled`) and a theme that is
+/// neither a pack nor a readable theme file (`usage`).
 pub fn style(args: &ScanArgs, output: &Output) -> Result<Style, Failure> {
-    if args.treemap == Some(TreemapWhen::Pixels) {
-        return Err(Failure::new(
-            Exit::Usage,
-            "not_compiled",
-            "--treemap pixels needs the pixels feature, which this build does not have",
-        )
-        .hint(
-            "Install with cargo install duscope --features pixels, or run duscope scan --treemap always for the cell map",
-        ));
+    let pixels = args.treemap == Some(TreemapWhen::Pixels);
+    if pixels && !pixels::COMPILED {
+        return Err(not_compiled());
     }
     let env = MapEnv::read(|name| std::env::var_os(name));
-    decide(args.theme.as_ref(), output.color, &env)
+    Ok(Style {
+        pixels,
+        ..decide(args.theme.as_ref(), output.color, &env)?
+    })
+}
+
+/// `--treemap pixels` in a build without the `pixels` feature.
+fn not_compiled() -> Failure {
+    Failure::new(
+        Exit::Usage,
+        "not_compiled",
+        "--treemap pixels needs the pixels feature, which this build does not have",
+    )
+    .hint(
+        "Install with cargo install duscope --features pixels on Rust 1.90 or later, or run duscope scan --treemap always for the cell map",
+    )
+}
+
+/// What `--treemap pixels` draws the map in `style` with: the terminal's
+/// image protocol, asked for now; or cells, where the map goes to a file
+/// (`-o`), where stdin and stdout are not both a terminal (the probe asks
+/// on one and reads the answer on the other), where the colours are off
+/// or the terminal's own (a picture has colours, and none of the
+/// terminal's), inside tmux (where the probe would run `tmux` and turn on
+/// an option of the pane: [`pixels::inside_tmux`]), and where the terminal
+/// answers none of the protocols.
+pub(super) fn pixels(style: &Style, output: &Output) -> Result<Drawing, Failure> {
+    if output.file.is_some() {
+        return Ok(Drawing::Cells("the map is written to a file"));
+    }
+    if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
+        return Ok(Drawing::Cells("stdin and stdout are not both a terminal"));
+    }
+    if colourless(&style.pack) {
+        return Ok(Drawing::Cells(
+            "a picture is drawn in a theme's colours, and the map's colours are off or the terminal's own",
+        ));
+    }
+    if pixels::inside_tmux(|name| std::env::var_os(name)) {
+        return Ok(Drawing::Cells(
+            "inside tmux the probe would turn on tmux's allow-passthrough option",
+        ));
+    }
+    match pixels::probe() {
+        Ok(Some(found)) => Ok(Drawing::Pixels(found)),
+        Ok(None) => Ok(Drawing::Cells(
+            "the terminal answered no Kitty graphics, Sixel or iTerm2 probe",
+        )),
+        // The probe fails only in a build without the feature.
+        Err(_) => Err(not_compiled()),
+    }
+}
+
+/// Whether `pack` draws without colours of its own: `no-color` shades by
+/// depth and `terminal-native` takes the terminal's sixteen.
+fn colourless(pack: &Pack) -> bool {
+    pack.shades || pack.name == "terminal-native"
 }
 
 /// The style from `--theme`, whether what people read is coloured, and
@@ -197,6 +262,7 @@ fn decide(theme_arg: Option<&OsString>, color: bool, env: &MapEnv) -> Result<Sty
             Glyphs::Ascii
         },
         ls_colors: ls_colors(env.ls_colors.as_deref().unwrap_or_default()),
+        pixels: false,
     })
 }
 
@@ -211,7 +277,6 @@ pub(super) fn picture(
     configured: Option<&OsString>,
 ) -> Result<(Pack, LsColors), Failure> {
     let env = MapEnv::read(|name| std::env::var_os(name));
-    let colourless = |pack: &Pack| pack.shades || pack.name == "terminal-native";
     let pack = match theme_arg {
         Some(_) => theme(theme_arg, &env)?,
         None => std::env::var_os("DUSCOPE_THEME")
@@ -282,7 +347,31 @@ pub fn draw(
         next: next_line(root.as_deref(), dot, columns),
     };
     let buffer = frame(&view, &opts, &footer, columns, rows);
-    output.bytes(buffer.to_ansi(style.depth).as_bytes())?;
+    // In pixels, the map above the frame's four lines, where it has them
+    // (not below 60×12, where the frame is the summary alone). A build
+    // without the feature compiles none of it.
+    let map_rows = buffer.height().saturating_sub(4);
+    let in_pixels = if pixels::COMPILED && style.pixels && map_rows > 0 {
+        let drawn = match pixels(style, output)? {
+            Drawing::Pixels(found) => found
+                .map(&view, &opts, columns, map_rows)
+                .map_err(|e| e.to_string()),
+            Drawing::Cells(why) => Err(why.to_owned()),
+        };
+        drawn
+            .inspect_err(|why| log::warn!("--treemap pixels: {why}, so the map is drawn in cells"))
+            .ok()
+    } else {
+        None
+    };
+    match in_pixels {
+        Some(map) => {
+            let mut text = map.to_ansi();
+            text.push_str(&rows_from(&buffer, map_rows).to_ansi(style.depth));
+            output.bytes(text.as_bytes())?;
+        }
+        None => output.bytes(buffer.to_ansi(style.depth).as_bytes())?,
+    }
     // The frame has room for one warning; the others follow on stderr, as
     // every other format writes them.
     for warning in warnings.iter().skip(1) {
@@ -292,6 +381,19 @@ pub fn draw(
         }
     }
     Ok(())
+}
+
+/// The rows of `buffer` from `from` down.
+fn rows_from(buffer: &CellBuffer, from: u16) -> CellBuffer {
+    let mut rows = CellBuffer::new(buffer.width(), buffer.height().saturating_sub(from));
+    for y in 0..rows.height() {
+        for x in 0..rows.width() {
+            if let (Some(&cell), Some(slot)) = (buffer.get(x, from + y), rows.get_mut(x, y)) {
+                *slot = cell;
+            }
+        }
+    }
+    rows
 }
 
 /// The frame's warning row: the first warning, and how many more follow

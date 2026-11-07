@@ -1,4 +1,5 @@
-//! Treemap layouts, the static terminal map and the SVG and PNG writers.
+//! Treemap layouts, the static terminal map, the SVG and PNG writers, and
+//! the map in pixels behind the `pixels` feature.
 //!
 //! This crate is an implementation detail of the `duscope` binary and promises
 //! no API stability before 1.0.
@@ -20,6 +21,7 @@ mod gp;
 pub mod packs;
 pub mod paint;
 pub mod picture;
+pub mod pixels;
 pub mod png;
 mod squarify;
 pub mod svg;

@@ -11,6 +11,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::num::NonZeroU16;
 use std::path::Path;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -18,8 +19,9 @@ use duscope_core::query::{TreeView, children};
 use duscope_core::rules::Class;
 use duscope_treemap::cells::{CellBuffer, Color, Depth};
 use duscope_treemap::paint::{ColorBy, Glyphs, PaintOpts, classes_of, paint_unlabelled};
+use duscope_treemap::pixels::{PixelMap, Pixels};
 use ratatui_core::backend::Backend;
-use ratatui_core::buffer::Buffer;
+use ratatui_core::buffer::{Buffer, CellDiffOption};
 use ratatui_core::layout::Rect;
 use ratatui_core::style::{Color as Shown, Modifier};
 use ratatui_core::terminal::Terminal;
@@ -71,7 +73,14 @@ pub struct App<'a> {
     /// keys: `Alt-]`, then `11;rgb:` and hex digits, then `Alt-\` or
     /// `Ctrl-G`. Any other key ends it and counts as itself.
     answer: bool,
+    /// `--treemap pixels`: what draws the map in pixels, and the map it
+    /// drew, kept until the pane's size changes.
+    pixels: Option<(Pixels, RefCell<Option<Drawn>>)>,
 }
+
+/// The map in pixels and the size it was drawn at; `None` where it could
+/// not be drawn, which leaves the cells.
+type Drawn = ((u16, u16), Option<PixelMap>);
 
 impl std::fmt::Debug for App<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -125,7 +134,14 @@ impl<'a> App<'a> {
             opts,
             depth,
             answer: false,
+            pixels: None,
         }
+    }
+
+    /// Draws the map in pixels with `pixels` (`--treemap pixels`), over
+    /// its cells.
+    pub fn draw_in_pixels(&mut self, pixels: Pixels) {
+        self.pixels = Some((pixels, RefCell::new(None)));
     }
 
     /// The selected entry's id.
@@ -160,6 +176,27 @@ impl<'a> App<'a> {
             self.screen(area.width, area.height)
         };
         copy(&cells, self.depth, area, buf);
+        if area.width >= MIN_SIZE.0 && area.height >= MIN_SIZE.1 {
+            self.draw_pixels(area, buf);
+        }
+    }
+
+    /// With `--treemap pixels`, the map in pixels over its cells in the
+    /// map pane, drawn again only when the pane's size changes.
+    fn draw_pixels(&self, area: Rect, buf: &mut Buffer) {
+        let Some((pixels, drawn)) = &self.pixels else {
+            return;
+        };
+        let map = layout(area.width, area.height).map;
+        let size = (map.width, map.height);
+        let mut drawn = drawn.borrow_mut();
+        if drawn.as_ref().is_none_or(|(at, _)| *at != size) {
+            let fresh = pixels.map(self.view, &self.opts, map.width, map.height);
+            *drawn = Some((size, fresh.ok()));
+        }
+        if let Some((_, Some(cells))) = drawn.as_ref() {
+            overlay(cells, area.x + map.x, area.y + map.y, buf);
+        }
     }
 
     /// The whole screen at `w`×`h`, at least [`MIN_SIZE`].
@@ -411,6 +448,32 @@ pub(crate) fn copy(cells: &CellBuffer, depth: Depth, area: Rect, buf: &mut Buffe
                 target.bg = color(cell.bg, depth);
                 if cell.bold {
                     target.modifier = Modifier::BOLD;
+                }
+            }
+        }
+    }
+}
+
+/// Puts the map in pixels at `x`, `y` of `buf`: each cell's text, one
+/// column wide whatever it holds, in its colour; the cells a picture
+/// drawn from an earlier one covers are left out of the frame's diff.
+fn overlay(cells: &PixelMap, x: u16, y: u16, buf: &mut Buffer) {
+    for dy in 0..cells.height() {
+        for dx in 0..cells.width() {
+            let Some(target) = buf.cell_mut((x + dx, y + dy)) else {
+                continue;
+            };
+            match cells.get(dx, dy) {
+                Some(cell) => {
+                    target.reset();
+                    target.set_symbol(&cell.symbol);
+                    if let Some((r, g, b)) = cell.fg {
+                        target.set_fg(Shown::Rgb(r, g, b));
+                    }
+                    target.set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
+                }
+                None => {
+                    target.set_diff_option(CellDiffOption::Skip);
                 }
             }
         }
