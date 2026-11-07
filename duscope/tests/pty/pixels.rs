@@ -337,3 +337,81 @@ fn p4_tui_07_the_viewer_draws_its_map_in_pixels() {
     assert!(text.contains("exit=0"), "{text}");
     assert!(!terminal.screen().alternate_screen(), "{text}");
 }
+
+#[test]
+fn p4_tui_03_a_zoom_draws_the_zoomed_folder_in_pixels() {
+    let env = TestEnv::new();
+    let home = env.fixtures().path("home");
+    let script = format!(
+        "'{}' scan -i --treemap pixels --threads 4 '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        home.display()
+    );
+    let mut terminal = Mock::new(Graphics::Kitty)
+        .builder(&env)
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap();
+    terminal
+        .wait_until(|s| s.alternate_screen() && s.graphics().kitty() == 1)
+        .unwrap();
+    // `z` zooms to the folder under the cursor and the picture follows it, as
+    // the cells under it do; `Z` comes back to the whole map, drawn again.
+    terminal.send(Key::Char('z')).unwrap();
+    terminal.wait_until(|s| s.graphics().kitty() == 2).unwrap();
+    terminal.send(Key::Char('Z')).unwrap();
+    terminal.wait_until(|s| s.graphics().kitty() == 3).unwrap();
+    terminal.send(Key::Char('q')).unwrap();
+    terminal.wait_exit().unwrap();
+    let text = terminal.screen().full_text();
+    assert!(text.contains("exit=0"), "{text}");
+}
+
+#[test]
+fn p4_tui_03_in_pixels_the_cursor_is_drawn_into_the_picture() {
+    let env = TestEnv::new();
+    let home = env.fixtures().path("home");
+    let script = format!(
+        "'{}' scan -i --treemap pixels --theme mocha --threads 4 '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        home.display()
+    );
+    let mut terminal = Mock::new(Graphics::Kitty)
+        .builder(&env)
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap();
+    terminal
+        .wait_until(|s| s.alternate_screen() && s.graphics().kitty() == 1)
+        .unwrap();
+    // Mocha's accent, which no class colour is: the cursor's marks, and
+    // where they are.
+    let accent = |screen: &Screen| {
+        let bitmap = screen.graphics().last().unwrap().decode().unwrap();
+        let mut marked = Vec::new();
+        for y in 0..bitmap.height() {
+            for x in 0..bitmap.width() {
+                if bitmap.pixel(x, y) == Some([0xf9, 0xe2, 0xaf, 0xff]) {
+                    marked.push((x, y));
+                }
+            }
+        }
+        marked
+    };
+    // The cursor opens on the largest file, marked in the picture.
+    let first = accent(&terminal.screen());
+    assert!(first.len() >= 100, "{} accent pixels", first.len());
+    // ⌫ moves it up to the file's folder, twice: the picture is sent again
+    // each time, the marks around the folder.
+    terminal.send(Key::Backspace).unwrap();
+    terminal.wait_until(|s| s.graphics().kitty() == 2).unwrap();
+    terminal.send(Key::Backspace).unwrap();
+    terminal.wait_until(|s| s.graphics().kitty() == 3).unwrap();
+    let third = accent(&terminal.screen());
+    assert!(third.len() >= 100, "{} accent pixels", third.len());
+    assert_ne!(first, third);
+    terminal.send(Key::Char('q')).unwrap();
+    terminal.wait_exit().unwrap();
+    let text = terminal.screen().full_text();
+    assert!(text.contains("exit=0"), "{text}");
+}

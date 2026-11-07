@@ -161,7 +161,7 @@ pixels:
     cargo +{{pixels_toolchain}} clippy --locked -p duscope-treemap --features pixels --all-targets --no-deps -- -D clippy::all
     cargo +{{pixels_toolchain}} build --locked -p duscope --features pixels
     cargo +{{pixels_toolchain}} test --locked -p duscope-treemap --features pixels -- p4_tui_07_
-    cargo +{{pixels_toolchain}} test --locked -p duscope --features pixels --test pixels --test pty -- p4_tui_07_
+    cargo +{{pixels_toolchain}} test --locked -p duscope --features pixels --test pixels --test pty -- p4_tui_07_ p4_tui_03_
 
 # The tests of one package: `just test-pkg P2-QRY-06` runs the tests named p2_qry_06_*
 test-pkg id:

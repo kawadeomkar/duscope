@@ -23,7 +23,13 @@
 //!   The labels are drawn once every tile is.
 //! - **Under the map**, where the picture is at least 40 by 12 cells: the
 //!   legend (each class's share) and the totals.
+//! - **The viewer's picture** (`--treemap pixels`,
+//!   [`crate::pixels::Picture`]) may be of a folder the viewer zooms to:
+//!   its tiles keep the whole map's colours, as the cell map's do
+//!   ([`Base`]), and the tiles drawn are noted, so that the viewer can mark
+//!   its cursor on them.
 
+use std::borrow::Cow;
 use std::io;
 
 use duscope_core::query::{Node, TreeView, children};
@@ -32,7 +38,8 @@ use duscope_core::rules::Class;
 use crate::cells::Color;
 use crate::gp::cut;
 use crate::paint::{
-    Glyphs, PaintOpts, classes_of, compact, dominant, readable, rgb, tile_color, truncate,
+    Base, Drawn, DrawnKind, Glyphs, PaintOpts, classes_of, compact, dominant, readable, rgb,
+    tile_color, truncate,
 };
 use crate::width::glyphs;
 use crate::{Algorithm, Rect, layout};
@@ -121,6 +128,31 @@ impl Metrics {
     }
 }
 
+/// What a picture of part of a scan carries beside its options: the
+/// viewer's, of the folder it zooms to.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Within<'c> {
+    /// Where the picture's root stands in the scan, so that its tiles keep
+    /// the whole map's `--color-by folder` and `level` colours.
+    pub base: Base,
+    /// Each of the picture's entries' class, by id, worked out already;
+    /// `None` works them out.
+    pub class_of: Option<&'c [Class]>,
+    /// Whether the tiles drawn are noted.
+    pub note: bool,
+}
+
+/// What [`draw`] drew.
+#[derive(Debug, Default)]
+pub(crate) struct Drawing {
+    /// The number of tiles painted.
+    pub tiles: u64,
+    /// With [`Within::note`], the tiles laid out, in pixels: each entry's
+    /// own (a folder whose children are laid out inside it as
+    /// [`DrawnKind::Box`], with no outline), each folder's pool and files.
+    pub drawn: Vec<Drawn>,
+}
+
 /// A label, drawn once the tiles are.
 struct Label {
     clip: Rect,
@@ -131,30 +163,40 @@ struct Label {
 }
 
 /// Draws the picture of the scan in `view` on `canvas`: the tiles, their
-/// labels, then the legend and the totals; the number of tiles.
+/// labels, then the legend and the totals; `within` says where `view`
+/// stands in the scan.
 pub(crate) fn draw(
     view: &dyn TreeView,
     opts: &PictureOpts<'_>,
     metrics: Metrics,
     canvas: &mut dyn Canvas,
-) -> io::Result<u64> {
+    within: &Within<'_>,
+) -> io::Result<Drawing> {
+    let base = within.base;
     let mut walk = Walk {
         view,
         opts,
         metrics,
         canvas,
-        class_of: classes_of(view, opts.paint.classes),
+        class_of: within.class_of.map_or_else(
+            || Cow::Owned(classes_of(view, opts.paint.classes)),
+            Cow::Borrowed,
+        ),
+        base,
         labels: Vec::new(),
         tiles: 0,
+        drawn: within.note.then(Vec::new),
     };
     if !view.is_empty() {
         let root = view.node(0);
         let area = Rect::new(0, 0, metrics.width, metrics.map_h);
+        // Below the scan's root every tile is inside one top-level folder.
+        let folder = base.folder.filter(|_| base.depth > 0);
         if root.is_dir() {
-            walk.block(&root, area, 0, None)?;
+            walk.block(&root, area, 0, folder)?;
         } else {
             let class = walk.class_of[0];
-            let color = tile_color(view, &opts.paint, &root, class, 0, None);
+            let color = tile_color(view, &opts.paint, &root, class, base.depth, folder);
             walk.leaf(
                 area,
                 color,
@@ -167,6 +209,7 @@ pub(crate) fn draw(
         canvas,
         labels,
         tiles,
+        drawn,
         ..
     } = walk;
     for label in &labels {
@@ -182,7 +225,10 @@ pub(crate) fn draw(
     if metrics.footer {
         under(canvas, opts, metrics)?;
     }
-    Ok(tiles)
+    Ok(Drawing {
+        tiles,
+        drawn: drawn.unwrap_or_default(),
+    })
 }
 
 /// The walk's state.
@@ -192,9 +238,13 @@ struct Walk<'v, 'o, 'c> {
     metrics: Metrics,
     canvas: &'c mut dyn Canvas,
     /// Each entry's class, by pre-order id.
-    class_of: Vec<Class>,
+    class_of: Cow<'o, [Class]>,
+    /// Where the picture's root stands in the scan.
+    base: Base,
     labels: Vec<Label>,
     tiles: u64,
+    /// The tiles laid out, when they are noted.
+    drawn: Option<Vec<Drawn>>,
 }
 
 /// A tile to place: an entry, or a directory's files under `--pool-files`.
@@ -235,8 +285,9 @@ impl Walk<'_, '_, '_> {
             files.push((Item::Files(dir.id, pooled.1), pooled.0));
         }
         // A top-level folder's rank among the root's children, largest
-        // first, as the static map numbers them.
-        let ranks: Vec<usize> = if depth == 0 {
+        // first, as the static map numbers them; a zoomed picture's root is
+        // inside one already.
+        let ranks: Vec<usize> = if depth == 0 && self.base.depth == 0 {
             let mut all: Vec<(u64, usize)> = files
                 .iter()
                 .chain(&dirs)
@@ -261,19 +312,21 @@ impl Walk<'_, '_, '_> {
         if self.opts.algorithm == Algorithm::Gp && file_weight > 0 && dir_weight > 0 {
             let whole = u128::from(file_weight) + u128::from(dir_weight);
             let (files_area, dirs_area) = cut(area, u128::from(file_weight), whole);
-            self.lay(&files, files_area, &|i| rank(i))?;
-            self.lay(&dirs, dirs_area, &|i| rank(files_n + i))?;
+            self.lay(dir.id, &files, files_area, &|i| rank(i))?;
+            self.lay(dir.id, &dirs, dirs_area, &|i| rank(files_n + i))?;
         } else {
             let all: Vec<(Item, u64)> = files.into_iter().chain(dirs).collect();
-            self.lay(&all, area, &rank)?;
+            self.lay(dir.id, &all, area, &rank)?;
         }
         Ok(())
     }
 
-    /// Lays `items` out in `area` with the algorithm asked for and paints
-    /// each tile, then the pool; `folder` gives an item's top-level folder.
+    /// Lays `items`, children of directory `dir`, out in `area` with the
+    /// algorithm asked for and paints each tile, then the pool; `folder`
+    /// gives an item's top-level folder.
     fn lay(
         &mut self,
+        dir: u32,
         items: &[(Item, u64)],
         area: Rect,
         folder: &dyn Fn(usize) -> Option<usize>,
@@ -298,19 +351,23 @@ impl Walk<'_, '_, '_> {
                     let open = paint.depth.is_none_or(|cap| node.depth < cap.max(1))
                         && node.last_id > node.id;
                     if node.is_dir() && open && tile.rect.w >= 2 && tile.rect.h >= 2 {
+                        self.note(id, dir, tile.rect, DrawnKind::Box { open: true });
                         self.block(&node, tile.rect, node.depth, folder)?;
                     } else {
+                        self.note(id, dir, tile.rect, DrawnKind::Leaf);
                         let class = if node.is_dir() {
                             dominant(self.view, &self.class_of, paint.size, id, false)
                         } else {
                             self.class_of[id as usize]
                         };
-                        let color = tile_color(self.view, paint, &node, class, node.depth, folder);
+                        let depth = node.depth + self.base.depth;
+                        let color = tile_color(self.view, paint, &node, class, depth, folder);
                         let name = name_of(self.view, &node);
                         self.leaf(tile.rect, color, &name, Some(node.size(paint.size)))?;
                     }
                 }
                 Item::Files(dir, count) => {
+                    self.note(dir, dir, tile.rect, DrawnKind::Files);
                     let class = dominant(self.view, &self.class_of, paint.size, dir, true);
                     let color = paint.pack.class(class);
                     self.leaf(tile.rect, color, &format!("{count} files"), None)?;
@@ -318,11 +375,29 @@ impl Walk<'_, '_, '_> {
             }
         }
         if let Some(small) = &laid.small {
+            self.note(dir, dir, small.rect, DrawnKind::Small);
             let color = paint.pack.class(Class::Other);
             let label = format!("+{} small", small.ids.len());
             self.leaf(small.rect, color, &label, None)?;
         }
         Ok(())
+    }
+
+    /// Notes a tile laid out, when the tiles are noted: `id`'s own, or
+    /// for a pool or the files' tile, its folder's; `parent` the folder
+    /// whose block holds it.
+    fn note(&mut self, id: u32, parent: u32, rect: Rect, kind: DrawnKind) {
+        if let Some(drawn) = &mut self.drawn
+            && rect.w > 0
+            && rect.h > 0
+        {
+            drawn.push(Drawn {
+                id,
+                parent,
+                rect,
+                kind,
+            });
+        }
     }
 
     /// Paints one leaf in `rect`, shaded in `color`, and queues its label.

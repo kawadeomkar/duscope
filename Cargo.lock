@@ -719,6 +719,7 @@ dependencies = [
  "duscope-testkit",
  "duscope-treemap",
  "libc",
+ "proptest",
  "ratatui-core",
  "ratatui-crossterm",
  "unicode-width",
