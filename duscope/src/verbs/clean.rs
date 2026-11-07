@@ -15,7 +15,8 @@
 //! shown and `yes` asked for once; otherwise, or under `--no-input`, the
 //! plan comes back with `confirmation_required`. The saved scan is not
 //! changed: after a move or a deletion an `index_untouched` warning names
-//! `rescan`.
+//! the rescan that measures the tree again (for an import, a new scan), and
+//! `next` holds it.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -27,10 +28,12 @@ use duscope_core::envelope::{
     CleanEnvelope, CleanQuery, CleanResult, ErrorObject, SCHEMA_VERSION, ScanBlock, Tool, Warning,
 };
 use duscope_core::handle::{Handle, Key};
-use duscope_core::query::{ExplainQuery, ScanSelector, SizeKind, clock};
+use duscope_core::index::Index;
+use duscope_core::query::{ExplainQuery, ScanSelector, SizeKind, TreeView, clock};
 
 use super::explain::unresolved_last;
-use super::source::{Lookup, core_failure, saved_block, stale_index};
+use super::next::{self, Hints};
+use super::source::{Lookup, core_failure, saved_block, scanned, stale_index};
 use super::treemap::shell_quote;
 use super::{Exit, Failure, scan};
 use crate::cli::CleanArgs;
@@ -114,8 +117,11 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     }
     let outcome = act.then(|| clean_execute(&mut plan));
     plan.plan.confirmation_required = !act && !blocked && moving > 0;
-    if outcome.is_some_and(|o| o.trashed_count + o.deleted_count > 0 || o.freed_bytes > 0) {
-        warnings.push(index_untouched(&scan_block, method));
+    // What moved or was deleted is still in the saved scan.
+    let changed =
+        outcome.is_some_and(|o| o.trashed_count + o.deleted_count > 0 || o.freed_bytes > 0);
+    if changed {
+        warnings.push(index_untouched(&resolved.index, method));
     }
 
     let failure = failure(
@@ -132,7 +138,10 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
             .unwrap_or_else(|| out::error_object(f)),
         _ => out::error_object(f),
     });
-    let next = next(args, &plan, outcome.is_some(), &scan_block);
+    let next = match outcome {
+        Some(_) => renew(changed, &resolved.index),
+        None => next(args, &plan, &scan_block),
+    };
     let footer = footer(&plan, outcome, output);
     let answer = envelope(&plan, outcome, &scan_block, &query, error, &warnings);
     let answer = CleanEnvelope { next, ..answer };
@@ -338,12 +347,16 @@ fn first_error(plan: &Plan) -> Option<&ErrorObject> {
     plan.plan.items.iter().find_map(|item| item.error.as_ref())
 }
 
-/// The saved scan is not changed by a move or a deletion: a rescan measures
-/// the tree again.
-fn index_untouched(scan: &ScanBlock, method: Method) -> Warning {
-    let hint = match scan.id.as_deref() {
-        Some(id) => format!("Run duscope rescan {id} to measure the tree again"),
-        None => "Run duscope scan to measure the tree again".to_owned(),
+/// The saved scan is not changed by a move or a deletion: a rescan of it,
+/// named as `next` names it, measures the tree again; an import, which has
+/// no scan options to rescan with, is renewed by a new scan of its root.
+fn index_untouched(index: &Index, method: Method) -> Warning {
+    let command = if scanned(index) {
+        let id = index.meta().scan_id.to_string();
+        next::command("rescan", None, &[], &id, index.file())
+    } else {
+        let root = index.root_path().to_string_lossy();
+        format!("duscope scan --save {}", shell_quote(&root))
     };
     let what = match method {
         Method::Trash => "what moved to the Trash",
@@ -353,22 +366,29 @@ fn index_untouched(scan: &ScanBlock, method: Method) -> Warning {
         code: "index_untouched",
         message: format!("the saved scans still hold {what}: they are never changed"),
         count: None,
-        hint: Some(hint),
+        hint: Some(format!("Run {command} to measure the tree again")),
     }
 }
 
-/// `clean`'s hints: after a plan that waits for a yes, the same items
-/// against the same saved scan with `--yes` (a handle's item by its handle
-/// again); after a move, the rescan that measures the tree again. None for
-/// a path that is not UTF-8, which a command line cannot carry.
-fn next(args: &CleanArgs, plan: &Plan, acted: bool, scan: &ScanBlock) -> Vec<String> {
-    if acted {
-        return scan
-            .id
-            .as_deref()
-            .map(|id| vec![format!("duscope rescan {id}")])
-            .unwrap_or_default();
+/// `clean`'s hint once it acted: when something moved or was deleted
+/// (`changed`), the rescan that measures the tree again, as `scans --check`
+/// suggests it. None when nothing changed, whose items' errors say what to
+/// do, nor for an import, which a rescan refuses.
+fn renew(changed: bool, index: &Index) -> Vec<String> {
+    if !changed || !scanned(index) {
+        return Vec::new();
     }
+    let id = index.meta().scan_id.to_string();
+    let root = index.root_path().to_string_lossy();
+    Hints::new(Some(&id), Some(index.file()))
+        .map(|mut hints| hints.run("rescan", Some(&root), &[]).done())
+        .unwrap_or_default()
+}
+
+/// `clean`'s hint for a plan that waits for a yes: the same items against
+/// the same saved scan with `--yes` (a handle's item by its handle again).
+/// None for a path that is not UTF-8, which a command line cannot carry.
+fn next(args: &CleanArgs, plan: &Plan, scan: &ScanBlock) -> Vec<String> {
     if !plan.plan.confirmation_required {
         return Vec::new();
     }
