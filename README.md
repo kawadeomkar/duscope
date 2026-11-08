@@ -29,6 +29,90 @@ filesystem, and it accounts for APFS clones and firmlinks on macOS and for btrfs
 and XFS reflinks, subvolumes and bind mounts on Linux. Linux and macOS are both
 first-class, with one binary, one set of commands and one JSON format.
 
+## Install
+
+GitHub Releases and crates.io carry each release from v0.1.0 (v0.0.1 was the
+pre-release placeholder). The other channels open with the release each one
+names.
+
+### GitHub Releases
+
+Prebuilt binaries for macOS (Apple silicon and Intel) and Linux (x86_64 and
+arm64, statically linked with musl), built by cargo-dist with build
+attestations. The shell installer picks the archive for the machine and
+installs `duscope` into `~/.cargo/bin`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/kawadeomkar/duscope/releases/latest/download/duscope-installer.sh | sh
+```
+
+To check a downloaded archive was built by this repository's release workflow:
+
+```sh
+gh attestation verify duscope-aarch64-apple-darwin.tar.xz --repo kawadeomkar/duscope
+```
+
+### Homebrew
+
+On macOS and Linux, with bottles, from the tap `kawadeomkar/homebrew-tap`:
+
+```sh
+brew install kawadeomkar/tap/duscope
+```
+
+Once duscope meets homebrew-core's notability bar, the formula moves to
+homebrew-core and `brew install duscope` works without the tap.
+
+### Debian and Ubuntu
+
+`.deb` packages for amd64 and arm64, attached to each GitHub release from
+v0.1.0. They install one static binary, which runs on any glibc:
+
+```sh
+sudo apt install ./duscope_<version>_amd64.deb
+```
+
+A signed apt repository (not yet live: phase 5, before 1.0) will then make it
+`sudo apt install duscope` on Debian 12 and later and Ubuntu 22.04 and later,
+once the repository is added as `docs/apt.md` will describe.
+
+### crates.io
+
+```sh
+cargo install duscope --locked
+```
+
+Cargo builds it with its default release settings: duscope's release profile
+(link-time optimisation, symbols stripped) applies only to builds inside this
+repository, so the binary is larger than the prebuilt ones.
+
+The `pixels` feature adds `--treemap pixels`: the map drawn in pixels on a
+terminal that shows images through Kitty graphics, Sixel or iTerm2's inline
+images, asked for only when the flag is given. No prebuilt package has it,
+and it needs Rust 1.90 or later:
+
+```sh
+cargo install duscope --locked --features pixels
+```
+
+Inside tmux the map stays in cells, with a warning: asking the terminal
+through tmux would mean running `tmux set -p allow-passthrough on`, which
+changes the pane's settings for every program after duscope, and duscope
+runs no other program.
+
+### From source
+
+It needs [rustup](https://rustup.rs), which installs the toolchain pinned in
+`rust-toolchain.toml`:
+
+```sh
+git clone https://github.com/kawadeomkar/duscope
+cd duscope
+rustup toolchain install
+cargo build --release
+./target/release/duscope --version
+```
+
 ## A tour
 
 The first command scans the tree and saves the scan in the index directory
@@ -178,90 +262,6 @@ saves a tree that ncdu, gdu or GrandPerspective wrote. `duscope man` prints the 
 - It never deletes without being told: no release yet has a command that deletes, and the `clean` of a later release is a dry run unless given `--yes`, and moves files to the Trash by default.
 - It never reads an index file from outside its index directory unless `--trust` names it: an index file may come from anyone ([SECURITY.md](SECURITY.md)).
 - It never opens a network connection: no telemetry, no update checks.
-
-## Install
-
-GitHub Releases and crates.io carry each release from v0.1.0 (v0.0.1 was the
-pre-release placeholder). The other channels open with the release each one
-names.
-
-### GitHub Releases
-
-Prebuilt binaries for macOS (Apple silicon and Intel) and Linux (x86_64 and
-arm64, statically linked with musl), built by cargo-dist with build
-attestations. The shell installer picks the archive for the machine and
-installs `duscope` into `~/.cargo/bin`:
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/kawadeomkar/duscope/releases/latest/download/duscope-installer.sh | sh
-```
-
-To check a downloaded archive was built by this repository's release workflow:
-
-```sh
-gh attestation verify duscope-aarch64-apple-darwin.tar.xz --repo kawadeomkar/duscope
-```
-
-### Homebrew
-
-On macOS and Linux, with bottles, from the tap `kawadeomkar/homebrew-tap`:
-
-```sh
-brew install kawadeomkar/tap/duscope
-```
-
-Once duscope meets homebrew-core's notability bar, the formula moves to
-homebrew-core and `brew install duscope` works without the tap.
-
-### Debian and Ubuntu
-
-`.deb` packages for amd64 and arm64, attached to each GitHub release from
-v0.1.0. They install one static binary, which runs on any glibc:
-
-```sh
-sudo apt install ./duscope_<version>_amd64.deb
-```
-
-A signed apt repository (not yet live: phase 5, before 1.0) will then make it
-`sudo apt install duscope` on Debian 12 and later and Ubuntu 22.04 and later,
-once the repository is added as `docs/apt.md` will describe.
-
-### crates.io
-
-```sh
-cargo install duscope --locked
-```
-
-Cargo builds it with its default release settings: duscope's release profile
-(link-time optimisation, symbols stripped) applies only to builds inside this
-repository, so the binary is larger than the prebuilt ones.
-
-The `pixels` feature adds `--treemap pixels`: the map drawn in pixels on a
-terminal that shows images through Kitty graphics, Sixel or iTerm2's inline
-images, asked for only when the flag is given. No prebuilt package has it,
-and it needs Rust 1.90 or later:
-
-```sh
-cargo install duscope --locked --features pixels
-```
-
-Inside tmux the map stays in cells, with a warning: asking the terminal
-through tmux would mean running `tmux set -p allow-passthrough on`, which
-changes the pane's settings for every program after duscope, and duscope
-runs no other program.
-
-### From source
-
-It needs [rustup](https://rustup.rs), which installs the toolchain pinned in
-`rust-toolchain.toml`:
-
-```sh
-git clone https://github.com/kawadeomkar/duscope
-cd duscope
-rustup toolchain install
-cargo build --release
-./target/release/duscope --version
-```
 
 ## Documentation
 
