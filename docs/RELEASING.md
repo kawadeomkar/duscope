@@ -86,7 +86,11 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    formula yet, the formula itself, copied from `packaging/homebrew/duscope.rb` with the tag's
    source archive and its checksum. Let the tap's `tests.yml` build the bottles on it (it also
    audits the formula and runs its test), then run the tap's `publish.yml` on the pull
-   request, which merges it with the bottle block. A re-run of the release opens no second
+   request, which merges it with the bottle block. Never merge it with GitHub's button: the
+   formula then keeps the previous release's bottle block, whose bottles unpack to the old
+   version, and `brew install` fails with "Unexpected bottle contents" (v0.2.0's, repaired by
+   a tap pull request that dropped the stale block and landed through `publish.yml`,
+   kawadeomkar/homebrew-tap#4). A re-run of the release opens no second
    pull request: the job stops when the formula is already at the tag or its pull request is
    open. A change to the formula beyond the version goes into `packaging/homebrew/duscope.rb`
    and, as its own pull request, into the tap.
