@@ -567,7 +567,11 @@ fn p5_walk_01_uuids_are_spelled_as_core_foundation_spells_them() {
     assert_eq!(spell_uuid(&bytes), "8332A5A0-3024-4BB2-AB99-D8AB8FC0AECC");
 }
 
-/// Detaches a disk image however the test ends.
+/// Detaches a disk image however the test ends. Every detach here is
+/// forced, as the other image tests' are: a volume just mounted can be
+/// held open a moment (Spotlight, fseventsd), and a plain detach that
+/// fails then can still unmount it, which leaves `hdiutil`'s retry
+/// nothing to detach ("No such file or directory").
 struct Detach<'a>(&'a TestEnv, PathBuf);
 
 impl Drop for Detach<'_> {
@@ -641,7 +645,7 @@ fn p5_walk_01_macos_no_log_on_an_image_gives_fsevents_disabled() {
     // next mount on.
     wait_for(".fseventsd", || mount.join(".fseventsd").is_dir());
     fs::write(mount.join(".fseventsd/no_log"), b"").unwrap();
-    env.hdiutil(&[&"detach", &mount]);
+    env.hdiutil(&[&"detach", &"-force", &mount]);
     env.hdiutil(&[&"attach", &"-mountpoint", &mount, &image]);
     let dev = locate(&mount).unwrap().dev;
     assert_eq!(volume_uuid(dev), None, "a volume with logging off");
@@ -701,12 +705,12 @@ fn p5_walk_01_macos_a_remount_since_the_mark_voids_a_replay_below_the_root() {
     assert_eq!(unchanged.fallback(), None, "{unchanged:?}");
 
     // Changed while fseventsd logs nothing, then attached as before.
-    env.hdiutil(&[&"detach", &mount]);
+    env.hdiutil(&[&"detach", &"-force", &mount]);
     env.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &mount, &image]);
     let dev = locate(&mount).unwrap().dev;
     assert_eq!(volume_uuid(dev), None, "no history under -nobrowse");
     fs::write(deep.join("offline"), b"bytes").unwrap();
-    env.hdiutil(&[&"detach", &mount]);
+    env.hdiutil(&[&"detach", &"-force", &mount]);
     env.hdiutil(&[&"attach", &"-mountpoint", &mount, &image]);
     let dev = locate(&mount).unwrap().dev;
     wait_for("the image's FSEvents history", || {
