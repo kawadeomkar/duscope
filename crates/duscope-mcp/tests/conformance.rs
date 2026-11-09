@@ -1151,6 +1151,18 @@ fn p3_mcp_06_errors_reach_rmcp_as_the_protocol_has_them() {
             assert_eq!(rpc_error(unknown).code, ErrorCode::INVALID_PARAMS);
             let resources = client.list_resources(None).await;
             assert_eq!(rpc_error(resources).code, ErrorCode::METHOD_NOT_FOUND);
+            // 2026-07-28 has no ping: the binary refuses it as rmcp's own
+            // server does (DEV-139).
+            let ping = client
+                .send_request_with_option(
+                    ClientRequest::PingRequest(PingRequest::default()),
+                    PeerRequestOptions::no_options(),
+                )
+                .await
+                .unwrap()
+                .await_response()
+                .await;
+            assert_eq!(rpc_error(ping).code, ErrorCode::METHOD_NOT_FOUND);
             let mut future = RequestMetaObject::new();
             future.set_protocol_version(serde_json::from_value(json!("2099-01-01")).unwrap());
             let request =
