@@ -550,6 +550,13 @@ pub fn process_alive(pid: u32) -> bool {
     platform::process_alive(pid)
 }
 
+/// The program that opens a path as the desktop would: `open` on macOS,
+/// `xdg-open` elsewhere.
+#[must_use]
+pub fn opener() -> &'static str {
+    platform::opener()
+}
+
 /// The user's cache directory under `home` when `XDG_CACHE_HOME` is unset:
 /// `~/Library/Caches` on macOS, `~/.cache` elsewhere.
 pub fn cache_dir(home: &Path) -> PathBuf {

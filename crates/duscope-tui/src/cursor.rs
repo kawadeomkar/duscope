@@ -16,7 +16,12 @@
 //!   putting back the cursor `z` found ([`crate::zoom`]).
 //! - `g`/`Home` and `G`/`End` jump to the first and last sibling, and
 //!   `PgUp`/`PgDn` move a page of them, in the siblings pane's order
-//!   (largest first); the siblings pane reaches entries too small to draw.
+//!   (largest first, or the `s` sort); the siblings pane reaches entries
+//!   too small to draw.
+//!
+//! With the siblings pane focused and in the list view the arrows move
+//! along that same order ([`Cursor::step`]); a mask leaves out of the
+//! spatial moves the tiles it hides.
 //!
 //! The cursor is an accent outline around its tile, with an accent tag
 //! carrying `name · size` on the tile's top edge when the tile is at least
@@ -32,19 +37,19 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crossterm::event::KeyCode;
 use duscope_treemap::Rect;
 use duscope_treemap::paint::{DrawnKind, Glyphs, compact};
 use ratatui_core::layout::Rect as Area;
 
 use crate::panes::Context;
 use crate::path::{Path, siblings};
+use crate::views::Viewing;
 use crate::widgets::{Canvas, Span};
 use crate::zoom::{Layouts, Map, Mark, Zoom};
 
 /// The siblings `PgUp` and `PgDn` move by: the rows the siblings pane
 /// lists.
-const PAGE: usize = 9;
+pub const PAGE: usize = 9;
 
 /// A direction of the spatial move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,25 +95,51 @@ pub enum Nav {
     PageDown,
 }
 
-impl Nav {
-    /// The navigation `code` asks for, without Ctrl or Alt; `Esc` is the
-    /// viewer's, which clears a filter first.
+/// A step along a list: the siblings pane's, or a table's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// The row before.
+    Prev,
+    /// The row after.
+    Next,
+    /// The first row.
+    First,
+    /// The last row.
+    Last,
+    /// This many rows back.
+    PageUp(usize),
+    /// This many rows on.
+    PageDown(usize),
+}
+
+impl Step {
+    /// The row a list of `len` rows moves to from the cursor's row `at`, if
+    /// it has one (none: the cursor is not listed); `None` for an empty
+    /// list.
     #[must_use]
-    pub fn of(code: KeyCode) -> Option<Nav> {
-        Some(match code {
-            KeyCode::Up | KeyCode::Char('k') => Nav::Move(Dir::Up),
-            KeyCode::Down | KeyCode::Char('j') => Nav::Move(Dir::Down),
-            KeyCode::Left | KeyCode::Char('h') => Nav::Move(Dir::Left),
-            KeyCode::Right | KeyCode::Char('l') => Nav::Move(Dir::Right),
-            KeyCode::Enter => Nav::Open,
-            KeyCode::Backspace => Nav::Up,
-            KeyCode::Char('z') => Nav::Zoom,
-            KeyCode::Char('Z') => Nav::Out,
-            KeyCode::Char('0') => Nav::Reset,
-            KeyCode::Char('g') | KeyCode::Home => Nav::First,
-            KeyCode::Char('G') | KeyCode::End => Nav::Last,
-            KeyCode::PageUp => Nav::PageUp,
-            KeyCode::PageDown => Nav::PageDown,
+    pub fn from(self, at: Option<usize>, len: usize) -> Option<usize> {
+        let end = len.checked_sub(1)?;
+        Some(match (self, at) {
+            (Step::First, _) | (Step::Next | Step::PageDown(_), None) => 0,
+            (Step::Last, _) | (Step::Prev | Step::PageUp(_), None) => end,
+            (Step::Prev, Some(i)) => i.saturating_sub(1),
+            (Step::Next, Some(i)) => (i + 1).min(end),
+            (Step::PageUp(page), Some(i)) => i.saturating_sub(page),
+            (Step::PageDown(page), Some(i)) => (i + page).min(end),
+        })
+    }
+
+    /// The step `nav` asks for along a list, with `page` rows to a page;
+    /// `None` for a key that is not a step.
+    #[must_use]
+    pub fn of(nav: Nav, page: usize) -> Option<Step> {
+        Some(match nav {
+            Nav::Move(Dir::Up) => Step::Prev,
+            Nav::Move(Dir::Down) => Step::Next,
+            Nav::First => Step::First,
+            Nav::Last => Step::Last,
+            Nav::PageUp => Step::PageUp(page),
+            Nav::PageDown => Step::PageDown(page),
             _ => return None,
         })
     }
@@ -173,6 +204,8 @@ pub struct Cursor {
     /// With `--treemap pixels`, the picture's tiles at the last frame: the
     /// map shown, which the arrows move on.
     shown: RefCell<Option<Rc<Map>>>,
+    /// `t`: the labels on the map's tiles.
+    labels: Cell<bool>,
 }
 
 impl Cursor {
@@ -203,9 +236,23 @@ impl Cursor {
     pub fn map(&self, ctx: &Context<'_>) -> Rc<Map> {
         let (w, h) = self.size.get();
         let root = self.zoom.root();
+        let labels = self.labels.get();
         self.layouts
             .borrow_mut()
-            .get(root, w, h, || Map::paint(ctx, root, w, h))
+            .get(root, w, h, || Map::paint(ctx, root, w, h, labels))
+    }
+
+    /// Forgets the maps kept: the colours or the labels changed. The
+    /// picture's tiles, kept with the pictures, are forgotten with them.
+    pub fn forget(&self) {
+        self.layouts.borrow_mut().clear();
+        *self.shown.borrow_mut() = None;
+    }
+
+    /// Turns the labels on the map's tiles on or off.
+    pub fn set_labels(&self, labels: bool) {
+        self.labels.set(labels);
+        self.forget();
     }
 
     /// How many maps are kept.
@@ -237,8 +284,19 @@ impl Cursor {
         self.path = Path::to(view, id);
     }
 
+    /// Puts the cursor on `id`, anywhere under the scan's root; false when
+    /// it was there.
+    pub fn go_to(&mut self, view: &dyn duscope_core::query::TreeView, id: u32) -> bool {
+        if self.path.cursor() == id {
+            return false;
+        }
+        self.path.jump(view, id);
+        true
+    }
+
     /// Does what `nav` asks; true when the cursor or the zoom changed.
-    pub fn nav(&mut self, ctx: &Context<'_>, nav: Nav) -> bool {
+    /// `viewing` sets the order of the list steps and what the mask hides.
+    pub fn nav(&mut self, ctx: &Context<'_>, nav: Nav, viewing: &Viewing<'_>) -> bool {
         let view = ctx.view;
         if view.is_empty() {
             return false;
@@ -247,7 +305,7 @@ impl Cursor {
         let cursor = self.path.cursor();
         let at_root = cursor == self.zoom.root();
         match nav {
-            Nav::Move(dir) => !at_root && self.spatial(ctx, dir),
+            Nav::Move(dir) => !at_root && self.spatial(ctx, dir, viewing),
             Nav::Open => self.path.down(view, size),
             Nav::Up => {
                 // At the map's root its parent is outside the map: zoom out
@@ -286,32 +344,35 @@ impl Cursor {
                 true
             }
             Nav::First | Nav::Last | Nav::PageUp | Nav::PageDown => {
-                let Some(parent) = self.path.parent().filter(|_| !at_root) else {
-                    return false;
-                };
-                let list = siblings(view, parent, size);
-                let Some(end) = list.len().checked_sub(1) else {
-                    return false;
-                };
-                let i = list.iter().position(|&id| id == cursor).unwrap_or(0);
-                let j = match nav {
-                    Nav::First => 0,
-                    Nav::Last => end,
-                    Nav::PageUp => i.saturating_sub(PAGE),
-                    _ => (i + PAGE).min(end),
-                };
-                if list[j] == cursor {
-                    return false;
-                }
-                self.path.select(list[j]);
-                true
+                Step::of(nav, PAGE).is_some_and(|step| self.step(ctx, viewing, step))
             }
         }
     }
 
+    /// Moves the cursor a `step` along its parent's children, in the order
+    /// the siblings pane lists them; true when it moved. On the map's root
+    /// there is no parent list to walk, and a step on goes into it instead.
+    pub fn step(&mut self, ctx: &Context<'_>, viewing: &Viewing<'_>, step: Step) -> bool {
+        let cursor = self.path.cursor();
+        let at_root = cursor == self.zoom.root();
+        let Some(parent) = self.path.parent().filter(|_| !at_root) else {
+            return step == Step::Next && self.path.down(ctx.view, ctx.opts.size);
+        };
+        let list = viewing.children(ctx, parent);
+        let at = list.iter().position(|&id| id == cursor);
+        let Some(to) = step.from(at, list.len()).map(|i| list[i]) else {
+            return false;
+        };
+        if to == cursor {
+            return false;
+        }
+        self.path.select(to);
+        true
+    }
+
     /// The spatial move: by the beam rule among the tiles of the cursor's
-    /// block; true when the cursor moved.
-    fn spatial(&mut self, ctx: &Context<'_>, dir: Dir) -> bool {
+    /// block the mask leaves; true when the cursor moved.
+    fn spatial(&mut self, ctx: &Context<'_>, dir: Dir, viewing: &Viewing<'_>) -> bool {
         let Some(parent) = self.path.parent() else {
             return false;
         };
@@ -320,10 +381,12 @@ impl Cursor {
         let cursor = self.path.cursor();
         let mark = map.mark(view, cursor);
         let from = map.rect(mark);
+        let hidden = viewing.mask.map(|mask| mask.hidden_tiles(ctx, &map));
         let candidates = map
             .block(parent)
             .iter()
             .filter(|&&i| mark != Mark::Tile(i))
+            .filter(|&&i| !hidden.as_ref().is_some_and(|hidden| hidden.tile(i)))
             .map(|&i| (i, map.tiles()[i].rect));
         let Some(to) = beam(from, dir, candidates) else {
             return false;
@@ -347,8 +410,15 @@ impl Cursor {
     }
 
     /// Draws the map into `area` of `canvas` (the map's size from now on),
-    /// then the link colour on the cursor's ancestors and the cursor.
-    pub fn draw(&self, canvas: &mut Canvas<'_>, area: Area, ctx: &Context<'_>) {
+    /// without what the mask of `viewing` hides, then the link colour on
+    /// the cursor's ancestors and the cursor.
+    pub fn draw(
+        &self,
+        canvas: &mut Canvas<'_>,
+        area: Area,
+        ctx: &Context<'_>,
+        viewing: &Viewing<'_>,
+    ) {
         self.size.set((area.width, area.height));
         let map = self.map(ctx);
         for y in 0..map.cells.height().min(area.height) {
@@ -360,6 +430,9 @@ impl Cursor {
                     *slot = cell;
                 }
             }
+        }
+        if let Some(mask) = viewing.mask {
+            mask.paint(canvas, area, ctx, &map);
         }
         let view = ctx.view;
         for i in self.linked(&map) {

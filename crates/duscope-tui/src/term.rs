@@ -6,6 +6,9 @@
 use std::fs::OpenOptions;
 use std::io::{self, Read, Stdout, Write};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -114,6 +117,26 @@ pub fn restore() {
 /// The terminal's size, columns and rows.
 pub fn size() -> io::Result<(u16, u16)> {
     terminal::size()
+}
+
+/// Opens `path` with the program `opener` (the desktop's, which the binary
+/// names: `open` on macOS, `xdg-open` elsewhere), detached from the
+/// terminal: its own process group, its streams on the null device, reaped
+/// in the background so that a finished opener leaves no zombie. An error
+/// says it could not be started; what the opener does with the path is its
+/// own business.
+pub fn open_detached(opener: &str, path: &Path) -> io::Result<()> {
+    let mut child = Command::new(opener)
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// Waits for the next key, mouse or resize event.

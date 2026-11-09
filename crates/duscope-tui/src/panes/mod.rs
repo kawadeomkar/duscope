@@ -6,8 +6,10 @@
 //!   full, the counts, the shares of the parent and of the scan, the type,
 //!   the modification time, the mode and owner.
 //! - **siblings** ([`siblings`]): the selection's parent's children,
-//!   largest first, the nine around the selection.
-//! - **legend** ([`legend`]): what the map's colours stand for.
+//!   largest first or in the `s` sort, the nine around the selection; `⇥`
+//!   moves the arrows onto it.
+//! - **legend** ([`legend`]): what the map's colours stand for; `⇥` moves
+//!   the arrows onto it, and `⏎` keeps the map's tiles of a row.
 //! - **facts** ([`facts`]): what `i` adds, from the scan and `explain`, in
 //!   the selected pane grown over the right column, or over the map when
 //!   the column is folded under it.
@@ -33,7 +35,7 @@ mod selected;
 mod siblings;
 
 pub use facts::{Facts, ScanFacts, Sources};
-pub use legend::{legend, legend_rows, ranks};
+pub use legend::{legend, legend_label, legend_rows, ranks, shown_rows};
 #[cfg(test)]
 use selected::mode_text;
 pub use selected::{folded, selected};
@@ -84,7 +86,7 @@ pub struct LegendRow {
 
 impl Context<'_> {
     /// The size the map weighs `node` by.
-    fn size(&self, node: &Node) -> u64 {
+    pub(crate) fn size(&self, node: &Node) -> u64 {
         node.size(self.opts.size)
     }
 
@@ -126,7 +128,7 @@ impl Context<'_> {
     }
 
     /// The name of `id`, a folder's ending in `/` when `slash`.
-    fn name(&self, id: u32, slash: bool) -> String {
+    pub(crate) fn name(&self, id: u32, slash: bool) -> String {
         let mut name = String::from_utf8_lossy(&self.view.name(id)).into_owned();
         if slash && self.view.node(id).is_dir() {
             name.push('/');
@@ -134,8 +136,8 @@ impl Context<'_> {
         name
     }
 
-    /// The path of folder `id` as the header writes the root's.
-    fn path(&self, id: u32) -> String {
+    /// The path of `id` as the header writes the root's.
+    pub(crate) fn path(&self, id: u32) -> String {
         let rel = String::from_utf8_lossy(&self.view.path(id)).into_owned();
         match (rel.is_empty(), self.root) {
             (true, root) => root.to_owned(),
@@ -154,7 +156,7 @@ impl Context<'_> {
     }
 
     /// `part` of `whole`, 0–1.
-    fn share(part: u64, whole: u64) -> f64 {
+    pub(crate) fn share(part: u64, whole: u64) -> f64 {
         if whole == 0 {
             0.0
         } else {

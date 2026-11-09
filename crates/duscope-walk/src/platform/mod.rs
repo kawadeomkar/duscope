@@ -160,6 +160,18 @@ pub(crate) fn process_alive(_pid: u32) -> bool {
     true
 }
 
+/// The program that opens a path as the desktop would: macOS's `open`.
+#[cfg(target_os = "macos")]
+pub(crate) fn opener() -> &'static str {
+    "open"
+}
+
+/// The program that opens a path as the desktop would: `xdg-open`.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn opener() -> &'static str {
+    "xdg-open"
+}
+
 /// The user's cache directory under `home` when `XDG_CACHE_HOME` is unset:
 /// macOS's `~/Library/Caches`.
 #[cfg(target_os = "macos")]

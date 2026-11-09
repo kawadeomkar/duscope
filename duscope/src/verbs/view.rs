@@ -10,15 +10,18 @@
 //! `i` in the viewer reads `explain` of the saved scan the viewer shows, or
 //! of the one a scan run for it was saved as; a scan not saved is answered
 //! from a fresh `stat`, as `explain` answers a path no saved scan holds.
+//!
+//! `y` writes OSC 52 straight to the terminal, between frames; `o` starts
+//! the system's opener, detached from the terminal.
 
 use std::ffi::OsString;
-use std::io::{self, IsTerminal};
-use std::path::Path;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 
 use duscope_core::envelope::{ScanBlock, Warning};
 use duscope_core::index::{Index, index_path};
 use duscope_core::query::{self, ScanSelector, TreeView};
-use duscope_tui::{App, Background, MIN_SIZE, ScanFacts, Sources, Tui};
+use duscope_tui::{App, Background, Effects, MIN_SIZE, ScanFacts, Sources, Tui};
 
 use super::source::Source;
 use super::{Exit, Failure, scan, source, treemap};
@@ -270,6 +273,7 @@ fn show(
     } else {
         None
     };
+    let packs = style.packs();
     let opts = style.paint_opts(
         look.color_by,
         look.depth,
@@ -289,6 +293,19 @@ fn show(
         caches,
         env: Box::new(|name| std::env::var_os(name)),
         scan: facts.scan,
+    });
+    app.with_packs(&packs);
+    app.with_ls_colors(style.ls_colors());
+    app.with_effects(Effects {
+        write: Box::new(|bytes| {
+            let mut out = io::stdout();
+            out.write_all(bytes)?;
+            out.flush()
+        }),
+        open: test_opener().unwrap_or_else(|| {
+            Box::new(|path| duscope_tui::open_detached(duscope_walk::opener(), path))
+        }),
+        env: Box::new(|name| std::env::var_os(name)),
     });
     let mut in_cells = None;
     match drawing {
@@ -312,6 +329,25 @@ fn show(
         crate::out::warn(warnings);
     }
     Ok(())
+}
+
+/// test-only: with `DUSCOPE_TEST_OPENER` set (debug builds alone), the
+/// file that `o` appends the path to, one line each, in place of the
+/// system's opener; no test starts a real one.
+fn test_opener() -> Option<duscope_tui::Opener<'static>> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let log = PathBuf::from(std::env::var_os("DUSCOPE_TEST_OPENER")?);
+    Some(Box::new(move |path: &Path| {
+        use std::os::unix::ffi::OsStrExt;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&log)?;
+        file.write_all(path.as_os_str().as_bytes())?;
+        file.write_all(b"\n")
+    }))
 }
 
 /// The terminal failed: a read, a write or the size.

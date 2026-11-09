@@ -91,6 +91,33 @@ impl<'p> Canvas<'p> {
         truncate(text, usize::from(room), self.glyphs)
     }
 
+    /// `text` cut to `room` columns from the front, starting with `…` when
+    /// cut: the end of a path is what tells it apart.
+    #[must_use]
+    pub fn cut_left(&self, text: &str, room: u16) -> String {
+        if self.width(text) <= room || room == 0 {
+            return if room == 0 {
+                String::new()
+            } else {
+                text.to_owned()
+            };
+        }
+        let more = self.glyph("…", "~");
+        let budget = room.saturating_sub(self.width(more));
+        let mut tail: Vec<char> = Vec::new();
+        let mut used = 0u16;
+        for ch in text.chars().rev() {
+            let width = self.width(&ch.to_string());
+            if used + width > budget {
+                break;
+            }
+            used += width;
+            tail.push(ch);
+        }
+        tail.reverse();
+        format!("{more}{}", tail.iter().collect::<String>())
+    }
+
     /// Paints the cells of `area` blank on `bg`.
     pub fn fill(&mut self, area: Rect, bg: Color) {
         for y in area.top()..area.bottom() {
@@ -363,21 +390,43 @@ impl<'p> Canvas<'p> {
         keys: &[(&str, &str)],
         message: Option<&Message>,
     ) {
+        let items: Vec<KeyItem<'_>> = keys
+            .iter()
+            .map(|&(key, what)| KeyItem {
+                key,
+                what,
+                active: None,
+            })
+            .collect();
+        self.key_items(x, y, end, &items, message);
+    }
+
+    /// The key line with [`KeyItem`]s: each key bold in the accent colour,
+    /// its description in overlay1 and the mode it is on, where it has one,
+    /// in the text colour, three cells apart; then `message`, right-aligned,
+    /// where there is room.
+    pub fn key_items(
+        &mut self,
+        x: u16,
+        y: u16,
+        end: u16,
+        items: &[KeyItem<'_>],
+        message: Option<&Message>,
+    ) {
         let roles = self.pack.roles;
         let mut at = x;
-        for (i, (key, what)) in keys.iter().enumerate() {
+        for (i, item) in items.iter().enumerate() {
             if i > 0 {
                 at = at.saturating_add(3);
             }
-            at = self.spans(
-                at,
-                y,
-                end,
-                &[
-                    Span::bold(*key, roles.accent),
-                    Span::new(format!(" {what}"), roles.overlay1),
-                ],
-            );
+            let mut spans = vec![
+                Span::bold(item.key, roles.accent),
+                Span::new(format!(" {}", item.what), roles.overlay1),
+            ];
+            if let Some(active) = item.active {
+                spans.push(Span::new(format!(" {active}"), roles.text));
+            }
+            at = self.spans(at, y, end, &spans);
         }
         if let Some(message) = message {
             let start = at.saturating_add(3);
@@ -441,6 +490,17 @@ pub struct ListRow<'a> {
     pub size: &'a str,
     /// Its share, 0–1.
     pub share: f64,
+}
+
+/// One item of the key line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyItem<'a> {
+    /// The key.
+    pub key: &'a str,
+    /// What it does.
+    pub what: &'a str,
+    /// The mode it is on (`size`), in the text colour.
+    pub active: Option<&'a str>,
 }
 
 /// What a message tells.

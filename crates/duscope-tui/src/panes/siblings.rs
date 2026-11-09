@@ -1,17 +1,20 @@
-//! The siblings pane: the selection's parent's children, largest first, in
-//! the order `g`, `G` and the pages walk them ([`crate::path::siblings`]):
-//! the first nine with 6-cell bars, then `… n more`; titled with the
-//! parent's name, size and file count. A selection past the first nine,
-//! reached through the list where its tile is too small to draw (or the
-//! map has none), shows the nine it falls among, under a `… n more` row
-//! for the larger ones above. Reading the list is O(children).
+//! The siblings pane: the selection's parent's children, largest first or
+//! in the sort `s` chose ([`crate::views::Viewing::children`]), the order
+//! `g`, `G` and the pages walk them: the first nine with 6-cell bars, then
+//! `… n more`; titled with the parent's name, size and file count, and the
+//! sort where it is not by size. A selection past the first nine, reached
+//! through the list where its tile is too small to draw (or the map has
+//! none), shows the nine it falls among, under a `… n more` row for the
+//! larger ones above. `⇥` focuses it: the arrows then move along it, and
+//! its border takes the accent colour. Reading the list is O(children),
+//! once for a folder and sort.
 
 use duscope_treemap::paint::compact;
 use ratatui_core::layout::Rect;
 
 use super::Context;
 use crate::layout::inner;
-use crate::path::siblings as ranked;
+use crate::views::{Sort, Viewing};
 use crate::widgets::{Canvas, ListRow, border, full_size, thousands};
 
 /// The siblings listed before `… n more`: a page of `PgUp` and `PgDn`.
@@ -20,23 +23,39 @@ const SIBLINGS: usize = 9;
 const SIBLING_BAR: u16 = 6;
 
 /// The siblings pane in `pane`, border included: the selection's parent's
-/// children, largest first, the selection marked.
-pub fn siblings(canvas: &mut Canvas<'_>, pane: Rect, ctx: &Context<'_>, id: u32) {
+/// children in the sort of `viewing`, the selection marked; the accent
+/// border when it is `focused`.
+pub fn siblings(
+    canvas: &mut Canvas<'_>,
+    pane: Rect,
+    ctx: &Context<'_>,
+    id: u32,
+    viewing: &Viewing<'_>,
+    focused: bool,
+) {
     let roles = canvas.pack.roles;
     let node = ctx.view.node(id);
     let parent = ctx.parent(&node);
-    let title = format!(
+    let mut title = format!(
         "in {} · {} · {} files",
         ctx.name(parent.id, false),
         full_size(ctx.size(&parent)),
         thousands(parent.file_count)
     );
-    canvas.pane(pane, &title, border(canvas.pack, false));
-    let area = inner(pane);
-    let mut kids = ranked(ctx.view, parent.id, ctx.opts.size);
-    if kids.is_empty() {
-        kids.push(parent.id);
+    // Ahead of the rest, which a narrow pane cuts.
+    if viewing.sort != Sort::Size {
+        title = format!("by {} · {title}", viewing.sort.word());
     }
+    let frame = if focused {
+        roles.accent
+    } else {
+        border(canvas.pack, false)
+    };
+    canvas.pane(pane, &title, frame);
+    let area = inner(pane);
+    let listed = viewing.children(ctx, parent.id);
+    let lonely = [parent.id];
+    let kids: &[u32] = if listed.is_empty() { &lonely } else { &listed };
     let size = |id: u32| ctx.size(&ctx.view.node(id));
     let whole = ctx.size(&parent);
     let name_width = area.width.saturating_sub(23).min(16);

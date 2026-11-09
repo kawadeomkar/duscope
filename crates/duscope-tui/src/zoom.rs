@@ -23,7 +23,9 @@ use std::rc::Rc;
 use duscope_core::query::{Subtree, TreeView};
 use duscope_treemap::Rect;
 use duscope_treemap::cells::CellBuffer;
-use duscope_treemap::paint::{Base, Drawn, DrawnKind, classes_of, paint_viewer};
+use duscope_treemap::paint::{
+    Base, Drawn, DrawnKind, classes_of, paint_viewer, paint_viewer_labelled,
+};
 
 use crate::panes::Context;
 
@@ -133,22 +135,32 @@ pub struct Map {
 
 impl Map {
     /// The map of `root` (a folder, or the scan's root) at `w`×`h` cells,
-    /// as `ctx` paints it.
+    /// as `ctx` paints it, with `t`'s labels when `labelled`.
     #[must_use]
-    pub fn paint(ctx: &Context<'_>, root: u32, w: u16, h: u16) -> Map {
+    pub fn paint(ctx: &Context<'_>, root: u32, w: u16, h: u16, labelled: bool) -> Map {
         let view = ctx.view;
         let base = base(ctx, root);
         let (cells, drawn) = if root == 0 || view.is_empty() {
-            paint_viewer(view, ctx.opts, w, h, ctx.class_of, base)
+            if labelled {
+                paint_viewer_labelled(view, ctx.opts, w, h, ctx.class_of, base)
+            } else {
+                paint_viewer(view, ctx.opts, w, h, ctx.class_of, base)
+            }
         } else {
             let node = view.node(root);
             let sub = Subtree::new(view, root);
             let range = root as usize..=node.last_id as usize;
-            if let Some(classes) = ctx.class_of.get(range) {
-                paint_viewer(&sub, ctx.opts, w, h, classes, base)
+            let classes;
+            let class_of = if let Some(found) = ctx.class_of.get(range) {
+                found
             } else {
-                let classes = classes_of(&sub, ctx.opts.classes);
-                paint_viewer(&sub, ctx.opts, w, h, &classes, base)
+                classes = classes_of(&sub, ctx.opts.classes);
+                &classes
+            };
+            if labelled {
+                paint_viewer_labelled(&sub, ctx.opts, w, h, class_of, base)
+            } else {
+                paint_viewer(&sub, ctx.opts, w, h, class_of, base)
             }
         };
         let area = Rect::new(0, 0, cells.width(), cells.height() * 2);
@@ -336,6 +348,11 @@ impl<T> Layouts<T> {
             }
         }
         map
+    }
+
+    /// Forgets the maps kept: something changed how the map is painted.
+    pub fn clear(&mut self) {
+        self.maps.clear();
     }
 
     /// The size they were painted at.
