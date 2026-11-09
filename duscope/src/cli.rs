@@ -265,6 +265,17 @@ pub struct CleanArgs {
     #[arg(long, value_parser = parse_size, value_name = "N", help_heading = "Clean")]
     pub expect_bytes: Option<u64>,
 
+    /// What each --from item must free, within 1%, in their order: one per handle
+    // Server-only, as duscope_delete's expect_bytes: never typed, so hidden.
+    #[arg(long, hide = true, value_parser = parse_size, value_name = "N",
+          requires = "from", conflicts_with_all = ["paths", "expect_bytes"])]
+    pub expect_item_bytes: Vec<u64>,
+
+    /// Answer the plan and stop, with no prompt and no confirmation_required
+    // Server-only, as duscope_delete's dry_run: never typed, so hidden.
+    #[arg(long, hide = true, conflicts_with = "yes")]
+    pub dry_run: bool,
+
     /// Never ask: without --yes, answer confirmation_required
     #[arg(long, help_heading = "Clean")]
     pub no_input: bool,

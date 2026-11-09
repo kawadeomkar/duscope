@@ -833,3 +833,111 @@ fn p4_core_01_after_a_clean_an_import_is_renewed_by_a_new_scan() {
         )
     );
 }
+
+// P5-MCP-01: the two flags `duscope_delete` runs `clean` with, never typed
+// by a person (the tool's own tests are in `crates/duscope-mcp`).
+
+/// `explain --json` of `path`: its handle and `freeable_now_bytes`.
+fn handle(env: &TestEnv, path: &Path) -> (String, u64) {
+    let facts = ok(&run(env, &["explain", s(path), "--json"]));
+    (
+        facts["result"]["handle"].as_str().unwrap().to_owned(),
+        facts["result"]["freeable_now_bytes"].as_u64().unwrap(),
+    )
+}
+
+#[test]
+fn p5_mcp_01_a_dry_run_answers_the_plan_with_no_confirmation_left_open() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    let file = root.join("a.bin");
+    let (token, frees) = handle(&env, &file);
+    let expect = format!("--expect-item-bytes={frees}");
+    let value = ok(&run(
+        &env,
+        &["clean", "--from", &token, &expect, "--dry-run", "--json"],
+    ));
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["error"], Value::Null);
+    assert_eq!(value["next"], serde_json::json!([]));
+    assert_eq!(value["result"]["plan"]["confirmation_required"], true);
+    assert_eq!(value["result"]["trashed_count"], 0);
+    assert!(file.exists());
+    // Without --expect-item-bytes too, and refused all the same with
+    // --yes beside it, which it cannot be.
+    assert_eq!(
+        run(&env, &["clean", "--from", &token, "--dry-run", "--json"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&env, &["clean", "--from", &token, "--dry-run", "--yes"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert!(file.exists());
+}
+
+#[test]
+fn p5_mcp_01_an_item_off_its_figure_is_refused_and_nothing_moves() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    let (file, dir) = (root.join("a.bin"), root.join("dir"));
+    let (token_a, frees_a) = handle(&env, &file);
+    let (token_b, frees_b) = handle(&env, &dir);
+    let wrong = format!("--expect-item-bytes={}", frees_b * 3 + 8192);
+    let right = format!("--expect-item-bytes={frees_a}");
+    for mode in [["--dry-run", "--json"], ["--yes", "--json"]] {
+        let out = run(
+            &env,
+            &[
+                "clean", "--from", &token_a, "--from", &token_b, &right, &wrong, mode[0], mode[1],
+            ],
+        );
+        let value = failed(&out, 1, "expectation_mismatch");
+        let items = &value["result"]["plan"]["items"];
+        assert_eq!(items[0]["action"], "trash", "{value}");
+        assert_eq!(items[1]["action"], "refused", "{value}");
+        assert_eq!(items[1]["reason"], "expectation_mismatch", "{value}");
+        assert_eq!(value["result"]["plan"]["confirmation_required"], false);
+        assert_eq!(value["result"]["trashed_count"], 0);
+        assert!(file.exists() && dir.exists());
+    }
+    // A refused item of another kind is reported first, as the plan says.
+    let link = root.join("link");
+    let out = run(
+        &env,
+        &[
+            "clean",
+            "--from",
+            &token_a,
+            s(&link),
+            "--expect-bytes=1",
+            "--json",
+        ],
+    );
+    assert_eq!(json(&out)["error"]["code"], "refused_path");
+    // One figure per handle, or the command line is wrong.
+    let out = run(
+        &env,
+        &[
+            "clean",
+            "--from",
+            &token_a,
+            "--from",
+            &token_b,
+            "--expect-item-bytes=1",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(json(&out)["error"]["code"], "usage");
+    assert_eq!(
+        run(&env, &["clean", "--expect-item-bytes=1"]).status.code(),
+        Some(2)
+    );
+}
