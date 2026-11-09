@@ -28,6 +28,8 @@ under [Auditing](#auditing) read it again.
   - `deny`
   - `fuzz-smoke` for each fuzz target (`sql`, `ncdu`, `gdu`, `gpscan`, `args`,
     `jsonrpc`)
+  - `mcp-conformance` on `ubuntu-24.04` and `macos-26`: rmcp's client, the
+    conformance oracle, against `duscope mcp`
   - `docs`
   - `schemas`
   - `size` on `macos-26` and `ubuntu-24.04`, and `size-comment`
@@ -50,7 +52,10 @@ under [Auditing](#auditing) read it again.
   best-effort Intel macOS runner, which
   would otherwise hold up every merge while it is unavailable, and once GitHub
   retires it. release.yml builds the x86_64 macOS archive again for a tag, so a
-  broken Intel build still stops a release. This PUT replaces the whole
+  broken Intel build still stops a release. `mcp-smoke`, which has Claude Code,
+  Codex CLI and Gemini CLI call `duscope mcp` with the vendors' keys, runs on
+  the schedule and a dispatch alone, and on no pull request: it is not
+  required, since each run pays the vendors and waits on their uptime. This PUT replaces the whole
   protection of `main`, so it restates the settings above unchanged. `app_id`
   15368 is GitHub Actions, so only a workflow run can report these checks.
 
@@ -60,9 +65,10 @@ under [Auditing](#auditing) read it again.
   2026-10-28 `intel-mac` was made optional again, leaving 36 checks. On
   2026-11-02, with P2-IDX-03, DEV-73 folded macOS's `clippy` and both its
   `test` legs into `checks (macos-26)`, leaving 34. P2-TEST-01 adds the five
-  `fuzz-smoke` checks, 39, P3-MCP-01 `fuzz-smoke (jsonrpc)`, 40, and P4-TUI-07
-  `pixels (macos-26)` and `pixels (ubuntu-24.04)`, 42 in all below, once they
-  merge.
+  `fuzz-smoke` checks, 39, P3-MCP-01 `fuzz-smoke (jsonrpc)`, 40, P4-TUI-07
+  `pixels (macos-26)` and `pixels (ubuntu-24.04)`, 42, and P3-MCP-06
+  `mcp-conformance (ubuntu-24.04)` and `mcp-conformance (macos-26)`, 44 in all
+  below, once they merge.
 
   These checks run on a pull request into `main`, and on one labelled
   `full-ci`. GitHub's stacked pull requests run as if into `main`: the pull
@@ -103,6 +109,8 @@ under [Auditing](#auditing) read it again.
         { "context": "fuzz-smoke (gpscan)", "app_id": 15368 },
         { "context": "fuzz-smoke (args)", "app_id": 15368 },
         { "context": "fuzz-smoke (jsonrpc)", "app_id": 15368 },
+        { "context": "mcp-conformance (ubuntu-24.04)", "app_id": 15368 },
+        { "context": "mcp-conformance (macos-26)", "app_id": 15368 },
         { "context": "docs", "app_id": 15368 },
         { "context": "schemas", "app_id": 15368 },
         { "context": "size (macos-26)", "app_id": 15368 },

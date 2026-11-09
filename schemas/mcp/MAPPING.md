@@ -384,3 +384,27 @@ the roots, so a scan whose root lies above a root is compared at that root.
 | `--limit` | `limit` | 1 to 100 |
 | `--all` | — | a tool returns one envelope |
 | `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
+
+## Conformance oracle (P3-MCP-06)
+
+Oracle: rmcp 3.6.0, the protocol's Rust SDK, whose client the conformance suite
+runs against `duscope mcp`.
+
+The workspace's `Cargo.toml` pins it with `=3.6.0`, a dev-dependency of
+`duscope-mcp` alone, and `deny.toml` bans it, with the tokio it runs on, from
+everything else, so no build the project ships holds it (D36, DEV-104). A
+`p3_mcp_06_*` test holds the line above to that pin and to the version
+`Cargo.lock` resolves; a `DEPS:` pull request that moves the pin moves the line.
+
+The crate ships no suite to point at a server: its tests drive its own client
+against its own server, or against a JavaScript or Python server they start
+over stdio and list the tools of (`tests/test_with_js.rs`,
+`tests/test_with_python.rs`). `crates/duscope-mcp/tests/conformance.rs` drives
+that client the same way against the binary: both protocol revisions'
+handshakes, a version refused and retried from the binary's list, a 2024-11-05
+client refused, `server/discover`, `tools/list`, `tools/call` of every tool the
+binary lists in both revisions, the errors a client meets, a deadline, a
+running and a queued call cancelled, and a scan's progress. A tap between the
+two holds every line the binary writes to rmcp's model of what it answers. CI's
+`mcp-conformance` job runs the crate's tests on ubuntu-24.04 and macos-26, and
+prints the oracle's version in its log.
