@@ -32,4 +32,14 @@ ask claude -p "$PROMPT" --output-format json --max-turns 10 --allowedTools "$all
 # The JSON result holds the final answer and the usage, not the tools'
 # results: an answer naming the directory shows the client read them.
 ((DRY_RUN)) || cp "$CLIENT_OUT" "$ANSWER"
+
+# The delete phase: the same server with --allow-delete, its one extra tool
+# not allowed, so in print mode Claude Code cannot grant it; the output's
+# permission_denials is the client's prompt, left unanswered.
+section "Delete registration"
+step claude mcp add --transport stdio duscope-delete -- duscope mcp --roots "$TREE" --allow-delete ||
+    fail "claude mcp add failed"
+ask_delete claude -p "$DELETE_PROMPT" --output-format json --max-turns 6 \
+    --allowedTools mcp__duscope-delete__duscope_explain
+verify_delete
 verify
