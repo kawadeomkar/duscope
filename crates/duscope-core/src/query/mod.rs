@@ -245,6 +245,13 @@ pub trait TreeView {
             .collect()
     }
 
+    /// The owner and group of entry `id` (`uid`, `gid`), where `--attrs
+    /// full` collected them; `None` in a basic scan, as its mode is. A
+    /// view that keeps no owners has none.
+    fn owner(&self, _id: u32) -> Option<(u32, u32)> {
+        None
+    }
+
     /// The logical size of the dataless files under `dir`.
     fn dataless_bytes(&self, dir: u32) -> u64 {
         self.dataless(dir).apparent
@@ -381,6 +388,13 @@ impl TreeView for ArenaView<'_> {
 
     fn name(&self, id: u32) -> Cow<'_, [u8]> {
         Cow::Borrowed(self.arena.entry(self.rollup.entry_at(id)).name)
+    }
+
+    /// From the entry's `--attrs full` side record.
+    fn owner(&self, id: u32) -> Option<(u32, u32)> {
+        self.arena
+            .full(self.rollup.entry_at(id))
+            .map(|full| (full.uid, full.gid))
     }
 
     /// From the arena's crossings: where the walk met another device.
@@ -590,6 +604,10 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
 
     fn dataless(&self, dir: u32) -> Dataless {
         self.view.dataless(dir + self.base)
+    }
+
+    fn owner(&self, id: u32) -> Option<(u32, u32)> {
+        self.view.owner(id + self.base)
     }
 }
 

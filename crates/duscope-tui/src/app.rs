@@ -10,6 +10,11 @@
 //! child at every level, as the canvas opens; the navigation keys move it
 //! and zoom the map ([`crate::cursor`]).
 //!
+//! `i` grows the selected pane into the full fact list over the right
+//! column, or opens it over the map where the column is folded under it
+//! ([`crate::panes::facts`]); `i` again or `Esc` closes it. The facts of an
+//! entry are read once, `explain` among them, and kept.
+//!
 //! With `--treemap pixels` the map pane shows a picture over its cells: of
 //! the zoom's root, in the whole map's colours, drawn once per root and
 //! size and kept ([`crate::zoom::Layouts`]), with the cursor's marks drawn
@@ -37,7 +42,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::cursor::{Cursor, Nav};
 use crate::layout::{Panes, inner, layout};
-use crate::panes::{self, Context, LegendRow, Ranks};
+use crate::panes::{self, Context, Facts, LegendRow, Ranks, Sources};
 use crate::path::Path as Selection;
 use crate::term::MIN_SIZE;
 use crate::widgets::{Canvas, Message, Notice, border};
@@ -61,6 +66,10 @@ const KEYS_ASCII: [(&str, &str); 6] = [
     ("Z", "out"),
     ("q", "quit"),
 ];
+
+/// The entries whose facts are kept: moving back and forth with the facts
+/// open reads each once.
+const KEPT_FACTS: usize = 256;
 
 /// What the loop does after an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +107,13 @@ pub struct App<'a> {
     cursor: Cursor,
     /// The `/` mask over the map, which `Esc` clears before it ascends.
     pub(crate) filter: Option<String>,
+    /// `i`: the selected pane grown into the full fact list, which `Esc`
+    /// closes before anything else.
+    facts_open: bool,
+    /// What the facts read besides the view.
+    sources: Sources<'a>,
+    /// The facts read, by id: `explain` runs once for an entry.
+    facts: RefCell<HashMap<u32, Rc<Facts>>>,
     /// Inside a late answer to the background probe, which arrives as
     /// keys: `Alt-]`, then `11;rgb:` and hex digits, then `Alt-\` or
     /// `Ctrl-G`. Any other key ends it and counts as itself.
@@ -187,6 +203,9 @@ impl<'a> App<'a> {
             view,
             cursor: Cursor::new(Selection::largest(view, opts.size)),
             filter: None,
+            facts_open: false,
+            sources: Sources::of(view),
+            facts: RefCell::new(HashMap::new()),
             summary,
             warning,
             root,
@@ -200,6 +219,37 @@ impl<'a> App<'a> {
             answer: false,
             pixels: None,
         }
+    }
+
+    /// Reads the facts `i` shows from `sources`: the saved scan `explain`
+    /// reads (the one the view reads where none is given), the cache rules,
+    /// the environment and the scan's block.
+    pub fn with_sources(&mut self, sources: Sources<'a>) {
+        self.sources = Sources {
+            index: sources.index.or_else(|| self.view.as_index()),
+            ..sources
+        };
+        self.facts.borrow_mut().clear();
+    }
+
+    /// The facts of `id`: read once, then kept, as many as [`KEPT_FACTS`].
+    fn facts_of(&self, id: u32) -> Rc<Facts> {
+        if let Some(facts) = self.facts.borrow().get(&id) {
+            return Rc::clone(facts);
+        }
+        let facts = Rc::new(Facts::read(&self.context(), &self.sources, id));
+        let mut kept = self.facts.borrow_mut();
+        if kept.len() >= KEPT_FACTS {
+            kept.clear();
+        }
+        kept.insert(id, Rc::clone(&facts));
+        facts
+    }
+
+    /// Whether the facts are open.
+    #[cfg(test)]
+    pub(crate) fn facts_open(&self) -> bool {
+        self.facts_open
     }
 
     /// Draws the map in pixels with `pixels` (`--treemap pixels`), over
@@ -317,7 +367,10 @@ impl<'a> App<'a> {
             self.screen(area.width, area.height)
         };
         copy(&cells, self.depth, area, buf);
-        if area.width >= MIN_SIZE.0 && area.height >= MIN_SIZE.1 {
+        // The facts over the map cover its picture too.
+        let covered = self.facts_open
+            && matches!(layout(area.width, area.height).panes, Panes::Folded { .. });
+        if area.width >= MIN_SIZE.0 && area.height >= MIN_SIZE.1 && !covered {
             self.draw_pixels(area, buf);
         }
     }
@@ -449,6 +502,26 @@ impl<'a> App<'a> {
         // The panes.
         match at.panes {
             Panes::Column {
+                selected, legend, ..
+            } if self.facts_open => {
+                // The selected pane down to the legend's last row.
+                let pane = Rect::new(
+                    selected.x,
+                    selected.y,
+                    selected.width,
+                    legend.bottom().saturating_sub(selected.y),
+                );
+                let facts = self.facts_of(self.selected());
+                panes::facts::expanded(
+                    &mut canvas,
+                    pane,
+                    &ctx,
+                    &self.sources,
+                    &facts,
+                    self.selected(),
+                );
+            }
+            Panes::Column {
                 selected,
                 siblings,
                 legend,
@@ -462,6 +535,17 @@ impl<'a> App<'a> {
             Panes::Folded { selected } => {
                 canvas.pane(selected, "selected", border(pack, false));
                 panes::folded(&mut canvas, inner(selected), &ctx, self.selected());
+                if self.facts_open {
+                    let facts = self.facts_of(self.selected());
+                    panes::facts::overlay(
+                        &mut canvas,
+                        at.map_pane,
+                        &ctx,
+                        &self.sources,
+                        &facts,
+                        self.selected(),
+                    );
+                }
             }
         }
 
@@ -540,9 +624,14 @@ impl<'a> App<'a> {
                 Flow::Wait
             }
             (KeyCode::Char('q'), false, false) | (KeyCode::Char('c'), false, true) => Flow::Quit,
-            // A filter is cleared before `Esc` ascends.
+            (KeyCode::Char('i'), false, false) => {
+                self.facts_open = !self.facts_open;
+                Flow::Redraw
+            }
+            // The facts are closed, then a filter cleared, before `Esc`
+            // ascends.
             (KeyCode::Esc, false, false) => {
-                if self.filter.take().is_some() {
+                if std::mem::take(&mut self.facts_open) || self.filter.take().is_some() {
                     Flow::Redraw
                 } else {
                     self.nav(Nav::Up)
