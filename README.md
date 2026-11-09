@@ -254,6 +254,20 @@ GrandPerspective's `.gpscan`, QDirStat's cache or CSV), and `duscope import`
 saves a tree that ncdu, gdu or GrandPerspective wrote. `duscope man` prints the manual page, and `duscope completions bash`
 (or zsh, fish, elvish, powershell) the completion script.
 
+## With an AI agent
+
+From v0.3, `duscope mcp` serves scans to MCP clients over stdio, and they reach
+nothing outside the directories given to `--roots`. Each client takes one line:
+
+```sh
+claude mcp add --transport stdio duscope -- duscope mcp --roots ~
+codex mcp add duscope -- duscope mcp --roots ~
+gemini mcp add --scope user duscope duscope mcp -- --roots ~
+```
+
+[docs/mcp.md](docs/mcp.md) lists the tools and has a Claude Code hook that asks
+before `duscope clean` runs.
+
 ## What it never does
 
 - It never follows a symbolic link, unless given `--follow-symlinks`.

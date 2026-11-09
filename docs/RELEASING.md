@@ -28,7 +28,8 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    ```sh
    scripts/changelog.py assemble X.Y.Z          # dates the section, deletes the fragments
    # set version = "X.Y.Z" in [workspace.package] and in the workspace crates'
-   # entries of [workspace.dependencies] (Cargo.toml), then:
+   # entries of [workspace.dependencies] (Cargo.toml), and the two versions in
+   # server.json, then:
    cargo update --workspace
    git commit -am "REL: vX.Y.Z"
    ```

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.kawadeomkar/duscope",
+  "title": "duscope",
+  "description": "Disk usage on macOS and Linux: largest paths, stale files, caches, scan diffs, read-only SQL.",
+  "repository": {
+    "url": "https://github.com/kawadeomkar/duscope",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "identifier": "duscope",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        },
+        {
+          "type": "named",
+          "name": "--roots",
+          "description": "A directory the client may read; nothing outside the roots is seen.",
+          "format": "filepath",
+          "isRequired": true,
+          "isRepeated": true
+        }
+      ]
+    }
+  ]
+}
