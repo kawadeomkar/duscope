@@ -61,6 +61,15 @@ The server lists them in this order; a test holds this list to its `tools/list`.
 - `duscope_summary`: Totals under a path in a saved scan: bytes on disk and apparent, files, directories, errors, the volumes, and the bytes no entry accounts for.
 - `duscope_top`: The largest directories, or files, under a path in a saved scan, largest first; narrowed by depth, size and glob, and paged with cursor.
 
+`duscope mcp` is read-only unless started with `--allow-delete`, which adds one tool,
+`duscope_delete`. It moves entries under `--roots` to the Trash, never deletes them permanently,
+and cannot move a root itself. Each item names a `handle` from `duscope_explain` and
+`expect_bytes`, the bytes the entry should free: its `frees_bytes` from a dry-run plan, or
+`freeable_now_bytes`; a figure off by more than 1% refuses the item. A call is a dry run unless
+`dry_run` is `false`, and one refused item stops the whole call. The tool is marked
+`_meta["anthropic/requiresUserInteraction"]: true`; a client that honours it asks before every
+call.
+
 ## Ask before `duscope clean`
 
 The MCP tools above read and scan. An agent with a shell can still run

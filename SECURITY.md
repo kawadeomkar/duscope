@@ -84,8 +84,9 @@ statement.
 
 #### 2. Agent paths and handles
 
-An agent names paths through the MCP server's tools. A tool writes only to the index directory:
-`clean` is a command of its own, and `--allow-delete` lists no tool yet.
+An agent names paths through the MCP server's tools. A tool writes only to the index directory,
+with one exception a person opts into: a server started with `--allow-delete` offers
+`duscope_delete`.
 
 - **Handles.** `explain --json` and the `duscope_explain` tool return a handle: an HMAC-SHA256
   tag over the path, its device and inode, its size on disk, the scan, and an expiry fifteen
@@ -194,7 +195,10 @@ control characters in a client's strings.
 - **Writes.** `duscope_scan` saves an index, a new file each call unless `max_age` finds a recent
   one; `scans --prune`, which no tool runs, removes old ones. A result past `--max-chars` goes
   to the index directory's `out`, and `duscope_explain` makes `handle.key` where there is none.
-  No tool writes anywhere else.
+  With `--allow-delete`, `duscope_delete` moves entries under the roots to the Trash and never
+  deletes one permanently. A root itself is refused, each item needs a handle that verifies and
+  the bytes it should free, and a call is a dry run unless it says otherwise. No tool writes
+  anywhere else.
 - **Limits.** A message is at most 16 MiB; a longer line is refused and skipped. Calls run one
   at a time, in the order they came. `duscope_scan` has 10 minutes and the other tools 30 seconds
   before the call is answered `deadline_exceeded`; `duscope_query`'s statement keeps the

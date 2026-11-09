@@ -266,7 +266,8 @@ gemini mcp add --scope user duscope duscope mcp -- --roots ~
 ```
 
 [docs/mcp.md](docs/mcp.md) lists the tools and has a Claude Code hook that asks
-before `duscope clean` runs.
+before `duscope clean` runs. The server is read-only by default; `--allow-delete`
+adds `duscope_delete`, which can only move entries to the Trash.
 
 ## What it never does
 
