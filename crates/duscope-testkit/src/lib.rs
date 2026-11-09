@@ -497,13 +497,16 @@ impl TestEnv {
     /// the next try. A `create` that may run again passes `-ov`, so a
     /// half-made image from a failed try is overwritten.
     ///
-    /// A `detach` can report an error and detach all the same, after which
-    /// every later try finds nothing to detach ("No such file or directory";
-    /// the JDK's jpackage tests met the same, JDK-8250646). So a `detach`
-    /// that fails is done once `hdiutil info` no longer lists the image its
-    /// target (the mount point or `/dev` node, its last argument) belonged
-    /// to, or when nothing was attached there to begin with; an image still
-    /// attached is tried again, and fails as before.
+    /// A `detach` can unmount the volume and then fail to eject its disk
+    /// ("couldn't eject ... - Resource busy"), or report an error and detach
+    /// all the same; the JDK's jpackage tests met the same, JDK-8250646. Its
+    /// mount point then names nothing, and every later try by that path
+    /// answers "No such file or directory". So a `detach` looks up the image
+    /// its target (the mount point or `/dev` node, its last argument) belongs
+    /// to. A try that fails is done once `hdiutil info` no longer lists that
+    /// image, or when nothing was attached there to begin with; otherwise the
+    /// next try names the image's whole disk, which stays valid, and an image
+    /// still attached after the last try fails as before.
     ///
     /// # Panics
     ///
@@ -513,8 +516,9 @@ impl TestEnv {
             .iter()
             .map(|a| a.as_ref().to_string_lossy().into_owned())
             .collect();
-        // For a `detach`: the image its target belongs to, `Some(None)`
-        // when nothing is attached there, `None` when that cannot be told.
+        // For a `detach`: the image its target belongs to and that image's
+        // whole disk, `Some(None)` when nothing is attached there, `None`
+        // when that cannot be told.
         let detaching = match (shown.first().map(String::as_str), args.last()) {
             (Some("detach"), Some(target)) => {
                 let target = Path::new(target.as_ref());
@@ -523,33 +527,40 @@ impl TestEnv {
                     images
                         .into_iter()
                         .find(|(_, places)| places.contains(&target))
-                        .map(|(image, _)| image)
+                        .and_then(|(image, places)| Some((image, places.into_iter().next()?)))
                 }))
             }
             _ => None,
         };
+        let mut tried: Vec<&dyn AsRef<OsStr>> = args.to_vec();
         let mut failures = Vec::new();
         for tries in 1..=3 {
             let out = self
                 .command("hdiutil")
-                .args(args)
+                .args(&tried)
                 .output()
                 .unwrap_or_else(|e| panic!("duscope-testkit: run hdiutil: {e}"));
             if out.status.success() {
                 return;
             }
+            let named = tried.last().map_or_else(String::new, |last| {
+                last.as_ref().to_string_lossy().into_owned()
+            });
             failures.push(format!(
-                "try {tries} ({}): {}{}",
+                "try {tries} on {named} ({}): {}{}",
                 out.status,
                 String::from_utf8_lossy(&out.stdout).trim_end(),
                 String::from_utf8_lossy(&out.stderr).trim_end()
             ));
             match &detaching {
                 Some(Some(None)) => return,
-                Some(Some(Some(image))) => {
+                Some(Some(Some((image, disk)))) => {
                     let images = self.images();
                     if images.is_some_and(|images| images.iter().all(|(i, _)| i != image)) {
                         return;
+                    }
+                    if let Some(last) = tried.last_mut() {
+                        *last = disk;
                     }
                 }
                 _ => {}
@@ -566,8 +577,8 @@ impl TestEnv {
     }
 
     /// The images `hdiutil info` lists: each one's `image-path`, with the
-    /// `/dev` nodes and mount points under it; `None` when it cannot be
-    /// read.
+    /// `/dev` nodes and mount points under it, its whole disk first; `None`
+    /// when it cannot be read.
     fn images(&self) -> Option<Vec<(String, Vec<PathBuf>)>> {
         let out = self.command("hdiutil").arg("info").output().ok()?;
         if !out.status.success() {

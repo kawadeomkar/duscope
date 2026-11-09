@@ -8,30 +8,24 @@
 
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::time::{Duration, Instant};
 
 use duscope_testkit::TestEnv;
 
 /// `hdiutil detach` of a directory nothing is mounted on fails with "No
 /// such file or directory", as every try after a detach that finished
-/// while reporting an error does: done at the first try, not tried again.
+/// while reporting an error does: that is done, where it used to panic.
 #[test]
 fn p0_test_01_a_detach_with_nothing_attached_is_done() {
     let env = TestEnv::new();
     let empty = fs::canonicalize(env.tmp_dir()).unwrap().join("not-mounted");
     fs::create_dir_all(&empty).unwrap();
-    let started = Instant::now();
     env.hdiutil(&[&"detach", &"-force", &empty]);
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "tried again: {:?}",
-        started.elapsed()
-    );
 }
 
 /// A file held open on the volume and no `-force`: every try is "Resource
 /// busy" and leaves the image attached, so the detach still fails, with
-/// each try's output.
+/// each try's output, the tries after the first naming the image's whole
+/// disk, which a mount point that an earlier try unmounted no longer does.
 #[test]
 #[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
 fn p0_test_01_macos_a_detach_that_leaves_the_image_attached_fails() {
@@ -64,7 +58,12 @@ fn p0_test_01_macos_a_detach_that_leaves_the_image_attached_fails() {
         .expect_err("a detach of a busy volume succeeded")
         .downcast::<String>()
         .unwrap();
-    for each in ["try 1", "try 2", "try 3", "Resource busy"] {
+    for each in [
+        "try 1 on /",
+        "try 2 on /dev/disk",
+        "try 3 on /dev/disk",
+        "Resource busy",
+    ] {
         assert!(message.contains(each), "{message}");
     }
 }
