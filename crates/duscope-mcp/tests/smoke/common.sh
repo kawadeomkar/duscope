@@ -28,11 +28,12 @@
 #
 # After the three calls, the delete phase (P5-MCP-01): the script registers the
 # server a second time as `duscope-delete` with --allow-delete and asks the
-# client to explain and delete one file. A non-interactive client cannot
-# answer the confirmation duscope_delete demands
-# (`_meta["anthropic/requiresUserInteraction"]`, a destructive tool), so the
-# client's output is the client prompt, or its refusal to ask; the phase
-# fails if the file moved. Each script runs it on the client's own
+# client to explain and delete one file. A non-interactive client is expected
+# not to be able to answer the confirmation duscope_delete demands
+# (`_meta["anthropic/requiresUserInteraction"]`, a destructive tool), so its
+# output should hold the prompt or a refusal to ask: what each client really
+# does is unobserved until the first real run, whose log a person reads. The
+# phase fails if the file moved. Each script runs it on the client's own
 # registration and command line (ask_delete, verify_delete).
 #
 # Exit status: 0 when the three calls were answered and the answer names the

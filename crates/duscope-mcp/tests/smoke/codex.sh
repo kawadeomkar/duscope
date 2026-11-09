@@ -47,8 +47,8 @@ ask codex_exec codex exec --skip-git-repo-check --ephemeral --json --output-last
 
 # The delete phase: the server registered a second time with --allow-delete
 # and without the override that approves its tools, so `codex exec`, which
-# answers no prompt, refuses the destructive call; its output is that prompt
-# left unanswered.
+# answers no prompt, is expected to refuse the destructive call and say so
+# in its output (unobserved until the first real run).
 section "Delete registration"
 step codex mcp add duscope-delete -- duscope mcp --roots "$TREE" --allow-delete ||
     fail "codex mcp add failed"

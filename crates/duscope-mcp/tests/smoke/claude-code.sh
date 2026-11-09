@@ -34,8 +34,9 @@ ask claude -p "$PROMPT" --output-format json --max-turns 10 --allowedTools "$all
 ((DRY_RUN)) || cp "$CLIENT_OUT" "$ANSWER"
 
 # The delete phase: the same server with --allow-delete, its one extra tool
-# not allowed, so in print mode Claude Code cannot grant it; the output's
-# permission_denials is the client's prompt, left unanswered.
+# not allowed, so print mode is expected not to grant it, and the output's
+# permission_denials to record the prompt left unanswered (unobserved until
+# the first real run).
 section "Delete registration"
 step claude mcp add --transport stdio duscope-delete -- duscope mcp --roots "$TREE" --allow-delete ||
     fail "claude mcp add failed"
