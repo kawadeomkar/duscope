@@ -156,6 +156,14 @@ deny *checks="licenses bans sources":
 test:
     cargo test --workspace
 
+# The locale leg on macOS (CI's `checks` job runs it under TZ=America/Los_Angeles and
+# LC_ALL=fr_FR.UTF-8; DEV-141): every test but the fixture tree's timed rebuild
+# (P0-TEST-01), which reads no locale and takes about a minute and a half on a macOS
+# runner. The same packages as `just test`: selecting fewer would resolve other features
+# and build the tests again.
+test-locale:
+    cargo test --workspace -- --skip p0_test_01_tree_builds_and_reports_its_time --skip p0_test_01_rebuild_lists_identically
+
 # The `pixels` feature on its toolchain (CI's `pixels` job): clippy over duscope-treemap, the
 # one crate with code behind the feature; the binary built with it; and the feature's tests,
 # which run the probe against mocked terminals (Kitty graphics, Sixel, iTerm2, none, silent)
