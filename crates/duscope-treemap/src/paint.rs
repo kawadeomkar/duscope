@@ -35,7 +35,8 @@
 //! The viewer's map ([`paint_unlabelled`]) carries no labels below the
 //! depth-1 titles: its panes name whatever the cursor is on. Painted with
 //! [`paint_viewer`], it also names the tiles it drew ([`Drawn`]), which
-//! the viewer's cursor moves between.
+//! the viewer's cursor moves between; [`paint_viewer_labelled`] is the same
+//! map with `t`'s labels on tiles of at least 8×2 cells.
 
 use std::borrow::Cow;
 
@@ -150,13 +151,24 @@ struct Painter<'v, 'o, 'c, V: TreeView + ?Sized> {
     overlay: Vec<Option<Cell>>,
     /// Each entry's class, by pre-order id.
     class_of: Cow<'c, [Class]>,
-    /// Whether tiles are labelled; the depth-1 titles are drawn either way.
-    labels: bool,
+    /// Which tiles are labelled; the depth-1 titles are drawn either way.
+    labels: Labels,
     /// The tiles drawn, when the viewer asks for them.
     drawn: Option<Vec<Drawn>>,
     /// The depth in the scan of the map's root, below the scan's root when
     /// the viewer zooms: added to a tile's depth for its `level` colour.
     depth_base: u32,
+}
+
+/// Which tiles of a map are labelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Labels {
+    /// None: the viewer's map, whose panes name its tiles.
+    None,
+    /// The static map's: a name from 5 columns, a size row from 8×2 cells.
+    Static,
+    /// The viewer's with `t`: tiles of at least 8×2 cells.
+    Tiles,
 }
 
 /// A tile of the viewer's map, as [`paint_viewer`] drew it, or as the
@@ -212,7 +224,7 @@ pub struct Base {
 pub fn paint(view: &(impl TreeView + ?Sized), opts: &PaintOpts<'_>, w: u16, h: u16) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
     let mut buffer = CellBuffer::new(w, h);
-    paint_into(view, opts, h, &mut buffer, None, None);
+    paint_into(view, opts, h, &mut buffer, None, None, Labels::Static);
     buffer
 }
 
@@ -231,7 +243,15 @@ pub fn paint_unlabelled(
 ) -> CellBuffer {
     let h = h.min(u16::MAX / 2);
     let mut buffer = CellBuffer::new(w, h);
-    paint_into(view, opts, h, &mut buffer, Some(class_of), None);
+    paint_into(
+        view,
+        opts,
+        h,
+        &mut buffer,
+        Some(class_of),
+        None,
+        Labels::None,
+    );
     buffer
 }
 
@@ -252,20 +272,55 @@ pub fn paint_viewer(
 ) -> (CellBuffer, Vec<Drawn>) {
     let h = h.min(u16::MAX / 2);
     let mut buffer = CellBuffer::new(w, h);
-    let drawn = paint_into(view, opts, h, &mut buffer, Some(class_of), Some(base));
+    let drawn = paint_into(
+        view,
+        opts,
+        h,
+        &mut buffer,
+        Some(class_of),
+        Some(base),
+        Labels::None,
+    );
+    (buffer, drawn)
+}
+
+/// Paints the viewer's map as [`paint_viewer`] does, with the labels `t`
+/// turns on: a name and a size on tiles of at least 8×2 cells.
+#[must_use]
+pub fn paint_viewer_labelled(
+    view: &(impl TreeView + ?Sized),
+    opts: &PaintOpts<'_>,
+    w: u16,
+    h: u16,
+    class_of: &[Class],
+    base: Base,
+) -> (CellBuffer, Vec<Drawn>) {
+    let h = h.min(u16::MAX / 2);
+    let mut buffer = CellBuffer::new(w, h);
+    let drawn = paint_into(
+        view,
+        opts,
+        h,
+        &mut buffer,
+        Some(class_of),
+        Some(base),
+        Labels::Tiles,
+    );
     (buffer, drawn)
 }
 
 /// Paints the map into the top `h` rows of `buffer` (at most 32767), as
-/// wide as the buffer: labelled, or without labels given each entry's class
-/// (`unlabelled`); with a `base`, the viewer's map, whose tiles it returns.
+/// wide as the buffer, each entry's class given (`class_of`) or worked out
+/// here, its tiles labelled as `labels` says; with a `base`, the viewer's
+/// map, whose tiles it returns.
 fn paint_into(
     view: &(impl TreeView + ?Sized),
     opts: &PaintOpts<'_>,
     h: u16,
     buffer: &mut CellBuffer,
-    unlabelled: Option<&[Class]>,
+    class_of: Option<&[Class]>,
     base: Option<Base>,
+    labels: Labels,
 ) -> Vec<Drawn> {
     let (w, h) = (buffer.width(), h.min(u16::MAX / 2).min(buffer.height()));
     let h_units = h * 2;
@@ -282,9 +337,9 @@ fn paint_into(
             usize::from(w) * usize::from(h_units)
         ],
         overlay: vec![None; usize::from(w) * usize::from(h)],
-        class_of: unlabelled
+        class_of: class_of
             .map_or_else(|| Cow::Owned(classes_of(view, opts.classes)), Cow::Borrowed),
-        labels: unlabelled.is_none(),
+        labels,
         drawn: base.map(|_| Vec::new()),
         depth_base: base.map_or(0, |b| b.depth),
     };
@@ -496,7 +551,7 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
         );
         let color = self.tinted(base, order % 2 == 1);
         self.fill(rect, color, clamp_depth(depth));
-        if !labelled || !self.labels {
+        if !labelled || self.labels == Labels::None {
             return;
         }
         let mut name = String::from_utf8_lossy(&self.view.name(node.id)).into_owned();
@@ -610,7 +665,12 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
     /// With shades, the name carries the class letter.
     fn label(&mut self, rect: Rect, name: &str, size: Option<&str>, fill: Color, class: Class) {
         let (top, rows) = cell_rows(rect);
-        if !self.labels || rect.w < 5 || rows == 0 {
+        let floor = match self.labels {
+            Labels::None => return,
+            Labels::Static => (5, 1),
+            Labels::Tiles => (8, 2),
+        };
+        if rect.w < floor.0 || rows < floor.1 {
             return;
         }
         let pack = self.opts.pack;
@@ -954,7 +1014,15 @@ pub fn frame(
     }
     let map_rows = rows - 5;
     let mut buffer = CellBuffer::new(w, map_rows + 4);
-    paint_into(view, opts, map_rows, &mut buffer, None, None);
+    paint_into(
+        view,
+        opts,
+        map_rows,
+        &mut buffer,
+        None,
+        None,
+        Labels::Static,
+    );
     // The legend: `■ code 61%` per class, the swatch in its colour.
     let mut x = 2u16;
     let y = map_rows;
