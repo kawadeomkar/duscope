@@ -1,13 +1,13 @@
 # Security policy
 
-Last reviewed: 2026-11-01, against the code that adds `--trust` (P2-SEC-01). The next review
-is P5-SEC-01's, before 1.0, against the MCP server and `clean`.
+Last reviewed: 2026-11-09, against the MCP server as built (P2-SEC-01). The next review is
+P5-SEC-01's, before 1.0, against the MCP server's delete tool and `clean`.
 
 duscope measures directory trees. It reads metadata, writes snapshot indexes of what it found
-into its own index directory, and answers queries about them. It opens no network socket. From
-phase 3, an MCP server lets agents ask the same questions, and from phase 4, `clean` moves what
-it is told to the trash. This page says what duscope treats as untrusted, the rule for each untrusted
-input, how to report a vulnerability, and how a fix is released.
+into its own index directory, and answers queries about them. It opens no network socket.
+`duscope mcp` lets agents ask the same questions over stdin and stdout, and `clean` moves what
+it is told to the trash. This page says what duscope treats as untrusted, the rule for each
+untrusted input, how to report a vulnerability, and how a fix is released.
 
 ## Reporting a vulnerability
 
@@ -43,10 +43,12 @@ upgrade.
 
 ### What is protected
 
-- **The user's files.** duscope never writes to the trees it scans. From phase 4, `clean` is the
-  only command that changes anything, and only what it is told to change.
+- **The user's files.** duscope never writes to the trees it scans, apart from the index
+  directory when a tree holds it. `clean` is the only command that changes anything, and only
+  what it is told to change.
 - **What the scans reveal.** Every path a scan measured, and its sizes and times, stays private
-  to the user who ran the scan.
+  to the user who ran the scan, and to the MCP clients that user starts `duscope mcp` for,
+  within its `--roots`.
 - **The machine.** No input makes duscope run code it does not ship, write outside its index
   directory and the outputs it is asked for, or use memory and time without bound.
 
@@ -62,7 +64,7 @@ upgrade.
 
 #### 1. SQL
 
-This is `query --sql`, and from phase 3 the MCP server's `query` tool, where an agent writes the
+This is `query --sql`, and the MCP server's `duscope_query` tool, where an agent writes the
 statement.
 
 - SQL runs only through the sandbox (`crates/duscope-core/src/query/sql.rs`).
@@ -76,14 +78,18 @@ statement.
 - **Limits:** SQLite's limits are lowered (statement length, columns, expression depth,
   compound selects, program size, function arguments). A deadline stops the statement (5 s by
   default, `--timeout` up to 60 s), and SQLite's heap is capped at 256 MiB.
+- **Whole scans:** a statement reads a whole scan, so over MCP `duscope_query` and
+  `duscope_schema` read only a scan whose root is a root or lies under one.
 - **Fuzzing:** `fuzz/fuzz_targets/sql.rs` fuzzes the sandbox.
 
 #### 2. Agent paths and handles
 
-From phase 3, an agent names paths, and from phase 4 it asks `clean` to act on them.
+An agent names paths through the MCP server's tools. A tool writes only to the index directory:
+`clean` is a command of its own, and `--allow-delete` lists no tool yet.
 
-- **Handles.** `explain --json` returns a handle: an HMAC-SHA256 tag over the path, its device
-  and inode, its size on disk, the scan, and an expiry fifteen minutes on.
+- **Handles.** `explain --json` and the `duscope_explain` tool return a handle: an HMAC-SHA256
+  tag over the path, its device and inode, its size on disk, the scan, and an expiry fifteen
+  minutes on.
   - **The key** is 32 random bytes in `handle.key` in the index directory, mode 0600.
   - **A key that cannot be trusted** issues no handle: a symbolic link in its place, another
     user's key, or one others may read. A warning says why.
@@ -91,13 +97,26 @@ From phase 3, an agent names paths, and from phase 4 it asks `clean` to act on t
     handle is read.
   - **Rejection:** a handle that was changed or has expired is refused, with `handle_invalid`
     or `handle_expired`.
-- **Paths (phase 3).** Each path an agent supplies is made absolute and resolved, and is
-  refused unless it lies under one of the server's `--roots`.
-- **Deletes (phase 4).** `clean` acts only on a handle that verifies.
-  - It is a dry run unless `--yes` is given.
+- **Paths.** The server's `--roots` are canonicalised when it starts, and each path an agent
+  supplies goes through one check (`crates/duscope-mcp/src/roots.rs`).
+  - A path holding a `..` component is refused. A relative path is read from the root of the
+    scan the call names, and refused when it names none.
+  - The rest is resolved, links included, and refused unless it lies under a root, with
+    `refused_path`. A link inside a root that leads out of it is refused like the path it leads
+    to, and a root given as a link is the directory it leads to.
+  - A part of a path that does not exist (a file deleted since the scan) is kept as written,
+    below the deepest part that does.
+- **Saved scans.** A client names a saved scan by its id, a prefix of it or `latest`, never by an
+  index file, so it cannot reach `--trust`.
+  - A saved scan whose root lies outside every root is invisible to it: `scan_not_found`.
+  - A saved scan whose root lies above a root is read at that root, as `--under` reads a
+    subtree. Its rows stop at the root; the result's `scan` block still names the scan's own
+    root and its totals.
+- **Deletes.** `clean` acts on the paths a person names and on handles that verify (`--from`).
+  - It is a dry run unless `--yes` is given or a person at a terminal types `yes` when it asks.
   - It moves entries to the trash by default.
   - `--permanent` deletes through `openat`, `O_NOFOLLOW` and `unlinkat`, after checking that the
-    entry's device and inode are still the handle's.
+    entry's device and inode are still what the plan saw (a handle's, for an item named by one).
 
 #### 3. Index files
 
@@ -126,9 +145,10 @@ virtual tables and crafted pages.
   - **Errors:** a refused file is `index_corrupt` or `index_version_mismatch`, exit 5.
 - **Indexes are snapshots.** Each index is written to a temporary file and renamed into place.
   Nothing edits an index after that.
-- **Permissions.** The index directory and its `scans` directory are 0700. Each index file and
-  the handle key are 0600. duscope still reads a looser directory, a looser index file, or one
-  another user owns, but it prints a warning on stderr with the `chmod` that fixes it.
+- **Permissions.** The index directory and its `scans` and `out` directories are 0700. Each
+  index file, each spill file in `out` and the handle key are 0600. duscope still reads a looser
+  directory, a looser index file, or one another user owns, but it prints a warning on stderr
+  with the `chmod` that fixes it.
 
 #### 4. The scanned tree
 
@@ -137,8 +157,9 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
 
 - **Names are bytes.** The index stores them as BLOBs. JSON carries invalid UTF-8 as a lossy
   `name` and the bytes in base64 (`name_raw`). Output for people (tables and the treemap)
-  shows control characters as escapes (`\x1b`), so a file name cannot drive the terminal. SVG
-  output escapes names as XML.
+  shows control characters as escapes (`\x1b`), so a file name in it cannot drive the terminal.
+  SVG output escapes names as XML. Names reach an agent as they are, in JSON: a client should
+  read them as data, whatever they say.
 - **Links.** The scanner never follows symbolic links unless `--follow-symlinks` is given. It
   does not cross onto another filesystem with `-x`, and it does not enter network filesystems
   without `--include-network`.
@@ -149,6 +170,11 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
 
   Besides these, it reads the two system tables that describe the layout: macOS's
   `/usr/share/firmlinks` and Linux's `/proc/self/mountinfo`. It writes nothing.
+
+  `explain`, and so the `duscope_explain` tool, is not the scanner: for its git facts it reads
+  what git reads (`.git` and what it names, `.gitignore`, `info/exclude`, the configuration and
+  the file its `core.excludesFile` names, and the repository's index). It parses them and runs
+  nothing.
 - **Imports.** `import` reads ncdu's and gdu's JSON and GrandPerspective's XML with in-tree
   streaming parsers.
   - Gzip is decompressed through a 1 GiB cap.
@@ -156,10 +182,30 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
     directory.
   - Each format has a fuzz target in `fuzz/`.
 
+### The MCP server
+
+`duscope mcp` speaks JSON-RPC, one message per line, on its stdin and stdout, and has no other
+transport. Stdout carries protocol messages alone. The log goes to stderr, and escapes the
+control characters in a client's strings.
+
+- **Tools.** A tool is its verb's command line, built from arguments checked against its input
+  schema and through the roots: an argument the schema does not name is refused, and a value
+  is joined to its flag with `=`, so it is never read as a flag.
+- **Writes.** `duscope_scan` saves an index, a new file each call unless `max_age` finds a recent
+  one; `scans --prune`, which no tool runs, removes old ones. A result past `--max-chars` goes
+  to the index directory's `out`, and `duscope_explain` makes `handle.key` where there is none.
+  No tool writes anywhere else.
+- **Limits.** A message is at most 16 MiB; a longer line is refused and skipped. Calls run one
+  at a time, in the order they came. `duscope_scan` has 10 minutes and the other tools 30 seconds
+  before the call is answered `deadline_exceeded`; `duscope_query`'s statement keeps the
+  sandbox's 5 seconds. A cancelled or expired scan stops within one directory per walk worker.
+  The verbs that read saved scans have no point at which to stop: one runs to its end, and the
+  next call waits for it.
+
 ### No network
 
 The binary opens no network socket. There is no telemetry and no update check, and `cargo deny`
-bans HTTP and TLS crates from the dependency tree.
+bans the HTTP and TLS crates `reqwest`, `hyper` and `openssl` from the dependency tree.
 
 The one socket it opens is local: while `view` or `scan -i` runs, the terminal library's event
 reader (crossterm's) opens a pair of Unix-domain sockets connected only to each other, through

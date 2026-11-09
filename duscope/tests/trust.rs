@@ -1,16 +1,18 @@
 //! P2-SEC-01: an index file outside the index directory is read only when
-//! `--trust` names it, and saved scans open to other users are read with a
-//! warning.
+//! `--trust` names it, saved scans open to other users are read with a
+//! warning, and no MCP tool can name an index file or reach `--trust`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+use std::collections::BTreeMap;
 use std::fs::{self, Permissions};
+use std::io::Write;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
 
 use duscope_testkit::TestEnv;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn run(env: &TestEnv, args: &[&str]) -> Output {
     env.cmd().args(args).output().unwrap()
@@ -187,4 +189,133 @@ fn p2_sec_01_saved_scans_open_to_others_are_read_with_a_warning() {
         "{}",
         stderr(&out)
     );
+}
+
+/// A 2026-07-28 request to the MCP server.
+fn request(id: u64, method: &str, params: &Value) -> Value {
+    let mut all = json!({
+        "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+        },
+    });
+    all.as_object_mut()
+        .unwrap()
+        .extend(params.as_object().unwrap().clone());
+    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": all})
+}
+
+/// The responses of `duscope mcp --roots ROOT` to `requests`, by id.
+fn serve(env: &TestEnv, root: &Path, requests: &[Value]) -> BTreeMap<u64, Value> {
+    let mut child = env
+        .cmd()
+        .arg("mcp")
+        .arg("--roots")
+        .arg(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for one in requests {
+        writeln!(stdin, "{one}").unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let message: Value = serde_json::from_str(line).unwrap();
+            (message["id"].as_u64().unwrap(), message)
+        })
+        .collect()
+}
+
+#[test]
+fn p2_sec_01_no_mcp_tool_can_name_an_index_file_or_reach_trust() {
+    let env = TestEnv::new();
+    let (root, inside) = saved(&env);
+    let copy = env.tmp_dir().join("copy.db");
+    fs::copy(&inside, &copy).unwrap();
+    let listed = serve(&env, &root, &[request(1, "tools/list", &json!({}))]);
+    let tools = listed[&1]["result"]["tools"].as_array().unwrap();
+    assert!(tools.len() >= 11, "{tools:?}");
+    // What each call is answered with, by id.
+    let mut asked: Vec<(u64, Value, &str)> = Vec::new();
+    let mut requests: Vec<Value> = Vec::new();
+    let mut ask = |tool: &Value, arguments: Value, code: &'static str| {
+        let id = requests.len() as u64 + 1;
+        let params = json!({"name": tool["name"], "arguments": arguments});
+        requests.push(request(id, "tools/call", &params));
+        asked.push((
+            id,
+            json!({"tool": tool["name"], "arguments": arguments}),
+            code,
+        ));
+    };
+    for tool in tools {
+        let properties = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(
+            !properties.contains_key("trust"),
+            "{} takes trust",
+            tool["name"]
+        );
+        // No argument of that name gets past the schema, either.
+        ask(tool, json!({"trust": [copy]}), "usage");
+        let selectors: Vec<&str> = ["scan_id", "old", "new"]
+            .into_iter()
+            .filter(|name| properties.contains_key(*name))
+            .collect();
+        if selectors.is_empty() {
+            continue;
+        }
+        // An index file, inside the index directory or outside it, by any
+        // argument that names a scan.
+        for file in [&copy, &inside] {
+            let mut arguments = json!({});
+            for name in &selectors {
+                arguments[*name] = json!(file);
+            }
+            if properties.contains_key("sql") {
+                arguments["sql"] = json!("select 1");
+            }
+            ask(tool, arguments, "refused_path");
+        }
+    }
+    let responses = serve(&env, &root, &requests);
+    assert_eq!(responses.len(), requests.len());
+    for (id, call, code) in asked {
+        let result = &responses[&id]["result"];
+        assert_eq!(result["isError"], true, "{call}: {result}");
+        assert_eq!(
+            result["structuredContent"]["error"]["code"], code,
+            "{call}: {result}"
+        );
+    }
+}
+
+#[test]
+fn p2_sec_01_a_spilled_envelope_is_the_owners_alone() {
+    let env = TestEnv::new();
+    let (root, _) = saved(&env);
+    let stub = ok(&run(
+        &env,
+        &["top", root.to_str().unwrap(), "--json", "--max-chars", "1"],
+    ));
+    let file = PathBuf::from(stub["spilled"]["path"].as_str().unwrap());
+    assert!(
+        file.starts_with(env.index_dir().join("out")),
+        "{}",
+        file.display()
+    );
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&file), 0o600, "{}", file.display());
+    assert_eq!(mode(file.parent().unwrap()), 0o700, "{}", file.display());
 }
