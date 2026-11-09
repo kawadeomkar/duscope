@@ -369,8 +369,13 @@ mod macos {
         )
         .unwrap();
         fs::remove_file(t("cases/hard-links/a/original.bin")).unwrap();
+        // The script grows no file: APFS gives a file that grows into a new
+        // block the rest of a 64 KiB chunk, and releases it at a time of its
+        // own (on a CI runner, between the rescan and the full scan after
+        // it, 15 blocks apart). Writing in place and shortening allocate
+        // nothing.
         let mut linked = fs::OpenOptions::new()
-            .append(true)
+            .write(true)
             .open(t("cases/hard-links/b/other-dir.bin"))
             .unwrap();
         std::io::Write::write_all(&mut linked, b"more").unwrap();
@@ -403,11 +408,12 @@ mod macos {
         )
         .unwrap();
         fs::set_permissions(t("home/Pictures/field"), fs::Permissions::from_mode(0o700)).unwrap();
-        let mut pdf = fs::OpenOptions::new()
-            .append(true)
+        // A file whose size changes.
+        let pdf = fs::OpenOptions::new()
+            .write(true)
             .open(t("home/Downloads/invoice-2036-11.pdf"))
             .unwrap();
-        std::io::Write::write_all(&mut pdf, b"more").unwrap();
+        pdf.set_len(pdf.metadata().unwrap().len() - 4).unwrap();
         drop(pdf);
         // The directories FSEvents reports for them, measured on macOS 26.6:
         // a link's or a clone's source among them, which the rescan reads
