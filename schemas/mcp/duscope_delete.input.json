@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "duscope_delete.input.json",
+  "title": "duscope_delete",
+  "description": "The arguments of duscope_delete, which runs `duscope clean --from` on each item's handle, as a dry run unless dry_run is false; the Trash only, and offered only under the server's --allow-delete.",
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "description": "The entries to move to the Trash, at most 100: all of them, or, if any is refused, none",
+      "items": {
+        "type": "object",
+        "description": "One entry to move",
+        "properties": {
+          "handle": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "The handle duscope_explain returned for the entry; it holds fifteen minutes and only while the path still holds the entry explain examined"
+          },
+          "expect_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The bytes this entry should free once the Trash is emptied: its frees_bytes from a dry-run plan, or duscope_explain's freeable_now_bytes. Off by more than 1%, the item is refused"
+          }
+        },
+        "required": [
+          "handle",
+          "expect_bytes"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": true,
+      "description": "true (the default): answer the plan and move nothing. false: move the items to the Trash, nothing else"
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "additionalProperties": false
+}

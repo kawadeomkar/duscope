@@ -385,6 +385,36 @@ the roots, so a scan whose root lies above a root is compared at that root.
 | `--all` | — | a tool returns one envelope |
 | `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
 
+## Delete (P5-MCP-01)
+
+`duscope_delete` runs `clean` on the handles a call names, and only under the
+server's `--allow-delete`: without it the tool is not listed and a call to it
+is an unknown tool. It is Trash-only, always: no argument reaches
+`--permanent`, and a value it passes on follows a `=`, so it cannot be read as
+a flag. Each `handle` is verified and its path bound to the roots (under one,
+and not one itself) before the verb runs; each `expect_bytes` goes to
+`--expect-item-bytes`, which refuses an item whose `frees_bytes` is not within
+1% of it. `dry_run` defaults to true, and answers the plan as a successful
+result (`--dry-run`); `false` is `--yes`.
+
+### `duscope_delete` (`clean`)
+
+| Flag | Parameter | Why |
+| --- | --- | --- |
+| `PATH` | — | a tool removes only what a handle names |
+| `--from` | `items` | each item's `handle` |
+| `--expect-item-bytes` | `items` | each item's `expect_bytes` (hidden: server-only) |
+| `--yes` | `dry_run` | `false` |
+| `--dry-run` | `dry_run` | `true`, the default (hidden: server-only) |
+| `--permanent` | — | the Trash only, over MCP |
+| `--expect-bytes` | — | a whole plan's figure: `expect_bytes` is per item |
+| `--no-input` | — | a tool run has no terminal: `--json` never prompts |
+| `--skip-refused` | — | a refused item stops the call |
+| `--scan` | — | the scan the handle names, else the newest that holds its path |
+| `--max-age` | — | the plan warns of an old scan; a client cannot act on the flag |
+| `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
+| `--test-now` | — | hidden: for tests |
+
 ## Conformance oracle (P3-MCP-06)
 
 Oracle: rmcp 3.9.0, the protocol's Rust SDK, whose client the conformance suite
