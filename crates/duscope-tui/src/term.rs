@@ -218,6 +218,11 @@ pub fn next_event() -> io::Result<Event> {
     event::read()
 }
 
+/// Whether an event can be read within `wait`.
+pub fn event_ready(wait: Duration) -> io::Result<bool> {
+    event::poll(wait)
+}
+
 /// Asks the terminal for its background colour (OSC 11), with a primary
 /// device attributes query (DA1) behind it. Terminals answer in order and
 /// every one answers DA1, so DA1's answer ends the wait early where OSC 11

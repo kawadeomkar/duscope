@@ -270,17 +270,39 @@ pub fn save(
     output: &Output,
     announce: bool,
 ) -> Result<(), Failure> {
-    let failed = |message: String| {
-        Failure::new(Exit::Runtime, "index_write_failed", message)
-            .hint("Run duscope scan --save again with --index-dir naming a writable directory")
+    let dir = match index_dir {
+        Some(dir) => dir.to_owned(),
+        None => {
+            duscope_core::index::default_dir(|name| std::env::var_os(name)).ok_or_else(|| {
+                save_failed("no index directory: neither HOME nor XDG_CACHE_HOME is set".to_owned())
+            })?
+        }
     };
-    let dir =
-        match index_dir {
-            Some(dir) => dir.to_owned(),
-            None => duscope_core::index::default_dir(|name| std::env::var_os(name)).ok_or_else(
-                || failed("no index directory: neither HOME nor XDG_CACHE_HOME is set".to_owned()),
-            )?,
-        };
+    write_index(scanned, walk, excludes, id, &dir)?;
+    if announce && !output.is_json() {
+        crate::out::stderr_line(&format!(
+            "saved as {id} ({})",
+            index_path(&dir, id).display()
+        ));
+    }
+    Ok(())
+}
+
+/// What a failed save says: `index_write_failed`, and how to get past it.
+fn save_failed(message: String) -> Failure {
+    Failure::new(Exit::Runtime, "index_write_failed", message)
+        .hint("Run duscope scan --save again with --index-dir naming a writable directory")
+}
+
+/// Writes the index of `scanned` under `dir`, silently: what `save` and a
+/// rescan the viewer runs beside its terminal share.
+pub(super) fn write_index(
+    scanned: &Scanned,
+    walk: &WalkArgs,
+    excludes: &[String],
+    id: &ScanId,
+    dir: &Path,
+) -> Result<(), Failure> {
     let root_volume = scanned.arena.volumes().first();
     let meta = ScanMeta {
         scan_id: id.clone(),
@@ -306,8 +328,8 @@ pub fn save(
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let started = Instant::now();
-    IndexWriter::write(&scanned.arena, &scanned.rollup, &meta, &dir)
-        .map_err(|e| failed(e.to_string()))?;
+    IndexWriter::write(&scanned.arena, &scanned.rollup, &meta, dir)
+        .map_err(|e| save_failed(e.to_string()))?;
     let secs = started.elapsed().as_secs_f64();
     let entries = scanned.rollup.len();
     #[allow(clippy::cast_precision_loss)]
@@ -316,12 +338,6 @@ pub fn save(
         "write: {} entries in {secs:.3} s: {per_entry:.2} µs/entry",
         thousands(entries as u64)
     );
-    if announce && !output.is_json() {
-        crate::out::stderr_line(&format!(
-            "saved as {id} ({})",
-            index_path(&dir, id).display()
-        ));
-    }
     Ok(())
 }
 

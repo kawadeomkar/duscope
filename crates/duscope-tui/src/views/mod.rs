@@ -28,6 +28,7 @@ use std::rc::Rc;
 use duscope_core::query::{SortKey, children, sort_ids};
 use ratatui_core::layout::Rect;
 
+use crate::mark::{Freed, Marks};
 use crate::mask::{Mask, WALK_BUDGET};
 use crate::panes::Context;
 use crate::widgets::Canvas;
@@ -145,9 +146,28 @@ pub struct Viewing<'a> {
     pub filter: Option<&'a str>,
     /// The rows worked out so far.
     pub rows: &'a Rows,
+    /// What `d` marked: outlined on the map, `✕` in the lists.
+    pub marks: &'a Marks,
+    /// What `yes` moved to the Trash this session: the map's freed tiles.
+    pub freed: &'a Freed,
 }
 
 impl Viewing<'_> {
+    /// `name` as the lists show it: `✕` in front of a marked entry.
+    #[must_use]
+    pub fn marked_name(&self, canvas: &Canvas<'_>, id: u32, name: String) -> String {
+        if self.marks.holds(id) {
+            let glyph = if canvas.glyphs == duscope_treemap::paint::Glyphs::Ascii {
+                "x "
+            } else {
+                "✕ "
+            };
+            format!("{glyph}{name}")
+        } else {
+            name
+        }
+    }
+
     /// What the pane titles add for the filter: nothing without one.
     #[must_use]
     pub fn filter_suffix(&self) -> String {

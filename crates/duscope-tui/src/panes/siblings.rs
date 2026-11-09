@@ -101,7 +101,8 @@ pub fn siblings(
             break;
         }
         let node = ctx.view.node(kid);
-        let (name, bytes) = (ctx.name(kid, true), ctx.size(&node));
+        let name = viewing.marked_name(canvas, kid, ctx.name(kid, true));
+        let (name, bytes) = (name, ctx.size(&node));
         let size = compact(bytes);
         canvas.list_row(
             area.x,
@@ -123,6 +124,27 @@ pub fn siblings(
     if start + shown < kids.len() {
         more(canvas, y, start + shown..kids.len());
     }
+}
+
+/// The sibling drawn in the row at `y` of the pane, with the selection
+/// `id`: `None` on the frame or a `… n more` row.
+pub fn siblings_row(
+    pane: Rect,
+    ctx: &Context<'_>,
+    id: u32,
+    viewing: &Viewing<'_>,
+    y: u16,
+) -> Option<u32> {
+    let parent = ctx.parent(&ctx.view.node(id));
+    let area = inner(pane);
+    let row = y.checked_sub(area.y).filter(|&dy| dy < area.height)?;
+    let listed = viewing.children(ctx, parent.id);
+    let lonely = [parent.id];
+    let kids: &[u32] = if listed.is_empty() { &lonely } else { &listed };
+    let at = kids.iter().position(|&k| k == id).unwrap_or(0);
+    let (start, shown) = window(kids.len(), at, SIBLINGS, usize::from(area.height));
+    let row = usize::from(row).checked_sub(usize::from(start > 0))?;
+    (row < shown).then(|| kids[start + row])
 }
 
 /// How many of `count` rows a list shows in `room` rows when it shows at

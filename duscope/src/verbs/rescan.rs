@@ -85,23 +85,7 @@ pub fn run(args: &RescanArgs, index_dir: Option<&Path>, output: &Output) -> Resu
     let parent = parent(args, &dir)?;
     let walk = walk_args(&parent);
     let excludes = parent.options.excludes.clone();
-    // From the checks and the replays to the roll-up: what the footer's
-    // incremental rescan took.
-    let began = Instant::now();
-    let (mut scanned, fallback) = match mode {
-        Mode::Full => (scan::scan(&walk, &excludes)?, None),
-        Mode::Auto | Mode::Incremental => match incremental(&parent, &walk, &excludes, max_age_ns)?
-        {
-            Ok(scanned) => (scanned, None),
-            Err(stop) => {
-                let fallback = refused(mode, stop, &parent)?;
-                (scan::scan(&walk, &excludes)?, fallback)
-            }
-        },
-    };
-    let took = began.elapsed();
-    scanned.parent = Some(parent.id.clone());
-    scanned.fallback = fallback.map(Fallback::as_str);
+    let (scanned, fallback, took) = read_again(&parent, &walk, &excludes, mode, max_age_ns)?;
     let id = scan::scan_id(&scanned)?;
     let read_again = scanned.incremental;
     let fresh = Source::Fresh {
@@ -123,6 +107,49 @@ pub fn run(args: &RescanArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         return Ok(());
     };
     scan::save(&scanned, &walk, &excludes, &id, Some(&dir), output, true)
+}
+
+/// Reads the tree of `parent` again as `mode` asks, the `parent` and
+/// fallback recorded on the scan: its new scan, the fallback it took and how
+/// long the checks, the replays and the roll-up took (the footer's
+/// incremental rescan).
+fn read_again(
+    parent: &Parent,
+    walk: &WalkArgs,
+    excludes: &[String],
+    mode: Mode,
+    max_age_ns: i64,
+) -> Result<(Scanned, Option<Fallback>, Duration), Failure> {
+    let began = Instant::now();
+    let (mut scanned, fallback) = match mode {
+        Mode::Full => (scan::scan(walk, excludes)?, None),
+        Mode::Auto | Mode::Incremental => match incremental(parent, walk, excludes, max_age_ns)? {
+            Ok(scanned) => (scanned, None),
+            Err(stop) => {
+                let fallback = refused(mode, stop, parent)?;
+                (scan::scan(walk, excludes)?, fallback)
+            }
+        },
+    };
+    let took = began.elapsed();
+    scanned.parent = Some(parent.id.clone());
+    scanned.fallback = fallback.map(Fallback::as_str);
+    Ok((scanned, fallback, took))
+}
+
+/// `r` in the viewer: the saved scan in `file` read again as `rescan` reads
+/// it (only what changed where it can, else the whole tree, with the options
+/// it was scanned with), saved under `dir`, without a word on the terminal,
+/// which is the viewer's. The new index's file.
+pub fn in_viewer(file: &Path, dir: &Path) -> Result<PathBuf, Failure> {
+    let index = Index::open(file).map_err(core_failure)?;
+    let parent = Parent::of(index)?;
+    let walk = walk_args(&parent);
+    let excludes = parent.options.excludes.clone();
+    let (scanned, _, _) = read_again(&parent, &walk, &excludes, Mode::Auto, rescan::MAX_AGE_NS)?;
+    let id = scan::scan_id(&scanned)?;
+    scan::write_index(&scanned, &walk, &excludes, &id, dir)?;
+    Ok(index_path(dir, &id))
 }
 
 /// What the footer says of how the rescan read the tree: `rescanned 1,204
@@ -314,30 +341,37 @@ fn parent(args: &RescanArgs, dir: &Path) -> Result<Parent, Failure> {
         )
         .hint(format!("Run duscope scan --save {} first", path.display()))
     })?;
-    // An imported tree has no scan options to scan with.
-    if !scanned(&index) {
-        let source = &index.meta().source;
-        return Err(Failure::new(
-            Exit::Usage,
-            "usage",
-            format!(
-                "saved scan {} is an import ({source}), which has no scan options to scan with again",
-                index.meta().scan_id
-            ),
-        )
-        .hint(format!(
-            "Run duscope scan --save {} to scan the tree here",
-            index.root_path().display()
-        )));
+    Parent::of(index)
+}
+
+impl Parent {
+    /// The saved scan `index` as a rescan's parent: its id, root and
+    /// options. An imported tree has no scan options to scan with.
+    fn of(index: Index) -> Result<Parent, Failure> {
+        if !scanned(&index) {
+            let source = &index.meta().source;
+            return Err(Failure::new(
+                Exit::Usage,
+                "usage",
+                format!(
+                    "saved scan {} is an import ({source}), which has no scan options to scan with again",
+                    index.meta().scan_id
+                ),
+            )
+            .hint(format!(
+                "Run duscope scan --save {} to scan the tree here",
+                index.root_path().display()
+            )));
+        }
+        let (options, attrs) = rescan::options(&index).map_err(core_failure)?;
+        Ok(Parent {
+            id: index.meta().scan_id.clone(),
+            root: index.root_path().to_owned(),
+            options,
+            attrs,
+            index,
+        })
     }
-    let (options, attrs) = rescan::options(&index).map_err(core_failure)?;
-    Ok(Parent {
-        id: index.meta().scan_id.clone(),
-        root: index.root_path().to_owned(),
-        options,
-        attrs,
-        index,
-    })
 }
 
 #[cfg(test)]

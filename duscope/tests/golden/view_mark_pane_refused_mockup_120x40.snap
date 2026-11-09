@@ -1,0 +1,81 @@
+                                                                                                                        
+                                                                                                                        
+╭─ mark pane · 3 marked ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│          action     size    frees  path                                                                              │
+│           trash  3.0 MiB  3.0 MiB  /Users/alex/Library/Caches/Homebrew/downloads                                     │
+│           trash  8.0 KiB  8.0 KiB  /Users/alex/Library/Logs/old.log                                                  │
+│refused: symlink  1.0 KiB  1.0 KiB  /Users/alex/Library/Containers                                                    │
+│                                                                                                                      │
+│2 items to move to the Trash: 3.0 MiB on disk, 3.0 MiB freed once the Trash is emptied · 1 refused                    │
+│1 of the 3 items cannot be moved to the Trash, so nothing is moved: unmark it with d                                  │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                                        
+--- styles: count fg bg [b]
+0: 120 - #1e1e2e
+1: 120 - #1e1e2e
+2: 2 #f9e2af #1e1e2e | 22 #b4befe #1e1e2e b | 96 #f9e2af #1e1e2e
+3: 1 #f9e2af #1e1e2e | 40 #b4befe #1e1e2e b | 78 - #1e1e2e | 1 #f9e2af #1e1e2e
+4: 1 #f9e2af #1e1e2e | 81 #cdd6f4 #1e1e2e | 37 - #1e1e2e | 1 #f9e2af #1e1e2e
+5: 1 #f9e2af #1e1e2e | 68 #cdd6f4 #1e1e2e | 50 - #1e1e2e | 1 #f9e2af #1e1e2e
+6: 1 #f9e2af #1e1e2e | 66 #cdd6f4 #1e1e2e | 52 - #1e1e2e | 1 #f9e2af #1e1e2e
+7: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+8: 1 #f9e2af #1e1e2e | 98 #cdd6f4 #1e1e2e | 20 - #1e1e2e | 1 #f9e2af #1e1e2e
+9: 1 #f9e2af #1e1e2e | 84 #f38ba8 #1e1e2e | 34 - #1e1e2e | 1 #f9e2af #1e1e2e
+10: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+11: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+12: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+13: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+14: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+15: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+16: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+17: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+18: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+19: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+20: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+21: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+22: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+23: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+24: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+25: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+26: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+27: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+28: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+29: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+30: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+31: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+32: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+33: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+34: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+35: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+36: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+37: 1 #f9e2af #1e1e2e | 118 - #1e1e2e | 1 #f9e2af #1e1e2e
+38: 120 #f9e2af #1e1e2e
+39: 120 - #1e1e2e
