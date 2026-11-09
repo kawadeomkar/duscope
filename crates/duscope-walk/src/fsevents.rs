@@ -159,9 +159,21 @@ impl Fallback {
 }
 
 /// The mark of the volume on `dev` when the system's event id was `now`:
-/// `None` where the volume keeps no history.
-pub(crate) fn mark(dev: u64, now: u64) -> Option<FsEventsMark> {
+/// `None` where the volume keeps no history, and off macOS. A caller that
+/// walks with [`walk_with`](crate::walk_with) and samples the event id
+/// itself marks the volumes it is handed with it.
+pub fn mark(dev: u64, now: u64) -> Option<FsEventsMark> {
     platform::fsevents_mark(dev, now)
+}
+
+/// Whether the history of a volume of type `fs_type` (`scan_volumes.fs_type`)
+/// may stand in for reading it again: on APFS and HFS+ only. fseventsd also
+/// logs FAT and exFAT volumes, whose coarse times need not change when a
+/// directory's entries do, and the history of a network volume holds none of
+/// the changes other machines make, so neither is ever reused.
+#[must_use]
+pub fn reusable(fs_type: &str) -> bool {
+    matches!(fs_type, "apfs" | "hfs")
 }
 
 /// Wraps `sink` so that every volume the walk entered carries its mark at
