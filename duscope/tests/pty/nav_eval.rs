@@ -395,12 +395,21 @@ fn p4_test_01_a_resize_storm_ends_at_its_last_size() {
         ..Step::default()
     };
     perform(&mut terminal, &last);
-    let key_line = terminal.screen().row_text(43);
-    assert!(key_line.contains("q quit"), "{key_line}");
-    terminal.send(Key::Char('q')).unwrap();
+    // The size arrives before the frame does: the key line is the frame's last row.
     terminal
-        .wait_until(|screen| screen.text().contains("exit=0"))
+        .wait_until(|screen| screen.row_text(43).contains("q quit"))
         .unwrap_or_else(|e| panic!("{e}:\n{}", shown(&terminal)));
+    terminal.send(Key::Char('q')).unwrap();
+    // crossterm returns a resize without reading the terminal when both wake
+    // one poll, and the poll reports a byte once, so a key on a storm's heels
+    // can wait for the next byte: the one retry the spec allows.
+    let quit = terminal.wait_until_for(|screen| screen.text().contains("exit=0"), RESIZE_WAIT);
+    if quit.is_err() {
+        terminal.send(Key::Char('q')).unwrap();
+        terminal
+            .wait_until(|screen| screen.text().contains("exit=0"))
+            .unwrap_or_else(|e| panic!("{e}:\n{}", shown(&terminal)));
+    }
     assert_restored(&terminal, "a resize storm");
 }
 
