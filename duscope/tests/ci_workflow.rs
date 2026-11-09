@@ -19,6 +19,10 @@ const SETTINGS: &str = "docs/github-settings.md";
 /// The per-job budget recorded in ci.yml.
 const JOB_BUDGET_MINUTES: u32 = 20;
 
+/// The budget of `checks (macos-26)`, clippy and both test legs on one
+/// runner (DEV-141).
+const MACOS_CHECKS_BUDGET_MINUTES: u32 = 30;
+
 /// The required checks as branch protection names them: the job name with its
 /// matrix values, as in the PUT of docs/github-settings.md. Every check a pull
 /// request runs is required but the [`OPTIONAL_JOBS`]: each other job of
@@ -103,6 +107,7 @@ const RECIPES: &[(&str, &str)] = &[
     ("test", "test"),
     ("checks", "clippy"),
     ("checks", "test"),
+    ("checks", "test-locale"),
     ("quick", "clippy"),
     ("quick", "test"),
     ("msrv", "test"),
@@ -370,10 +375,72 @@ fn p0_ci_01_every_job_has_a_timeout_within_the_budget() {
             .unwrap_or_else(|| panic!("job `{}` has no timeout-minutes", job.id))
             .parse()
             .unwrap_or_else(|e| panic!("job `{}`: timeout-minutes is not a number: {e}", job.id));
+        let budget = if job.id == "checks" {
+            MACOS_CHECKS_BUDGET_MINUTES
+        } else {
+            JOB_BUDGET_MINUTES
+        };
         assert!(
-            (1..=JOB_BUDGET_MINUTES).contains(&minutes),
-            "job `{}` has timeout-minutes {minutes}, over the {JOB_BUDGET_MINUTES}-minute budget",
+            (1..=budget).contains(&minutes),
+            "job `{}` has timeout-minutes {minutes}, over its {budget}-minute budget",
             job.id
+        );
+    }
+}
+
+/// DEV-141: macOS's clippy and both test legs share one runner, so its
+/// locale leg leaves out the fixture tree's timed rebuild, which reads no
+/// locale, and the job has 30 minutes.
+#[test]
+fn p0_ci_01_macos_checks_has_30_minutes_and_a_locale_leg_without_the_rebuild() {
+    let workflow = read(WORKFLOW);
+    let jobs = jobs(&workflow);
+    let checks = jobs
+        .iter()
+        .find(|j| j.id == "checks")
+        .expect("ci.yml has no `checks` job");
+    assert_eq!(
+        job_key(checks, "timeout-minutes"),
+        Some(MACOS_CHECKS_BUDGET_MINUTES.to_string().as_str())
+    );
+    assert!(
+        workflow.contains(&format!(
+            "`checks (macos-26)`, which has {MACOS_CHECKS_BUDGET_MINUTES} (DEV-141)"
+        )),
+        "ci.yml's header records the job's own budget"
+    );
+    let locale = step_script(
+        checks,
+        "just test under TZ=America/Los_Angeles LC_ALL=fr_FR.UTF-8",
+    );
+    let commands: Vec<&str> = locale.lines().map(str::trim).collect();
+    assert!(commands.contains(&"just test-locale"), "{locale}");
+    assert!(!commands.contains(&"just test"), "{locale}");
+    let justfile = read("justfile");
+    let recipe: Vec<&str> = justfile
+        .lines()
+        .skip_while(|line| *line != "test-locale:")
+        .skip(1)
+        .take_while(|line| line.starts_with("    "))
+        .map(str::trim)
+        .collect();
+    // The packages `just test` builds, so nothing is built again; the two
+    // tests left out are the ones that time the fixture tree's rebuild.
+    assert_eq!(
+        recipe,
+        [
+            "cargo test --workspace -- --skip p0_test_01_tree_builds_and_reports_its_time \
+          --skip p0_test_01_rebuild_lists_identically"
+        ]
+    );
+    let fixture_build = read("crates/duscope-testkit/tests/fixture_build.rs");
+    for skipped in [
+        "p0_test_01_tree_builds_and_reports_its_time",
+        "p0_test_01_rebuild_lists_identically",
+    ] {
+        assert!(
+            fixture_build.contains(&format!("fn {skipped}()")),
+            "the locale leg skips `{skipped}`, which fixture_build.rs no longer has"
         );
     }
 }

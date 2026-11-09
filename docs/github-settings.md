@@ -22,7 +22,9 @@ under [Auditing](#auditing) read it again.
   [ci.yml](../.github/workflows/ci.yml):
   - `fmt`
   - `clippy` and `test`, with its locale leg, on `ubuntu-24.04` and
-    `ubuntu-24.04-arm`, and on `macos-26` in one job, `checks (macos-26)`
+    `ubuntu-24.04-arm`, and on `macos-26` in one job, `checks (macos-26)`,
+    whose locale leg leaves out the fixture tree's timed rebuild
+    (`just test-locale`) and which has 30 minutes
   - `platform` and `bench-regression` on the three runners
   - `msrv (pinned)` and `msrv (stable)`
   - `deny`

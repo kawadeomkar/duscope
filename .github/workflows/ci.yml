@@ -1,7 +1,8 @@
 # duscope CI: the merge gate for every pull request (plan/SPEC.md "CI/CD", P0-CI-01).
 #
-# Budget: 20 minutes per job, enforced by `timeout-minutes: 20` on every job; the
-# target is under 10 minutes of wall time per job.
+# Budget: 20 minutes per job, enforced by `timeout-minutes: 20` on every job but
+# `checks (macos-26)`, which has 30 (DEV-141); the target is under 10 minutes of
+# wall time per job.
 #
 # The jobs run the justfile recipes developers run (`just fmt`, `just clippy`,
 # `just test`, `just docs`, `just deny`, `just size`, `just repro`), so a green
@@ -324,12 +325,14 @@ jobs:
     # paid for its own checkout and cache, and the locale leg built the tests
     # again. Each step runs whatever failed before it, so one run reports
     # every failure. The platform tests stay a job of their own: their release
-    # build and root runs take about 13 minutes, which would take this one past
-    # the 20-minute budget.
+    # build and root runs take about 13 minutes. Clippy and the two legs took 17
+    # to 20 minutes by November 2026 and twice ran into the 20-minute budget, so
+    # the locale leg leaves out the fixture tree's timed rebuild, which reads no
+    # locale (`just test-locale`), and the job has 30 minutes (DEV-141).
     name: checks (macos-26)
     if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -371,7 +374,7 @@ jobs:
           locales=$(locale -a)
           grep -Eiq '^fr_FR\.utf-?8$' <<<"$locales" || { echo "::error::fr_FR.UTF-8 is not available on this runner"; exit 1; }
           date
-          just test
+          just test-locale
       - name: Regenerate the goldens after a failure
         if: failure() && steps.test.outcome == 'failure'
         run: just golden || true
