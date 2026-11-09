@@ -31,6 +31,7 @@ if sys.version_info < (3, 9):  # pragma: no cover - the message is the point
 
 import measure
 import indexbench
+import redraw
 import sweep
 import tools
 import trees
@@ -157,6 +158,17 @@ def parser() -> argparse.ArgumentParser:
     index.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
     index.add_argument("--out", help="the result file (default <results-dir>/<date>-<platform>-index.json)")
     index.add_argument("--hyperfine", default="hyperfine", help="the hyperfine command (default hyperfine on PATH)")
+    drawn = sub.add_parser("redraw", help="measure the viewer's redraw at 120x40 on T2 (P4-TEST-01)")
+    _tree_options(drawn, "T2")
+    _jobs_option(drawn)
+    drawn.add_argument("--duscope", required=True, metavar="PATH", help="the duscope executable to measure")
+    drawn.add_argument("--rounds", type=int, default=30, help="cycles of each kind's keys (default 30)")
+    drawn.add_argument("--frame-wait", type=float, default=redraw.FRAME_WAIT_S, help=f"seconds a press waits for a frame's first byte before it counts as changing nothing (default {redraw.FRAME_WAIT_S:g})")
+    drawn.add_argument("--tree-path", help="measure this tree as --trees' one name, neither built nor verified: for a tree that must stay as it is")
+    drawn.add_argument("--tools-dir", default=os.path.join(BENCH, ".tools"), help=argparse.SUPPRESS)
+    drawn.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
+    drawn.add_argument("--out", help="the result file (default <results-dir>/<date>-<platform>-redraw.json)")
+    drawn.add_argument("--note", help="free text kept in the result file, such as where a provisional number was measured")
     return top
 
 
@@ -541,6 +553,7 @@ def write_result(result: Dict[str, object], out: str) -> None:
 COMMANDS = {
     "sweep": lambda args: sweep.cmd_sweep(args, sys.modules[__name__]),
     "index": lambda args: indexbench.cmd_index(args, sys.modules[__name__]),
+    "redraw": lambda args: redraw.cmd_redraw(args, sys.modules[__name__]),
     "run": cmd_run,
     "build": cmd_build,
     "install": cmd_install,

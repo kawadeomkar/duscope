@@ -40,6 +40,7 @@ for release binaries, and rustup with the stable toolchain for the competitors b
 | `show FILE` | print a result file as a table |
 | `sweep` | measure duscope at each thread count and apply the defaults rule ([The thread sweep](#the-thread-sweep)) |
 | `index` | measure a saved scan's write, queries and size, and the D34 comparison ([Index measurements](#index-measurements)) |
+| `redraw` | measure the viewer's redraw at 120x40 on T2 ([The redraw budget](#the-redraw-budget)) |
 
 Options of `run` (most also apply to `build`, `install` and `verify`):
 
@@ -405,6 +406,45 @@ status 1 means something could not be measured, not that a gate failed.
 `nightly-bench.yml` runs it on each bench runner after the harness, and publishes the file to
 `bench-results` beside the harness's.
 
+## The redraw budget
+
+`bench/run.sh redraw --duscope target/release/duscope` measures the number Gate 4 → 5 asks for
+(P4-TEST-01): how long the viewer takes to redraw at 120x40 on T2, from a saved scan. The viewer
+runs on a pseudo-terminal of that size, in a true-colour terminal's environment; what it writes is
+read and dropped, not parsed, so the terminal's own drawing is not in the time. One redraw is from
+the write of a key (or the change of the terminal's size) to the last byte of the frame it caused,
+the end of a frame being 50 ms of silence after its first byte. A key that changes nothing on the
+screen, a move at a block's edge, writes no frame and is counted, not timed; `--frame-wait`
+(default 5 s) is how long a press waits for a frame's first byte before it counts as one of those,
+longer than T2's slowest frame, so that a slow frame is not read by the next press.
+
+The kinds, each in a session of its own, `--rounds` cycles (default 30):
+
+| Kind | Keys | What it asks of the viewer |
+| --- | --- | --- |
+| `move` | `l j h k` on the map's top row | the cursor's outline and the panes |
+| `descend` | `⌫ ⏎` from the file the viewer opens on | the panes and the breadcrumbs |
+| `zoom` | `z Z l` from the map's top row | a map for each folder the first time it is zoomed, kept after |
+| `repaint` | `c p` | every cell of the map in new colours, the full-repaint case |
+| `focus` | `⇥` | the panes' borders |
+| `views` | `2 1 3 1 4 1` | each table's first frame, and the map again |
+| `resize` | two sizes, 100x30 and 120x40 | the whole screen at another size |
+
+The result file (`<date>-<platform>-redraw.json` in `--results-dir`, or `--out`) holds the usual
+header, one row per tree and kind (`samples`, `no_frame`, p50, p95, mean, min, max and the times
+in milliseconds, the mean bytes of a frame), and `gates`: the line
+`redraw_p95_ms_at_120x40 <= 16`, the largest p95 of the kinds at 120x40, read from T2 (`resize`
+stands beside it, measured but not in the gate's number, since half of its frames are at another
+size). As in `index`, a gate failing is no failure of the run; a part that cannot be measured is
+recorded in `failures` and exit status 1 means something could not be measured.
+
+`nightly-bench.yml` runs it on each bench runner after the index measurements and publishes the
+file to `bench-results` beside the others. `--note` keeps free text in the result file;
+`--tree-path` measures a tree that is already there, read-only and neither built nor verified.
+`results/redraw-macos-arm64-provisional.json` is one such run, on an Apple M5 Pro against a
+read-only `bench/.trees/T2`, kept until the first nightly number exists; it is provisional and
+macOS-local, and it is not the nightly result.
+
 ## The allocator
 
 P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
@@ -431,6 +471,8 @@ defaults reached 168–244. On macOS
 | `drop-caches.sh` | the cold-run cache drop |
 | `test_bench.py` | unit tests, run by `duscope/tests/bench_harness.rs` |
 | `indexbench.py` | the index measurements (`index`) |
+| `redraw.py` | the viewer's redraw budget (`redraw`) |
+| `test_redraw.py` | its unit tests, run with `test_bench.py`; `duscope/tests/pty/nav_redraw.rs` runs it whole |
 | `test_indexbench.py` | its unit tests, run with `test_bench.py`; `duscope/tests/index_bench.rs` runs it whole |
 | `compare.py` | the regression check: a result file against the results before it on the same machine and tree |
 | `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |
@@ -438,4 +480,5 @@ defaults reached 168–244. On macOS
 | `gab_bench.c` | the per-entry cost of `getattrlistbulk` attribute sets on macOS |
 | `sweep.py` | the thread sweep and the rule that sets a platform's default thread count |
 | `results/clone-attributes-macos.json` | P1-BENCH-02's measurement and the `--clones` and `PRIVATESIZE` decisions |
+| `results/redraw-macos-arm64-provisional.json` | P4-TEST-01's provisional macOS-local redraw number, until the nightly measures it |
 | `results/allocator.json` | P1-BENCH-03's measurement: mimalloc on the musl builds, the system allocator on macOS |
