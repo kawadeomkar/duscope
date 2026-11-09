@@ -47,6 +47,8 @@ const REQUIRED_CHECKS: &[&str] = &[
     "fuzz-smoke (gpscan)",
     "fuzz-smoke (args)",
     "fuzz-smoke (jsonrpc)",
+    "mcp-conformance (ubuntu-24.04)",
+    "mcp-conformance (macos-26)",
     "docs",
     "schemas",
     "size (macos-26)",
@@ -71,8 +73,9 @@ const REQUIRED_CHECKS: &[&str] = &[
 /// Jobs of ci.yml that do not gate a merge: intel-mac builds on GitHub's
 /// best-effort Intel macOS runner, on pushes to main, the schedule and a
 /// dispatch; quick runs only on a pull request into another branch than main,
-/// which no branch protection covers (DEV-73).
-const OPTIONAL_JOBS: &[&str] = &["intel-mac", "quick"];
+/// which no branch protection covers (DEV-73); mcp-smoke runs the three MCP
+/// clients on the schedule and a dispatch alone (P3-MCP-06).
+const OPTIONAL_JOBS: &[&str] = &["intel-mac", "quick", "mcp-smoke"];
 
 /// The jobs of release.yml that run only for a tag: pull requests report them
 /// skipped, so they are not required.
@@ -498,6 +501,7 @@ fn p0_ci_01_a_pull_request_into_another_branch_runs_the_quick_set() {
                  && !contains(github.event.pull_request.labels.*.name, 'full-ci')"
             ),
             "intel-mac" => assert_eq!(condition, "github.event_name != 'pull_request'"),
+            "mcp-smoke" => assert_eq!(condition, SMOKE_ONLY_ON),
             "size-comment" => assert!(condition.contains(&format!("&& ({SCOPE})")), "{condition}"),
             id => assert_eq!(condition, full, "job `{id}`"),
         }
@@ -926,6 +930,178 @@ fn p4_tui_07_the_pixels_job_runs_on_both_platforms() {
         assert!(
             runners.contains(os),
             "the pixels job does not run on {os}: {runners:?}"
+        );
+    }
+}
+
+/// When `mcp-smoke` runs: the schedule and a dispatch, never a pull request.
+const SMOKE_ONLY_ON: &str =
+    "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
+
+/// The steps of `job`: each one's lines, from its `- ` on.
+fn steps(job: &Job) -> Vec<Vec<&str>> {
+    let mut steps: Vec<Vec<&str>> = Vec::new();
+    let mut in_steps = false;
+    for line in &job.lines {
+        if line == "    steps:" {
+            in_steps = true;
+            continue;
+        }
+        if !in_steps {
+            continue;
+        }
+        if line.starts_with("      - ") {
+            steps.push(vec![line.as_str()]);
+        } else if let Some(step) = steps.last_mut() {
+            step.push(line.as_str());
+        }
+    }
+    steps
+}
+
+/// The step of `job` named `name`, as its lines.
+fn step<'j>(job: &'j Job, name: &str) -> Vec<&'j str> {
+    steps(job)
+        .into_iter()
+        .find(|step| step[0].trim() == format!("- name: {name}"))
+        .unwrap_or_else(|| panic!("job `{}` has no step `{name}`", job.id))
+}
+
+/// P3-MCP-06: rmcp's client against the binary, on both first-class
+/// platforms, a required check on each.
+#[test]
+fn p3_mcp_06_mcp_conformance_runs_rmcps_client_against_the_binary_on_both_platforms() {
+    let jobs = jobs(&read(WORKFLOW));
+    let job = jobs
+        .iter()
+        .find(|job| job.id == "mcp-conformance")
+        .expect("ci.yml has no `mcp-conformance` job");
+    assert_eq!(job_key(job, "runs-on"), Some("${{ matrix.os }}"));
+    let runners: BTreeSet<String> = job
+        .matrix()
+        .into_iter()
+        .filter(|(key, _)| key == "os")
+        .map(|(_, os)| os)
+        .collect();
+    let expected: BTreeSet<String> = ["ubuntu-24.04", "macos-26"].map(str::to_owned).into();
+    assert_eq!(runners, expected);
+    for os in &expected {
+        let check = format!("mcp-conformance ({os})");
+        assert!(
+            REQUIRED_CHECKS.contains(&check.as_str()),
+            "{check} is not required"
+        );
+    }
+    // The suite starts the binary beside its test executable: the build
+    // comes first, then the crate's tests, rmcp's suite among them.
+    let commands: Vec<&str> = job
+        .lines
+        .iter()
+        .filter_map(|line| line.trim().strip_prefix("run: "))
+        .collect();
+    let at = |command: &str| {
+        commands
+            .iter()
+            .position(|c| *c == command)
+            .unwrap_or_else(|| panic!("mcp-conformance does not run `{command}`: {commands:?}"))
+    };
+    assert!(at("cargo build --locked -p duscope") < at("cargo test --locked -p duscope-mcp"));
+    // The oracle's version goes to the log, as Cargo.lock resolves it.
+    let oracle = step(job, "The conformance oracle").join("\n");
+    assert!(
+        oracle.contains("cargo tree --locked -p duscope-mcp --edges dev --invert rmcp"),
+        "{oracle}"
+    );
+    assert!(oracle.contains("GITHUB_STEP_SUMMARY"), "{oracle}");
+}
+
+/// P3-MCP-06: the client smoke tests run where they cost nothing to a pull
+/// request: on the schedule and a dispatch, never required.
+#[test]
+fn p3_mcp_06_mcp_smoke_runs_on_the_schedule_and_a_dispatch_alone() {
+    let workflow = read(WORKFLOW);
+    let jobs = jobs(&workflow);
+    let job = jobs
+        .iter()
+        .find(|job| job.id == "mcp-smoke")
+        .expect("ci.yml has no `mcp-smoke` job");
+    assert_eq!(job_key(job, "if"), Some(SMOKE_ONLY_ON));
+    assert!(OPTIONAL_JOBS.contains(&"mcp-smoke"));
+    assert!(
+        REQUIRED_CHECKS
+            .iter()
+            .all(|check| !check.starts_with("mcp-smoke")),
+        "mcp-smoke gates no merge"
+    );
+    for trigger in ["\n  schedule:\n", "\n  workflow_dispatch:\n"] {
+        assert!(
+            workflow.contains(trigger),
+            "ci.yml has no {trigger:?} trigger"
+        );
+    }
+    // The logs are kept whatever failed, for the author to commit.
+    let upload = steps(job)
+        .into_iter()
+        .find(|step| step[0].contains("actions/upload-artifact@"))
+        .expect("mcp-smoke keeps no logs");
+    let upload = upload.join("\n");
+    assert!(upload.contains("if: ${{ !cancelled() }}"), "{upload}");
+    assert!(upload.contains("name: mcp-smoke-logs"), "{upload}");
+}
+
+/// P3-MCP-06: each client's step runs its script with its own key, from
+/// the repository secret of the name docs/RELEASING.md lists, and nothing
+/// else in the workflow reads those secrets.
+#[test]
+fn p3_mcp_06_each_smoke_step_gets_its_own_key_alone() {
+    const CLIENTS: [(&str, &str, &str); 3] = [
+        ("Claude Code", "claude-code.sh", "ANTHROPIC_API_KEY"),
+        ("Codex CLI", "codex.sh", "OPENAI_API_KEY"),
+        ("Gemini CLI", "gemini.sh", "GEMINI_API_KEY"),
+    ];
+    let workflow = read(WORKFLOW);
+    let jobs = jobs(&workflow);
+    let job = jobs.iter().find(|job| job.id == "mcp-smoke").unwrap();
+    assert!(
+        job.lines.iter().all(|line| !line.starts_with("    env:")),
+        "mcp-smoke sets job-wide variables"
+    );
+    let releasing = read("docs/RELEASING.md");
+    for (name, script, key) in CLIENTS {
+        let lines = step(job, name);
+        let secrets: Vec<&str> = lines
+            .iter()
+            .filter(|line| line.contains("secrets."))
+            .map(|line| line.trim())
+            .collect();
+        assert_eq!(
+            secrets,
+            [format!("{key}: ${{{{ secrets.{key} }}}}")],
+            "{name}"
+        );
+        let run = lines
+            .iter()
+            .find_map(|line| line.trim().strip_prefix("run: "))
+            .unwrap_or_else(|| panic!("step `{name}` runs nothing"));
+        assert!(
+            run.starts_with(&format!("crates/duscope-mcp/tests/smoke/{script} ")),
+            "{run}"
+        );
+        assert!(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../crates/duscope-mcp/tests/smoke")
+                .join(script)
+                .is_file(),
+            "{script}"
+        );
+        assert!(
+            releasing.contains(&format!("`{key}`")),
+            "docs/RELEASING.md lists no secret {key}"
+        );
+        assert_eq!(
+            workflow.matches(&format!("secrets.{key}")).count(),
+            1,
+            "{key} is read outside its step"
         );
     }
 }
