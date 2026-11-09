@@ -60,3 +60,6 @@ Reading a file changes nothing that history records: a rescan of a scan
 taken with
 .B \-\-attrs full
 keeps the access times that scan read for whatever it takes from it.
+So that they are never older than the age limit, a scan with
+.B \-\-attrs full
+that was itself an incremental rescan is read whole.

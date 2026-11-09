@@ -271,7 +271,23 @@ pub fn plan(index: &Index, checks: &Checks<'_>, history: &dyn History) -> Result
             ),
         ));
     }
-    let (options, _) = super::options(index).map_err(Stop::Index)?;
+    let (options, attrs) = super::options(index).map_err(Stop::Index)?;
+    // FSEvents records no reads, so an incremental rescan keeps the access
+    // times the saved scan read for what it takes from it. Under `--attrs
+    // full` a saved scan that was itself incremental may hold access times
+    // older than its own age; it is read whole, so they are never older than
+    // --max-age (DEV-142).
+    if attrs == Attrs::Full && meta.incremental {
+        return Err(Stop::fallback(
+            Fallback::IndexTooOld,
+            format!(
+                "saved scan {} is itself an incremental rescan: under --attrs full, the access \
+                 times it took from its own saved scan may be older than --max-age {}",
+                meta.scan_id,
+                days(checks.max_age_ns)
+            ),
+        ));
+    }
     options_unchanged(index, &options, checks)?;
     let saved = Saved::load(index).map_err(Stop::Index)?;
     let root = index.root_path().to_owned();

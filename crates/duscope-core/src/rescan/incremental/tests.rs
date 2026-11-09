@@ -780,3 +780,53 @@ fn p5_core_01_a_root_put_in_place_of_the_scanned_one_is_read_again() {
     // No directory of the copy passed for the scanned one's.
     assert_eq!(outcome.rescanned_dirs, walked.dirs);
 }
+
+/// DEV-142: FSEvents records no reads, so an incremental rescan keeps the
+/// saved scan's access times for what it takes from it. Under `--attrs full`
+/// a saved scan that was itself an incremental rescan is read whole,
+/// `index_too_old`, so those access times are never older than `--max-age`;
+/// a full-attribute scan read whole, or a basic one, is rescanned
+/// incrementally.
+#[test]
+fn p5_core_01_under_attrs_full_an_incremental_saved_scan_is_read_whole() {
+    let env = TestEnv::new();
+    let base = fs::canonicalize(env.tmp_dir()).unwrap();
+    let root = base.join("tree");
+    tree(&root);
+    let started = now_ns();
+    let reached = |attrs: Attrs, incremental: bool, id: &str| {
+        let walk = WalkOptions { attrs, ..opts() };
+        let mut arena = Arena::new(attrs);
+        let provider = provider(&walk).unwrap();
+        walk_with(&*provider, &root, &walk, |mut event| {
+            if let ScanEvent::Volume(volume) = &mut event {
+                volume.fsevents = volume.entered().then(scan_mark);
+            }
+            arena.push(event).unwrap();
+        })
+        .unwrap();
+        let meta = ScanMeta {
+            incremental,
+            ..meta(&root, id, started, "{}", 0)
+        };
+        let saved = write(arena, &meta, &base.join(id));
+        let quiet = |under: &Path| Ok(reporting(under, &[]));
+        let history = script(&quiet);
+        let checks = Checks {
+            now_ns: started + 3_600_000_000_000,
+            max_age_ns: MAX_AGE_NS,
+            tool_version: "0.0.0",
+        };
+        match plan(&saved, &checks, &history) {
+            Ok(_) => None,
+            Err(Stop::Fallback(reason, _)) => Some(reason),
+            Err(other) => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(
+        reached(Attrs::Full, true, "full-incremental"),
+        Some(Fallback::IndexTooOld)
+    );
+    assert_eq!(reached(Attrs::Full, false, "full-whole"), None);
+    assert_eq!(reached(Attrs::Basic, true, "basic-incremental"), None);
+}
