@@ -275,16 +275,16 @@ fn viewer<'a>(view: &'a ArenaView<'a>, opts: PaintOpts<'a>) -> App<'a> {
     )
 }
 
-fn key(code: KeyCode) -> Event {
+pub(crate) fn key(code: KeyCode) -> Event {
     Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
-fn char(c: char) -> Event {
+pub(crate) fn char(c: char) -> Event {
     key(KeyCode::Char(c))
 }
 
 /// A terminal of `w`×`h` with `app`'s first frame.
-fn first_frame(app: &App<'_>, w: u16, h: u16) -> Terminal<TestBackend> {
+pub(crate) fn first_frame(app: &App<'_>, w: u16, h: u16) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal
         .draw(|f| app.draw(f.area(), f.buffer_mut()))
@@ -293,7 +293,11 @@ fn first_frame(app: &App<'_>, w: u16, h: u16) -> Terminal<TestBackend> {
 }
 
 /// Feeds `event` to `app` and draws the frame it asks for.
-fn press(app: &mut App<'_>, terminal: &mut Terminal<TestBackend>, event: &Event) -> Flow {
+pub(crate) fn press(
+    app: &mut App<'_>,
+    terminal: &mut Terminal<TestBackend>,
+    event: &Event,
+) -> Flow {
     let flow = app.on(event);
     if flow == Flow::Redraw {
         terminal
@@ -1216,7 +1220,7 @@ fn p4_tui_03_scripted_navigation_snapshots() {
 // ------------------------------------------------------------ the budget
 
 /// `count` folders with children, spread over `view`'s ids.
-fn folders(view: &dyn TreeView, count: usize) -> Vec<u32> {
+pub(crate) fn folders(view: &dyn TreeView, count: usize) -> Vec<u32> {
     let mut folders = Vec::new();
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     while folders.len() < count {
@@ -1236,7 +1240,7 @@ fn folders(view: &dyn TreeView, count: usize) -> Vec<u32> {
 /// by the release binary; `None`, and the test skipped, without
 /// `DUSCOPE_TEST_PLATFORM=1`. A missing tree fails the test rather than
 /// passing it unmeasured.
-fn t2(env: &duscope_testkit::TestEnv) -> Option<duscope_core::index::Index> {
+pub(crate) fn t2(env: &duscope_testkit::TestEnv) -> Option<duscope_core::index::Index> {
     use duscope_core::index::Index;
     use duscope_core::query::index_files;
 
@@ -1268,7 +1272,7 @@ fn t2(env: &duscope_testkit::TestEnv) -> Option<duscope_core::index::Index> {
 }
 
 /// `samples`' 50th, 90th and 99th percentiles and maximum, in µs.
-fn percentiles(samples: &mut [std::time::Duration]) -> [u128; 4] {
+pub(crate) fn percentiles(samples: &mut [std::time::Duration]) -> [u128; 4] {
     samples.sort_unstable();
     let at = |q: usize| samples[(samples.len() - 1) * q / 100].as_micros();
     [at(50), at(90), at(99), at(100)]

@@ -530,4 +530,4 @@ fn mark(canvas: &mut Canvas<'_>, area: Area, rect: Rect, tag: &(String, String))
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

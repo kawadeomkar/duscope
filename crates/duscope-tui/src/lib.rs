@@ -26,6 +26,7 @@ mod zoom;
 
 pub use app::{App, Flow, run, snapshot};
 pub use crossterm::event::Event;
+pub use panes::{ScanFacts, Sources};
 pub use term::{Background, MIN_SIZE, Tui, next_event, restore, size};
 
 #[cfg(test)]
