@@ -3,6 +3,7 @@
 //! the scan (the scan block, its warnings, the footer for people).
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,12 @@ pub struct Scanned {
     /// The saved scan this one scans again (`rescan`); `None` for a fresh
     /// scan.
     pub parent: Option<ScanId>,
+    /// For a rescan that read again only what changed, the directories it
+    /// read; `None` for any other scan.
+    pub incremental: Option<u64>,
+    /// Why a rescan read the whole tree although it was not asked to
+    /// (`fallback_reason`); `None` for any other scan.
+    pub fallback: Option<&'static str>,
     /// Where the tree came from, as `scan_meta.source` says: `scan`, or
     /// `import:<format>` for a tree another tool wrote.
     pub source: &'static str,
@@ -160,7 +167,10 @@ pub fn scan_block(scanned: &Scanned, walk_args: &WalkArgs, size: SizeKind) -> Sc
         dir_count: root.dir_count,
         error_count: summary.unreadable_dirs + summary.entry_errors,
         vanished_count: arena.vanished(),
-        incremental: false,
+        incremental: scanned.incremental.is_some(),
+        parent_scan_id: scanned.parent.as_ref().map(ToString::to_string),
+        rescanned_dirs: scanned.incremental,
+        fallback_reason: scanned.fallback,
         volumes: arena
             .volumes()
             .iter()
@@ -290,7 +300,7 @@ pub fn save(
         vanished_count: scanned.arena.vanished(),
         excluded_count: scanned.summary.excluded,
         clones_unavailable: scanned.summary.clones_unavailable,
-        incremental: false,
+        incremental: scanned.incremental.is_some(),
         parent_scan_id: scanned.parent.as_ref().map(ToString::to_string),
         source: scanned.source.to_owned(),
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -549,6 +559,37 @@ pub fn now(walk_args: &WalkArgs) -> Result<i64, Failure> {
 
 /// Scans the tree `walk_args` names.
 pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failure> {
+    let walked = |root: &Path, opts: &WalkOptions, sink: &mut dyn FnMut(ScanEvent)| {
+        Ok::<_, Infallible>(walk(root, opts, sink))
+    };
+    let Ok(scanned) = scan_by(walk_args, excludes, walked)?;
+    Ok(scanned)
+}
+
+/// What a scan's tree is read by: given the root, the walk's options and
+/// the sink, the walk's outcome, or `Err` when it gave up on a reading
+/// [`scan`] does not make (a rescan's incremental walk that falls back).
+pub(super) trait ReadTree<E>:
+    FnOnce(&Path, &WalkOptions, &mut dyn FnMut(ScanEvent)) -> Result<Result<WalkSummary, WalkError>, E>
+{
+}
+
+impl<E, F> ReadTree<E> for F where
+    F: FnOnce(
+        &Path,
+        &WalkOptions,
+        &mut dyn FnMut(ScanEvent),
+    ) -> Result<Result<WalkSummary, WalkError>, E>
+{
+}
+
+/// Scans the tree `walk_args` names as [`scan`] does, reading it with
+/// `read`; `Err` inside when `read` gave up.
+pub(super) fn scan_by<E>(
+    walk_args: &WalkArgs,
+    excludes: &[String],
+    read: impl ReadTree<E>,
+) -> Result<Result<Scanned, E>, Failure> {
     let given = match &walk_args.path {
         Some(path) => path.clone(),
         None => std::env::current_dir().map_err(|e| {
@@ -593,7 +634,7 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     let mut arena = Arena::new(opts.attrs);
     let mut push_error = None;
     let mut errors = log::log_enabled!(log::Level::Debug).then(|| DirErrors::new(&root));
-    let walked = walk(&root, &opts, |event| {
+    let walked = read(&root, &opts, &mut |event| {
         if let (Some(call), ScanEvent::Entry(_)) = (&call, &event) {
             call.entries.fetch_add(1, Ordering::Relaxed);
         }
@@ -608,6 +649,10 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
     });
     let walk_time = started.elapsed();
     drop(interrupts);
+    let walked = match walked {
+        Ok(walked) => walked,
+        Err(gave_up) => return Ok(Err(gave_up)),
+    };
     let summary = walked.map_err(|e| walk_failure(&given, e))?;
     if let Some(e) = push_error {
         return Err(Failure::new(Exit::Runtime, "io_error", e.to_string()));
@@ -646,11 +691,13 @@ pub fn scan(walk_args: &WalkArgs, excludes: &[String]) -> Result<Scanned, Failur
         started_ns,
         finished_ns: now(walk_args)?,
         parent: None,
+        incremental: None,
+        fallback: None,
         source: "scan",
         full_disk_access_missing,
     };
     phases(&scanned, walk_time, rollup_time);
-    Ok(scanned)
+    Ok(Ok(scanned))
 }
 
 /// `-v`: the walk and the roll-up, with counts and rates; `-vv` adds each
@@ -1166,6 +1213,8 @@ mod tests {
             started_ns: 0,
             finished_ns: 0,
             parent: None,
+            incremental: None,
+            fallback: None,
             source: "scan",
             full_disk_access_missing: false,
         }
@@ -1226,6 +1275,8 @@ mod tests {
             started_ns: 0,
             finished_ns: 0,
             parent: None,
+            incremental: None,
+            fallback: None,
             source: "scan",
             full_disk_access_missing: false,
         };
@@ -1302,6 +1353,8 @@ mod tests {
             started_ns: 0,
             finished_ns: 0,
             parent: None,
+            incremental: None,
+            fallback: None,
             source: "scan",
             full_disk_access_missing: false,
         };

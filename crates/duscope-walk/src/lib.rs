@@ -457,12 +457,7 @@ pub fn walk(
     opts: &WalkOptions,
     sink: impl FnMut(ScanEvent),
 ) -> Result<WalkSummary, WalkError> {
-    let provider = if opts.fallback {
-        platform::fallback()
-    } else {
-        platform::native()
-    };
-    let provider = provider.ok_or(WalkError::NoProvider)?;
+    let provider = provider(opts)?;
     let now = fsevents::current_event_id();
     walk_with(
         &*provider,
@@ -470,6 +465,23 @@ pub fn walk(
         opts,
         fsevents::marking(now, fsevents::mark, sink),
     )
+}
+
+/// The provider [`walk`] reads with: this platform's, or the fallback
+/// provider under [`WalkOptions::fallback`]. A caller that reads part of a
+/// tree some other way wraps it and walks with [`walk_with`], marking the
+/// volumes itself ([`fsevents::mark`]).
+///
+/// # Errors
+///
+/// [`WalkError::NoProvider`] on a platform other than Linux and macOS.
+pub fn provider(opts: &WalkOptions) -> Result<Box<dyn Provider>, WalkError> {
+    let provider = if opts.fallback {
+        platform::fallback()
+    } else {
+        platform::native()
+    };
+    provider.ok_or(WalkError::NoProvider)
 }
 
 /// Sets the process up for walking: raises the descriptor limit, grows the

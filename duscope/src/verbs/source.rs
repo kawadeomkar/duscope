@@ -703,6 +703,11 @@ pub(super) fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
         error_count: meta.error_count,
         vanished_count: meta.vanished_count,
         incremental: meta.incremental,
+        parent_scan_id: meta.parent_scan_id.clone(),
+        // What a rescan read, and why it read the whole tree, belong to
+        // its own output: the index keeps neither.
+        rescanned_dirs: None,
+        fallback_reason: None,
         volumes: volumes
             .iter()
             .map(|v| VolumeEntry {

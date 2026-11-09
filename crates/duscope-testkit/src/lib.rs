@@ -151,6 +151,23 @@ pub fn duscope_bin() -> PathBuf {
     dir.join(format!("duscope{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// Builds a copy of the reference fixture tree of its own in `dir`, for a
+/// test that changes the tree or needs it on another volume (a disk image):
+/// the shared tree [`TestEnv::fixtures`] holds is never changed. Returns
+/// the copy's root, `dir/tree`; its unreadable directories keep their modes
+/// at rest.
+///
+/// # Panics
+///
+/// When the tree cannot be built.
+pub fn build_fixture_tree(dir: &Path) -> PathBuf {
+    let out = OutDir::new(dir);
+    let plan = Plan::embedded().unwrap_or_else(|e| panic!("duscope-testkit: {e}"));
+    out.ensure(&plan, true)
+        .unwrap_or_else(|e| panic!("duscope-testkit: fixture tree at {}: {e}", dir.display()));
+    out.tree()
+}
+
 /// The variable that makes [`golden`] rewrite golden files instead of
 /// comparing with them, when set to `1` in the test process's environment.
 pub const UPDATE_GOLDEN: &str = "DUSCOPE_TEST_UPDATE_GOLDEN";
@@ -189,10 +206,11 @@ pub fn golden(name: &str, actual: &str) {
 
 /// `text`, a command's output, without what differs between runs, machines
 /// and releases, for a golden file: the root's path as `<root>`, the scan's
-/// id and times (in the `next` hints too: the scan and the cursor they
-/// name, and the next page's whole command, which repeats the test's own),
-/// the version, every `volumes` array (sizes and free space), and in a
-/// table's footer the scan's duration and the saved scan's id and time.
+/// id, its parent's and its times (in the `next` hints too: the scan and
+/// the cursor they name, and the next page's whole command, which repeats
+/// the test's own), the version, every `volumes` array (sizes and free
+/// space), and in a table's footer the scan's duration and the saved scan's
+/// id and time.
 ///
 /// # Panics
 ///
@@ -204,6 +222,8 @@ pub fn normalize(text: &str, root: &Path) -> String {
     let mut text = text.replace(root, "<root>");
     for (key, placeholder) in [
         ("\"id\":\"", "<id>"),
+        // A rescan's parent.
+        ("\"parent_scan_id\":\"", "<id>"),
         // A page's cursor names the scan.
         ("\"next_cursor\":\"", "<cursor>"),
         ("\"started_at\":\"", "<time>"),

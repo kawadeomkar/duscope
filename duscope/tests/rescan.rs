@@ -1,6 +1,8 @@
-//! P2-IDX-05: `rescan` of the fixture tree: a golden, an index whose dirs
-//! totals equal a fresh scan's and whose scan_meta carries the parent and
-//! its options, `latest` reading the child, and `--incremental` not yet.
+//! P2-IDX-05: `rescan` of the fixture tree: a golden of a full rescan, an
+//! index whose dirs totals equal a fresh scan's and whose `scan_meta` carries
+//! the parent and its options, `latest` reading the child, and
+//! `--incremental` not available where no change history is kept
+//! (P5-CORE-01 brings it to macOS).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -84,7 +86,9 @@ fn p2_idx_05_a_rescan_is_a_fresh_scan_with_the_parents_options() {
     let env = TestEnv::new();
     let home = fs::canonicalize(env.fixtures().path("home")).unwrap();
     let parent = save(&env, &home);
-    let out = rescan(&env, 1, &[home.to_str().unwrap(), "--json"]);
+    // The whole tree, as every rescan read it before P5-CORE-01: what an
+    // incremental one reads depends on the volume's history.
+    let out = rescan(&env, 1, &[home.to_str().unwrap(), "--full", "--json"]);
     let answer = ok(&out);
     let os = std::env::consts::OS;
     golden(
@@ -187,9 +191,16 @@ fn p2_idx_05_incremental_is_not_available_and_a_rescan_needs_a_saved_scan() {
         &env,
         &["rescan", home.to_str().unwrap(), "--incremental", "--json"],
     );
-    assert_eq!(out.status.code(), Some(2));
-    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(error["error"]["code"], "not_available");
+    // Where the platform keeps no change history (Linux). On macOS it reads
+    // what FSEvents reports (P5-CORE-01), or fails the same way when a
+    // check does.
+    let read_again = out.status.success()
+        && serde_json::from_slice::<Value>(&out.stdout).unwrap()["scan"]["incremental"] == true;
+    if duscope_walk::fsevents::current_event_id().is_none() || !read_again {
+        assert_eq!(out.status.code(), Some(2));
+        let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(error["error"]["code"], "not_available");
+    }
     // --full is what a rescan does.
     let out = run(
         &env,

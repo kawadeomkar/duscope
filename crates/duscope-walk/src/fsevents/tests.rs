@@ -179,3 +179,14 @@ fn p5_walk_01_replays_and_their_errors_name_their_fallback_reasons() {
         ]
     );
 }
+
+#[test]
+fn p5_core_01_only_apfs_and_hfs_histories_stand_in_for_a_read() {
+    use super::reusable;
+    assert!(reusable("apfs") && reusable("hfs"));
+    for fs_type in [
+        "msdos", "exfat", "ntfs", "smbfs", "nfs", "afpfs", "webdav", "ext4", "",
+    ] {
+        assert!(!reusable(fs_type), "{fs_type}");
+    }
+}

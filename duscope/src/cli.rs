@@ -878,13 +878,21 @@ pub struct RescanArgs {
     #[arg(long, value_name = "FILE")]
     pub trust: Vec<PathBuf>,
 
-    /// Scan the whole tree again (what every rescan does until phase 5)
+    /// Scan the whole tree again, not only what changed
     #[arg(long, conflicts_with = "incremental")]
     pub full: bool,
 
-    /// Scan only what changed since the saved scan (not yet available)
+    /// Scan only what changed since the saved scan, or fail
+    ///
+    /// By default a rescan does so where it can, else scans the whole tree
+    ///
+    /// It can on macOS, from the FSEvents history; on Linux it never can
     #[arg(long)]
     pub incremental: bool,
+
+    /// How old the saved scan may be to scan what changed (h, d, w, y; default 7d)
+    #[arg(long, value_name = "AGE")]
+    pub max_age: Option<String>,
 }
 
 /// `schema`'s flags.
@@ -1258,11 +1266,12 @@ pub fn apply_config(cli: &mut Cli, matches: &ArgMatches, config: &Config) -> Res
             max_age_default(&mut args.max_age);
             args.caches_extra.clone_from(&config.caches_extra);
         }
-        // A rescan takes the saved scan's options, not the file's.
+        // A rescan takes the saved scan's options, not the file's; how old
+        // a saved scan may be is the file's.
+        Some(Verb::Rescan(args)) => max_age_default(&mut args.max_age),
         // An import reads a file: no scan options apply.
         Some(
             Verb::Scans(_)
-            | Verb::Rescan(_)
             | Verb::Import(_)
             | Verb::Schema(_)
             | Verb::Mcp(_)

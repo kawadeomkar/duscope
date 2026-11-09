@@ -1,14 +1,22 @@
 //! `rescan`: a saved scan's root scanned again with the options it was
 //! scanned with, which `scan_meta.options` records. The new scan is a new
 //! index (snapshots are never edited) whose `parent_scan_id` names the old
-//! one; the old one stays until `scans --prune` removes it. Phase 5 adds
-//! the incremental path; until then every rescan is a full one.
+//! one; the old one stays until `scans --prune` removes it. Where the
+//! platform keeps a change history (macOS's `FSEvents`) and every check
+//! passes, only what changed is read again ([`plan`], [`merge`]); else the
+//! whole tree is.
 
 use duscope_walk::Attrs;
 use serde::{Deserialize, Serialize};
 
 use crate::CoreError;
 use crate::index::Index;
+
+mod incremental;
+
+pub use incremental::{
+    Checks, Fallback, FsEvents, History, MAX_AGE_NS, Merged, Plan, Stop, merge, plan,
+};
 
 /// The options a scan was taken with, as `scan_meta.options` records them
 /// (JSON) and a rescan takes them again: what decides which tree a scan
