@@ -733,7 +733,7 @@ fn p5_walk_01_macos_a_remount_since_the_mark_voids_a_replay_below_the_root() {
         let replayed = replay(dev, &marked, under, REPLAY_TIMEOUT).unwrap();
         assert_eq!(
             &replayed.must_scan_subdirs,
-            &[under.clone()],
+            std::slice::from_ref(under),
             "{replayed:?}"
         );
         assert_eq!(

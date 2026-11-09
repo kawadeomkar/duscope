@@ -591,14 +591,14 @@ impl TestEnv {
                 .and_then(|rest| rest.trim_start().strip_prefix(':'))
             {
                 images.push((path.trim().to_owned(), Vec::new()));
-            } else if line.starts_with("/dev/") {
-                if let Some((_, places)) = images.last_mut() {
-                    places.extend(
-                        line.split('\t')
-                            .map(|field| PathBuf::from(field.trim()))
-                            .filter(|field| field.is_absolute()),
-                    );
-                }
+            } else if line.starts_with("/dev/")
+                && let Some((_, places)) = images.last_mut()
+            {
+                places.extend(
+                    line.split('\t')
+                        .map(|field| PathBuf::from(field.trim()))
+                        .filter(|field| field.is_absolute()),
+                );
             }
         }
         Some(images)

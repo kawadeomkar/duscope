@@ -38,7 +38,7 @@ hyperfine_version := "2.0.0"
 fuzz_toolchain := "nightly-2026-10-23"
 # The toolchain the `pixels` feature builds on (P4-TUI-07): ratatui-image's
 # Sixel encoder, icy_sixel, quantises through quantette, which needs Rust 1.90,
-# past the pinned 1.88 the default build keeps. `just setup` installs it; ci.yml's
+# past the pinned 1.89 the default build keeps. `just setup` installs it; ci.yml's
 # pixels job reads it here.
 pixels_toolchain := "1.90"
 

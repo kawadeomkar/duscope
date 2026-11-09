@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kawadeomkar/duscope"
 homepage = "https://github.com/kawadeomkar/duscope"
@@ -72,9 +72,9 @@ ratatui-image = { version = "11.1.0", default-features = false }
 image = { version = "=0.25.10", default-features = false }
 # The index (P2-IDX-02): `bundled` compiles the SQLite the binary ships, with
 # the features duscope does not use left out (.cargo/config.toml); `functions`,
-# `hooks` and `limits` for the `query --sql` sandbox (P2-QRY-07). 0.40.2 is
-# the newest release the 1.88 toolchain builds: 0.41 needs 1.89.
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "functions", "hooks", "limits"] }
+# `hooks` and `limits` for the `query --sql` sandbox (P2-QRY-07). 0.41 is the
+# first release that bundles SQLite 3.54, which fixes RUSTSEC-2026-0459.
+rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "functions", "hooks", "limits"] }
 # The `pixels` feature's guard on the terminal's modes around the picker's
 # probe (P4-TUI-07): the version crossterm already brings, with the features it
 # already turns on.

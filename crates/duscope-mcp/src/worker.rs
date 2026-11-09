@@ -344,10 +344,10 @@ impl Worker {
     fn stop(&mut self) {
         self.shared.state().closed = true;
         self.shared.wake.notify_all();
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
-                warn!("the MCP worker thread panicked");
-            }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            warn!("the MCP worker thread panicked");
         }
     }
 }
@@ -494,12 +494,12 @@ impl Setup {
                 reporter = None;
                 continue;
             }
-            if let Some(reporter) = &mut reporter {
-                if now >= tick {
-                    report(call, reporter);
-                    while tick <= now {
-                        tick += every;
-                    }
+            if let Some(reporter) = &mut reporter
+                && now >= tick
+            {
+                report(call, reporter);
+                while tick <= now {
+                    tick += every;
                 }
             }
         }

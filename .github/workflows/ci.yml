@@ -478,7 +478,7 @@ jobs:
       fail-fast: false
       matrix:
         # pinned: rust-toolchain.toml, which must name the workspace rust-version
-        # (1.88). stable: the newest release, built and tested without clippy.
+        # (1.89). stable: the newest release, built and tested without clippy.
         toolchain: [pinned, stable]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -526,7 +526,7 @@ jobs:
     # The `pixels` feature (P4-TUI-07), which no build the project ships turns
     # on: `just pixels` on the feature's own toolchain, the justfile's
     # pixels_toolchain (1.90, which ratatui-image's Sixel encoder needs, past
-    # the pinned 1.88). Clippy over duscope-treemap, the one crate with code
+    # the pinned 1.89). Clippy over duscope-treemap, the one crate with code
     # behind the feature; the binary built with it; and the tests that run the
     # probe against mocked terminals, termlens answering as a Kitty graphics
     # terminal, a Sixel one, iTerm2, one with neither, and one that answers
@@ -549,7 +549,7 @@ jobs:
         with:
           tool: just@${{ env.JUST_VERSION }}
       - name: Install the pixels feature's toolchain, as the justfile pins it
-        # RUSTUP_TOOLCHAIN in place of rust-toolchain.toml's 1.88 for every
+        # RUSTUP_TOOLCHAIN in place of rust-toolchain.toml's 1.89 for every
         # cargo and rustc of the job, the cache's key included.
         run: |
           toolchain=$(just --evaluate pixels_toolchain)
@@ -617,7 +617,7 @@ jobs:
           rustup toolchain install "$nightly" --profile minimal
           rustup run "$nightly" rustc --version
           # Built with the nightly: cargo-fuzz's locked dependencies need a
-          # newer rustc than the pinned 1.88 (`just setup` builds it with stable).
+          # newer rustc than the pinned 1.89 (`just setup` builds it with stable).
           cargo +"$nightly" install --locked "cargo-fuzz@$(just --evaluate cargo_fuzz_version)"
       - name: Start from the nightly corpus
         # Read only: nightly-fuzz.yml grows the corpus on main, and a pull

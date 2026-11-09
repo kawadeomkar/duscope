@@ -7,7 +7,7 @@ benchmarks, packaging and releases. Agents working in this repository read
 ## Prerequisites
 
 - [rustup](https://rustup.rs). The Rust toolchain itself is pinned in `rust-toolchain.toml`
-  (1.88), and `just setup` installs it.
+  (1.89), and `just setup` installs it.
 - [just](https://just.systems), the task runner.
 - [gh](https://cli.github.com), signed in with `gh auth login`, to open pull requests.
 
@@ -50,7 +50,7 @@ disagree, so a pin changes in both places in the same pull request.
 
 | Tool | Version | Installed by | Used for |
 | --- | --- | --- | --- |
-| `rustup` | 1.88 (`rust-toolchain.toml`), stable, nightly, the dated nightly `fuzz_toolchain` and `pixels_toolchain` (1.90; justfile) | you; the toolchains by `just setup` | 1.88 builds and tests; stable builds the tools below and runs the MSRV job's second leg; the dated nightly runs `just fuzz` as CI does; 1.90 builds the `pixels` feature, whose Sixel encoder needs it, in `just pixels` |
+| `rustup` | 1.89 (`rust-toolchain.toml`), stable, nightly, the dated nightly `fuzz_toolchain` and `pixels_toolchain` (1.90; justfile) | you; the toolchains by `just setup` | 1.89 builds and tests; stable builds the tools below and runs the MSRV job's second leg; the dated nightly runs `just fuzz` as CI does; 1.90 builds the `pixels` feature, whose Sixel encoder needs it, in `just pixels` |
 | `just` | any 1.x release | you | the recipes below |
 | `gh` | any 2.x release | you | pull requests |
 | `cargo-deny` | 0.20.2 | `just setup` | licences, bans, sources and advisories |
