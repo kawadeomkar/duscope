@@ -160,6 +160,8 @@ struct Walked {
 struct WalkRunner {
     tree: Arc<MemProvider>,
     threads: usize,
+    /// The directories the held walk has begun to read.
+    reads: Arc<AtomicUsize>,
     walked: Arc<Mutex<Option<Walked>>>,
 }
 
@@ -172,7 +174,7 @@ impl Runner for WalkRunner {
         if invocation.verb == "test_scan" {
             let provider = Held {
                 inner: &self.tree,
-                reads: AtomicUsize::new(0),
+                reads: Arc::clone(&self.reads),
                 stop: Arc::clone(&call.cancel),
             };
             let opts = WalkOptions {
@@ -209,7 +211,7 @@ impl Runner for WalkRunner {
 /// so that a broken test fails instead of hanging).
 struct Held<'a> {
     inner: &'a MemProvider,
-    reads: AtomicUsize,
+    reads: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
 }
 
@@ -271,6 +273,7 @@ fn cancel_a_walk(threads: usize) -> Walked {
     let runner = WalkRunner {
         tree: Arc::new(tree),
         threads,
+        reads: Arc::default(),
         walked: Arc::default(),
     };
     let mut registry = Registry::new(24_000, false);
@@ -307,6 +310,16 @@ fn cancel_a_walk(threads: usize) -> Walked {
     assert_eq!(progress["method"], "notifications/progress", "{progress}");
     assert_eq!(progress["params"]["progressToken"], "walk");
     assert!(progress["params"]["progress"].as_u64().unwrap() >= 1);
+    // That progress can be the root's own entry, counted before any
+    // directory is read: the cancellation has to find the walk at its hold.
+    let started = Instant::now();
+    while runner.reads.load(Ordering::Relaxed) <= OPEN_READS {
+        assert!(
+            started.elapsed() < PATIENCE,
+            "the walk never reached its hold"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
     writeln!(
         input,
         "{}",
