@@ -268,6 +268,54 @@ mod macos {
             .unwrap()
     }
 
+    /// The names of `table`'s columns, in order.
+    fn columns(db: &Connection, table: &str) -> Vec<String> {
+        let stmt = db
+            .prepare(&format!("SELECT * FROM {table} LIMIT 0"))
+            .unwrap();
+        stmt.column_names().into_iter().map(str::to_owned).collect()
+    }
+
+    /// A value for a failure's message, a blob as text.
+    fn shown(value: &Sql) -> String {
+        match value {
+            Sql::Blob(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// How `got` differs from `want`, rows of `table` with these columns:
+    /// the row counts, then each differing row (at most twenty) by its id
+    /// and name, with the columns that differ.
+    fn differing(table: &str, columns: &[String], got: &[Vec<Sql>], want: &[Vec<Sql>]) -> String {
+        let named = columns.iter().position(|c| c == "name");
+        let mut lines = vec![format!(
+            "{table}: {} rows against a full scan's {}",
+            got.len(),
+            want.len()
+        )];
+        let rows = got
+            .iter()
+            .zip(want)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b);
+        for (at, (a, b)) in rows.take(20) {
+            let changed: Vec<String> = columns
+                .iter()
+                .zip(a.iter().zip(b))
+                .filter(|(_, (x, y))| x != y)
+                .map(|(column, (x, y))| format!("{column} {} against {}", shown(x), shown(y)))
+                .collect();
+            let name = named.map(|i| shown(&b[i])).unwrap_or_default();
+            lines.push(format!(
+                "  row {at} ({} {name}): {}",
+                shown(&b[0]),
+                changed.join("; ")
+            ));
+        }
+        lines.join("\n")
+    }
+
     /// The mark the saved scan `id` recorded for the volume on `dev`.
     fn mark_of(db: &Connection, dev: u64) -> FsEventsMark {
         db.query_row(
@@ -437,6 +485,7 @@ mod macos {
         let merged = scan["id"].as_str().unwrap().to_owned();
         let fresh = save(&env, &tree);
         let (merged, fresh) = (index(&env, &merged), index(&env, &fresh));
+        let mut differences = Vec::new();
         for (table, order) in [
             ("dirs", "id"),
             ("files", "id"),
@@ -447,16 +496,15 @@ mod macos {
             ("type_stats", "ext"),
         ] {
             let (got, want) = (rows(&merged, table, order), rows(&fresh, table, order));
-            let first = got.iter().zip(&want).position(|(a, b)| a != b);
-            assert!(
-                got == want,
-                "{table}: {} rows against a full scan's {}, first difference at {first:?}: {:?} against {:?}",
-                got.len(),
-                want.len(),
-                first.and_then(|i| got.get(i)),
-                first.and_then(|i| want.get(i)),
-            );
+            if got != want {
+                differences.push(differing(table, &columns(&fresh, table), &got, &want));
+            }
         }
+        assert!(
+            differences.is_empty(),
+            "the incremental rescan's index differs from a full scan's:\n{}",
+            differences.join("\n")
+        );
         let incremental: i64 = merged
             .query_row(
                 "SELECT value FROM scan_meta WHERE key = 'incremental'",
