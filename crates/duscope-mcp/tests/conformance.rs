@@ -1,5 +1,5 @@
 //! P3-MCP-06: the conformance suite. rmcp's client, the oracle D36 names
-//! (rmcp 3.6.0, recorded in `schemas/mcp/MAPPING.md`), against the `duscope
+//! (rmcp 3.9.0, recorded in `schemas/mcp/MAPPING.md`), against the `duscope
 //! mcp` binary itself, over its stdin and stdout, the way rmcp's own tests
 //! drive a stdio server they start: both protocol revisions' handshakes and
 //! the version refusals, discovery, `tools/list`, `tools/call` of every tool

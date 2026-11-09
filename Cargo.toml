@@ -103,7 +103,7 @@ proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # acceptance names so it cannot move under the tests. Default features off, so
 # its server half, macros and schemars stay out; `transport-async-rw` speaks
 # over the pipes the tests hand it.
-rmcp = { version = "=3.6.0", default-features = false, features = ["client", "transport-async-rw"] }
+rmcp = { version = "=3.9.0", default-features = false, features = ["client", "transport-async-rw"] }
 schemars = { version = "1.2.3", default-features = false, features = ["derive"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }

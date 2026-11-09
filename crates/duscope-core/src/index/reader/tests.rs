@@ -557,6 +557,56 @@ fn p2_sec_01_a_hostile_index_is_refused_or_neutralised() {
     );
 }
 
+/// RUSTSEC-2026-0459, waived in `deny.toml` on this test's strength: SQLite
+/// before 3.54 can return uninitialized memory for a database opened with a
+/// `-wal` of another page size, so a saved scan's `-wal` must never be read.
+/// The pair is whoever made a hostile file's: an index in WAL mode with a
+/// change committed to its `-wal` alone, which a plain open does see.
+#[test]
+fn p2_sec_01_a_saved_scans_wal_is_never_read() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    let mut tree = MemProvider::new("/t");
+    tree.file("x", 1);
+    let file = small_index(&dir.join("wal"), &tree, "abcdef012345", 1);
+    let saved = Index::open(&file).unwrap().meta().tool_version.clone();
+    let db = Connection::open(&file).unwrap();
+    db.execute_batch(
+        "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; \
+         UPDATE scan_meta SET value = '9.9.9' WHERE key = 'tool_version';",
+    )
+    .unwrap();
+    // Copied while the connection is open: closing it would checkpoint the
+    // change into the file.
+    let wal = |db: &Path| PathBuf::from(format!("{}-wal", db.display()));
+    let copy = dir.join("copy.db");
+    fs::copy(&file, &copy).unwrap();
+    fs::copy(wal(&file), wal(&copy)).unwrap();
+    drop(db);
+    let written = fs::read(wal(&copy)).unwrap();
+    assert!(!written.is_empty());
+
+    assert!(super::uri(&copy).ends_with("?mode=ro&immutable=1"));
+    let index = Index::open(&copy).unwrap();
+    assert_eq!(index.meta().tool_version, saved, "the -wal was read");
+    drop(index);
+    assert_eq!(
+        fs::read(wal(&copy)).unwrap(),
+        written,
+        "the -wal was touched"
+    );
+
+    let plain = Connection::open(&copy).unwrap();
+    let seen: String = plain
+        .query_row(
+            "SELECT value FROM scan_meta WHERE key = 'tool_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(seen, "9.9.9", "the -wal held no change to ignore");
+}
+
 #[test]
 fn p2_sec_01_an_index_past_the_limits_is_refused() {
     let env = TestEnv::new();
