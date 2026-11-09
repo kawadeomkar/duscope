@@ -21,7 +21,7 @@ use crate::cli::{Cli, visible_verbs};
 use crate::out::emit_bytes;
 
 /// The page's date, changed with its hand-written prose.
-const DATE: &str = "2026-10-27";
+const DATE: &str = "2026-11-08";
 
 /// The hand-written sections, in order.
 const SECTIONS: [&str; 5] = [

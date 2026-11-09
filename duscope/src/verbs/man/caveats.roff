@@ -42,3 +42,21 @@ and HFS+ by default):
 .B \-\-exclude \(aq*.MOV\(aq
 does not leave out
 .IR a.mov .
+.PP
+On macOS
+.B rescan
+reads again only what the volumes' FSEvents history reports changed since
+the saved scan.
+On the startup disk's Data volume that history does not record changes
+made from recoveryOS or from another system between a shutdown and the
+next startup, so a rescan after such changes can miss them.
+The age limit
+.RB ( \-\-max\-age ,
+7 days by default) and the post\-check, which reads a sample of the
+directories again before the new scan is saved, stand behind it;
+.B duscope rescan \-\-full
+reads the whole tree.
+Reading a file changes nothing that history records: a rescan of a scan
+taken with
+.B \-\-attrs full
+keeps the access times that scan read for whatever it takes from it.

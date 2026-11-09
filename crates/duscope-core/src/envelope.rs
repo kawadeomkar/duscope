@@ -141,6 +141,17 @@ pub mod values {
     pub const METHODS: [&str; 2] = ["trash", "permanent"];
     /// What became of an item `clean` was told to move or delete.
     pub const OUTCOMES: [&str; 3] = ["trashed", "deleted", "failed"];
+    /// Why a rescan read the whole tree (`fallback_reason`).
+    pub const FALLBACK_REASONS: [&str; 8] = [
+        "index_too_old",
+        "volume_changed",
+        "history_gone",
+        "fsevents_disabled",
+        "options_changed",
+        "too_many_changes",
+        "events_dropped",
+        "post_check_failed",
+    ];
 }
 
 /// `values` with null, for a nullable field's values.
@@ -256,13 +267,32 @@ pub struct ScanBlock {
     pub error_count: u64,
     /// Entries that disappeared during the scan.
     pub vanished_count: u64,
-    /// Whether the scan reused an earlier one (never before phase 5).
+    /// Whether an incremental rescan wrote the scan: it read again only
+    /// what the volumes' change history (macOS's `FSEvents`) reports
+    /// changed since its parent, and took the rest from it.
     pub incremental: bool,
+    /// The saved scan this one scanned again (`rescan`); null for a scan of
+    /// its own.
+    pub parent_scan_id: Option<String>,
+    /// The directories an incremental rescan read again; null for any
+    /// other scan, and for a saved scan read back, whose index does not
+    /// keep it.
+    pub rescanned_dirs: Option<u64>,
+    /// Why a rescan read the whole tree although it was not asked to:
+    /// `index_too_old`, `volume_changed`, `history_gone`,
+    /// `fsevents_disabled`, `options_changed`, `too_many_changes`,
+    /// `events_dropped` or `post_check_failed`; null for any other scan,
+    /// for a saved scan read back, whose index does not keep it, and on a
+    /// platform that keeps no change history (Linux), where every rescan
+    /// reads the whole tree.
+    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::FALLBACK_REASONS)))))]
+    pub fallback_reason: Option<&'static str>,
     /// Every volume the scan met, entered or not.
     pub volumes: Vec<VolumeEntry>,
     /// Files left out and directories not entered by the excludes
     /// (`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`,
-    /// `--skip-containers`).
+    /// `--skip-containers`). An incremental rescan counts the files as the
+    /// scan it renews counted them.
     pub excluded_count: u64,
     /// Each directory the excludes kept the scan out of, path bytewise.
     pub excluded: Vec<ExcludedEntry>,

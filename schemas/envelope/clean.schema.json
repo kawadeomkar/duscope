@@ -474,10 +474,39 @@
           "type": "array"
         },
         "excluded_count": {
-          "description": "Files left out and directories not entered by the excludes\n(`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`,\n`--skip-containers`).",
+          "description": "Files left out and directories not entered by the excludes\n(`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`,\n`--skip-containers`). An incremental rescan counts the files as the\nscan it renews counted them.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "fallback_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "index_too_old",
+                "volume_changed",
+                "history_gone",
+                "fsevents_disabled",
+                "options_changed",
+                "too_many_changes",
+                "events_dropped",
+                "post_check_failed",
+                null
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Why a rescan read the whole tree although it was not asked to:\n`index_too_old`, `volume_changed`, `history_gone`,\n`fsevents_disabled`, `options_changed`, `too_many_changes`,\n`events_dropped` or `post_check_failed`; null for any other scan,\nfor a saved scan read back, whose index does not keep it, and on a\nplatform that keeps no change history (Linux), where every rescan\nreads the whole tree.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-platforms": [
+            "macos"
+          ],
+          "x-since": "0.3"
         },
         "file_count": {
           "description": "Non-directories.",
@@ -505,8 +534,29 @@
           ]
         },
         "incremental": {
-          "description": "Whether the scan reused an earlier one (never before phase 5).",
+          "description": "Whether an incremental rescan wrote the scan: it read again only\nwhat the volumes' change history (macOS's `FSEvents`) reports\nchanged since its parent, and took the rest from it.",
           "type": "boolean"
+        },
+        "parent_scan_id": {
+          "description": "The saved scan this one scanned again (`rescan`); null for a scan of\nits own.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
+        },
+        "rescanned_dirs": {
+          "description": "The directories an incremental rescan read again; null for any\nother scan, and for a saved scan read back, whose index does not\nkeep it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-platforms": [
+            "macos"
+          ],
+          "x-since": "0.3"
         },
         "root": {
           "description": "The root, absolute, symbolic links resolved.",
@@ -579,6 +629,9 @@
         "error_count",
         "vanished_count",
         "incremental",
+        "parent_scan_id",
+        "rescanned_dirs",
+        "fallback_reason",
         "volumes",
         "excluded_count",
         "excluded"

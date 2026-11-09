@@ -91,6 +91,8 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         started_ns,
         finished_ns: started_ns,
         parent: None,
+        incremental: None,
+        fallback: None,
         source: imported.format.source(),
         full_disk_access_missing: false,
     };
