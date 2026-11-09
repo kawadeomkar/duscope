@@ -6,15 +6,21 @@
 //! the list verbs do; `scan -i` scans and opens the result, saved with
 //! `--save`. Both refuse, before any scan, a stdout that is not a terminal,
 //! an output format other than people's, and a terminal below 80×24.
+//!
+//! `i` in the viewer reads `explain` of the saved scan the viewer shows, or
+//! of the one a scan run for it was saved as; a scan not saved is answered
+//! from a fresh `stat`, as `explain` answers a path no saved scan holds.
 
 use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::Path;
 
-use duscope_core::envelope::Warning;
+use duscope_core::envelope::{ScanBlock, Warning};
+use duscope_core::index::{Index, index_path};
 use duscope_core::query::{self, ScanSelector, TreeView};
-use duscope_tui::{App, Background, MIN_SIZE, Tui};
+use duscope_tui::{App, Background, MIN_SIZE, ScanFacts, Sources, Tui};
 
+use super::source::Source;
 use super::{Exit, Failure, scan, source, treemap};
 use crate::cli::{ColorBy, IndexArgs, MinTile, ScanArgs, TreemapWhen, ViewArgs, WalkArgs};
 use crate::out::{Format, Output};
@@ -43,6 +49,24 @@ pub fn run(args: &ViewArgs, index_dir: Option<&Path>, output: &Output) -> Result
         pool_files: false,
         pixels: false,
     };
+    // A scan run for the viewer is in the index now, unless --no-save:
+    // `explain` reads it there. A saved scan's view reads its own.
+    let saved = match &source {
+        Source::Fresh { save: Some(_), .. } => source.index_file().and_then(|file| open(&file)),
+        _ => None,
+    };
+    let unaccounted = match &source {
+        Source::Saved { index, .. } => index.meta().unaccounted_bytes,
+        Source::Fresh { scanned, .. } => scan::unaccounted(scanned),
+    };
+    let facts = Facts {
+        index: saved.as_ref(),
+        scan: scan_facts(
+            &block,
+            unaccounted,
+            (source.started_ns(), source.finished_ns()),
+        ),
+    };
     let view = source.view();
     show(
         &*view,
@@ -50,8 +74,40 @@ pub fn run(args: &ViewArgs, index_dir: Option<&Path>, output: &Output) -> Result
         &look,
         source.footer(&block, output),
         &source.warnings(&walk),
+        &facts,
         output,
     )
+}
+
+/// What `i` reads besides the view: the index a scan run for the viewer
+/// was saved as, and the scan's block.
+struct Facts<'a> {
+    index: Option<&'a Index>,
+    scan: ScanFacts,
+}
+
+/// The saved scan in `file`; `None`, and the facts read from a fresh
+/// `stat`, where it cannot be opened, which the log says.
+fn open(file: &Path) -> Option<Index> {
+    Index::open(file)
+        .inspect_err(|e| log::warn!("the facts read no saved scan: {e}"))
+        .ok()
+}
+
+/// The scan's facts from its `block`: the root volume's size and free
+/// space, what it uses that the scan did not find, when the scan ran
+/// (`times`, Unix nanoseconds) and its threads.
+fn scan_facts(block: &ScanBlock, unaccounted: Option<u64>, times: (i64, i64)) -> ScanFacts {
+    ScanFacts {
+        volume: block
+            .volumes
+            .first()
+            .filter(|v| v.total_bytes > 0)
+            .map(|v| (v.total_bytes, v.free_bytes)),
+        unaccounted_bytes: unaccounted,
+        times: Some(times),
+        threads: Some(block.thread_count),
+    }
 }
 
 /// `scan -i`: the scan, saved with `--save`, then the viewer on it.
@@ -61,6 +117,7 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     // theme), before the scan.
     treemap::style(args, output)?;
     let scanned = scan::scan(&args.walk, &args.exclude)?;
+    let mut saved = None;
     if args.save {
         let id = scan::scan_id(&scanned)?;
         scan::save(
@@ -72,9 +129,22 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
             output,
             true,
         )?;
+        // Where scan::save wrote it, which `explain` reads.
+        saved = index_dir
+            .map(Path::to_owned)
+            .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)))
+            .and_then(|dir| open(&index_path(&dir, &id)));
     }
     let size = scan::size_kind(&args.walk);
     let block = scan::scan_block(&scanned, &args.walk, size);
+    let facts = Facts {
+        index: saved.as_ref(),
+        scan: scan_facts(
+            &block,
+            scan::unaccounted(&scanned),
+            (scanned.started_ns, scanned.finished_ns),
+        ),
+    };
     let look = Look {
         theme: args.theme.as_ref(),
         color_by: args.color_by,
@@ -89,6 +159,7 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         &look,
         scan::footer(&block, &scanned, output),
         &scan::warnings(&scanned),
+        &facts,
         output,
     )
 }
@@ -169,16 +240,18 @@ fn named_scan(
 /// Runs the viewer on `view` until `q` or `Ctrl-C`: takes the terminal
 /// (asking it for its background when the colours depend on it), draws,
 /// answers events, and gives the terminal back; then the warnings on
-/// stderr, which the frame has room for one of.
+/// stderr, which the frame has room for one of. `i` reads `facts`.
 fn show(
     view: &dyn TreeView,
     walk: &WalkArgs,
     look: &Look<'_>,
     summary: String,
     warnings: &[Warning],
+    facts: &Facts<'_>,
     output: &Output,
 ) -> Result<(), Failure> {
     let classes = super::query::classes(walk.classes_extra.as_deref(), "[classes] extra")?;
+    let caches = scan::cache_rules(walk.caches_extra.as_deref())?;
     let size = scan::size_kind(walk);
     let now = scan::now(walk)?;
     let warning = treemap::frame_warning(warnings);
@@ -210,6 +283,13 @@ fn show(
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from);
     let mut app = App::new(view, opts, style.depth(), home.as_deref(), summary, warning);
+    app.with_sources(Sources {
+        // A scan run for the viewer and saved has the arena's ids.
+        index: facts.index.map(|index| (index, 0)),
+        caches,
+        env: Box::new(|name| std::env::var_os(name)),
+        scan: facts.scan,
+    });
     let mut in_cells = None;
     match drawing {
         Some(treemap::Drawing::Pixels(found)) => app.draw_in_pixels(found),
