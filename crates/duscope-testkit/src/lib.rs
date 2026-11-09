@@ -497,13 +497,39 @@ impl TestEnv {
     /// the next try. A `create` that may run again passes `-ov`, so a
     /// half-made image from a failed try is overwritten.
     ///
+    /// A `detach` can report an error and detach all the same, after which
+    /// every later try finds nothing to detach ("No such file or directory";
+    /// the JDK's jpackage tests met the same, JDK-8250646). So a `detach`
+    /// that fails is done once `hdiutil info` no longer lists the image its
+    /// target (the mount point or `/dev` node, its last argument) belonged
+    /// to, or when nothing was attached there to begin with; an image still
+    /// attached is tried again, and fails as before.
+    ///
     /// # Panics
     ///
-    /// When every try fails, with the last one's output.
+    /// When every try fails, with each try's output.
     pub fn hdiutil(&self, args: &[&dyn AsRef<OsStr>]) {
-        let mut tries = 0;
-        loop {
-            tries += 1;
+        let shown: Vec<String> = args
+            .iter()
+            .map(|a| a.as_ref().to_string_lossy().into_owned())
+            .collect();
+        // For a `detach`: the image its target belongs to, `Some(None)`
+        // when nothing is attached there, `None` when that cannot be told.
+        let detaching = match (shown.first().map(String::as_str), args.last()) {
+            (Some("detach"), Some(target)) => {
+                let target = Path::new(target.as_ref());
+                let target = fs::canonicalize(target).unwrap_or_else(|_| target.to_owned());
+                Some(self.images().map(|images| {
+                    images
+                        .into_iter()
+                        .find(|(_, places)| places.contains(&target))
+                        .map(|(image, _)| image)
+                }))
+            }
+            _ => None,
+        };
+        let mut failures = Vec::new();
+        for tries in 1..=3 {
             let out = self
                 .command("hdiutil")
                 .args(args)
@@ -512,21 +538,59 @@ impl TestEnv {
             if out.status.success() {
                 return;
             }
-            if tries == 3 {
-                let shown: Vec<String> = args
-                    .iter()
-                    .map(|a| a.as_ref().to_string_lossy().into_owned())
-                    .collect();
-                panic!(
-                    "hdiutil {} failed {tries} times ({}): {}{}",
-                    shown.join(" "),
-                    out.status,
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
+            failures.push(format!(
+                "try {tries} ({}): {}{}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout).trim_end(),
+                String::from_utf8_lossy(&out.stderr).trim_end()
+            ));
+            match &detaching {
+                Some(Some(None)) => return,
+                Some(Some(Some(image))) => {
+                    let images = self.images();
+                    if images.is_some_and(|images| images.iter().all(|(i, _)| i != image)) {
+                        return;
+                    }
+                }
+                _ => {}
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            if tries < 3 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
         }
+        panic!(
+            "hdiutil {} failed 3 times:\n{}",
+            shown.join(" "),
+            failures.join("\n")
+        );
+    }
+
+    /// The images `hdiutil info` lists: each one's `image-path`, with the
+    /// `/dev` nodes and mount points under it; `None` when it cannot be
+    /// read.
+    fn images(&self) -> Option<Vec<(String, Vec<PathBuf>)>> {
+        let out = self.command("hdiutil").arg("info").output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let mut images: Vec<(String, Vec<PathBuf>)> = Vec::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some(path) = line
+                .strip_prefix("image-path")
+                .and_then(|rest| rest.trim_start().strip_prefix(':'))
+            {
+                images.push((path.trim().to_owned(), Vec::new()));
+            } else if line.starts_with("/dev/") {
+                if let Some((_, places)) = images.last_mut() {
+                    places.extend(
+                        line.split('\t')
+                            .map(|field| PathBuf::from(field.trim()))
+                            .filter(|field| field.is_absolute()),
+                    );
+                }
+            }
+        }
+        Some(images)
     }
 
     /// A command for the duscope binary under this environment.
