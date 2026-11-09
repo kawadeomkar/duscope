@@ -656,6 +656,28 @@ impl Index {
             .any(|v| !v.entered && v.mount_point == path)
     }
 
+    /// The first link of the inode entry `id` is a link of, where the scan
+    /// met more than one (`shared_members.link_first`): the link its bytes
+    /// are charged to, `id` itself when it is that link. `None` for an
+    /// entry no other link shares.
+    pub fn first_link(&self, id: u32) -> Option<u32> {
+        let first = self
+            .db
+            .query_row(
+                "SELECT link_first FROM shared_members WHERE id = ?1",
+                [id],
+                |row| row.get::<_, Option<u32>>(0),
+            )
+            .optional();
+        match first {
+            Ok(first) => first.flatten(),
+            Err(e) => {
+                self.fail(&e);
+                None
+            }
+        }
+    }
+
     /// Keeps a failed query's error as the first failed read, when it is.
     pub(crate) fn record(&self, e: &CoreError) {
         let mut failed = self.failed.borrow_mut();
@@ -833,6 +855,31 @@ impl TreeView for Index {
 
     fn as_index(&self) -> Option<(&Index, u32)> {
         Some((self, 0))
+    }
+
+    /// From the entry's `uid` and `gid` columns, NULL in a basic scan.
+    fn owner(&self, id: u32) -> Option<(u32, u32)> {
+        let table = if self.node(id).is_dir() {
+            "dirs"
+        } else {
+            "files"
+        };
+        let owner = self
+            .db
+            .query_row(
+                &format!("SELECT uid, gid FROM {table} WHERE id = ?1"),
+                [id],
+                |row| Ok((row.get::<_, Option<u32>>(0)?, row.get::<_, Option<u32>>(1)?)),
+            )
+            .optional();
+        match owner {
+            Ok(Some((Some(uid), Some(gid)))) => Some((uid, gid)),
+            Ok(_) => None,
+            Err(e) => {
+                self.fail(&e);
+                None
+            }
+        }
     }
 
     /// From `dirs.dev`: a directory on another device than its parent's.
