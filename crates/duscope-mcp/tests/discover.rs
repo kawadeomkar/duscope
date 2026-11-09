@@ -155,15 +155,32 @@ fn p3_mcp_02_each_request_is_answered_from_its_own_meta() {
     for (answer, id) in answers[1..4].iter().zip(2..) {
         assert_eq!(error(answer, id).0, -32602, "{answer}");
     }
-    assert_eq!(
-        answers[4]["result"],
-        json!({
-            "resultType": "complete",
-            "_meta": {"io.modelcontextprotocol/serverInfo": server_info()},
-        })
-    );
+    // 2026-07-28 has no ping (DEV-139).
+    assert_eq!(error(&answers[4], 5).0, -32601);
     // No tool registry yet.
     assert_eq!(error(&answers[5], 6).0, -32601);
+}
+
+#[test]
+fn p3_mcp_02_a_ping_is_answered_in_2025_11_25_alone() {
+    let answers = serve(&[
+        modern(1, "ping", "2026-07-28"),
+        request(2, "ping", &json!({})),
+        initialize(3, "2025-11-25"),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        request(4, "ping", &json!({})),
+        modern(5, "ping", "2026-07-28"),
+    ]);
+    assert_eq!(answers.len(), 5, "{answers:?}");
+    // A version in _meta asks for 2026-07-28, which has no ping, before the
+    // handshake and within the session alike (DEV-139).
+    for (answer, id) in [(&answers[0], 1), (&answers[4], 5)] {
+        assert_eq!(error(answer, id).0, -32601, "{answer}");
+        assert_eq!(answer["error"]["message"], "method not found: ping");
+    }
+    // Ahead of the handshake and in the 2025-11-25 session, ping is served.
+    assert_eq!(answers[1]["result"], json!({}));
+    assert_eq!(answers[3]["result"], json!({}));
 }
 
 #[test]

@@ -211,10 +211,12 @@ impl Server {
     }
 
     /// Every method but `initialize` and a `tools/call` the server runs: its
-    /// result, as the revision writes it.
+    /// result, as the revision writes it. 2026-07-28 has no `ping`: a request
+    /// naming that version gets "method not found", as rmcp's server answers
+    /// it (DEV-139).
     fn call(&self, revision: Revision, method: &str) -> Result<Box<RawValue>, RpcError> {
         match (method, revision, &self.tools) {
-            ("ping", _, _) => self.finish(revision, &Map::new()),
+            ("ping", Revision::Session, _) => self.finish(revision, &Map::new()),
             ("server/discover", Revision::PerRequest, _) => {
                 self.finish(revision, &discover::discover_fields(&self.config))
             }
