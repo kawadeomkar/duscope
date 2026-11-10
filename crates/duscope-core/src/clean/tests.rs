@@ -492,15 +492,18 @@ fn p5_mcp_01_an_item_that_frees_other_than_its_figure_is_refused() {
         (plan.plan.total_allocated_bytes, plan.plan.total_frees_bytes),
         (0, 0)
     );
-    // A size not known counts as 0: only 0 meets it.
+    // A size no saved scan knows meets no figure, 0 included: a directory
+    // made since the scan is refused whatever it holds.
     let fresh = root.join("made-since");
     fs::create_dir(&fresh).unwrap();
-    let unknown = |expected: u64| {
+    fs::write(fresh.join("big.bin"), vec![7u8; 64 * 1024]).unwrap();
+    for expected in [0, 1, 64 * 1024] {
         let mut plan = clean_plan(&[item(fresh.clone())], &index, &q, Method::Trash).unwrap();
         assert_eq!(plan.plan.items[0].frees_bytes, None);
+        assert_eq!(plan.plan.items[0].action, "trash");
         plan.refuse_unexpected(&[expected]);
-        plan.plan.items[0].action
-    };
-    assert_eq!(unknown(0), "trash");
-    assert_eq!(unknown(1), "refused");
+        assert_eq!(plan.plan.items[0].action, "refused", "{expected}");
+        assert_eq!(plan.plan.items[0].reason, Some(super::UNEXPECTED));
+        assert_eq!(plan.acting_count(), 0);
+    }
 }

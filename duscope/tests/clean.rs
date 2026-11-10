@@ -941,3 +941,53 @@ fn p5_mcp_01_an_item_off_its_figure_is_refused_and_nothing_moves() {
         Some(2)
     );
 }
+
+#[test]
+fn p5_mcp_01_an_item_whose_bytes_no_scan_knows_is_refused_whatever_its_figure() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    let file = root.join("a.bin");
+    let (token_a, frees_a) = handle(&env, &file);
+    // A directory made since the scan: what it frees is not known.
+    let fresh = root.join("made-since");
+    fs::create_dir(&fresh).unwrap();
+    fs::write(fresh.join("big.bin"), vec![5u8; 200_000]).unwrap();
+    let facts = ok(&run(&env, &["explain", s(&fresh), "--json"]));
+    assert_eq!(
+        facts["result"]["freeable_now_bytes"],
+        Value::Null,
+        "{facts}"
+    );
+    let token_d = facts["result"]["handle"].as_str().unwrap().to_owned();
+    let right = format!("--expect-item-bytes={frees_a}");
+    for figure in ["0", "1", "200000"] {
+        let unknown = format!("--expect-item-bytes={figure}");
+        for mode in ["--dry-run", "--yes"] {
+            let out = run(
+                &env,
+                &[
+                    "clean", "--from", &token_a, &right, "--from", &token_d, &unknown, mode,
+                    "--json",
+                ],
+            );
+            let value = failed(&out, 1, "expectation_mismatch");
+            let items = &value["result"]["plan"]["items"];
+            assert_eq!(items[0]["action"], "trash", "{value}");
+            assert_eq!(items[1]["action"], "refused", "{value}");
+            assert_eq!(items[1]["reason"], "expectation_mismatch", "{value}");
+            assert_eq!(items[1]["frees_bytes"], Value::Null, "{value}");
+            assert_eq!(value["result"]["trashed_count"], 0, "{value}");
+            let message = value["error"]["message"].as_str().unwrap();
+            assert!(
+                message.contains("the saved scan does not hold") && message.contains("made-since"),
+                "{message}"
+            );
+            assert!(
+                value["error"]["hint"].as_str().unwrap().contains("Rescan"),
+                "{value}"
+            );
+            assert!(file.exists() && fresh.join("big.bin").exists());
+        }
+    }
+}

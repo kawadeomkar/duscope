@@ -336,3 +336,29 @@ fn p5_mcp_01_the_tool_says_it_may_delete_and_needs_a_person() {
         }
     }
 }
+
+#[test]
+fn p5_mcp_01_an_item_without_its_bytes_is_refused_never_taken_as_0() {
+    let env = TestEnv::new();
+    let root = env.work_dir().canonicalize().unwrap();
+    std::fs::write(root.join("one.bin"), b"1").unwrap();
+    let index_dir = env.index_dir();
+    let handle = handle_of(&index_dir, &root.join("one.bin"));
+    // Past the schema, which requires it, the tool still never makes up a
+    // figure: no expect_bytes, or one that is no count of bytes, is refused
+    // before the command line exists.
+    for item in [
+        json!({"handle": handle}),
+        json!({"handle": handle, "expect_bytes": null}),
+        json!({"handle": handle, "expect_bytes": -1}),
+        json!({"handle": handle, "expect_bytes": "4096"}),
+    ] {
+        let refusal = invocation_refusal(
+            &json!({"items": [item], "dry_run": false}),
+            &root,
+            &index_dir,
+        );
+        assert_eq!(refusal.code, "usage", "{item}: {refusal}");
+        assert!(refusal.message.contains("expect_bytes"), "{refusal}");
+    }
+}

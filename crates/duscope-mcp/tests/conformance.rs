@@ -2095,3 +2095,61 @@ impl Drop for Detach<'_> {
             .output();
     }
 }
+
+#[test]
+fn p5_mcp_01_an_entry_no_saved_scan_holds_is_refused_whatever_its_expect_bytes() {
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (one, one_frees) = explained(&env, &root.join("one.bin"));
+        // A directory made since the scan: explain knows no freeable bytes
+        // for it, and 0, the figure a client might send for that, meets
+        // nothing.
+        let fresh = root.join("made-since");
+        fs::create_dir(&fresh).unwrap();
+        fs::write(fresh.join("big.bin"), vec![6u8; 200_000]).unwrap();
+        let out = env
+            .cmd()
+            .args(["explain", "--json"])
+            .arg(&fresh)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let facts: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(facts["result"]["freeable_now_bytes"], Value::Null);
+        let fresh_handle = facts["result"]["handle"].as_str().unwrap().to_owned();
+        let items = json!([item(&one, one_frees), item(&fresh_handle, 0)]);
+        let (arguments, real) = (
+            json!({ "items": items }),
+            json!({"items": items, "dry_run": false}),
+        );
+        let ((dry, wet), _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, dry) = call(&client, "duscope_delete", &arguments).await;
+                let (_, wet) = call(&client, "duscope_delete", &real).await;
+                ((dry, wet), client)
+            },
+        );
+        for result in [&dry, &wet] {
+            assert_eq!(error_code(result), "expectation_mismatch", "{result:?}");
+            let value = result.structured_content.as_ref().unwrap();
+            let items = &value["result"]["plan"]["items"];
+            assert_eq!(items[0]["action"], "trash", "{value}");
+            assert_eq!(items[1]["action"], "refused", "{value}");
+            assert_eq!(items[1]["reason"], "expectation_mismatch", "{value}");
+            assert_eq!(value["result"]["trashed_count"], 0, "{value}");
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("the saved scan does not hold"),
+                "{value}"
+            );
+        }
+        assert_untouched(&env, &root);
+        assert!(fresh.join("big.bin").exists());
+    }
+}

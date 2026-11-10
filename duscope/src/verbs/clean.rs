@@ -20,7 +20,8 @@
 //!
 //! The MCP tool `duscope_delete` runs this verb through two flags of its
 //! own, never typed: `--expect-item-bytes`, one figure per `--from` in
-//! their order, which refuses an item off by more than 1%; and `--dry-run`,
+//! their order, which refuses an item off by more than 1%, and one whose
+//! bytes the saved scan does not know whatever its figure; and `--dry-run`,
 //! which answers the plan as a successful answer with no prompt and no
 //! `--yes` hint, since a client asks for it as a plan, not a confirmation.
 //! Under a tool call, acting claims the call's point of no return
@@ -363,13 +364,29 @@ fn unexpected(plan: &Plan, expected: &[u64], moved: &str) -> Option<Failure> {
         .iter()
         .enumerate()
         .find(|(_, item)| item.reason == Some(UNEXPECTED))?;
-    let message = format!(
-        "{} of the {} items free other than they were expected to, so nothing was {moved}: {} \
-         frees {} bytes, not within 1% of {}",
+    let count = format!(
+        "{} of the {} items free other than they were expected to, so nothing was {moved}",
         thousands(plan.refused_count() as u64),
         thousands(items.len() as u64),
+    );
+    // An item the saved scan does not hold: what it frees is not known, so
+    // no figure is met until a scan measures it.
+    let Some(frees) = item.frees_bytes else {
+        let message = format!(
+            "{count}: the saved scan does not hold {}, so what it frees is not known",
+            item.path
+        );
+        return Some(
+            Failure::new(Exit::Runtime, "expectation_mismatch", message).hint(
+                "Rescan the directory that holds it (duscope_scan, or duscope rescan), then \
+                 explain it again for a handle and its bytes",
+            ),
+        );
+    };
+    let message = format!(
+        "{count}: {} frees {} bytes, not within 1% of {}",
         item.path,
-        thousands(item.frees_bytes.unwrap_or(0)),
+        thousands(frees),
         thousands(expected.get(at).copied().unwrap_or(0)),
     );
     Some(

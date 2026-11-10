@@ -12,8 +12,9 @@
 //! A call goes one of two ways. `dry_run` (the default) answers the plan
 //! and moves nothing. `dry_run: false` is `--yes`. Either way the plan's
 //! refusals stand: one item refused, or one whose `frees_bytes` is not
-//! within 1% of its `expect_bytes`, stops the whole call, as `clean` stops
-//! a list it cannot wholly move.
+//! within 1% of its `expect_bytes` or is not known (an entry no saved scan
+//! holds), stops the whole call, as `clean` stops a list it cannot wholly
+//! move.
 //!
 //! Each handle is verified here before the verb runs, and the path it names
 //! must lie under the roots: a handle can have been issued by any `explain`
@@ -77,7 +78,18 @@ impl Tool for Delete {
             let now = clock::now();
             for item in items {
                 let token = item["handle"].as_str().unwrap_or_default();
-                let expected = item["expect_bytes"].as_u64().unwrap_or_default();
+                // The schema makes it required; a figure that is not there is
+                // never taken as one, least of all as 0.
+                let Some(expected) = item["expect_bytes"].as_u64() else {
+                    return Err(Refusal {
+                        code: "usage",
+                        message: "every item needs expect_bytes, the bytes it should free"
+                            .to_owned(),
+                        hint: "Call duscope_delete with expect_bytes set on each item, from \
+                               duscope_explain's freeable_now_bytes or a dry run's frees_bytes"
+                            .to_owned(),
+                    });
+                };
                 let payload = Handle::verify(&key, token, now).map_err(|e| handle_refusal(&e))?;
                 let path = Path::new(OsStr::from_bytes(&payload.path));
                 context.roots.bound_item(path)?;
