@@ -358,6 +358,12 @@ duscope opens every index file the same way, trusted or not ([SECURITY.md](../SE
   - `scan_id` is not 12 lowercase hex digits, or `tool_version` is not a
     version: `index_corrupt`;
   - its major `index_version` is another: `index_version_mismatch`.
+- **Rows out of layout.** Every directory has
+  `id <= files_end <= last_id < n_entries`, and every entry other than the root
+  a parent below its id. A row that breaks this never makes a verb read for
+  ever. A verb that reads it fails `index_corrupt`, exit 5; a verb that does
+  not may answer from the rows it read, with no warning. `scans --check` reads
+  every row.
 
 A program that writes index files for duscope to read keeps within these.
 

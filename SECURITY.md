@@ -146,6 +146,9 @@ virtual tables and crafted pages.
   - **Versions:** the major `index_version` must be this build's, and `tool_version` must name
     a duscope version.
   - **Errors:** a refused file is `index_corrupt` or `index_version_mismatch`, exit 5.
+  - **Rows:** a row whose ids break the index's layout never makes a verb read for ever. A verb
+    that reads such a row fails `index_corrupt`, exit 5; a verb that does not may answer from the
+    rows it read, with no warning. `scans --check` reads every row.
 - **Indexes are snapshots.** Each index is written to a temporary file and renamed into place.
   Nothing edits an index after that.
 - **Permissions.** The index directory and its `scans` and `out` directories are 0700. Each
