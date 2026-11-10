@@ -283,12 +283,13 @@ fn p2_idx_02_v_reports_the_write() {
     assert!(err.contains(" µs/entry"), "{err}");
 }
 
-/// P2-IDX-07, on either platform and with no mount: `SQLite` builds a
-/// temporary file's name in 512 bytes, so a directory it accepts but whose
-/// path leaves no room for the name fails the sort with a bare `SQLITE_ERROR`
-/// (`unixGetTempname`). Ten thousand directories with long names give more
-/// than the sort's 2 MB of memory, so it needs the file. The save is built
-/// again in memory and succeeds.
+/// P2-IDX-07, with no mount: `SQLite` builds a temporary file's name in 512
+/// bytes, so a directory it accepts but whose path leaves no room for the
+/// name fails the sort with a bare `SQLITE_ERROR` (`unixGetTempname`). Ten
+/// thousand directories with long names give more than the sort's 2 MB of
+/// memory, so it needs the file. The save is built again in memory and
+/// succeeds. Linux opens the file with `O_TMPFILE`, by its directory alone,
+/// so there it has no name to build and the first build succeeds.
 #[test]
 fn p2_idx_07_a_temporary_directory_path_too_long_for_sqlite_builds_in_memory() {
     let env = TestEnv::new();
@@ -310,10 +311,12 @@ fn p2_idx_07_a_temporary_directory_path_too_long_for_sqlite_builds_in_memory() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
     assert_eq!(envelope(&out)["ok"], true);
-    assert!(
-        err.contains("building the indexes failed"),
-        "the first build failed on the temporary name: {err}"
-    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            err.contains("building the indexes failed"),
+            "the first build failed on the temporary name: {err}"
+        );
+    }
     let names = scans(&env.index_dir());
     assert_eq!(names.len(), 1, "{names:?}");
     assert!(names[0].ends_with(".db"), "{names:?}");

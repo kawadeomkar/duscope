@@ -192,9 +192,9 @@ virtual tables and crafted pages.
   runs, a tree of more than about a million files, it opens a second file to merge them. Both go
   in `SQLITE_TMPDIR` if that is set and writable, else `TMPDIR`, else the first of `/var/tmp`,
   `/usr/tmp` and `/tmp` that is writable, and as a last resort the current directory.
-  - **Privacy.** Each file has a random name and mode 0600, and SQLite unlinks it as it opens it,
-    so neither is in a directory while it is in use and nothing of them remains however the
-    process ends. They hold the keys being sorted: a directory's name with its parent's id and its
+  - **Privacy.** Each file has mode 0600 and is in no directory while it is in use, so nothing of
+    them remains however the process ends: on Linux SQLite opens it with `O_TMPFILE` where the
+    filesystem allows, and otherwise gives it a random name and unlinks it as it opens it. They hold the keys being sorted: a directory's name with its parent's id and its
     own (about a dozen bytes beside the name), and a file's size on disk with its id (about a dozen
     bytes in all). They never hold a file's name or a path.
   - **Where they go.** Set `SQLITE_TMPDIR` to choose the directory. The first file is about as

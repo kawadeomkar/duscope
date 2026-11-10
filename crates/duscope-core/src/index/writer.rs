@@ -13,8 +13,10 @@
 //! index's keys through a file past that (`temp_store = FILE`), so a save
 //! costs little more memory than the scan it follows. The file is `SQLite`'s
 //! own, in the first of `SQLITE_TMPDIR`, `TMPDIR`, `/var/tmp`, `/usr/tmp`,
-//! `/tmp` and the current directory that can be written; it is unlinked as
-//! it is opened. If it cannot be created or written the save is built again
+//! `/tmp` and the current directory that can be written; it is in no
+//! directory while in use (`O_TMPFILE` on Linux where the filesystem allows,
+//! otherwise unlinked as it is opened). If it cannot be created or written
+//! the save is built again
 //! with the sort in memory, so that a full temporary directory does not fail
 //! it: a failed statement under `journal_mode = OFF` leaves the file
 //! unusable, so the second build starts over.
