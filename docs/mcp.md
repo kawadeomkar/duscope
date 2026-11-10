@@ -80,9 +80,9 @@ than they finish meets these limits:
 
 - A message is at most 1 MiB; a longer line is refused (`-32600`) and skipped. Every tool's largest
   request fits.
-- At most 64 requests, holding 32 MiB between them once parsed, wait behind the running call. A
-  request past either is not queued and never runs: it is answered at once with the JSON-RPC error
-  `-31000` ("the server is busy"), whose `data` gives `max_queued_requests` and
+- At most 64 requests, holding 32 MiB between them once parsed, ids included, wait behind the
+  running call. A request past either is not queued and never runs: it is answered at once with
+  the JSON-RPC error `-31000` ("the server is busy"), whose `data` gives `max_queued_requests` and
   `max_queued_bytes`. Send it again once some of the requests before it are answered. `ping`,
   `tools/list`, `server/discover` and cancellations are read and handled at once, even then.
 - A path is at most 4096 bytes; a longer one is refused with `refused_path`.
