@@ -904,7 +904,10 @@ fn p5_core_04_a_write_with_its_time_restored_is_priced_live() {
         let plan = clean_plan(&[item(path.clone())], &index, &q, Method::Trash).unwrap();
         assert_eq!(plan.changed_count(), 1, "{}", path.display());
         assert_eq!(plan.plan.items[0].frees_kind, Some("upper_bound"));
-        assert!(plan.plan.items[0].frees_bytes.unwrap() >= len + scanned);
+        // The file's blocks, and for the folder what it held too (on ext4 a
+        // directory has blocks of its own, which the file does not include).
+        let floor = if path == &dir { len + scanned } else { len };
+        assert!(plan.plan.items[0].frees_bytes.unwrap() >= floor);
     }
 }
 

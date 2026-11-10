@@ -1242,6 +1242,11 @@ fn p5_core_04_an_unchanged_fixture_tree_keeps_index_figures() {
                 continue;
             };
             let path = entry.path();
+            // A name that is not UTF-8, as the Linux tree holds, is no
+            // argument of this command line.
+            if path.to_str().is_none() {
+                continue;
+            }
             // A folder that may be listed but not entered holds entries no
             // one can stat.
             let Ok(meta) = fs::symlink_metadata(&path) else {
