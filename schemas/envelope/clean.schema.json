@@ -288,7 +288,7 @@
           "description": "Why moving or deleting it failed; null otherwise."
         },
         "frees_bytes": {
-          "description": "What deleting it would free now: its bytes less those a link or\nclone member outside it keeps; null where that is not known (a\ndirectory no saved scan holds).",
+          "description": "What deleting it would free now: its bytes less those a link or\nclone member outside it keeps, measured from the tree for an item\nthat changed since the saved scan or whose bytes the scan does not\nhold (a directory: what its walk found, at most); null where that is\nnot known (a refused directory outside the scan's root, or one it did\nnot enter).",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -747,7 +747,8 @@
                 "index_untouched",
                 "spilled",
                 "deprecated_flag",
-                "tz_unavailable"
+                "tz_unavailable",
+                "changed_since_scan"
               ]
             },
             {

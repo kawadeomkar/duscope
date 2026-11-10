@@ -12,9 +12,10 @@
 //! A call goes one of two ways. `dry_run` (the default) answers the plan
 //! and moves nothing. `dry_run: false` is `--yes`. Either way the plan's
 //! refusals stand: one item refused, or one whose `frees_bytes` is not
-//! within 1% of its `expect_bytes` or is not known (an entry no saved scan
-//! holds), stops the whole call, as `clean` stops a list it cannot wholly
-//! move.
+//! within 1% of its `expect_bytes` or is a directory no saved scan measured
+//! (made since the scan, or not entered by it), stops the whole call, as
+//! `clean` stops a list it cannot wholly move; and an item that has changed
+//! since the scan its handle was read from fails the call (`path_changed`).
 //!
 //! Each handle is verified here before the verb runs, and the path it names
 //! must lie under the roots: a handle can have been issued by any `explain`

@@ -12,6 +12,10 @@
 //! to the Trash and nowhere else; any other answer closes the pane and
 //! moves nothing. A plan with a refused item moves nothing, as `clean`
 //! without `--skip-refused` does, and a plan that cannot be made says why.
+//! A plan that measured items from the tree, since they changed after the
+//! saved scan, says so under its line, as `clean` warns of it
+//! (`changed_since_scan`): the map shows the scan's sizes, the pane what is
+//! there now.
 //!
 //! The marks cross a reload by their absolute paths: each lands on the
 //! entry at the same path in the new scan, or is dropped.
@@ -487,6 +491,18 @@ fn moved_line(outcome: &CleanOutcome, size: &SizeText<'_>) -> String {
 /// The question `clean` asks on a terminal, the pane's as well.
 const QUESTION: &str = "Type yes to move them to the Trash: ";
 
+/// What `clean` warns of a plan whose `changed` items changed since the
+/// saved scan, so that it measured them from the tree; none when none did.
+fn changed_note(changed: usize) -> Option<String> {
+    (changed > 0).then(|| {
+        format!(
+            "{} changed since the saved scan, so the plan measured {} from the tree",
+            count(changed, "item"),
+            if changed == 1 { "it" } else { "them" }
+        )
+    })
+}
+
 /// What a plan with a refused item says: `clean` moves nothing either.
 fn refused_note(plan: &CleanPlan) -> String {
     let refused = refused_count(plan);
@@ -774,7 +790,13 @@ impl Pane {
         let roles = canvas.pack.roles;
         let count = self.ids.len();
         let body = match &self.state {
-            State::Planned(plan) => Body::planned(&plan.plan, count, &self.input, size, &roles),
+            State::Planned(plan) => {
+                let mut body = Body::planned(&plan.plan, count, &self.input, size, &roles);
+                if let Some(note) = changed_note(plan.changed_count()) {
+                    body.under.insert(1, (note, roles.subtext));
+                }
+                body
+            }
             State::Acted(plan, outcome) => Body::acted(&plan.plan, outcome, count, size, &roles),
             State::Unplanned(why) => Body::unplanned(why, count, &roles),
         };

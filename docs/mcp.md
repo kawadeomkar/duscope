@@ -65,8 +65,9 @@ The server lists them in this order; a test holds this list to its `tools/list`.
 `duscope_delete`. It moves entries under `--roots` to the Trash, never deletes them permanently,
 and cannot move a root itself. Each item names a `handle` from `duscope_explain` and
 `expect_bytes`, the bytes the entry should free: its `frees_bytes` from a dry-run plan, or
-`freeable_now_bytes`; a figure off by more than 1% refuses the item. A call is a dry run unless
-`dry_run` is `false`, and one refused item stops the whole call. The tool is marked
+`freeable_now_bytes`; a figure off by more than 1% refuses the item, and an entry that changed
+since the saved scan fails the call (`path_changed`): scan it again, then explain it again. A call
+is a dry run unless `dry_run` is `false`, and one refused item stops the whole call. The tool is marked
 `_meta["anthropic/requiresUserInteraction"]: true`; a client that honours it asks before every
 call.
 

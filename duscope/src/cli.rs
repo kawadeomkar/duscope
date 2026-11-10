@@ -243,7 +243,7 @@ pub struct CleanArgs {
 
     /// An entry explain --json examined, by its handle (repeatable)
     ///
-    /// Valid for fifteen minutes, while the path holds the same entry
+    /// Valid for fifteen minutes, while the path holds the entry as the scan saw it
     #[arg(long = "from", value_name = "HANDLE")]
     pub from: Vec<String>,
 
@@ -262,6 +262,8 @@ pub struct CleanArgs {
     /// Act only if the plan frees within 1% of N bytes (its total_frees_bytes)
     ///
     /// Otherwise nothing is touched and clean fails with expectation_mismatch
+    ///
+    /// An item changed since the saved scan counts as it is now
     #[arg(long, value_parser = parse_size, value_name = "N", help_heading = "Clean")]
     pub expect_bytes: Option<u64>,
 
@@ -287,6 +289,8 @@ pub struct CleanArgs {
     /// The saved scan the sizes come from: latest, an id prefix or an index file
     ///
     /// Default: the newest saved scan that holds the first item; clean needs one
+    ///
+    /// An item changed since that scan is measured from the tree (changed_since_scan)
     #[arg(long, value_name = "SCAN", help_heading = "Saved scans")]
     pub scan: Option<String>,
 

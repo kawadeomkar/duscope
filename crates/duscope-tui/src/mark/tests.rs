@@ -3,7 +3,8 @@
 //! item says, the freed tiles and the reload; and on a small tree on disk,
 //! saved: a mark planned at its own path and never where a folder that
 //! has become a link leads, the question asked once, a paste that is not
-//! keys. Nothing here moves a file:
+//! keys. P5-CORE-04: what the pane says of an item that changed since the
+//! scan. Nothing here moves a file:
 //! `clean_execute` only runs through the binary, in `duscope/tests/pty`,
 //! where the test environment guards the real Trash.
 
@@ -29,7 +30,7 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::terminal::Terminal;
 
-use super::{Answer, Body, DECLINED, Marks, Pane, State, Toggled, plan_rows};
+use super::{Answer, Body, DECLINED, Marks, Pane, State, Toggled, changed_note, plan_rows};
 use crate::cursor::tests::{char, first_frame, key, press};
 use crate::panes::Sources;
 use crate::panes::tests::{classes, mockup, opts, status};
@@ -918,4 +919,44 @@ fn p4_tui_06_d_refuses_a_folder_that_holds_what_was_moved() {
     app.jump(downloads);
     press(&mut app, &mut terminal, &char('d'));
     assert_eq!(app.marked_ids(), [downloads]);
+}
+
+#[test]
+fn p5_core_04_the_pane_says_an_item_changed_since_the_scan() {
+    let env = TestEnv::new();
+    let (root, index) = on_disk(&env);
+    // The saved scan here is read from an ncdu export, which records no
+    // times: the file differs from its row, so the plan measures it from
+    // the tree, as `clean` does, and the pane says so under its line.
+    let mut marks = Marks::default();
+    marks.toggle(&index, id_of(&index, "big.bin"));
+    let pane = Pane::open(&marks, &index, &Sources::of(&index));
+    let State::Planned(plan) = &pane.state else {
+        panic!("no plan: {:?}", pane.state);
+    };
+    assert_eq!(plan.changed_count(), 1);
+    let item = &plan.plan.items[0];
+    let meta = fs::metadata(root.join("big.bin")).unwrap();
+    assert_eq!(
+        item.allocated_bytes,
+        std::os::unix::fs::MetadataExt::blocks(&meta) * 512
+    );
+    assert_eq!(item.frees_kind, Some("upper_bound"));
+    assert!(pane.asks());
+    let mocha = Pack::named("mocha").unwrap();
+    let mut canvas = Canvas::new(120, 40, &mocha, duscope_treemap::paint::Glyphs::Unicode);
+    pane.draw(&mut canvas, Rect::new(0, 2, 120, 37), &iec);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 120, 40));
+    crate::app::copy(&canvas.cells, Depth::TrueColor, buf.area, &mut buf);
+    let text = snapshot(&buf);
+    let note = "1 item changed since the saved scan, so the plan measured it from the tree";
+    assert!(text.contains(note), "{text}");
+    assert!(text.contains("Type yes"), "{text}");
+    // As `clean` words its warning, and nothing when nothing changed.
+    assert_eq!(changed_note(1).as_deref(), Some(note));
+    assert_eq!(
+        changed_note(2).as_deref(),
+        Some("2 items changed since the saved scan, so the plan measured them from the tree")
+    );
+    assert_eq!(changed_note(0), None);
 }

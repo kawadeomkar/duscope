@@ -7,11 +7,17 @@
 //! guards against is made to happen between [`clean_plan`] and
 //! [`clean_execute`]: a directory swapped for a symbolic link to a directory
 //! outside the scan's root.
+//!
+//! P5-CORE-04: an item that changed since the scan (a directory grown, a
+//! file rewritten in place) is priced from the tree, and one from a handle
+//! fails the plan.
 
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use duscope_testkit::TestEnv;
 use duscope_walk::{Attrs, RemoveError, WalkOptions, walk};
@@ -191,12 +197,14 @@ fn p4_core_01_an_item_made_since_the_scan_is_planned_from_disk() {
     assert_eq!(plan.acting_count(), 2);
     assert_eq!(items[0].allocated_bytes, blocks(&root.join("new.bin")));
     assert_eq!(items[0].frees_kind, Some("upper_bound"));
-    // The directory with what is under it; what it frees is not known.
+    // The directory with what is under it, which it frees at most
+    // (P5-CORE-04: a directory priced from the tree counts in the totals).
     assert_eq!(
         items[1].allocated_bytes,
         blocks(&root.join("new")) + blocks(&root.join("new/c.bin"))
     );
-    assert_eq!(items[1].frees_bytes, None);
+    assert_eq!(items[1].frees_bytes, Some(items[1].allocated_bytes));
+    assert_eq!(items[1].frees_kind, Some("upper_bound"));
 }
 
 #[test]
@@ -497,13 +505,259 @@ fn p5_mcp_01_an_item_that_frees_other_than_its_figure_is_refused() {
     let fresh = root.join("made-since");
     fs::create_dir(&fresh).unwrap();
     fs::write(fresh.join("big.bin"), vec![7u8; 64 * 1024]).unwrap();
-    for expected in [0, 1, 64 * 1024] {
+    let walked = blocks(&fresh) + blocks(&fresh.join("big.bin"));
+    for expected in [0, 1, 64 * 1024, walked] {
         let mut plan = clean_plan(&[item(fresh.clone())], &index, &q, Method::Trash).unwrap();
-        assert_eq!(plan.plan.items[0].frees_bytes, None);
+        // P5-CORE-04: priced from the tree, its walk's figure, at most.
+        assert_eq!(plan.plan.items[0].frees_bytes, Some(walked));
+        assert_eq!(plan.plan.items[0].frees_kind, Some("upper_bound"));
         assert_eq!(plan.plan.items[0].action, "trash");
         plan.refuse_unexpected(&[expected]);
         assert_eq!(plan.plan.items[0].action, "refused", "{expected}");
         assert_eq!(plan.plan.items[0].reason, Some(super::UNEXPECTED));
         assert_eq!(plan.acting_count(), 0);
     }
+}
+
+/// Scans the tree at `root` into a saved scan in `env`'s scratch directory.
+fn scan_of(env: &TestEnv, root: &Path) -> Index {
+    let mut arena = Arena::new(Attrs::Basic);
+    walk(root, &WalkOptions::default(), |e| arena.push(e).unwrap()).unwrap();
+    let rollup = roll_up(&mut arena);
+    let meta = meta(root);
+    let dir = env.tmp_dir().join("index");
+    fs::create_dir_all(&dir).unwrap();
+    IndexWriter::write(&arena, &rollup, &meta, &dir).unwrap();
+    Index::open(&index_path(&dir, &meta.scan_id)).unwrap()
+}
+
+/// Appends `n` bytes to the file at `path`: the same inode, grown.
+fn grow(path: &Path, n: usize) {
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(&vec![6u8; n]).unwrap();
+}
+
+/// Rewrites the file at `path` in place with bytes of its own length, and
+/// moves its modification time `ahead`: only that time tells.
+fn rewrite(path: &Path, ahead: Duration) {
+    let len = fs::metadata(path).unwrap().len();
+    let was = fs::metadata(path).unwrap().modified().unwrap();
+    let mut file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all(&vec![4u8; usize::try_from(len).unwrap()])
+        .unwrap();
+    file.set_modified(was + ahead).unwrap();
+}
+
+/// A path's item with the handle of what is there now.
+fn signed(path: &Path) -> CleanItem {
+    let meta = fs::symlink_metadata(path).unwrap();
+    CleanItem {
+        path: path.to_owned(),
+        handle: Some((meta.dev(), meta.ino())),
+    }
+}
+
+#[test]
+fn p5_core_04_a_directory_grown_since_the_scan_is_priced_live() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let dir = root.join("dir");
+    // As the scan saw it: its figures, a.bin keeping the link's bytes.
+    let plan = clean_plan(&[item(dir.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    let scanned = plan.plan.items[0].clone();
+    assert_eq!(scanned.frees_kind, Some("lower_bound"));
+    assert_eq!(
+        scanned.frees_bytes,
+        Some(blocks(&dir) + blocks(&dir.join("b.bin")))
+    );
+
+    // A file made in it since: the walk's bytes, every inode under it once,
+    // which it frees at most; the plan counts them.
+    fs::write(dir.join("grown.bin"), vec![5u8; 50 * 1024]).unwrap();
+    let live = blocks(&dir)
+        + blocks(&dir.join("a-again.bin"))
+        + blocks(&dir.join("b.bin"))
+        + blocks(&dir.join("grown.bin"));
+    let plan = clean_plan(&[item(dir.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 1);
+    let item0 = &plan.plan.items[0];
+    assert_eq!(
+        (item0.allocated_bytes, item0.frees_bytes, item0.frees_kind),
+        (live, Some(live), Some("upper_bound"))
+    );
+    assert_eq!((item0.action, item0.reason), ("trash", None));
+    assert_eq!(
+        (plan.plan.total_allocated_bytes, plan.plan.total_frees_bytes),
+        (live, live)
+    );
+    assert!(live >= scanned.allocated_bytes + 50 * 1024, "{live}");
+
+    // Deeper down, where neither the directory's own time nor its entries
+    // move: a file under a folder under it, rewritten in place at its own
+    // length, changes the newest time under it.
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("deep");
+    fs::create_dir_all(top.join("proj/sub")).unwrap();
+    fs::write(top.join("proj/sub/deep.bin"), vec![3u8; 9000]).unwrap();
+    let deep_index = scan_of(&env, &top);
+    let proj = top.join("proj");
+    let plan = clean_plan(&[item(proj.clone())], &deep_index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    assert_eq!(plan.plan.items[0].frees_kind, Some("exact"));
+    rewrite(&top.join("proj/sub/deep.bin"), Duration::from_secs(60));
+    let plan = clean_plan(&[item(proj.clone())], &deep_index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(plan.plan.items[0].frees_kind, Some("upper_bound"));
+    assert_eq!(
+        plan.plan.items[0].frees_bytes,
+        Some(blocks(&proj) + blocks(&proj.join("sub")) + blocks(&proj.join("sub/deep.bin")))
+    );
+}
+
+#[test]
+fn p5_core_04_a_file_rewritten_in_place_is_priced_live() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let file = root.join("dir/b.bin");
+    let ino = fs::metadata(&file).unwrap().ino();
+    let plan_of = || clean_plan(&[item(file.clone())], &index, &q, Method::Trash).unwrap();
+    let plan = plan_of();
+    assert_eq!(plan.changed_count(), 0);
+    assert_eq!(plan.plan.items[0].frees_kind, Some("exact"));
+
+    // The same bytes' length, written again: its modification time alone
+    // differs from its row.
+    rewrite(&file, Duration::from_secs(60));
+    let plan = plan_of();
+    assert_eq!(plan.changed_count(), 1);
+    let item0 = &plan.plan.items[0];
+    assert_eq!(
+        (item0.allocated_bytes, item0.frees_bytes, item0.frees_kind),
+        (blocks(&file), Some(blocks(&file)), Some("upper_bound"))
+    );
+
+    // Grown in place, the same inode: its size now, from the plan's stat.
+    grow(&file, 60 * 1024);
+    assert_eq!(fs::metadata(&file).unwrap().ino(), ino);
+    let plan = plan_of();
+    assert_eq!(plan.changed_count(), 1);
+    let item0 = &plan.plan.items[0];
+    assert!(blocks(&file) >= 65 * 1024, "{}", blocks(&file));
+    assert_eq!(
+        (item0.allocated_bytes, item0.frees_bytes, item0.frees_kind),
+        (blocks(&file), Some(blocks(&file)), Some("upper_bound"))
+    );
+    assert_eq!(plan.plan.total_frees_bytes, blocks(&file));
+    assert_eq!((item0.action, item0.reason), ("trash", None));
+}
+
+#[test]
+fn p5_core_04_a_drifted_handle_item_is_path_changed() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let (dir, file) = (root.join("dir"), root.join("dir/b.bin"));
+    // As the scan saw them, their handles plan.
+    let plan = clean_plan(&[signed(&dir)], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    assert!(clean_plan(&[signed(&file)], &index, &q, Method::Trash).is_ok());
+
+    // The file grown in place: the same device and inode, so the handle
+    // still names it, but not what the scan saw, nor is its directory.
+    grow(&file, 40 * 1024);
+    for path in [&file, &dir] {
+        match clean_plan(&[signed(path)], &index, &q, Method::Trash) {
+            Err(CoreError::PathChanged(message)) => assert!(
+                message.contains("has changed since the saved scan"),
+                "{message}"
+            ),
+            other => panic!("{}: {other:?}", path.display()),
+        }
+    }
+    // Beside an unchanged item, the whole plan fails, as clean acts on all
+    // of a list or none.
+    assert!(matches!(
+        clean_plan(
+            &[signed(&root.join("a.bin")), signed(&dir)],
+            &index,
+            &q,
+            Method::Trash
+        ),
+        Err(CoreError::PathChanged(_))
+    ));
+    // By path, the same items are priced from the tree.
+    let plan = clean_plan(
+        &[item(file), item(root.join("a.bin"))],
+        &index,
+        &q,
+        Method::Trash,
+    )
+    .unwrap();
+    assert_eq!(plan.changed_count(), 1);
+}
+
+#[test]
+fn p5_core_04_a_directory_the_scan_did_not_enter_is_measured_and_has_not_changed() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    fs::create_dir_all(top.join("app/cache/deeper")).unwrap();
+    fs::write(top.join("app/main.rs"), vec![1u8; 3000]).unwrap();
+    fs::write(top.join("app/cache/blob.bin"), vec![2u8; 40 * 1024]).unwrap();
+    fs::write(top.join("app/cache/deeper/more.bin"), vec![2u8; 20 * 1024]).unwrap();
+    // Scanned with app/cache listed and not entered.
+    let mut arena = Arena::new(Attrs::Basic);
+    let opts = WalkOptions {
+        excludes: globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("app/cache").unwrap())
+            .build()
+            .unwrap(),
+        ..WalkOptions::default()
+    };
+    walk(&top, &opts, |e| arena.push(e).unwrap()).unwrap();
+    let rollup = roll_up(&mut arena);
+    let meta = meta(&top);
+    let dir = env.tmp_dir().join("index");
+    fs::create_dir_all(&dir).unwrap();
+    IndexWriter::write(&arena, &rollup, &meta, &dir).unwrap();
+    let index = Index::open(&index_path(&dir, &meta.scan_id)).unwrap();
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let app = top.join("app");
+    let cache = app.join("cache");
+
+    // The folder that holds it: what the scan read has not changed, so its
+    // figures are the scan's, and it plans from a handle.
+    let plan = clean_plan(&[signed(&app)], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    assert_ne!(plan.plan.items[0].frees_kind, Some("upper_bound"));
+    assert!(!plan.unmeasured(0));
+
+    // The folder itself: the scan holds nothing under it, so a walk prices
+    // it, at most; it has not changed, and its handle plans.
+    let plan = clean_plan(&[signed(&cache)], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    let live = blocks(&cache)
+        + blocks(&cache.join("blob.bin"))
+        + blocks(&cache.join("deeper"))
+        + blocks(&cache.join("deeper/more.bin"));
+    let item0 = &plan.plan.items[0];
+    assert_eq!(
+        (item0.allocated_bytes, item0.frees_bytes, item0.frees_kind),
+        (live, Some(live), Some("upper_bound"))
+    );
+    assert!(plan.unmeasured(0));
+
+    // A change inside it is not one the scan could see: still unchanged.
+    fs::write(cache.join("deeper/new.bin"), vec![2u8; 8 * 1024]).unwrap();
+    let plan = clean_plan(&[signed(&app)], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    // A change beside it is.
+    fs::write(app.join("lib.rs"), b"x").unwrap();
+    let plan = clean_plan(&[item(app.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 1);
 }

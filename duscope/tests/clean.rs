@@ -10,10 +10,15 @@
 //! and after measures what went; `--expect-bytes` at the edges of its 1%.
 //! The race `--permanent` guards against is the library's test, between
 //! the plan and the deletion (`duscope-core`'s `clean` tests).
+//!
+//! P5-CORE-04: a tree changed since its scan is planned from what is there
+//! now, so `--expect-bytes` is held to the live bytes; an unchanged one keeps
+//! the scan's figures and goldens.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -976,7 +981,13 @@ fn p5_mcp_01_an_item_whose_bytes_no_scan_knows_is_refused_whatever_its_figure() 
             assert_eq!(items[0]["action"], "trash", "{value}");
             assert_eq!(items[1]["action"], "refused", "{value}");
             assert_eq!(items[1]["reason"], "expectation_mismatch", "{value}");
-            assert_eq!(items[1]["frees_bytes"], Value::Null, "{value}");
+            // P5-CORE-04: measured by the plan's own walk, which no figure
+            // from a saved scan is held to.
+            assert!(
+                items[1]["frees_bytes"].as_u64().unwrap() >= 200_000,
+                "{value}"
+            );
+            assert_eq!(items[1]["frees_kind"], "upper_bound", "{value}");
             assert_eq!(value["result"]["trashed_count"], 0, "{value}");
             let message = value["error"]["message"].as_str().unwrap();
             assert!(
@@ -1050,4 +1061,218 @@ fn p5_mcp_01_a_run_that_acted_on_some_items_says_how_many_of_how_many() {
     );
     assert!(gone.iter().all(|path| !path.exists()));
     assert!(kept.iter().all(|path| path.exists()));
+}
+
+// P5-CORE-04: what changed since the scan is priced from the tree.
+
+/// Writes `n` zero bytes to a new file at `path`, a mebibyte at a time.
+fn zeros(path: &Path, n: usize) {
+    let mut file = fs::File::create(path).unwrap();
+    let chunk = vec![0u8; 1 << 20];
+    let mut left = n;
+    while left > 0 {
+        let take = left.min(chunk.len());
+        file.write_all(&chunk[..take]).unwrap();
+        left -= take;
+    }
+}
+
+#[test]
+fn p5_core_04_expect_bytes_fails_against_live_bytes() {
+    // The audit's reproduction: a plan and --expect-bytes of 4,096 bytes,
+    // 50 MiB written since the scan.
+    let env = TestEnv::new();
+    let v = fs::canonicalize(env.tmp_dir()).unwrap().join("v");
+    let d = v.join("d");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("a"), vec![0u8; 4096]).unwrap();
+    let saved = ok(&run(
+        &env,
+        &["scan", s(&v), "--save", "--json", "--treemap", "never"],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    zeros(&d.join("big"), 52_428_800);
+    let out = run(
+        &env,
+        &[
+            "clean",
+            s(&d),
+            "--scan",
+            &id,
+            "--permanent",
+            "--expect-bytes",
+            "4096",
+            "--yes",
+            "--json",
+        ],
+    );
+    let value = failed(&out, 1, "expectation_mismatch");
+    assert!(d.join("a").exists() && d.join("big").exists());
+    assert_eq!(value["result"]["deleted_count"], 0);
+    assert_eq!(value["result"]["freed_bytes"], 0);
+    // The plan is the tree's: what the walk found, at most.
+    let plan = &value["result"]["plan"];
+    let total = plan["total_frees_bytes"].as_u64().unwrap();
+    assert!(total >= 52_428_800 + 4096, "{value}");
+    assert_eq!(plan["items"][0]["frees_kind"], "upper_bound", "{value}");
+    assert_eq!(plan["items"][0]["frees_bytes"], total, "{value}");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&thousands(total)) && message.contains("4,096"),
+        "{message}"
+    );
+    // The warning says why, and how to measure the tree again.
+    let warning = &value["warnings"][0];
+    assert_eq!(warning["code"], "changed_since_scan", "{value}");
+    assert_eq!(warning["count"], 1, "{value}");
+    let hint = warning["hint"].as_str().unwrap();
+    assert!(
+        hint.starts_with("Run duscope rescan")
+            && hint.contains(&id)
+            && hint.ends_with("to measure the tree again"),
+        "{hint}"
+    );
+    // The live figure is the one a plan meets; a dry run waits for --yes.
+    let out = run(
+        &env,
+        &[
+            "clean",
+            s(&d),
+            "--scan",
+            &id,
+            "--permanent",
+            "--expect-bytes",
+            &total.to_string(),
+            "--json",
+        ],
+    );
+    failed(&out, 1, "confirmation_required");
+
+    // A directory made since the scan counts its walk too: 0 no longer
+    // passes for it.
+    let fresh = v.join("made-since");
+    fs::create_dir(&fresh).unwrap();
+    fs::write(fresh.join("c"), vec![1u8; 64 * 1024]).unwrap();
+    let out = run(
+        &env,
+        &[
+            "clean",
+            s(&fresh),
+            "--scan",
+            &id,
+            "--permanent",
+            "--expect-bytes",
+            "0",
+            "--yes",
+            "--json",
+        ],
+    );
+    let value = failed(&out, 1, "expectation_mismatch");
+    assert!(fresh.join("c").exists());
+    assert!(
+        value["result"]["plan"]["total_frees_bytes"]
+            .as_u64()
+            .unwrap()
+            >= 64 * 1024,
+        "{value}"
+    );
+    // Made since, not changed: no warning for it.
+    assert_eq!(value["warnings"], serde_json::json!([]), "{value}");
+}
+
+#[test]
+fn p5_core_04_an_unchanged_fixture_tree_keeps_index_figures() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.fixtures().root()).unwrap();
+    let saved = ok(&run(
+        &env,
+        &["scan", s(&root), "--save", "--json", "--threads", "4"],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let os = std::env::consts::OS;
+    // P4-CORE-01's two plans, as their goldens hold them.
+    let items = [
+        root.join("home/Projects/npm-app/node_modules"),
+        root.join("cases/hard-links/a/original.bin"),
+    ];
+    for (format, flag) in [("json", "--json"), ("plain", "--plain")] {
+        let mut args = vec!["clean"];
+        args.extend(items.iter().map(|p| s(p)));
+        args.push(flag);
+        let out = run(&env, &args);
+        assert_eq!(out.status.code(), Some(1));
+        let text = String::from_utf8(out.stdout).unwrap();
+        golden(
+            &format!("clean_{format}_plan@{os}.snap"),
+            &normalize(&text, &root, &id),
+        );
+    }
+    // Every folder two levels down, each planned alone, the fixture tree's
+    // cases among them (links, clones, sparse and compressed files, an
+    // unreadable folder, odd names, times and file types): none has changed
+    // since the scan, so none is priced from the tree.
+    let mut planned = 0;
+    for top in ["home", "cases"] {
+        for entry in fs::read_dir(root.join(top)).unwrap() {
+            let path = entry.unwrap().path();
+            if !fs::symlink_metadata(&path).unwrap().is_dir() {
+                continue;
+            }
+            let value = json(&run(&env, &["clean", s(&path), "--scan", &id, "--json"]));
+            let warnings = value["warnings"].as_array().unwrap();
+            assert!(
+                warnings.iter().all(|w| w["code"] != "changed_since_scan"),
+                "{}: {value}",
+                path.display()
+            );
+            planned += 1;
+        }
+    }
+    assert!(planned > 20, "{planned}");
+}
+
+#[test]
+fn p5_core_04_clean_from_an_entry_changed_since_the_scan_is_path_changed() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    let dir = root.join("dir");
+    let (token, _) = handle(&env, &dir);
+    // Its file grown in place: the same directory, the same inode, but not
+    // what the scan saw and explain signed.
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("b.bin"))
+        .unwrap();
+    file.write_all(&vec![1u8; 30_000]).unwrap();
+    drop(file);
+    for mode in ["--dry-run", "--yes"] {
+        let value = failed(
+            &run(&env, &["clean", "--from", &token, mode, "--json"]),
+            1,
+            "path_changed",
+        );
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("has changed since the saved scan"),
+            "{message}"
+        );
+        let hint = value["error"]["hint"].as_str().unwrap();
+        assert!(hint.contains("duscope rescan"), "{hint}");
+        assert!(dir.join("b.bin").exists());
+    }
+    // By path, the plan is the tree's, and says so.
+    let value = failed(
+        &run(&env, &["clean", s(&dir), "--json"]),
+        1,
+        "confirmation_required",
+    );
+    assert_eq!(
+        value["warnings"][0]["code"], "changed_since_scan",
+        "{value}"
+    );
+    assert_eq!(
+        value["result"]["plan"]["items"][0]["frees_kind"],
+        "upper_bound"
+    );
 }

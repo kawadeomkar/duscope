@@ -17,7 +17,7 @@ pub const SCHEMA_VERSION: &str = "0.2";
 
 /// The warning codes of the conventions appendix, the only values of
 /// [`Warning::code`].
-pub const WARNING_CODES: [&str; 15] = [
+pub const WARNING_CODES: [&str; 16] = [
     "partial_read",
     "mounts_excluded",
     "stale_index",
@@ -33,6 +33,7 @@ pub const WARNING_CODES: [&str; 15] = [
     "spilled",
     "deprecated_flag",
     "tz_unavailable",
+    "changed_since_scan",
 ];
 
 /// The error codes of the conventions appendix, the only values of
@@ -1377,8 +1378,11 @@ pub struct PlanItem {
     /// Bytes on disk: a directory's subtree, hard links and clones once.
     pub allocated_bytes: u64,
     /// What deleting it would free now: its bytes less those a link or
-    /// clone member outside it keeps; null where that is not known (a
-    /// directory no saved scan holds).
+    /// clone member outside it keeps, measured from the tree for an item
+    /// that changed since the saved scan or whose bytes the scan does not
+    /// hold (a directory: what its walk found, at most); null where that is
+    /// not known (a refused directory outside the scan's root, or one it did
+    /// not enter).
     pub frees_bytes: Option<u64>,
     /// `exact`, `lower_bound` or `upper_bound`; null with `frees_bytes`.
     #[cfg_attr(test, schemars(extend("enum" = nullable(&values::FREEABLE_KINDS))))]
