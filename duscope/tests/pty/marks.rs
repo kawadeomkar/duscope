@@ -2,8 +2,9 @@
 //! as `clean` prints it; only `yes` typed in full moves anything, into the
 //! test's own Trash: on Linux the test's XDG Trash, on macOS a disk image's
 //! (a platform test), since the startup volume's items go to the account's
-//! Trash whatever `HOME` says, which the test environment refuses. Nothing
-//! here reaches the real Trash. `r` rescans and reloads.
+//! Trash whatever `HOME` says, which the test environment refuses. Any
+//! other answer closes the pane, and a paste is never keys. Nothing here
+//! reaches the real Trash. `r` rescans and reloads.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -183,19 +184,62 @@ fn p4_tui_06_anything_but_yes_in_the_pane_moves_nothing() {
     let root = work_tree(&env);
     tree(&env, &root);
     let mut terminal = marked_two(&env, &root, 120, 40);
-    terminal.send(Key::Char('D')).unwrap();
-    wait(&mut terminal, "Type yes to move them");
-    for answer in ["no", "YES", "ye"] {
+    // Each wrong answer closes the pane and moves nothing: the question is
+    // asked once, as `clean` asks it, and `D` asks it again.
+    for answer in ["no", "YES", "ye", "yes "] {
+        terminal.send(Key::Char('D')).unwrap();
+        wait(&mut terminal, "Type yes to move them");
         send(&mut terminal, answer);
         wait(&mut terminal, &format!("{answer}▌"));
         terminal.send(Key::Enter).unwrap();
-        wait(&mut terminal, "the answer was not yes");
+        wait(
+            &mut terminal,
+            "the answer was not yes, so nothing was moved",
+        );
+        wait_gone(&mut terminal, "mark pane");
     }
-    // Esc closes it and moves nothing; the marks are still there.
+    // Esc closes it too; the marks are still there.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "Type yes to move them");
     terminal.send(Key::Esc).unwrap();
     wait_gone(&mut terminal, "mark pane");
     wait(&mut terminal, "2 marked");
     assert!(root.join("a.bin").exists() && root.join("c.bin").exists());
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    let text = terminal.screen().full_text();
+    assert!(!text.contains("moved"), "{text}");
+}
+
+#[test]
+fn p4_tui_06_a_paste_holding_yes_moves_nothing() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    tree(&env, &root);
+    let mut terminal = viewer(&env, &root, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    // The viewer brackets pastes, so a paste is one event it ignores.
+    assert!(terminal.screen().bracketed_paste());
+    // The keys that would mark the selection, open the pane and answer
+    // it, pasted: nothing is marked. The `d` typed after them marks.
+    terminal.paste("dDyes\n").unwrap();
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    assert!(root.join("a.bin").exists());
+    // In the pane, a pasted `yes` and line break are not the answer: only
+    // the `n` typed after them is.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "Type yes to move them");
+    terminal.paste("yes\n").unwrap();
+    terminal.send(Key::Char('n')).unwrap();
+    wait(&mut terminal, "Type yes to move them to the Trash: n▌");
+    terminal.send(Key::Enter).unwrap();
+    wait(
+        &mut terminal,
+        "the answer was not yes, so nothing was moved",
+    );
+    wait_gone(&mut terminal, "mark pane");
+    assert!(root.join("a.bin").exists());
     terminal.send(Key::Char('q')).unwrap();
     wait(&mut terminal, "exit=0");
     let text = terminal.screen().full_text();

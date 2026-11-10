@@ -6,9 +6,10 @@
 //! mark pane: the plan [`clean_plan`] makes of the marked paths, each
 //! planned as `clean` plans a path it is given (every symbolic link above
 //! its last component resolved), printed as `clean` prints it: the same
-//! table, the same line under it and the same question. Only `yes` typed in
-//! full (and `⏎`) moves anything, through [`clean_execute`], to the Trash
-//! and nowhere else; a plan with a refused item moves nothing, as `clean`
+//! table, the same line under it and the same question, asked once. Only
+//! `yes` typed in full (and `⏎`) moves anything, through [`clean_execute`],
+//! to the Trash and nowhere else; any other answer closes the pane and
+//! moves nothing. A plan with a refused item moves nothing, as `clean`
 //! without `--skip-refused` does, and a plan that cannot be made says why.
 //!
 //! The marks cross a reload by their absolute paths: each lands on the
@@ -302,8 +303,22 @@ pub struct Pane {
     state: State,
     /// What has been typed.
     input: String,
-    /// The note on the last answer.
-    note: Option<&'static str>,
+}
+
+/// What the viewer says when the answer was not `yes`: the pane has
+/// closed, as `clean` asks once.
+pub const DECLINED: &str = "the answer was not yes, so nothing was moved";
+
+/// What `⏎` in the pane came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    /// Nothing: the pane asks nothing (a plan with a refused item, one
+    /// that could not be made, one acted on already).
+    Unasked,
+    /// The answer was not `yes`: nothing moved, and the pane closes.
+    Declined,
+    /// `yes`: what the plan moved.
+    Moved(Moved),
 }
 
 /// What `yes` did.
@@ -498,7 +513,6 @@ impl Body {
         plan: &CleanPlan,
         count: usize,
         input: &str,
-        note: Option<&str>,
         size: &SizeText<'_>,
         roles: &Roles,
     ) -> Body {
@@ -507,9 +521,6 @@ impl Body {
         let mut under = vec![(line, roles.text)];
         if refused {
             under.push((refused_note(plan), roles.red));
-        }
-        if let Some(note) = note {
-            under.push((note.to_owned(), roles.red));
         }
         Body {
             count,
@@ -692,7 +703,6 @@ impl Pane {
             ids,
             state,
             input: String::new(),
-            note: None,
         }
     }
 
@@ -706,7 +716,6 @@ impl Pane {
     pub fn typed(&mut self, c: char) -> bool {
         if self.asks() && self.input.chars().count() < 16 {
             self.input.push(c);
-            self.note = None;
             return true;
         }
         false
@@ -717,21 +726,21 @@ impl Pane {
         self.input.pop().is_some()
     }
 
-    /// `⏎`: moves the plan when the answer is `yes` in full, and only then.
-    /// `None` moved nothing (the note says why).
-    pub fn answer(&mut self, size: &SizeText<'_>) -> Option<Moved> {
+    /// `⏎`: moves the plan when the answer is `yes` in full, and only then;
+    /// any other answer is [`Answer::Declined`], and the viewer closes the
+    /// pane: the question is asked once, as `clean` asks it.
+    pub fn answer(&mut self, size: &SizeText<'_>) -> Answer {
         if !self.asks() {
-            return None;
+            return Answer::Unasked;
         }
         if self.input != "yes" {
             self.input.clear();
-            self.note = Some("the answer was not yes, so nothing was moved");
-            return None;
+            return Answer::Declined;
         }
         let State::Planned(mut plan) =
             std::mem::replace(&mut self.state, State::Unplanned(String::new()))
         else {
-            return None;
+            return Answer::Unasked;
         };
         let outcome = clean_execute(&mut plan);
         let ids = plan
@@ -746,7 +755,7 @@ impl Pane {
         let bytes = outcome.trashed_bytes;
         self.state = State::Acted(plan, outcome);
         self.input.clear();
-        Some(Moved { ids, line, bytes })
+        Answer::Moved(Moved { ids, line, bytes })
     }
 
     /// Whether the pane should stay open after it acted: an item failed.
@@ -760,9 +769,7 @@ impl Pane {
         let roles = canvas.pack.roles;
         let count = self.ids.len();
         let body = match &self.state {
-            State::Planned(plan) => {
-                Body::planned(&plan.plan, count, &self.input, self.note, size, &roles)
-            }
+            State::Planned(plan) => Body::planned(&plan.plan, count, &self.input, size, &roles),
             State::Acted(plan, outcome) => Body::acted(&plan.plan, outcome, count, size, &roles),
             State::Unplanned(why) => Body::unplanned(why, count, &roles),
         };

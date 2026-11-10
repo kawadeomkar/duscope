@@ -74,7 +74,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::cursor::{Cursor, Dir, Nav, PAGE, Step};
 use crate::keys::{self, Action};
 use crate::layout::{Panes, inner, layout};
-use crate::mark::{self, Freed, Toggled};
+use crate::mark::{self, Answer, Freed, Toggled};
 use crate::mask::Mask;
 use crate::mouse::{Clicks, Press};
 use crate::panes::{self, Context, Facts, LegendRow, Ranks, Sources};
@@ -1124,6 +1124,9 @@ impl<'a> App<'a> {
             Event::Resize(..) => Flow::Redraw,
             Event::Key(key) if key.kind != KeyEventKind::Release => self.key(key),
             Event::Mouse(mouse) => self.mouse(*mouse, Instant::now()),
+            // The rest waits; a paste among it (the terminal brackets
+            // pastes) is never keys: not an answer in the mark pane, not a
+            // filter, not a command.
             _ => Flow::Wait,
         };
         self.released(flow)
@@ -1364,13 +1367,19 @@ impl<'a> App<'a> {
 
     /// `⏎` in the mark pane: acts on `yes`. What moved leaves the marks for
     /// the freed tiles; the pane stays open when something failed, to show
-    /// what, and otherwise the key line says what moved.
+    /// what, and otherwise the key line says what moved. Any other answer
+    /// closes the pane, moving nothing: the question is asked once.
     fn answer_pane(&mut self) -> Flow {
         let Some(pane) = &mut self.pane else {
             return Flow::Wait;
         };
-        let Some(moved) = pane.answer(&*self.effects.size) else {
-            return Flow::Redraw;
+        let moved = match pane.answer(&*self.effects.size) {
+            Answer::Unasked => return Flow::Redraw,
+            Answer::Declined => {
+                self.pane = None;
+                return self.warn(mark::DECLINED.to_owned());
+            }
+            Answer::Moved(moved) => moved,
         };
         let stays = pane.stays_open();
         for &id in &moved.ids {

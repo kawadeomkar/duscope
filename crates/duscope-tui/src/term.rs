@@ -1,7 +1,8 @@
-//! The terminal the viewer draws on: raw mode, the alternate screen and
-//! mouse capture, taken on entry and given back on every way out (a
-//! return, an error, a panic through the binary's hook); the size the
-//! viewer checks before it starts; and the background probe.
+//! The terminal the viewer draws on: raw mode, the alternate screen, mouse
+//! capture and bracketed paste (so that a paste arrives as one event the
+//! viewer ignores, never as keys), taken on entry and given back on every
+//! way out (a return, an error, a panic through the binary's hook); the
+//! size the viewer checks before it starts; and the background probe.
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -15,7 +16,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::Show;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -65,15 +69,20 @@ impl Tui {
     /// Takes the terminal: raw mode; then, when `probe`, the background
     /// question, which needs raw mode to read the answer and must come
     /// before the first event read, which would take the answer for keys;
-    /// then the alternate screen and mouse capture. A step that fails gives
-    /// back what the ones before it took.
+    /// then the alternate screen, mouse capture and bracketed paste. A step
+    /// that fails gives back what the ones before it took.
     pub fn enter(probe: bool) -> io::Result<Tui> {
         enable_raw_mode()?;
         HELD.store(true, Ordering::SeqCst);
         let background = if probe { background(PROBE_WAIT) } else { None };
-        let taken = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)
-            .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())))
-            .and_then(|mut terminal| terminal.clear().map(|()| terminal));
+        let taken = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )
+        .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())))
+        .and_then(|mut terminal| terminal.clear().map(|()| terminal));
         match taken {
             Ok(terminal) => Ok(Tui {
                 terminal,
@@ -103,8 +112,8 @@ impl Drop for Tui {
     }
 }
 
-/// Gives the terminal back if the viewer holds it: mouse reporting off,
-/// the main screen, the cursor shown, raw mode off. Does nothing otherwise,
+/// Gives the terminal back if the viewer holds it: bracketed paste and
+/// mouse reporting off, the main screen, the cursor shown, raw mode off. Does nothing otherwise,
 /// so a panic hook can call it whatever was running, and a second call
 /// (the hook, then the unwinding drop) writes nothing.
 pub fn restore() {
@@ -112,6 +121,7 @@ pub fn restore() {
         // Nothing to do about a failure here: this is the way out.
         let _ = execute!(
             io::stdout(),
+            DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen,
             Show

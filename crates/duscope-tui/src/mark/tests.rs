@@ -1,7 +1,8 @@
 //! P4-TUI-06: marks and the mark pane, on the canvas's example tree: what
 //! `d` keeps, the pane's table beside `clean`'s, what a plan with a refused
 //! item says, the freed tiles and the reload; and on a small tree on disk,
-//! saved: a mark planned as `clean` plans its path. Nothing here moves a file:
+//! saved: a mark planned as `clean` plans its path, the question asked
+//! once, a paste that is not keys. Nothing here moves a file:
 //! `clean_execute` only runs through the binary, in `duscope/tests/pty`,
 //! where the test environment guards the real Trash.
 
@@ -10,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crossterm::event::KeyCode;
+use crossterm::event::{Event, KeyCode};
 use duscope_core::arena::Arena;
 use duscope_core::clean::CleanOutcome;
 use duscope_core::envelope::{CleanPlan, ErrorObject, PlanItem};
@@ -27,7 +28,7 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::terminal::Terminal;
 
-use super::{Body, Marks, Pane, State, Toggled, plan_rows};
+use super::{Body, DECLINED, Marks, Pane, State, Toggled, plan_rows};
 use crate::cursor::tests::{char, first_frame, key, press};
 use crate::panes::Sources;
 use crate::panes::tests::{classes, mockup, opts, status};
@@ -255,7 +256,7 @@ fn p4_tui_06_the_pane_asks_for_yes_or_says_why_it_cannot() {
         Pack::named("mocha").unwrap().roles,
     );
     // A plan that moves: the table, the line, the question.
-    let body = Body::planned(&plan(), 2, "ye", None, &iec, &roles);
+    let body = Body::planned(&plan(), 2, "ye", &iec, &roles);
     golden(
         "view_mark_pane_mockup_120x40.snap",
         &frame(&body, &mocha, 120, 40),
@@ -269,7 +270,7 @@ fn p4_tui_06_the_pane_asks_for_yes_or_says_why_it_cannot() {
     );
 
     // A refused item: no question, and why nothing moves.
-    let body = Body::planned(&plan_with_refusal(), 3, "", None, &iec, &roles);
+    let body = Body::planned(&plan_with_refusal(), 3, "", &iec, &roles);
     assert_eq!(body.answer, None);
     golden(
         "view_mark_pane_refused_mockup_120x40.snap",
@@ -282,18 +283,6 @@ fn p4_tui_06_the_pane_asks_for_yes_or_says_why_it_cannot() {
         "{text}"
     );
     assert!(!text.contains("Type yes"), "{text}");
-
-    // A wrong answer: the note.
-    let body = Body::planned(
-        &plan(),
-        2,
-        "",
-        Some("the answer was not yes, so nothing was moved"),
-        &iec,
-        &roles,
-    );
-    let text = frame(&body, &mocha, 120, 40);
-    assert!(text.contains("the answer was not yes"), "{text}");
 
     // Moved, one of them failed: its outcome, the failure and `clean`'s
     // line; no question.
@@ -350,7 +339,7 @@ fn p4_tui_06_the_pane_cuts_a_long_path_from_the_left_and_counts_what_does_not_fi
     for _ in 0..30 {
         plan.items.push(filler.clone());
     }
-    let body = Body::planned(&plan, 32, "", None, &iec, &roles);
+    let body = Body::planned(&plan, 32, "", &iec, &roles);
     let text = frame(&body, &mocha, 80, 24);
     assert!(text.contains("…"), "{text}");
     assert!(text.contains("keep-this-end.bin"), "{text}");
@@ -746,9 +735,75 @@ fn p4_tui_06_a_mark_is_planned_as_clean_plans_its_path() {
     assert_eq!(item.path, outside.join("b.bin").to_string_lossy());
     assert!(!pane.asks());
     let mocha = Pack::named("mocha").unwrap();
-    let body = Body::planned(planned(&pane), 1, "", None, &iec, &mocha.roles);
+    let body = Body::planned(planned(&pane), 1, "", &iec, &mocha.roles);
     let text = frame(&body, &mocha, 120, 40);
     assert!(text.contains("refused: outside root"), "{text}");
     assert!(!text.contains("Type yes"), "{text}");
     assert!(outside.join("b.bin").exists());
+}
+
+#[test]
+fn p4_tui_06_a_wrong_answer_closes_the_pane_and_a_paste_is_not_keys() {
+    let env = TestEnv::new();
+    let (root, index) = on_disk(&env);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = App::new(
+        &index,
+        opts(&mocha, &classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let mut terminal = first_frame(&app, 120, 40);
+    // A paste of the keys that would mark, open the pane and answer it is
+    // not those keys.
+    let paste = |text: &str| Event::Paste(text.to_owned());
+    assert_eq!(
+        press(&mut app, &mut terminal, &paste("dDyes\r")),
+        Flow::Wait
+    );
+    assert!(app.marked_ids().is_empty());
+    assert!(!app.pane_open());
+
+    let big = id_of(&index, "big.bin");
+    app.jump(big);
+    press(&mut app, &mut terminal, &char('d'));
+    press(&mut app, &mut terminal, &char('D'));
+    assert!(app.pane_open());
+    let text = text_of(terminal.backend().buffer());
+    assert!(
+        text.contains("Type yes to move them to the Trash: ▌"),
+        "{text}"
+    );
+    // In the pane a paste holding `yes` is not typed either.
+    assert_eq!(press(&mut app, &mut terminal, &paste("yes\r")), Flow::Wait);
+    assert_eq!(press(&mut app, &mut terminal, &char('n')), Flow::Redraw);
+    let text = text_of(terminal.backend().buffer());
+    assert!(
+        text.contains("Type yes to move them to the Trash: n▌"),
+        "{text}"
+    );
+    // A wrong answer closes the pane, moving nothing: the question is asked
+    // once, as `clean` asks it. The mark stays.
+    assert_eq!(
+        press(&mut app, &mut terminal, &key(KeyCode::Enter)),
+        Flow::Redraw
+    );
+    assert!(!app.pane_open());
+    let text = text_of(terminal.backend().buffer());
+    assert!(text.contains(DECLINED), "{text}");
+    assert_eq!(app.marked_ids(), [big]);
+    assert!(root.join("big.bin").exists());
+    // `D` asks again, from the start; so does an empty answer close it.
+    press(&mut app, &mut terminal, &char('D'));
+    assert!(app.pane_open());
+    let text = text_of(terminal.backend().buffer());
+    assert!(
+        text.contains("Type yes to move them to the Trash: ▌"),
+        "{text}"
+    );
+    press(&mut app, &mut terminal, &key(KeyCode::Enter));
+    assert!(!app.pane_open());
+    assert!(root.join("big.bin").exists());
 }
