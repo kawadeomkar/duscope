@@ -66,8 +66,10 @@
 //!
 //! The queue is bounded, so that a client cannot fill the server's memory
 //! while a call runs: at most [`MAX_QUEUED_REQUESTS`] requests wait, holding
-//! at most [`MAX_QUEUED_BYTES`] between them once parsed. A request past
-//! either is not queued and never runs: the reader answers it at once with
+//! at most [`MAX_QUEUED_BYTES`] between them once parsed, by what each is
+//! measured to hold: its parameters and both copies of its id, or its answer
+//! and its id. A request past either is not queued and never runs: the
+//! reader answers it at once with
 //! [`jsonrpc::SERVER_BUSY`], ahead of the requests waiting, and goes on
 //! reading, since a client's cancellations arrive on the same stream. A
 //! request the worker takes at once waits for nothing and is taken whatever
@@ -123,12 +125,16 @@ pub const SCAN_DEADLINE: Duration = Duration::from_secs(10 * 60);
 pub const MAX_QUEUED_REQUESTS: usize = 64;
 
 /// How much memory the requests waiting may hold between them, once parsed:
-/// 32 MiB. Counted parsed, not as read: a line of small
-/// JSON objects takes about 85 times its length in memory.
+/// 32 MiB. Counted parsed, not as read: a line of small JSON objects takes
+/// up to about 95 times its length in memory.
 pub const MAX_QUEUED_BYTES: usize = 32 * 1024 * 1024;
 
 /// The entries of one node of the `BTreeMap` behind a JSON object.
 const MAP_NODE_ENTRIES: usize = 11;
+
+/// The fewest entries such a node holds, the root aside, in a map that only
+/// grows, as a parsed object does: a split leaves five on either side.
+const MAP_NODE_FEWEST_ENTRIES: usize = 5;
 
 /// The smallest block the allocator hands out, which a short string takes.
 const SMALLEST_ALLOCATION: usize = 16;
@@ -244,13 +250,17 @@ enum Job {
 }
 
 impl Job {
-    /// Roughly what the job holds in memory: its parsed params, or its
-    /// answer.
+    /// Roughly what the job holds in memory: a call's parsed params and
+    /// its id, twice ([`Call::bytes`]); an answer and the id of its
+    /// responder.
     fn bytes(&self) -> usize {
         match self {
-            Job::Answer(_, Ok(result)) => result.get().len(),
-            Job::Answer(_, Err(error)) => {
-                error.message.len() + error.data.as_ref().map_or(0, held_bytes)
+            Job::Answer(responder, outcome) => {
+                let answer = match outcome {
+                    Ok(result) => result.get().len(),
+                    Err(error) => error.message.len() + error.data.as_ref().map_or(0, held_bytes),
+                };
+                answer.saturating_add(held_by_id(responder.id()))
             }
             Job::Call(call) => call.bytes,
         }
@@ -289,7 +299,8 @@ impl Job {
 struct Call {
     id: Id,
     params: Option<Map<String, Value>>,
-    /// Roughly what `params` holds in memory ([`held_bytes`]).
+    /// Roughly what `params` holds in memory ([`held_bytes`]) and the two
+    /// copies of the id, this one and the one in the responder.
     bytes: usize,
     revision: Revision,
     /// `None` once the call is answered, or abandoned for a cancellation.
@@ -402,13 +413,6 @@ impl State {
 /// hold. It walks the value once; a parsed value nests at most 128 deep
 /// (`serde_json`'s limit), so the recursion is bounded.
 fn held_bytes(value: &Value) -> usize {
-    let block = |bytes: usize| {
-        if bytes == 0 {
-            0
-        } else {
-            bytes.max(SMALLEST_ALLOCATION)
-        }
-    };
     match value {
         Value::String(text) => block(text.capacity()),
         Value::Array(items) => items.iter().fold(
@@ -420,17 +424,53 @@ fn held_bytes(value: &Value) -> usize {
     }
 }
 
+/// What the allocator gives a block of `bytes`: at least its smallest.
+fn block(bytes: usize) -> usize {
+    if bytes == 0 {
+        0
+    } else {
+        bytes.max(SMALLEST_ALLOCATION)
+    }
+}
+
 /// [`held_bytes`] of an object: its nodes, its keys and what its values hold.
 fn held_by_fields(fields: &Map<String, Value>) -> usize {
-    let slot = size_of::<String>() + size_of::<Value>();
-    let nodes = fields.len().div_ceil(MAP_NODE_ENTRIES);
-    fields.iter().fold(
-        nodes.saturating_mul(slot * MAP_NODE_ENTRIES + SMALLEST_ALLOCATION),
-        |held, (key, value)| {
+    fields
+        .iter()
+        .fold(map_node_bytes(fields.len()), |held, (key, value)| {
             held.saturating_add(key.capacity().max(SMALLEST_ALLOCATION))
                 .saturating_add(held_bytes(value))
-        },
-    )
+        })
+}
+
+/// The most the nodes of the `BTreeMap` behind an object of `entries` entries
+/// can take: the client chooses the order of its keys, and so how full the
+/// nodes are left. Up to [`MAP_NODE_ENTRIES`] entries are one leaf. Past
+/// that, every node but the root holds at least [`MAP_NODE_FEWEST_ENTRIES`]
+/// entries and `leaves - 1` entries sit in the branches, which bounds the
+/// leaves; the branches hold those `leaves - 1` entries, the root at least
+/// one of them and the others at least the fewest, which bounds the branches.
+fn map_node_bytes(entries: usize) -> usize {
+    let slot = size_of::<String>() + size_of::<Value>();
+    let leaf = slot * MAP_NODE_ENTRIES + SMALLEST_ALLOCATION;
+    let branch = leaf + (MAP_NODE_ENTRIES + 1) * size_of::<usize>();
+    if entries <= MAP_NODE_ENTRIES {
+        return if entries == 0 { 0 } else { leaf };
+    }
+    let leaves = entries.saturating_add(1) / (MAP_NODE_FEWEST_ENTRIES + 1);
+    let branches = leaves.saturating_add(MAP_NODE_FEWEST_ENTRIES - 2) / MAP_NODE_FEWEST_ENTRIES;
+    leaves
+        .saturating_mul(leaf)
+        .saturating_add(branches.saturating_mul(branch))
+}
+
+/// What a request's id holds in memory beyond its own slot: a string's
+/// bytes. A message of 1 MiB can be nearly all id.
+fn held_by_id(id: &Id) -> usize {
+    match id {
+        Id::String(text) => block(text.capacity()),
+        Id::Number(_) => 0,
+    }
 }
 
 /// The error a request past the queue's limits is answered with.
@@ -608,7 +648,12 @@ impl Worker {
     /// requests before it; past the queue's limits it is answered
     /// [`jsonrpc::SERVER_BUSY`] at once, and never runs.
     pub(crate) fn call(&self, request: Request, revision: Revision, responder: Responder) {
-        let bytes = request.params.as_ref().map_or(0, held_by_fields);
+        // The id is held twice: by the call and by its responder.
+        let bytes = request
+            .params
+            .as_ref()
+            .map_or(0, held_by_fields)
+            .saturating_add(held_by_id(&request.id).saturating_mul(2));
         let mut state = self.shared.state();
         if !state.admits(bytes) {
             drop(state);

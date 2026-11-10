@@ -1687,6 +1687,109 @@ fn p5_sec_05_the_measure_counts_what_a_parsed_message_holds() {
 }
 
 #[test]
+fn p5_sec_05_a_call_s_id_counts_twice_and_an_answer_s_once() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, responder) = blocked_worker(&env, &runner, &output);
+    let outbox = Outbox::new(output.clone());
+    let long: usize = 1024 * 1024;
+
+    worker.call(
+        tool_request(2, "test_echo", "a"),
+        Revision::PerRequest,
+        responder(2),
+    );
+    let (_, plain) = queued(&worker);
+
+    // The call keeps its id, and so does the responder that answers it.
+    let call_id = Id::String("c".repeat(long));
+    let mut with_long_id = tool_request(3, "test_echo", "a");
+    with_long_id.id = call_id.clone();
+    worker.call(
+        with_long_id,
+        Revision::PerRequest,
+        Responder::new(call_id, outbox.clone()),
+    );
+    let (_, two) = queued(&worker);
+    assert_eq!(two, 2 * plain + 2 * long);
+
+    // An answer waiting holds its id once, in its responder.
+    let message = "not here";
+    worker.answer(
+        Responder::new(Id::String("a".repeat(long)), outbox),
+        Err(RpcError::new(jsonrpc::METHOD_NOT_FOUND, message)),
+    );
+    let (held, three) = queued(&worker);
+    assert_eq!(held, 3);
+    assert_eq!(three, two + message.len() + long);
+
+    runner.latch.open();
+    worker.finish();
+    assert_eq!(output.messages().len(), 4);
+}
+
+#[test]
+fn p5_sec_05_requests_with_ids_of_one_mib_stop_at_the_byte_limit() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, _responder) = blocked_worker(&env, &runner, &output);
+    let outbox = Outbox::new(output.clone());
+    let sent = MAX_QUEUED_REQUESTS;
+    for n in 0..sent {
+        let long_id = Id::String(format!("{n:08}{}", "i".repeat(1024 * 1024 - 8)));
+        let mut request = tool_request(0, "test_echo", "a");
+        request.id = long_id.clone();
+        worker.call(
+            request,
+            Revision::PerRequest,
+            Responder::new(long_id, outbox.clone()),
+        );
+        let (_, bytes) = queued(&worker);
+        assert!(bytes <= MAX_QUEUED_BYTES, "{bytes} bytes");
+    }
+    // Two copies of 1 MiB each: the bytes stop them, long before the count.
+    let (held, bytes) = queued(&worker);
+    assert_eq!(held, 15, "{held} calls, {bytes} bytes");
+    let messages = output.messages();
+    assert_eq!(messages.len(), sent - held);
+    for message in &messages {
+        assert_eq!(message["error"]["code"], jsonrpc::SERVER_BUSY);
+    }
+    runner.latch.open();
+    worker.finish();
+    assert_eq!(output.messages().len(), sent + 1);
+}
+
+#[test]
+fn p5_sec_05_an_object_past_one_node_counts_the_most_its_map_can_take() {
+    /// A node of the map behind an object of `String` keys and `Value`s:
+    /// eleven of each and its header, then, for a node with children, twelve
+    /// pointers.
+    const LEAF: usize = 632;
+    const BRANCH: usize = 728;
+    /// A short key is the allocator's smallest block.
+    const KEY: usize = 16;
+    let object = |entries: usize| -> Map<String, Value> {
+        (0..entries)
+            .map(|n| (format!("k{n}"), Value::Null))
+            .collect()
+    };
+    assert_eq!(held_by_fields(&object(0)), 0);
+    assert_eq!(held_by_fields(&object(1)), LEAF + KEY);
+    assert_eq!(held_by_fields(&object(11)), LEAF + 11 * KEY);
+    // Twelve entries split the root: two leaves and the branch above them.
+    assert_eq!(held_by_fields(&object(12)), 2 * LEAF + BRANCH + 12 * KEY);
+    // 1,000 entries: at most 1001 / 6 leaves of five entries, one more above
+    // each pair of them, and the branches those need.
+    assert_eq!(
+        held_by_fields(&object(1000)),
+        166 * LEAF + 33 * BRANCH + 1000 * KEY
+    );
+}
+
+#[test]
 fn p5_sec_05_a_request_the_worker_takes_at_once_is_never_busy() {
     let env = TestEnv::new();
     let runner = TestRunner::new();
