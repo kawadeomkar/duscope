@@ -8,11 +8,17 @@
 //! lock, so messages written from several threads never interleave. The crate
 //! writes nothing else to its output: logs go through the `log` facade, which
 //! the binary points at stderr.
+//!
+//! A panic hook, which may run on a thread that holds the outbox's lock, writes
+//! through `Responder::respond_before_abort` instead: it tries the lock for
+//! 100 ms and writes nothing if the lock stays held, so it neither waits for
+//! ever nor writes into the middle of another line.
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use log::{debug, warn};
 use serde::Serialize;
@@ -33,6 +39,33 @@ const KEPT_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// The reader thread's name, which panics and debuggers show.
 pub const READER_THREAD: &str = "duscope-mcp-reader";
+
+/// How many more times [`lock_briefly`] tries a lock another thread holds.
+const BRIEF_TRIES: u32 = 20;
+
+/// How long [`lock_briefly`] waits before each try after the first: 100 ms
+/// in all.
+const BRIEF_PAUSE: Duration = Duration::from_millis(5);
+
+/// `mutex`, locked for a panic hook, which must never wait on a lock: the
+/// thread that panicked may hold it, and a lock a thread already holds never
+/// comes free for it. The lock is tried, then tried again every 5 ms for
+/// 100 ms; `WouldBlock` if it stayed held, and `Poisoned` at once if a thread
+/// panicked holding it.
+pub(crate) fn lock_briefly<T>(
+    mutex: &Mutex<T>,
+) -> Result<MutexGuard<'_, T>, TryLockError<MutexGuard<'_, T>>> {
+    let mut tries = 0;
+    loop {
+        match mutex.try_lock() {
+            Err(TryLockError::WouldBlock) if tries < BRIEF_TRIES => {
+                tries += 1;
+                thread::sleep(BRIEF_PAUSE);
+            }
+            locked => return locked,
+        }
+    }
+}
 
 /// What the server does with each message the transport accepts. Its
 /// methods run on the reader thread, which reads nothing more until they
@@ -106,32 +139,60 @@ impl Outbox {
     /// The sink, locked. A thread that panicked holding it may have left part
     /// of a line on the stream, so the sink then counts as failed.
     fn sink(&self) -> MutexGuard<'_, Sink> {
-        self.sink.lock().unwrap_or_else(|poisoned| {
-            let mut sink = poisoned.into_inner();
-            sink.failed.get_or_insert(io::ErrorKind::Other);
-            sink
-        })
+        self.sink.lock().unwrap_or_else(poisoned)
     }
 
     fn write(&self, line: &[u8]) -> io::Result<()> {
-        let mut guard = self.sink();
-        let sink = &mut *guard;
-        if let Some(kind) = sink.failed {
-            return Err(io::Error::new(
-                kind,
-                "an earlier write to the client failed",
-            ));
-        }
-        let written = sink.out.write_all(line).and_then(|()| sink.out.flush());
-        if let Err(e) = &written {
-            sink.failed = Some(e.kind());
-        }
-        written
+        self.sink().write_line(line)
+    }
+
+    /// Writes `line` as [`write`](Outbox::write) does, for a panic hook: the
+    /// sink is locked by [`lock_briefly`], and while it stays held, by
+    /// another thread or by the one that panicked, nothing is written and the
+    /// write fails `WouldBlock`.
+    fn write_before_abort(&self, line: &[u8]) -> io::Result<()> {
+        let mut sink = match lock_briefly(&self.sink) {
+            Ok(sink) => sink,
+            Err(TryLockError::Poisoned(sink)) => poisoned(sink),
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "another write to the client holds the output",
+                ));
+            }
+        };
+        sink.write_line(line)
     }
 
     fn failed(&self) -> Option<io::ErrorKind> {
         self.sink().failed
     }
+}
+
+impl Sink {
+    /// Writes and flushes `line`, unless a write has failed before: the
+    /// stream may hold part of a line, and nothing more is written to it.
+    fn write_line(&mut self, line: &[u8]) -> io::Result<()> {
+        if let Some(kind) = self.failed {
+            return Err(io::Error::new(
+                kind,
+                "an earlier write to the client failed",
+            ));
+        }
+        let written = self.out.write_all(line).and_then(|()| self.out.flush());
+        if let Err(e) = &written {
+            self.failed = Some(e.kind());
+        }
+        written
+    }
+}
+
+/// The sink a thread panicked holding: it may hold part of a line, so it
+/// counts as failed.
+fn poisoned(poisoned: std::sync::PoisonError<MutexGuard<'_, Sink>>) -> MutexGuard<'_, Sink> {
+    let mut sink = poisoned.into_inner();
+    sink.failed.get_or_insert(io::ErrorKind::Other);
+    sink
 }
 
 impl fmt::Debug for Outbox {
@@ -153,7 +214,7 @@ pub struct Responder {
 }
 
 impl Responder {
-    fn new(id: Id, outbox: Outbox) -> Responder {
+    pub(crate) fn new(id: Id, outbox: Outbox) -> Responder {
         Responder {
             id,
             outbox,
@@ -183,6 +244,23 @@ impl Responder {
             Ok(result) => self.outbox.send_result(&self.id, &*result),
             Err(error) => self.outbox.send_error(Some(&self.id), &error),
         }
+    }
+
+    /// Sends the response as [`respond_raw`](Responder::respond_raw) does,
+    /// from a panic hook: it is written only if the output can be locked
+    /// within [`lock_briefly`]'s 100 ms, and fails `WouldBlock` without
+    /// writing anything otherwise. Either way the request is done with: no
+    /// internal error follows when the responder goes.
+    pub(crate) fn respond_before_abort(
+        mut self,
+        outcome: Result<Box<RawValue>, RpcError>,
+    ) -> io::Result<()> {
+        self.open = false;
+        let line = match outcome {
+            Ok(result) => jsonrpc::result_line(&self.id, &*result)?,
+            Err(error) => jsonrpc::error_line(Some(&self.id), &error)?,
+        };
+        self.outbox.write_before_abort(&line)
     }
 
     /// Sends a notification about the request ahead of its response, such

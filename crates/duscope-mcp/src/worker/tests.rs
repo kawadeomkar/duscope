@@ -6,12 +6,16 @@
 //! running call once it has seen its progress. The binary's tests
 //! (`duscope/src/verbs/mcp/tests.rs`) cancel a real walk this way, since
 //! duscope-walk lies outside this crate's dependencies.
+//!
+//! P3-MCP-08: what the panic hook answers before the process ends, on a
+//! worker started here and an output the test reads, and a panicked verb
+//! under unwinding, which the server survives.
 
 use std::future::Future;
 use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
 use std::os::fd::OwnedFd;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -95,7 +99,9 @@ impl Tool for TestTool {
 ///   all the same;
 /// - `test_commit_late` counts one entry and waits for the latch alone, as
 ///   a plan is made, then claims the point of no return, and acts on
-///   nothing (`stopped`) when its call was stopped first.
+///   nothing (`stopped`) when its call was stopped first;
+/// - `test_panic` panics;
+/// - `test_commit_panic` claims its call's point of no return, then panics.
 fn tools() -> Vec<TestTool> {
     [
         ("test_echo", "echo"),
@@ -104,6 +110,8 @@ fn tools() -> Vec<TestTool> {
         ("test_count", "count"),
         ("test_commit", "commit"),
         ("test_commit_late", "commit_late"),
+        ("test_panic", "panic"),
+        ("test_commit_panic", "commit_panic"),
     ]
     .into_iter()
     .map(|(name, verb)| TestTool { name, verb })
@@ -254,6 +262,12 @@ impl Runner for TestRunner {
                     other => other,
                 }
             }
+            "panic" => panic!("the verb {label} panicked"),
+            "commit_panic" => {
+                assert!(call.commit());
+                self.note(format!("committed {label}"));
+                panic!("the verb {label} panicked past its point of no return");
+            }
             "count" => {
                 for _ in 0..30 {
                     thread::sleep(Duration::from_millis(5));
@@ -281,19 +295,24 @@ impl Runner for TestRunner {
     }
 }
 
-/// A server offering the fake tools, run by `runner`, timed by `timing`.
-fn server(env: &TestEnv, runner: &TestRunner, timing: Timing) -> Server {
+/// The fake tools, run by `runner`.
+fn fake_tools(env: &TestEnv, runner: &TestRunner) -> Tools {
     let mut registry = Registry::new(24_000, false);
     for tool in tools() {
         registry.register(Box::new(tool)).unwrap();
     }
+    Tools {
+        registry,
+        roots: Roots::new([env.work_dir()]).unwrap(),
+        index_dir: env.index_dir(),
+        runner: Box::new(runner.clone()),
+    }
+}
+
+/// A server offering the fake tools, run by `runner`, timed by `timing`.
+fn server(env: &TestEnv, runner: &TestRunner, timing: Timing) -> Server {
     Server::new(ServerConfig::new(PLACEHOLDER_INSTRUCTIONS))
-        .with_tools(Tools {
-            registry,
-            roots: Roots::new([env.work_dir()]).unwrap(),
-            index_dir: env.index_dir(),
-            runner: Box::new(runner.clone()),
-        })
+        .with_tools(fake_tools(env, runner))
         .with_timing(timing)
 }
 
@@ -1091,6 +1110,328 @@ fn p5_mcp_01_the_input_ending_stops_every_call_before_its_point_of_no_return() {
             "stopped second",
             "start third",
             "end third"
+        ]
+    );
+}
+
+// P3-MCP-08: the panic hook answers before the process ends. The hook is
+// the binary's; here the worker's part of it is called on a worker of the
+// test's own, since a test process runs many servers at once and the hook
+// answers for the last one started.
+
+/// What an output has been given, which the test reads back.
+#[derive(Clone, Default)]
+struct Recorded(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Recorded {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Recorded {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// Every message written, each a whole line.
+    fn messages(&self) -> Vec<Value> {
+        let bytes = self.bytes();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(
+            text.is_empty() || text.ends_with('\n'),
+            "a partial line: {text:?}"
+        );
+        text.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+}
+
+fn id(n: u64) -> Id {
+    Id::from_value(&json!(n)).unwrap()
+}
+
+/// The tool call `id`, of `tool` with `label`, as the reader hands it on.
+fn tool_request(n: u64, tool: &str, label: &str) -> Request {
+    let params = json!({"name": tool, "arguments": {"label": label}});
+    Request {
+        id: id(n),
+        method: "tools/call".to_owned(),
+        params: params.as_object().cloned(),
+    }
+}
+
+/// A worker running the fake tools, and responders that answer on `output`.
+fn worker(
+    env: &TestEnv,
+    runner: &TestRunner,
+    output: &Recorded,
+) -> (Worker, impl Fn(u64) -> Responder) {
+    let worker = Worker::start(
+        Arc::new(fake_tools(env, runner)),
+        ServerConfig::new(PLACEHOLDER_INSTRUCTIONS),
+        quick(),
+    )
+    .unwrap();
+    let outbox = Outbox::new(output.clone());
+    (worker, move |n| Responder::new(id(n), outbox.clone()))
+}
+
+#[test]
+fn p3_mcp_08_the_hook_answers_the_running_call_then_the_queue_in_order() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, responder) = worker(&env, &runner, &output);
+    worker.call(
+        tool_request(1, "test_block", "first"),
+        Revision::PerRequest,
+        responder(1),
+    );
+    runner.wait_for("start first");
+    worker.call(
+        tool_request(2, "test_echo", "second"),
+        Revision::PerRequest,
+        responder(2),
+    );
+    // A request the reader answered, waiting for the calls before it.
+    let answered = RawValue::from_string(r#"{"answered":3}"#.to_owned()).unwrap();
+    worker.answer(responder(3), Ok(answered));
+    worker.call(
+        tool_request(4, "test_echo", "fourth"),
+        Revision::Session,
+        responder(4),
+    );
+    worker.call(
+        tool_request(5, "test_echo", "cancelled"),
+        Revision::PerRequest,
+        responder(5),
+    );
+    assert!(worker.cancel(&id(5)));
+    worker.shared.answer_before_abort();
+    let messages = output.messages();
+    let ids: Vec<&Value> = messages.iter().map(|m| &m["id"]).collect();
+    assert_eq!(ids, [1, 2, 3, 4], "{messages:#?}");
+    // The hook ran on the test's thread, not the call's: the server, not
+    // the verb, panicked.
+    assert_eq!(
+        messages[0]["error"],
+        json!({
+            "code": -32603,
+            "message": "internal error: the server panicked while test_block ran; the server \
+                        is stopping",
+        })
+    );
+    for (message, tool) in [(&messages[1], "test_echo"), (&messages[3], "test_echo")] {
+        assert_eq!(message["error"]["code"], -32603, "{message}");
+        assert_eq!(
+            message["error"]["message"],
+            format!("internal error: the server is stopping after a panic: {tool} did not run")
+        );
+    }
+    assert_eq!(messages[2]["result"], json!({"answered": 3}));
+    // The running call was stopped, so its verb acts on nothing; nothing
+    // queued ever runs, and nothing more is written.
+    runner.wait_for("stopped first");
+    worker.finish();
+    assert_eq!(runner.log(), ["start first", "stopped first"]);
+    assert_eq!(output.messages().len(), 4);
+}
+
+#[test]
+fn p3_mcp_08_a_call_past_its_point_of_no_return_is_told_some_may_be_done() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, responder) = worker(&env, &runner, &output);
+    worker.call(
+        tool_request(1, "test_commit", "first"),
+        Revision::PerRequest,
+        responder(1),
+    );
+    runner.wait_for("committed first");
+    worker.shared.answer_before_abort();
+    let messages = output.messages();
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert_eq!(messages[0]["id"], 1);
+    assert_eq!(
+        messages[0]["error"]["message"],
+        "internal error: the server panicked while test_commit ran past its point of no return: \
+         some of what the call asked for may be done; the server is stopping"
+    );
+    // A committed call is never stopped: its verb runs to its end, and its
+    // answer is not sent twice.
+    runner.latch.open();
+    runner.wait_for("end first");
+    worker.finish();
+    assert_eq!(
+        runner.log(),
+        ["start first", "committed first", "end first"]
+    );
+    assert_eq!(output.messages().len(), 1);
+}
+
+#[test]
+fn p3_mcp_08_a_call_answered_already_is_not_answered_again() {
+    // Answered at its deadline while its verb, which cannot stop, still
+    // runs: the hook has nothing to send for it.
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let worker = Worker::start(
+        Arc::new(fake_tools(&env, &runner)),
+        ServerConfig::new(PLACEHOLDER_INSTRUCTIONS),
+        Timing {
+            deadline: Some(Duration::from_millis(20)),
+            ..quick()
+        },
+    )
+    .unwrap();
+    let outbox = Outbox::new(output.clone());
+    worker.call(
+        tool_request(1, "test_stubborn", "first"),
+        Revision::PerRequest,
+        Responder::new(id(1), outbox),
+    );
+    let started = Instant::now();
+    while output.messages().is_empty() {
+        assert!(started.elapsed() < PATIENCE, "never answered");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(worker.shared.state().running.is_some());
+    worker.shared.answer_before_abort();
+    runner.latch.open();
+    worker.finish();
+    let messages = output.messages();
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert_eq!(
+        messages[0]["result"]["structuredContent"]["error"]["code"],
+        "deadline_exceeded"
+    );
+    assert_eq!(runner.log(), ["start first", "end first"]);
+}
+
+/// An output whose first write answers another request through the hook's
+/// path, on the thread that holds the output's lock, as a panic hook on
+/// that thread would: what that answer met.
+struct Reentrant {
+    recorded: Recorded,
+    outbox: Arc<OnceLock<Outbox>>,
+    met: Arc<Mutex<Option<(io::ErrorKind, Duration)>>>,
+}
+
+impl Write for Reentrant {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut met = self.met.lock().unwrap();
+        if met.is_none() {
+            let outbox = self.outbox.get().unwrap().clone();
+            let started = Instant::now();
+            let sent =
+                Responder::new(id(2), outbox).respond_before_abort(Err(RpcError::internal("x")));
+            *met = Some((sent.unwrap_err().kind(), started.elapsed()));
+        }
+        self.recorded.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// An output that breaks partway through a line, as a writer that panics
+/// would leave it.
+struct Breaks(Recorded);
+
+impl Write for Breaks {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(&buf[..buf.len() / 2])?;
+        panic!("the output broke mid-line");
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn p3_mcp_08_the_hook_writes_nothing_while_the_output_is_held_or_broken() {
+    // Held by the thread that would answer: it gives up within its bound,
+    // and the line being written goes out whole, alone.
+    let recorded = Recorded::default();
+    let outbox = Arc::new(OnceLock::new());
+    let met = Arc::new(Mutex::new(None));
+    let output = Outbox::new(Reentrant {
+        recorded: recorded.clone(),
+        outbox: Arc::clone(&outbox),
+        met: Arc::clone(&met),
+    });
+    outbox.set(output.clone()).unwrap();
+    Responder::new(id(1), output)
+        .respond(Ok(json!({})))
+        .unwrap();
+    let (kind, waited) = met.lock().unwrap().unwrap();
+    assert_eq!(kind, io::ErrorKind::WouldBlock);
+    assert!(waited >= Duration::from_millis(100), "{waited:?}");
+    assert!(waited < Duration::from_secs(5), "{waited:?}");
+    let messages = recorded.messages();
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert_eq!(messages[0]["id"], 1);
+
+    // Broken by a write that panicked: nothing is added after its part of a
+    // line.
+    let recorded = Recorded::default();
+    let output = Outbox::new(Breaks(recorded.clone()));
+    let writer = output.clone();
+    let panicked = thread::spawn(move || writer.notify("notifications/x", None)).join();
+    assert!(panicked.is_err());
+    let partial = recorded.bytes();
+    assert!(!partial.is_empty());
+    let sent = Responder::new(id(1), output).respond_before_abort(Err(RpcError::internal("x")));
+    assert!(sent.is_err());
+    assert_eq!(recorded.bytes(), partial);
+}
+
+#[test]
+fn p3_mcp_08_under_unwinding_a_panicked_verb_is_answered_and_the_server_goes_on() {
+    // No hook here: where panics unwind, the worker answers the call itself
+    // and runs the next.
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_panic", "first"));
+    client.send(&call(2, "test_echo", "second"));
+    client.send(&call(3, "test_commit_panic", "third"));
+    let first = client.next();
+    assert_eq!(first["id"], 1);
+    assert_eq!(
+        first["error"],
+        json!({"code": -32603, "message": "internal error: test_panic's verb panicked"})
+    );
+    let second = client.next();
+    assert_eq!(second["id"], 2);
+    assert_eq!(second["result"]["isError"], false, "{second}");
+    let third = client.next();
+    assert_eq!(third["id"], 3);
+    assert_eq!(
+        third["error"]["message"],
+        "internal error: test_commit_panic's verb panicked past its point of no return: some of \
+         what the call asked for may be done"
+    );
+    assert!(client.close().is_empty());
+    assert_eq!(
+        runner.log(),
+        [
+            "start first",
+            "start second",
+            "end second",
+            "start third",
+            "committed third"
         ]
     );
 }

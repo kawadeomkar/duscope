@@ -73,6 +73,16 @@ is a dry run unless `dry_run` is `false`, and one refused item stops the whole c
 `_meta["anthropic/requiresUserInteraction"]: true`; a client that honours it asks before every
 call.
 
+## If the server stops
+
+The tools run in the server's own process, so a bug that makes duscope panic ends the server.
+Before it ends, it answers the call that was running and every request waiting behind it: each
+call with a JSON-RPC internal error (`-32603`) saying the server is stopping, which a call that
+never ran says too. A call that had begun to change something when the panic came, such as a
+`duscope_delete` moving entries, says that some of the change may be done; `duscope_explain`
+shows what is still there. The client starts the server again; the panic's message is in the
+server's log, on stderr.
+
 ## Ask before `duscope clean`
 
 The MCP tools above read and scan. An agent with a shell can still run
