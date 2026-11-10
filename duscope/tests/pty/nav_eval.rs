@@ -2,7 +2,10 @@
 //! scripted session of `duscope view` in a pseudo-terminal: the keys a person
 //! would press and what the screen must show after each. Each must complete
 //! without `?`: a script that presses it, or types it, is refused before it
-//! runs, and a step that finds the help on the screen fails.
+//! runs, and a step that finds the help on the screen fails. A step that
+//! sends keys or a resize fails if what it waits for is already on the
+//! screen before it sends them, and what it waits for must still be there
+//! once the screen has settled after them.
 //!
 //! The Trash is never the machine's own. On Linux a task with a Trash step
 //! moves its file into the test's XDG Trash; on macOS, under the test
@@ -26,6 +29,10 @@ const SCRIPTS: &str = include_str!("nav_tasks.toml");
 const STEP_WAIT: Duration = Duration::from_secs(60);
 /// The first wait of a resize step, the one timing-sensitive kind.
 const RESIZE_WAIT: Duration = Duration::from_secs(10);
+/// How long the screen must hold still to count as settled: the viewer
+/// writes a frame in pieces, and a wait can match the first of them while the
+/// rows below still show the frame before.
+const SETTLE: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,6 +107,12 @@ impl Step {
             Some(Only::Trash) => own_trash,
             Some(Only::NoTrash) => !own_trash,
         }
+    }
+
+    /// Whether the step sends anything: keys, text or a resize. One that
+    /// does not only reads what the steps before it left.
+    fn sends(&self) -> bool {
+        !self.press.is_empty() || self.text.is_some() || self.resize.is_some()
     }
 }
 
@@ -217,9 +230,24 @@ fn met(screen: &Screen, step: &Step) -> bool {
         })
 }
 
-/// Performs `step` and waits for what it expects; a resize step, the one
-/// timing-sensitive kind, gets the one retry the spec allows.
-fn perform(terminal: &mut Terminal, step: &Step) {
+/// Performs `step`, which `what` names, and waits for what it expects; a
+/// resize step, the one timing-sensitive kind, gets the one retry the spec
+/// allows.
+///
+/// A step that sends something must not be met before it does, or the wait
+/// after it would pass on what was already there; the screen it is checked
+/// on has settled, the step before having waited for that. What the step
+/// waits for must still hold once the screen settles after it, so a match
+/// on part of a frame, the rest still the frame before, does not count.
+fn perform(terminal: &mut Terminal, what: &str, step: &Step) {
+    if step.sends() {
+        let before = terminal.screen();
+        assert!(
+            !met(&before, step),
+            "{what}: already met before its keys or resize, so it would check nothing:\n{}",
+            before.full_text()
+        );
+    }
     if let Some((cols, rows)) = step.resize {
         terminal.resize(cols, rows).unwrap();
         let settled = terminal.wait_until_for(|screen| met(screen, step), RESIZE_WAIT);
@@ -229,21 +257,37 @@ fn perform(terminal: &mut Terminal, step: &Step) {
             terminal.resize(cols, rows).unwrap();
             terminal
                 .wait_until(|screen| met(screen, step))
-                .unwrap_or_else(|e| panic!("resize {cols}×{rows}: {e}:\n{}", shown(terminal)));
+                .unwrap_or_else(|e| panic!("{what}: {e}:\n{}", shown(terminal)));
         }
-        return;
-    }
-    for key in &step.press {
-        terminal.send(key_of(key).unwrap()).unwrap();
-    }
-    if let Some(text) = &step.text {
-        for c in text.chars() {
-            terminal.send(Key::Char(c)).unwrap();
+    } else {
+        for key in &step.press {
+            terminal.send(key_of(key).unwrap()).unwrap();
         }
+        if let Some(text) = &step.text {
+            for c in text.chars() {
+                terminal.send(Key::Char(c)).unwrap();
+            }
+        }
+        terminal
+            .wait_until(|screen| met(screen, step))
+            .unwrap_or_else(|e| panic!("{what}: {e}:\n{}", shown(terminal)));
     }
-    terminal
-        .wait_until(|screen| met(screen, step))
-        .unwrap_or_else(|e| panic!("{step:?}: {e}:\n{}", shown(terminal)));
+    let settled = settle(terminal, what);
+    assert!(
+        met(&settled, step),
+        "{what}: met part-way through a frame, not once the screen settled:\n{}",
+        settled.full_text()
+    );
+}
+
+/// The screen once it has held still for [`SETTLE`].
+fn settle(terminal: &mut Terminal, what: &str) -> Screen {
+    terminal.wait_stable(SETTLE).unwrap_or_else(|e| {
+        panic!(
+            "{what}: the screen never settled: {e}:\n{}",
+            shown(terminal)
+        )
+    })
 }
 
 fn shown(terminal: &Terminal) -> String {
@@ -256,8 +300,11 @@ fn run(env: &TestEnv, root: &Path, task: &Task, own_trash: bool) -> Terminal {
     terminal
         .wait_until(|screen| screen.text().contains("treemap · "))
         .unwrap_or_else(|e| panic!("{}: {e}:\n{}", task.title, shown(&terminal)));
-    for step in task.step.iter().filter(|step| step.runs(own_trash)) {
-        perform(&mut terminal, step);
+    settle(&mut terminal, &task.id);
+    let steps = task.step.iter().enumerate();
+    for (i, step) in steps.filter(|(_, step)| step.runs(own_trash)) {
+        let what = format!("{}, step {} {step:?}", task.id, i + 1);
+        perform(&mut terminal, &what, step);
         assert!(
             !terminal.screen().text().contains("this help"),
             "{}: the help is on the screen:\n{}",
@@ -397,8 +444,8 @@ fn p4_test_01_a_resize_storm_ends_at_its_last_size() {
         see: vec!["treemap · ".to_owned()],
         ..Step::default()
     };
-    // The frame drawn at 150×44, its key line on the last row.
-    perform(&mut terminal, &last);
+    // The frame drawn at 150×44, its key line on the last row, settled.
+    perform(&mut terminal, "a resize storm's last size", &last);
     terminal.send(Key::Char('q')).unwrap();
     // crossterm returns a resize without reading the terminal when both wake
     // one poll, and the poll reports a byte once, so a key on a storm's heels
