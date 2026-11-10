@@ -3,12 +3,13 @@
 //! `d` marks the selection and `d` on a marked entry unmarks it; a folder's
 //! mark covers what is under it, so marking a folder drops the marks inside
 //! it and an entry inside a marked folder is not marked again. `D` opens the
-//! mark pane: the plan [`clean_plan`] makes of the marked paths, printed as
-//! `clean` prints it: the same table, the same line under it and the same
-//! question. Only `yes` typed in full (and `⏎`) moves anything, through
-//! [`clean_execute`], to the Trash and nowhere else; a plan with a refused
-//! item moves nothing, as `clean` without `--skip-refused` does, and a
-//! plan that cannot be made says why.
+//! mark pane: the plan [`clean_plan`] makes of the marked paths, each
+//! planned as `clean` plans a path it is given (every symbolic link above
+//! its last component resolved), printed as `clean` prints it: the same
+//! table, the same line under it and the same question. Only `yes` typed in
+//! full (and `⏎`) moves anything, through [`clean_execute`], to the Trash
+//! and nowhere else; a plan with a refused item moves nothing, as `clean`
+//! without `--skip-refused` does, and a plan that cannot be made says why.
 //!
 //! What moved stays on the map for the session as a freed tile (the saved
 //! scan is not changed; a rescan measures the tree again) and is counted for
@@ -18,11 +19,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use duscope_core::clean::{CleanItem, CleanOutcome, Method, Plan, clean_execute, clean_plan};
 use duscope_core::envelope::{CleanPlan, PlanItem};
 use duscope_core::query::{ExplainQuery, SizeKind, TreeView, abs_path};
+use duscope_core::resolve::resolve_path;
 use duscope_treemap::cells::{Cell, Color};
 use duscope_treemap::packs::Roles;
 use duscope_treemap::paint::{DrawnKind, Glyphs};
@@ -619,7 +621,13 @@ fn fit_row(canvas: &Canvas<'_>, row: &PlanRow, room: u16) -> String {
 
 impl Pane {
     /// The pane of the marks in `view`, planned against the saved scan in
-    /// `sources`, or saying why it cannot be planned.
+    /// `sources`, or saying why it cannot be planned. Each mark is planned
+    /// as `clean` plans the path it is given: with every symbolic link above
+    /// its last component resolved, so a folder replaced by a link since the
+    /// scan is planned where the link leads, and refused there when that is
+    /// outside the scan's root. The saved scan holds no entry's inode, so
+    /// the plan checks what is at the path when the pane opens, as `clean`
+    /// does for a path.
     pub fn open(marks: &Marks, view: &dyn TreeView, sources: &Sources<'_>) -> Pane {
         let ids = marks.ids();
         let state = match sources.index {
@@ -632,7 +640,9 @@ impl Pane {
                 let items: Vec<CleanItem> = ids
                     .iter()
                     .map(|&id| CleanItem {
-                        path: PathBuf::from(OsStr::from_bytes(&abs_path(view, id))),
+                        path: unresolved_last(PathBuf::from(OsStr::from_bytes(&abs_path(
+                            view, id,
+                        )))),
                         handle: None,
                     })
                     .collect();
@@ -725,6 +735,16 @@ impl Pane {
             State::Unplanned(why) => Body::unplanned(why, count, &roles),
         };
         body.draw(canvas, pane);
+    }
+}
+
+/// `path`, absolute, with every symbolic link above its last component
+/// resolved and the last one kept: the path `clean` plans for a path it is
+/// given (`explain`'s reading of a path), a link itself never followed.
+fn unresolved_last(path: PathBuf) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => resolve_path(Path::new("/"), parent).real.join(name),
+        _ => path,
     }
 }
 

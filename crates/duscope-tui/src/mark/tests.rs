@@ -1,10 +1,12 @@
 //! P4-TUI-06: marks and the mark pane, on the canvas's example tree: what
 //! `d` keeps, the pane's table beside `clean`'s, what a plan with a refused
-//! item says, the freed tiles and the reload. Nothing here moves a file:
+//! item says, the freed tiles and the reload; and on a small tree on disk,
+//! saved: a mark planned as `clean` plans its path. Nothing here moves a file:
 //! `clean_execute` only runs through the binary, in `duscope/tests/pty`,
 //! where the test environment guards the real Trash.
 
 use std::cell::Cell;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -12,10 +14,11 @@ use crossterm::event::KeyCode;
 use duscope_core::arena::Arena;
 use duscope_core::clean::CleanOutcome;
 use duscope_core::envelope::{CleanPlan, ErrorObject, PlanItem};
+use duscope_core::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
 use duscope_core::interchange::import::{ImportFormat, import};
 use duscope_core::query::{ArenaView, SizeKind, TreeView};
 use duscope_core::rollup::{RollUp, roll_up};
-use duscope_testkit::golden;
+use duscope_testkit::{TestEnv, golden};
 use duscope_treemap::cells::Depth;
 use duscope_treemap::packs::Pack;
 use duscope_treemap::paint::ColorBy;
@@ -24,8 +27,9 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::terminal::Terminal;
 
-use super::{Body, Marks, Toggled, plan_rows};
+use super::{Body, Marks, Pane, State, Toggled, plan_rows};
 use crate::cursor::tests::{char, first_frame, key, press};
+use crate::panes::Sources;
 use crate::panes::tests::{classes, mockup, opts, status};
 use crate::widgets::Canvas;
 use crate::{App, Effects, Ended, Flow, Input, run_session, snapshot};
@@ -509,7 +513,12 @@ fn p4_tui_06_r_asks_the_binary_and_landing_reloads() {
 
 /// A tree of `kids` under `/r`, read from an ncdu export.
 fn tree_of(kids: &str) -> (Arena, RollUp) {
-    let json = format!(r#"[1,2,{{"progname":"ncdu"}},[{{"name":"/r"}}{kids}]]"#);
+    tree_at("/r", kids)
+}
+
+/// A tree of `kids` under `root`, read from an ncdu export.
+fn tree_at(root: &str, kids: &str) -> (Arena, RollUp) {
+    let json = format!(r#"[1,2,{{"progname":"ncdu"}},[{{"name":"{root}"}}{kids}]]"#);
     let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
         .unwrap()
         .arena;
@@ -569,4 +578,99 @@ fn p4_tui_06_a_reload_keeps_the_view_the_cursor_and_the_marks_by_path() {
     // What the reload forgot: the freed tiles (a new App has none) and the
     // answer.
     assert_eq!(press(&mut app, &mut terminal, &char('x')), Flow::Redraw);
+}
+
+/// A tree on disk in `env`'s scratch directory (`big.bin`, `dir/b.bin`,
+/// `small.bin`), and its saved scan, read from an ncdu export of the same
+/// names and sizes: what `clean_plan` reads as a scan of the tree.
+fn on_disk(env: &TestEnv) -> (PathBuf, Index) {
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    fs::create_dir_all(root.join("dir")).unwrap();
+    fs::write(root.join("big.bin"), vec![1u8; 64 * 1024]).unwrap();
+    fs::write(root.join("dir/b.bin"), vec![2u8; 16 * 1024]).unwrap();
+    fs::write(root.join("small.bin"), vec![3u8; 4 * 1024]).unwrap();
+    let file =
+        |name: &str, bytes: u64| format!(r#"{{"name":"{name}","asize":{bytes},"dsize":{bytes}}}"#);
+    let kids = format!(
+        ",{},[{{\"name\":\"dir\"}},{}],{}",
+        file("big.bin", 64 * 1024),
+        file("b.bin", 16 * 1024),
+        file("small.bin", 4 * 1024)
+    );
+    let root_text = root.to_str().unwrap();
+    let tree = tree_at(root_text, &kids);
+    let meta = ScanMeta {
+        scan_id: ScanId::new(root_text.as_bytes(), 1, [0; 8]),
+        root: root_text.as_bytes().to_vec(),
+        root_as_given: root_text.as_bytes().to_vec(),
+        started_at: 1,
+        finished_at: 2,
+        options: "{}".to_owned(),
+        platform: "test".to_owned(),
+        scanning_uid: 501,
+        thread_count: 1,
+        size_kind: "allocated",
+        volume_total: 1 << 40,
+        volume_free: 1 << 39,
+        unaccounted_bytes: None,
+        error_count: 0,
+        vanished_count: 0,
+        excluded_count: 0,
+        clones_unavailable: true,
+        incremental: false,
+        parent_scan_id: None,
+        source: "scan".to_owned(),
+        tool_version: "0.0.0".to_owned(),
+    };
+    let dir = env.tmp_dir().join("index");
+    fs::create_dir_all(&dir).unwrap();
+    IndexWriter::write(&tree.0, &tree.1, &meta, &dir).unwrap();
+    let index = Index::open(&index_path(&dir, &meta.scan_id)).unwrap();
+    (root, index)
+}
+
+/// The plan of the pane `pane`, which must have one.
+fn planned(pane: &Pane) -> &CleanPlan {
+    match &pane.state {
+        State::Planned(plan) => &plan.plan,
+        other => panic!("no plan: {other:?}"),
+    }
+}
+
+#[test]
+fn p4_tui_06_a_mark_is_planned_as_clean_plans_its_path() {
+    let env = TestEnv::new();
+    let (root, index) = on_disk(&env);
+    let mut marks = Marks::default();
+    marks.toggle(&index, id_of(&index, "dir/b.bin"));
+    // As scanned: the path the scan holds, to be moved.
+    let pane = Pane::open(&marks, &index, &Sources::of(&index));
+    let item = &planned(&pane).items[0];
+    assert_eq!((item.action, item.reason), ("trash", None));
+    assert_eq!(item.path, root.join("dir/b.bin").to_string_lossy());
+    assert!(pane.asks());
+
+    // `dir` replaced since the scan by a link to a folder outside the
+    // scan's root: the mark is planned where the link leads and refused
+    // there, `outside_root`, as `clean` plans and refuses the path it is
+    // given (its parent resolved); the pane asks nothing.
+    let outside = fs::canonicalize(env.tmp_dir()).unwrap().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("b.bin"), vec![9u8; 1024]).unwrap();
+    fs::rename(root.join("dir"), root.join("dir.old")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("dir")).unwrap();
+    let pane = Pane::open(&marks, &index, &Sources::of(&index));
+    let item = &planned(&pane).items[0];
+    assert_eq!(
+        (item.action, item.reason),
+        ("refused", Some("outside_root"))
+    );
+    assert_eq!(item.path, outside.join("b.bin").to_string_lossy());
+    assert!(!pane.asks());
+    let mocha = Pack::named("mocha").unwrap();
+    let body = Body::planned(planned(&pane), 1, "", None, &iec, &mocha.roles);
+    let text = frame(&body, &mocha, 120, 40);
+    assert!(text.contains("refused: outside root"), "{text}");
+    assert!(!text.contains("Type yes"), "{text}");
+    assert!(outside.join("b.bin").exists());
 }
