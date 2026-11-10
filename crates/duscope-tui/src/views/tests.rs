@@ -4,6 +4,7 @@
 //! show; the checks read the screen, the tiles and the key map.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -24,8 +25,10 @@ use ratatui_core::terminal::Terminal;
 
 use crate::app::{clipboard_allowed, osc52};
 use crate::cursor::tests::{char, first_frame, key, press};
-use crate::keys::ALL;
+use crate::cursor::{Dir, Nav};
+use crate::keys::{ALL, Action};
 use crate::panes::tests::{classes, mockup, opts, status};
+use crate::views::Tab;
 use crate::widgets::Canvas;
 use crate::zoom::Map;
 use crate::{App, Effects, Flow, snapshot};
@@ -913,6 +916,134 @@ fn p4_tui_05_enter_in_a_legend_a_resize_shortened_filters_by_a_row_it_lists() {
     );
 }
 
+/// The keys a help label names, each as its code and whether Ctrl is
+/// held: the named keys as words (`Esc`, `PgUp`, ASCII's `arrows`,
+/// `enter`, `bksp`, `tab`), `Ctrl-` before a letter, and every other
+/// character a key of its own (`←↓↑→`, `hjkl`, `⏎`).
+fn label_keys(label: &str) -> Vec<(KeyCode, bool)> {
+    let mut keys = Vec::new();
+    for word in label.split_whitespace() {
+        let named = match word {
+            "Esc" => Some(KeyCode::Esc),
+            "Home" => Some(KeyCode::Home),
+            "End" => Some(KeyCode::End),
+            "PgUp" => Some(KeyCode::PageUp),
+            "PgDn" => Some(KeyCode::PageDown),
+            "enter" => Some(KeyCode::Enter),
+            "bksp" => Some(KeyCode::Backspace),
+            "tab" => Some(KeyCode::Tab),
+            "Shift-⇥" | "Shift-tab" => Some(KeyCode::BackTab),
+            _ => None,
+        };
+        if let Some(code) = named {
+            keys.push((code, false));
+        } else if word == "arrows" {
+            for code in [KeyCode::Left, KeyCode::Down, KeyCode::Up, KeyCode::Right] {
+                keys.push((code, false));
+            }
+        } else if let Some(letter) = word.strip_prefix("Ctrl-") {
+            let mut chars = letter.chars();
+            let c = chars.next().unwrap_or_else(|| panic!("{word}"));
+            assert_eq!(chars.next(), None, "{word}");
+            keys.push((KeyCode::Char(c.to_ascii_lowercase()), true));
+        } else {
+            for c in word.chars() {
+                let code = match c {
+                    '←' => KeyCode::Left,
+                    '↓' => KeyCode::Down,
+                    '↑' => KeyCode::Up,
+                    '→' => KeyCode::Right,
+                    '⏎' => KeyCode::Enter,
+                    '⌫' => KeyCode::Backspace,
+                    '⇥' => KeyCode::Tab,
+                    c => KeyCode::Char(c),
+                };
+                keys.push((code, false));
+            }
+        }
+    }
+    keys
+}
+
+/// Every action the viewer answers, each at its place in [`place`].
+const EVERY: [Action; 30] = [
+    Action::Quit,
+    Action::Back,
+    Action::Nav(Nav::Move(Dir::Left)),
+    Action::Nav(Nav::Move(Dir::Down)),
+    Action::Nav(Nav::Move(Dir::Up)),
+    Action::Nav(Nav::Move(Dir::Right)),
+    Action::Nav(Nav::Open),
+    Action::Nav(Nav::Up),
+    Action::Nav(Nav::Zoom),
+    Action::Nav(Nav::Out),
+    Action::Nav(Nav::Reset),
+    Action::Nav(Nav::First),
+    Action::Nav(Nav::Last),
+    Action::Nav(Nav::PageUp),
+    Action::Nav(Nav::PageDown),
+    Action::View(Tab::Treemap),
+    Action::View(Tab::List),
+    Action::View(Tab::Largest),
+    Action::View(Tab::Types),
+    Action::Sort,
+    Action::Labels,
+    Action::Color,
+    Action::Pack,
+    Action::Filter,
+    Action::FocusNext,
+    Action::FocusPrev,
+    Action::Facts,
+    Action::Help,
+    Action::Copy,
+    Action::Open,
+];
+
+/// The place of `action` in [`EVERY`]. The match has no wildcard: an
+/// action, a move, a direction or a view added to the viewer does not
+/// compile until it has an arm here and a place in [`EVERY`], which the
+/// help test then requires a key for.
+fn place(action: Action) -> usize {
+    match action {
+        Action::Quit => 0,
+        Action::Back => 1,
+        Action::Nav(nav) => match nav {
+            Nav::Move(dir) => match dir {
+                Dir::Left => 2,
+                Dir::Down => 3,
+                Dir::Up => 4,
+                Dir::Right => 5,
+            },
+            Nav::Open => 6,
+            Nav::Up => 7,
+            Nav::Zoom => 8,
+            Nav::Out => 9,
+            Nav::Reset => 10,
+            Nav::First => 11,
+            Nav::Last => 12,
+            Nav::PageUp => 13,
+            Nav::PageDown => 14,
+        },
+        Action::View(tab) => match tab {
+            Tab::Treemap => 15,
+            Tab::List => 16,
+            Tab::Largest => 17,
+            Tab::Types => 18,
+        },
+        Action::Sort => 19,
+        Action::Labels => 20,
+        Action::Color => 21,
+        Action::Pack => 22,
+        Action::Filter => 23,
+        Action::FocusNext => 24,
+        Action::FocusPrev => 25,
+        Action::Facts => 26,
+        Action::Help => 27,
+        Action::Copy => 28,
+        Action::Open => 29,
+    }
+}
+
 #[test]
 fn p4_tui_05_question_mark_lists_exactly_the_bindings_in_the_key_map() {
     let tree = mockup();
@@ -966,6 +1097,33 @@ fn p4_tui_05_question_mark_lists_exactly_the_bindings_in_the_key_map() {
         assert!(!text_of(terminal.backend().buffer()).contains("this help"));
         assert_eq!(press(&mut app, &mut terminal, &char('?')), Flow::Redraw);
         assert_eq!(app.on(&char('q')), Flow::Quit);
+    }
+    // What each row names is what its keys are, key for key, written
+    // with UTF-8 or without: a key the label names is bound, and a key
+    // bound is in the label.
+    for binding in ALL {
+        let strokes: HashSet<(KeyCode, bool)> =
+            binding.strokes.iter().map(|s| (s.code, s.ctrl)).collect();
+        assert_eq!(strokes.len(), binding.strokes.len(), "{}", binding.label);
+        for label in [binding.label, binding.ascii] {
+            let named = label_keys(label);
+            let keys: HashSet<(KeyCode, bool)> = named.iter().copied().collect();
+            assert_eq!(keys.len(), named.len(), "a key named twice in {label:?}");
+            assert_eq!(keys, strokes, "{label:?} and its keys");
+        }
+    }
+    // Every action the viewer has is bound to a key, and so listed.
+    for (i, action) in EVERY.iter().enumerate() {
+        assert_eq!(place(*action), i, "{action:?}");
+        assert!(
+            ALL.iter()
+                .flat_map(|b| b.strokes)
+                .any(|s| s.action == *action),
+            "{action:?} has no key"
+        );
+    }
+    for stroke in ALL.iter().flat_map(|b| b.strokes) {
+        assert_eq!(EVERY.get(place(stroke.action)), Some(&stroke.action));
     }
 }
 
