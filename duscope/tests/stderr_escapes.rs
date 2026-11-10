@@ -118,3 +118,62 @@ fn p5_sec_05_quotes_and_backslashes_in_a_message_stay_as_they_are() {
     let text = clean(&out.stderr);
     assert!(text.contains("it's \"a\" \\name"), "{text}");
 }
+
+/// A small tree under `env`.
+fn small_tree(env: &TestEnv) -> PathBuf {
+    let root = env.work_dir().join("tree");
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(root.join("sub/file"), "x").unwrap();
+    root
+}
+
+#[test]
+fn p5_sec_05_a_regex_it_cannot_compile_is_one_sentence_saying_what_is_wrong() {
+    let env = TestEnv::new();
+    let root = small_tree(&env);
+    for (pattern, mistake) in [
+        ("[a", "unclosed character class"),
+        ("(a", "unclosed group"),
+        ("a{2,1}", "invalid repetition count range"),
+        // The crate draws a pattern of several lines another way.
+        ("a\nb[", "unclosed character class"),
+    ] {
+        let out = duscope(&env)
+            .args(["top", "--plain", "--regex", pattern])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{pattern:?}");
+        let text = clean(&out.stderr);
+        assert!(
+            text.contains(&format!("--regex {pattern:?}: {mistake}")),
+            "{text}"
+        );
+        assert!(!text.contains("\\x0a"), "a newline shown raw: {text}");
+        assert!(!text.contains("regex parse error"), "{text}");
+
+        let out = duscope(&env)
+            .args(["top", "--json", "--regex", pattern])
+            .arg(&root)
+            .output()
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let message = envelope["error"]["message"].as_str().unwrap();
+        assert!(!message.contains('\n'), "{message}");
+        assert!(message.contains(mistake), "{message}");
+    }
+}
+
+#[test]
+fn p5_sec_05_a_newline_in_a_name_stays_an_escape() {
+    let env = TestEnv::new();
+    let missing = env.work_dir().join("two\nlines");
+    let out = duscope(&env)
+        .args(["explain", "--plain"])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let text = clean(&out.stderr);
+    assert!(text.contains("two\\x0alines"), "{text}");
+}

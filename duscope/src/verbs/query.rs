@@ -697,6 +697,16 @@ fn limit(args: Option<&QueryArgs>, output: &Output) -> Result<Option<usize>, Fai
     }
 }
 
+/// What is wrong with a pattern, from the `regex` crate's text about it, for
+/// a failure's message, which is one sentence. That text draws the pattern
+/// over several lines with a caret under the mistake, and its last line says
+/// what the mistake is (`error: unclosed group`); its other error, a pattern
+/// too large to compile, is one line already.
+fn regex_mistake(text: &str) -> &str {
+    let last = text.rsplit('\n').next().unwrap_or(text);
+    last.strip_prefix("error: ").unwrap_or(last)
+}
+
 /// The shared filters the flags ask for, with each as given; and whether
 /// a date was read as UTC for want of zoneinfo.
 fn filters(
@@ -715,7 +725,8 @@ fn filters(
             .extend(args.glob.iter().map(|g| format!("--glob={g}")));
     }
     if let Some(re) = &args.regex {
-        f.regex = Some(Regex::new(re).map_err(|e| usage("--regex", e.to_string()))?);
+        let refused = |e: String| usage("--regex", format!("{re:?}: {}", regex_mistake(&e)));
+        f.regex = Some(Regex::new(re).map_err(|e| refused(e.to_string()))?);
         f.given.push(format!("--regex={re}"));
     }
     if args.invert {
