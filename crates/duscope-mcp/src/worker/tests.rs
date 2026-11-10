@@ -1435,3 +1435,270 @@ fn p3_mcp_08_under_unwinding_a_panicked_verb_is_answered_and_the_server_goes_on(
         ]
     );
 }
+
+// P5-SEC-05: the queue's limits.
+
+/// The busy error, as every refused request carries it.
+fn assert_busy(message: &Value, id: u64) {
+    assert_eq!(message["id"], id, "{message}");
+    assert_eq!(message["error"]["code"], jsonrpc::SERVER_BUSY, "{message}");
+    let data = &message["error"]["data"];
+    assert_eq!(
+        data["max_queued_requests"], MAX_QUEUED_REQUESTS,
+        "{message}"
+    );
+    assert_eq!(data["max_queued_bytes"], MAX_QUEUED_BYTES, "{message}");
+}
+
+#[test]
+fn p5_sec_05_the_busy_code_lies_outside_what_mcp_and_json_rpc_reserve() {
+    assert!(
+        !(-32768..=-32000).contains(&jsonrpc::SERVER_BUSY),
+        "MCP 2026-07-28: new codes lie outside the JSON-RPC reserved range"
+    );
+}
+
+/// A call whose label is `bytes` long.
+fn call_of(id: u64, tool: &str, bytes: usize) -> Value {
+    call(id, tool, &"x".repeat(bytes))
+}
+
+#[test]
+fn p5_sec_05_a_request_past_the_count_limit_is_answered_busy_and_never_runs() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    let queued = u64::try_from(MAX_QUEUED_REQUESTS).unwrap();
+    for id in 2..2 + queued {
+        client.send(&call(id, "test_echo", &format!("queued {id}")));
+    }
+    // Sent in the order of the ids: the reader has read the queued ones
+    // when it answers these, ahead of everything waiting.
+    for id in 2 + queued..2 + queued + 3 {
+        client.send(&call(id, "test_echo", "over"));
+    }
+    for id in 2 + queued..2 + queued + 3 {
+        assert_busy(&client.next(), id);
+    }
+    // The reader still answers what it answers at once.
+    client.send(&request(9000, "ping", &json!({})));
+    assert_eq!(client.ids(1), [9000]);
+    assert_eq!(runner.log(), ["start first"]);
+    runner.latch.open();
+    let answered = client.ids(MAX_QUEUED_REQUESTS + 1);
+    let expected: Vec<Value> = (1..2 + queued).map(|id| json!(id)).collect();
+    assert_eq!(answered, expected, "the ones it kept run in order");
+    assert!(
+        !runner.log().iter().any(|line| line == "start over"),
+        "{:?}",
+        runner.log()
+    );
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_sec_05_a_request_past_the_byte_limit_is_answered_busy() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    let quarter = MAX_QUEUED_BYTES / 4;
+    // Four fit; the fifth does not, nor does what follows it until one
+    // is answered.
+    for id in 2..7 {
+        client.send(&call_of(id, "test_echo", quarter - 4096));
+    }
+    assert_busy(&client.next(), 6);
+    runner.latch.open();
+    assert_eq!(client.ids(5), [1, 2, 3, 4, 5]);
+    assert!(client.close().is_empty());
+}
+
+/// A worker whose call `first` is blocked and running, and responders that
+/// answer on `output`.
+fn blocked_worker(
+    env: &TestEnv,
+    runner: &TestRunner,
+    output: &Recorded,
+) -> (Worker, impl Fn(u64) -> Responder) {
+    let (worker, responder) = worker(env, runner, output);
+    worker.call(
+        tool_request(1, "test_block", "first"),
+        Revision::PerRequest,
+        responder(1),
+    );
+    runner.wait_for("start first");
+    (worker, responder)
+}
+
+/// What the requests waiting hold: how many, and the bytes.
+fn queued(worker: &Worker) -> (usize, usize) {
+    let state = worker.shared.state();
+    (state.queue.len(), state.queued_bytes)
+}
+
+#[test]
+fn p5_sec_05_the_queue_never_holds_more_than_its_limits() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, responder) = blocked_worker(&env, &runner, &output);
+    let label = "x".repeat(1024 * 1024);
+    let sent: u64 = 100;
+    for n in 2..2 + sent {
+        worker.call(
+            tool_request(n, "test_echo", &label),
+            Revision::PerRequest,
+            responder(n),
+        );
+        let (held, bytes) = queued(&worker);
+        assert!(held <= MAX_QUEUED_REQUESTS, "{held} requests");
+        assert!(bytes <= MAX_QUEUED_BYTES, "{bytes} bytes");
+    }
+    // 1 MiB of label each: the bytes are the limit here, a few below 32.
+    let (held, bytes) = queued(&worker);
+    assert!((29..=32).contains(&held), "{held} calls, {bytes} bytes");
+    let refused = usize::try_from(sent).unwrap() - held;
+    let messages = output.messages();
+    assert_eq!(messages.len(), refused);
+    for message in &messages {
+        assert_eq!(message["error"]["code"], jsonrpc::SERVER_BUSY, "{message}");
+    }
+    runner.latch.open();
+    worker.finish();
+    assert_eq!(output.messages().len(), usize::try_from(sent).unwrap() + 1);
+}
+
+#[test]
+fn p5_sec_05_the_count_and_the_bytes_come_back_as_requests_leave() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, responder) = blocked_worker(&env, &runner, &output);
+    for n in 2..6 {
+        worker.call(
+            tool_request(n, "test_echo", &"y".repeat(1024)),
+            Revision::PerRequest,
+            responder(n),
+        );
+    }
+    let (held, four) = queued(&worker);
+    assert_eq!(held, 4);
+    assert!(four > 4 * 1024, "{four} bytes");
+    // A cancelled one gives back what it held.
+    assert!(worker.cancel(&id(3)));
+    let (held, three) = queued(&worker);
+    assert_eq!(held, 3);
+    assert!(three < four, "{three} of {four} bytes");
+    runner.latch.open();
+    // Answered: the running call and three of the queued ones.
+    let started = Instant::now();
+    while output.messages().len() < 4 {
+        assert!(started.elapsed() < PATIENCE, "{:?}", output.messages());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(queued(&worker), (0, 0));
+    worker.finish();
+}
+
+#[test]
+fn p5_sec_05_a_full_queue_still_hears_cancellations() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    let queued = u64::try_from(MAX_QUEUED_REQUESTS).unwrap();
+    for id in 2..2 + queued {
+        client.send(&call(id, "test_echo", "queued"));
+    }
+    client.send(&call(2 + queued, "test_echo", "over"));
+    assert_busy(&client.next(), 2 + queued);
+    // Cancelling one that waits makes room for one more.
+    client.send(&cancel(2));
+    client.send(&request(9000, "ping", &json!({})));
+    assert_eq!(client.ids(1), [9000], "the cancellation was read in turn");
+    client.send(&call(100_000, "test_echo", "room"));
+    // Cancelling the running call is heard behind a full queue.
+    client.send(&cancel(1));
+    runner.wait_for("stopped first");
+    let answered = client.ids(MAX_QUEUED_REQUESTS);
+    assert_eq!(answered.last(), Some(&json!(100_000)), "{answered:?}");
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_sec_05_an_answer_past_the_limit_is_answered_busy() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    let queued = u64::try_from(MAX_QUEUED_REQUESTS).unwrap();
+    for id in 2..2 + queued {
+        // Neither ping, discovery nor tools/list: each waits as an answer.
+        client.send(&request(id, "resources/list", &json!({})));
+    }
+    client.send(&request(2 + queued, "resources/list", &json!({})));
+    assert_busy(&client.next(), 2 + queued);
+    runner.latch.open();
+    let rest: Vec<Value> = (0..=MAX_QUEUED_REQUESTS).map(|_| client.next()).collect();
+    assert_eq!(rest[0]["id"], 1);
+    assert_eq!(rest[1]["error"]["code"], -32601, "{}", rest[1]);
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_sec_05_the_measure_counts_what_a_parsed_message_holds() {
+    // A long string costs its length.
+    let label = "x".repeat(1024 * 1024);
+    let string: Value = serde_json::from_str(&format!("[\"{label}\"]")).unwrap();
+    let held = held_bytes(&string);
+    assert!(
+        (1024 * 1024..2 * 1024 * 1024).contains(&held),
+        "{held} bytes"
+    );
+    // Small objects cost far more than the text: `{"a":0},` is 8 bytes of
+    // JSON, and a node, a key and a slot in memory.
+    let count: usize = 10_000;
+    let text = format!("[{}{{\"a\":0}}]", "{\"a\":0},".repeat(count - 1));
+    let objects: Value = serde_json::from_str(&text).unwrap();
+    let held = held_bytes(&objects);
+    assert!(held >= count * 600, "{held} bytes for {count} objects");
+    assert!(
+        held >= text.len() * 60,
+        "{held} bytes for {} of text",
+        text.len()
+    );
+    // Nothing at all costs nothing beyond the slot.
+    assert_eq!(held_bytes(&Value::Null), 0);
+    assert_eq!(held_bytes(&json!({})), 0);
+}
+
+#[test]
+fn p5_sec_05_a_request_the_worker_takes_at_once_is_never_busy() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    // Parsed, this message holds more than the queue allows; nothing runs
+    // or waits, so it is taken, refused by its arguments alone.
+    let count = MAX_QUEUED_BYTES / 600 + 1;
+    let objects = vec![json!({"a": 0}); count];
+    let message = request(
+        1,
+        "tools/call",
+        &json!({"name": "test_echo", "arguments": {"label": objects}}),
+    );
+    assert!(
+        message["params"].as_object().map_or(0, held_by_fields) > MAX_QUEUED_BYTES,
+        "the message is meant to be past the limit"
+    );
+    client.send(&message);
+    let answered = client.next();
+    assert_eq!(answered["id"], 1);
+    assert_eq!(answered["result"]["isError"], true, "{answered}");
+    assert!(client.close().is_empty());
+}

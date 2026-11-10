@@ -62,6 +62,15 @@
 //! (or meets the end of the input after it), unless it is past its point of
 //! no return. The worker stops once the running call's verb has returned.
 //!
+//! The queue is bounded, so that a client cannot fill the server's memory
+//! while a call runs: at most [`MAX_QUEUED_REQUESTS`] requests wait, holding
+//! at most [`MAX_QUEUED_BYTES`] between them once parsed. A request past
+//! either is not queued and never runs: the reader answers it at once with
+//! [`jsonrpc::SERVER_BUSY`], ahead of the requests waiting, and goes on
+//! reading, since a client's cancellations arrive on the same stream. A
+//! request the worker takes at once waits for nothing and is taken whatever
+//! it holds.
+//!
 //! A panic ends the process in a release build, which aborts on one
 //! (DEV-87): nothing unwinds, so neither the worker's answer to a verb that
 //! panicked nor the internal error a dropped responder sends is ever written.
@@ -90,10 +99,10 @@ use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 use serde_json::value::RawValue;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::discover::ServerConfig;
-use crate::jsonrpc::{Id, Request, RpcError};
+use crate::jsonrpc::{self, Id, Request, RpcError};
 use crate::progress::{self, PROGRESS, PROGRESS_EVERY, Reporter};
 use crate::roots::Refusal;
 use crate::server::{self, Revision, Tools};
@@ -105,6 +114,22 @@ pub const DEADLINE: Duration = Duration::from_secs(30);
 
 /// How long `duscope_scan` may run: 10 minutes.
 pub const SCAN_DEADLINE: Duration = Duration::from_secs(10 * 60);
+
+/// How many requests may wait behind the running one: 64. More is a client
+/// that does not wait for its answers: a model's parallel tool calls are
+/// far fewer.
+pub const MAX_QUEUED_REQUESTS: usize = 64;
+
+/// How much memory the requests waiting may hold between them, once parsed:
+/// 32 MiB. Counted parsed, not as read: a line of small
+/// JSON objects takes about 85 times its length in memory.
+pub const MAX_QUEUED_BYTES: usize = 32 * 1024 * 1024;
+
+/// The entries of one node of the `BTreeMap` behind a JSON object.
+const MAP_NODE_ENTRIES: usize = 11;
+
+/// The smallest block the allocator hands out, which a short string takes.
+const SMALLEST_ALLOCATION: usize = 16;
 
 /// The worker thread's name, which panics and debuggers show.
 pub const WORKER_THREAD: &str = "duscope-mcp-worker";
@@ -217,6 +242,18 @@ enum Job {
 }
 
 impl Job {
+    /// Roughly what the job holds in memory: its parsed params, or its
+    /// answer.
+    fn bytes(&self) -> usize {
+        match self {
+            Job::Answer(_, Ok(result)) => result.get().len(),
+            Job::Answer(_, Err(error)) => {
+                error.message.len() + error.data.as_ref().map_or(0, held_bytes)
+            }
+            Job::Call(call) => call.bytes,
+        }
+    }
+
     /// Whether a write to the client has failed, so that the job's answer
     /// could not reach it. A cancelled call owes none.
     fn output_failed(&self) -> bool {
@@ -250,6 +287,8 @@ impl Job {
 struct Call {
     id: Id,
     params: Option<Map<String, Value>>,
+    /// Roughly what `params` holds in memory ([`held_bytes`]).
+    bytes: usize,
     revision: Revision,
     /// `None` once the call is answered, or abandoned for a cancellation.
     responder: Mutex<Option<Responder>>,
@@ -312,12 +351,100 @@ impl Call {
 #[derive(Default)]
 struct State {
     queue: VecDeque<Job>,
+    /// What the jobs in `queue` hold between them ([`Job::bytes`]).
+    queued_bytes: usize,
     /// The call the worker is running, for a cancellation to find.
     running: Option<Arc<Call>>,
     /// Whether the worker is busy with a job taken from the queue.
     busy: bool,
     /// No more jobs come: the worker stops once the queue is empty.
     closed: bool,
+}
+
+impl State {
+    /// Whether a request holding `bytes` may join the queue: one the worker
+    /// takes at once waits for nothing, and any other must fit the limits.
+    fn admits(&self, bytes: usize) -> bool {
+        (self.queue.is_empty() && !self.busy)
+            || (self.queue.len() < MAX_QUEUED_REQUESTS
+                && self.queued_bytes.saturating_add(bytes) <= MAX_QUEUED_BYTES)
+    }
+
+    fn push(&mut self, job: Job) {
+        self.queued_bytes = self.queued_bytes.saturating_add(job.bytes());
+        self.queue.push_back(job);
+    }
+
+    fn pop(&mut self) -> Option<Job> {
+        let job = self.queue.pop_front()?;
+        self.queued_bytes = self.queued_bytes.saturating_sub(job.bytes());
+        Some(job)
+    }
+
+    /// The job at `at`, out of the queue.
+    fn remove(&mut self, at: usize) -> Option<Job> {
+        let job = self.queue.remove(at)?;
+        self.queued_bytes = self.queued_bytes.saturating_sub(job.bytes());
+        Some(job)
+    }
+
+    /// Every job in the queue, which is left empty.
+    fn take_all(&mut self) -> Vec<Job> {
+        self.queued_bytes = 0;
+        self.queue.drain(..).collect()
+    }
+}
+
+/// Roughly what `value` holds in memory beyond its own slot: a string's
+/// bytes, an array's slots, an object's nodes, and the same of what they
+/// hold. It walks the value once; a parsed value nests at most 128 deep
+/// (`serde_json`'s limit), so the recursion is bounded.
+fn held_bytes(value: &Value) -> usize {
+    let block = |bytes: usize| {
+        if bytes == 0 {
+            0
+        } else {
+            bytes.max(SMALLEST_ALLOCATION)
+        }
+    };
+    match value {
+        Value::String(text) => block(text.capacity()),
+        Value::Array(items) => items.iter().fold(
+            block(items.capacity().saturating_mul(size_of::<Value>())),
+            |held, item| held.saturating_add(held_bytes(item)),
+        ),
+        Value::Object(fields) => held_by_fields(fields),
+        Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+    }
+}
+
+/// [`held_bytes`] of an object: its nodes, its keys and what its values hold.
+fn held_by_fields(fields: &Map<String, Value>) -> usize {
+    let slot = size_of::<String>() + size_of::<Value>();
+    let nodes = fields.len().div_ceil(MAP_NODE_ENTRIES);
+    fields.iter().fold(
+        nodes.saturating_mul(slot * MAP_NODE_ENTRIES + SMALLEST_ALLOCATION),
+        |held, (key, value)| {
+            held.saturating_add(key.capacity().max(SMALLEST_ALLOCATION))
+                .saturating_add(held_bytes(value))
+        },
+    )
+}
+
+/// The error a request past the queue's limits is answered with.
+fn server_busy() -> RpcError {
+    RpcError::new(
+        jsonrpc::SERVER_BUSY,
+        format!(
+            "the server is busy: at most {MAX_QUEUED_REQUESTS} requests, holding {} MiB, may \
+             wait behind the running call; send this one again once some are answered",
+            MAX_QUEUED_BYTES / (1024 * 1024)
+        ),
+    )
+    .with_data(json!({
+        "max_queued_requests": MAX_QUEUED_REQUESTS,
+        "max_queued_bytes": MAX_QUEUED_BYTES,
+    }))
 }
 
 struct Shared {
@@ -344,7 +471,7 @@ impl Shared {
         // Held to the end, so that nothing joins the queue while it is
         // answered.
         let running = state.running.clone();
-        let queued: Vec<Job> = state.queue.drain(..).collect();
+        let queued = state.take_all();
         let on_call_thread = thread::current().name() == Some(CALL_THREAD);
         let mut owed: Vec<(Responder, Result<Box<RawValue>, RpcError>)> = Vec::new();
         if let Some(call) = running {
@@ -439,6 +566,7 @@ impl fmt::Debug for Worker {
         let state = self.shared.state();
         f.debug_struct("Worker")
             .field("queued", &state.queue.len())
+            .field("queued_bytes", &state.queued_bytes)
             .field("busy", &state.busy)
             .field("closed", &state.closed)
             .finish_non_exhaustive()
@@ -475,19 +603,27 @@ impl Worker {
     }
 
     /// Queues the tool call `request`, which speaks `revision`, behind the
-    /// requests before it.
+    /// requests before it; past the queue's limits it is answered
+    /// [`jsonrpc::SERVER_BUSY`] at once, and never runs.
     pub(crate) fn call(&self, request: Request, revision: Revision, responder: Responder) {
+        let bytes = request.params.as_ref().map_or(0, held_by_fields);
+        let mut state = self.shared.state();
+        if !state.admits(bytes) {
+            drop(state);
+            refuse_busy(responder);
+            return;
+        }
         let call = Arc::new(Call {
             id: request.id,
             params: request.params,
+            bytes,
             revision,
             responder: Mutex::new(Some(responder)),
             signals: CallSignals::default(),
         });
-        let mut state = self.shared.state();
         let ahead = state.queue.len() + usize::from(state.busy);
         debug!("queued tools/call {} behind {ahead}", call.id);
-        state.queue.push_back(Job::Call(call));
+        state.push(Job::Call(call));
         drop(state);
         self.shared.wake.notify_one();
     }
@@ -503,11 +639,21 @@ impl Worker {
             send(responder, outcome);
             return;
         }
-        debug!(
-            "request {} waits for the requests before it",
-            responder.id()
-        );
-        state.queue.push_back(Job::Answer(responder, outcome));
+        let job = Job::Answer(responder, outcome);
+        if !state.admits(job.bytes()) {
+            drop(state);
+            if let Job::Answer(responder, _) = job {
+                refuse_busy(responder);
+            }
+            return;
+        }
+        if let Job::Answer(responder, _) = &job {
+            debug!(
+                "request {} waits for the requests before it",
+                responder.id()
+            );
+        }
+        state.push(job);
         drop(state);
         self.shared.wake.notify_one();
     }
@@ -522,7 +668,7 @@ impl Worker {
             .queue
             .iter()
             .position(|job| matches!(job, Job::Call(call) if call.id == *id));
-        if let Some(Job::Call(call)) = queued.and_then(|at| state.queue.remove(at)) {
+        if let Some(Job::Call(call)) = queued.and_then(|at| state.remove(at)) {
             drop(state);
             debug!("request {id} leaves the queue");
             call.cancel();
@@ -573,7 +719,7 @@ impl Worker {
     pub(crate) fn abort(mut self) {
         let mut state = self.shared.state();
         state.closed = true;
-        let dropped: Vec<Job> = state.queue.drain(..).collect();
+        let dropped = state.take_all();
         let running = state.running.clone();
         drop(state);
         for job in dropped {
@@ -617,7 +763,7 @@ fn work(shared: &Shared, setup: &Setup) {
         let job = {
             let mut state = shared.state();
             loop {
-                if let Some(job) = state.queue.pop_front() {
+                if let Some(job) = state.pop() {
                     if let Job::Call(call) = &job {
                         state.running = Some(Arc::clone(call));
                     }
@@ -865,6 +1011,12 @@ fn report(call: &Call, reporter: &mut Reporter) {
             call.id
         );
     }
+}
+
+/// Answers a request the queue cannot hold.
+fn refuse_busy(responder: Responder) {
+    info!("request {} refused: the queue is full", responder.id());
+    send(responder, Err(server_busy()));
 }
 
 /// Sends a response. A failed write stops the transport, which reports it.

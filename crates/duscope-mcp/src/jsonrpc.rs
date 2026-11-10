@@ -25,6 +25,10 @@ pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 /// A failure inside the server.
 pub const INTERNAL_ERROR: i64 = -32603;
+/// duscope's own: the server is busy, and the request was not taken. MCP
+/// reserves `-32000` to `-32099` for itself and earlier implementations, and
+/// asks that a new code lie outside `-32768` to `-32000`.
+pub const SERVER_BUSY: i64 = -31000;
 
 /// A request's id: a string or an integer. MCP narrows JSON-RPC here: an id
 /// is never null, and a fraction is not an integer.
