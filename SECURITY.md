@@ -177,7 +177,10 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
   `explain`, and so the `duscope_explain` tool, is not the scanner: for its git facts it reads
   what git reads (`.git` and what it names, `.gitignore`, `info/exclude`, the configuration and
   the file its `core.excludesFile` names, and the repository's index). It parses them and runs
-  nothing.
+  nothing. It reads each one only when it is a regular file, and never past a cap: 64 KiB for
+  `.git` and `commondir`, 1 MiB per configuration file, 16 MiB per ignore file, 1 GiB for the
+  index. So a FIFO or a device in a repository cannot stall `explain` or fill its memory. A
+  `.gitignore` that is a symbolic link is not followed, as git has not followed one since 2.32.
 - **Imports.** `import` reads ncdu's and gdu's JSON and GrandPerspective's XML with in-tree
   streaming parsers.
   - Gzip is decompressed through a 1 GiB cap.

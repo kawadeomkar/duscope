@@ -13,8 +13,9 @@ The design is fixed by two documents; read the parts a task cites before writing
 - Linux and macOS are both first-class: every change builds, tests and benchmarks on both.
 - The scanner never follows symlinks by default, never reads file contents (the 43-byte
   CACHEDIR.TAG check and explain's FIEMAP ioctl are the only exceptions, beside the two system
-  tables that describe the layout: macOS's /usr/share/firmlinks and Linux's
-  /proc/self/mountinfo), never writes.
+  tables that describe the layout, macOS's /usr/share/firmlinks and Linux's
+  /proc/self/mountinfo, and explain's reads of git's files, each a regular file under a cap,
+  through duscope_walk::read_regular), never writes.
 - Indexes are immutable snapshots: a rescan writes a new file; nothing edits an index in place.
 - Names are bytes (BLOB in the index); the envelope adds name_raw only for invalid UTF-8.
 - The envelope changes additively only; every list verb's rows are `entries` plus the shared
