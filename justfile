@@ -13,8 +13,13 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # to 7,446,464 (P3-MCP-04 and P3-MCP-07), about half of P3-MCP-04's share being
 # P3-MCP-03's registry, which a release build drops while no tool is registered.
 # Plus 10% would pass the spec's 8 MB ceiling, so the budget is the ceiling
-# (DEV-115).
-size_budget := "8000000"
+# (DEV-115). The 8 MB ceiling came from the proposal's size probe, which
+# underestimated duscope's own code; with x86_64 musl at 7,823,296 bytes on
+# main at 6b740b8c (run 42611223243) and phases 3 to 5 still to come, the
+# ceiling is re-based once to 10 MB and the measured-plus-10% ratchet ends
+# (P0-CI-03): the budget is the ceiling, packages report their size (the size
+# job's comment posts it on every pull request) and do not re-derive it.
+size_budget := "10000000"
 
 # Developer tools installed by `just setup`, mirrored in CONTRIBUTING.md.
 cargo_deny_version := "0.20.2"

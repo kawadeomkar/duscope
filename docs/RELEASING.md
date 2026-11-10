@@ -48,7 +48,7 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    release.yml's builds do. The `dependencies` test fails when `DEPENDENCIES.md`'s tables and
    the direct dependencies of the published crates differ (a `cargo tree` count does not
    match the table, which covers all five published crates). The CI jobs `size`, `repro` and
-   `build-time` (against its CPU model's budget in `BUILD_TIME_BUDGETS` in `ci.yml`) on that
+   `build-time` (against the ceiling `BUILD_TIME_BUDGET_SECS` in `ci.yml`) on that
    commit must be green too.
 
 4. **Tag and watch.** On `main` at the release commit, sign the tag with the key in
