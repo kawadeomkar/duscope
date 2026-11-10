@@ -23,6 +23,10 @@
 //! their order, which refuses an item off by more than 1%; and `--dry-run`,
 //! which answers the plan as a successful answer with no prompt and no
 //! `--yes` hint, since a client asks for it as a plan, not a confirmation.
+//! Under a tool call, acting claims the call's point of no return
+//! (`CallSignals::commit`) just before anything moves: a call cancelled,
+//! past its deadline or whose client has gone by then moves nothing
+//! (`interrupted`), and one committed runs to its end.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -126,8 +130,9 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         };
         act = out::ask(question).is_some_and(|a| a == "yes");
     }
+    let stopped = stopped_first(&mut act);
     let outcome = act.then(|| clean_execute(&mut plan));
-    plan.plan.confirmation_required = !act && !blocked && moving > 0;
+    plan.plan.confirmation_required = !act && !blocked && !stopped && moving > 0;
     // What moved or was deleted is still in the saved scan.
     let changed =
         outcome.is_some_and(|o| o.trashed_count + o.deleted_count > 0 || o.freed_bytes > 0);
@@ -135,14 +140,16 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         warnings.push(index_untouched(&resolved.index, method));
     }
 
-    let failure = failure(
-        &plan,
-        refused > 0 && !args.skip_refused,
-        mismatch,
-        outcome,
-        asked,
-        args,
-    );
+    let failure = stopped.then(|| stopped_failure(method)).or_else(|| {
+        failure(
+            &plan,
+            refused > 0 && !args.skip_refused,
+            mismatch,
+            outcome,
+            asked,
+            args,
+        )
+    });
     let error = failure.as_ref().map(|f| match outcome {
         // An item's own error, as the plan holds it.
         Some(_) if !blocked => first_error(&plan)
@@ -152,7 +159,7 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     });
     let next = match outcome {
         Some(_) => renew(changed, &resolved.index),
-        None if args.dry_run => Vec::new(),
+        None if args.dry_run || stopped => Vec::new(),
         None => next(args, &plan, &scan_block),
     };
     let footer = footer(&plan, outcome, output);
@@ -163,6 +170,36 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         Some(failure) => Err(failure.reported()),
         None => Ok(()),
     }
+}
+
+/// Under an MCP tool call, acting (`act`) is the call's point of no return,
+/// claimed just before anything moves: whether the call was stopped first
+/// (cancelled, past its deadline, its client gone), when `act` is cleared
+/// and nothing moves. A call that commits is answered with what this run
+/// did, however long it takes.
+fn stopped_first(act: &mut bool) -> bool {
+    let stopped = *act && super::mcp::running_call().is_some_and(|call| !call.commit());
+    if stopped {
+        log::info!("the tool call was stopped before clean acted: nothing is moved or deleted");
+        *act = false;
+    }
+    stopped
+}
+
+/// The failure of a run whose MCP tool call was stopped (cancelled, past
+/// its deadline, its client gone) before it acted: nothing was moved or
+/// deleted. The call was answered already, or is owed no answer.
+fn stopped_failure(method: Method) -> Failure {
+    let moved = match method {
+        Method::Trash => "moved",
+        Method::Permanent => "deleted",
+    };
+    Failure::new(
+        Exit::Interrupted,
+        "interrupted",
+        format!("the tool call was stopped before anything was {moved}, so nothing was"),
+    )
+    .hint("Call the tool again for a new plan")
 }
 
 /// `--expect-item-bytes` gives one figure per `--from` handle, or none.

@@ -88,13 +88,22 @@ impl Tool for TestTool {
 ///   latch, or its call is told to stop;
 /// - `test_stubborn` waits for the latch alone, as a verb with no point at
 ///   which to stop;
-/// - `test_count` counts an entry every 5 ms, 30 of them.
+/// - `test_count` counts an entry every 5 ms, 30 of them;
+/// - `test_commit` counts one entry and claims its call's point of no
+///   return at once, then waits for the latch alone, as a verb that has
+///   begun to move things; it ends `stopped` if its call was told to stop
+///   all the same;
+/// - `test_commit_late` counts one entry and waits for the latch alone, as
+///   a plan is made, then claims the point of no return, and acts on
+///   nothing (`stopped`) when its call was stopped first.
 fn tools() -> Vec<TestTool> {
     [
         ("test_echo", "echo"),
         ("test_block", "block"),
         ("test_stubborn", "stubborn"),
         ("test_count", "count"),
+        ("test_commit", "commit"),
+        ("test_commit_late", "commit_late"),
     ]
     .into_iter()
     .map(|(name, verb)| TestTool { name, verb })
@@ -166,7 +175,8 @@ impl Waited {
 #[derive(Clone)]
 struct TestRunner {
     /// What the verbs did, in order: `start LABEL`, then `end LABEL`,
-    /// `stopped LABEL` or `timed out LABEL` ([`Waited`]).
+    /// `stopped LABEL` or `timed out LABEL` ([`Waited`]); `committed LABEL`
+    /// once a verb has claimed its call's point of no return.
     log: Arc<Mutex<Vec<String>>>,
     latch: Arc<Latch>,
 }
@@ -216,6 +226,30 @@ impl Runner for TestRunner {
                 self.latch.wait(|| call.cancel.load(Ordering::Relaxed))
             }
             "stubborn" => self.latch.wait(|| false),
+            "commit" => {
+                call.entries.fetch_add(1, Ordering::Relaxed);
+                if call.commit() {
+                    self.note(format!("committed {label}"));
+                    match self.latch.wait(|| false) {
+                        // A committed call is never told to stop.
+                        Waited::Opened if call.cancel.load(Ordering::Relaxed) => Waited::Stopped,
+                        other => other,
+                    }
+                } else {
+                    Waited::Stopped
+                }
+            }
+            "commit_late" => {
+                call.entries.fetch_add(1, Ordering::Relaxed);
+                match self.latch.wait(|| false) {
+                    Waited::Opened if call.commit() => {
+                        self.note(format!("committed {label}"));
+                        Waited::Opened
+                    }
+                    Waited::Opened => Waited::Stopped,
+                    other => other,
+                }
+            }
             "count" => {
                 for _ in 0..30 {
                     thread::sleep(Duration::from_millis(5));
@@ -840,5 +874,169 @@ fn p3_mcp_05_rmcp_cancels_a_running_call_once_it_has_seen_its_progress() {
             assert_eq!(log.log(), ["start ", "stopped ", "start ", "end "]);
             client
         },
+    );
+}
+
+// P5-MCP-01: a call's point of no return. A verb that moves things claims
+// it first; the deadline, a cancellation and a gone client claim the stop.
+
+/// Whether the server has written anything for `wait`: false when nothing
+/// came in that time.
+fn wrote_within(client: &Client, wait: Duration) -> bool {
+    client.messages.recv_timeout(wait).is_ok()
+}
+
+#[test]
+fn p5_mcp_01_a_call_stopped_before_its_point_of_no_return_acts_on_nothing() {
+    // Past its deadline: answered deadline_exceeded, and its verb, which
+    // reaches its point of no return only after that, finds the call
+    // stopped and acts on nothing.
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let timing = Timing {
+        deadline: Some(Duration::from_millis(50)),
+        ..quick()
+    };
+    let mut client = Client::start(server(&env, &runner, timing));
+    client.send(&call(1, "test_commit_late", "first"));
+    let first = client.next();
+    assert_eq!(first["id"], 1);
+    assert_eq!(
+        first["result"]["structuredContent"]["error"]["code"], "deadline_exceeded",
+        "{first}"
+    );
+    runner.latch.open();
+    // The next call runs once the first call's verb has returned.
+    client.send(&call(2, "test_echo", "second"));
+    assert_eq!(client.next()["id"], 2);
+    assert_eq!(
+        runner.log(),
+        ["start first", "stopped first", "start second", "end second"]
+    );
+    assert!(client.close().is_empty());
+
+    // Cancelled: never answered, and its verb acts on nothing.
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_commit_late", "first"));
+    runner.wait_for("start first");
+    client.send(&cancel(1));
+    // The reader takes the cancellation before it answers the ping.
+    client.send(&request(2, "ping", &json!({})));
+    assert_eq!(client.ids(1), [2]);
+    runner.latch.open();
+    client.send(&call(3, "test_echo", "second"));
+    assert_eq!(client.ids(1), [3]);
+    assert_eq!(
+        runner.log(),
+        ["start first", "stopped first", "start second", "end second"]
+    );
+    assert!(client.close().is_empty(), "request 1 got an answer");
+}
+
+#[test]
+fn p5_mcp_01_a_committed_call_past_its_deadline_is_answered_with_its_result() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let timing = Timing {
+        deadline: Some(Duration::from_millis(50)),
+        ..quick()
+    };
+    let mut client = Client::start(server(&env, &runner, timing));
+    client.send(&call(1, "test_commit", "first"));
+    runner.wait_for("committed first");
+    // Well past the deadline, and nothing has answered the call.
+    assert!(
+        !wrote_within(&client, Duration::from_millis(200)),
+        "the committed call was answered before its verb returned"
+    );
+    runner.latch.open();
+    let response = client.next();
+    assert_eq!(response["id"], 1);
+    let result = &response["result"];
+    assert_eq!(result["isError"], false, "{response}");
+    assert_eq!(result["structuredContent"]["label"], "first");
+    assert_eq!(result["content"][0]["text"], "ran \"first\"");
+    assert_eq!(
+        runner.log(),
+        ["start first", "committed first", "end first"]
+    );
+    // The next call has its own deadline.
+    client.send(&call(2, "test_echo", "second"));
+    assert_eq!(client.next()["result"]["isError"], false);
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_mcp_01_a_cancellation_after_the_point_of_no_return_still_gets_the_result() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_commit", "first"));
+    runner.wait_for("committed first");
+    client.send(&cancel(1));
+    client.send(&request(2, "ping", &json!({})));
+    assert_eq!(client.ids(1), [2]);
+    runner.latch.open();
+    let response = client.next();
+    assert_eq!(response["id"], 1, "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(response["result"]["structuredContent"]["label"], "first");
+    assert_eq!(
+        runner.log(),
+        ["start first", "committed first", "end first"]
+    );
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_mcp_01_a_gone_client_stops_a_call_before_its_point_of_no_return_not_after() {
+    // How long the tests let a progress that cannot be sent go out: ten of
+    // its 20 ms intervals.
+    let gone_by = Duration::from_millis(200);
+
+    // Before: the first progress that cannot be sent stops the call, and
+    // its verb, reaching its point of no return later, acts on nothing.
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let (mut input, transport) = start_gone(server(&env, &runner, quick()));
+    send(
+        &mut input,
+        &call_with_progress(1, "test_commit_late", "first"),
+    );
+    runner.wait_for("start first");
+    thread::sleep(gone_by);
+    drop(input);
+    runner.latch.open();
+    assert_eq!(
+        transport.wait().unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+    assert_eq!(runner.log(), ["start first", "stopped first"]);
+
+    // After: neither the progress that cannot be sent nor the input's end
+    // stops a committed call, whose verb runs to its end before the server
+    // ends, its answer failing as the client has gone.
+    let runner = TestRunner::new();
+    let (mut input, transport) = start_gone(server(&env, &runner, quick()));
+    send(&mut input, &call_with_progress(1, "test_commit", "first"));
+    runner.wait_for("committed first");
+    thread::sleep(gone_by);
+    drop(input);
+    let opener = {
+        let runner = runner.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            runner.latch.open();
+        })
+    };
+    assert_eq!(
+        transport.wait().unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+    opener.join().unwrap();
+    assert_eq!(
+        runner.log(),
+        ["start first", "committed first", "end first"]
     );
 }

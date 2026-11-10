@@ -36,18 +36,29 @@
 //! dropped. The next call starts only once the last call's verb has
 //! returned, so no two verbs ever run at once.
 //!
+//! A verb that changes what it cannot take back (`clean` acting for
+//! `duscope_delete`) first claims the call's point of no return
+//! ([`CallSignals::commit`]), and the deadline, a cancellation and an
+//! abandoned client each claim the call's stop; the call takes whichever
+//! comes first, and never both. A call stopped first moves nothing: its
+//! verb finds it stopped and acts on nothing. A call committed first runs
+//! to its end and is always answered with its verb's result, after its
+//! deadline too: the deadline does not answer it `deadline_exceeded`, and a
+//! cancellation of it is ignored, as the protocol allows for a request that
+//! can no longer be cancelled.
+//!
 //! When the input ends, the worker answers the calls already received, then
 //! stops. Once a write to the client has failed, from any thread, nothing
 //! more can reach it: the worker starts no request still queued, dropping
 //! each unanswered, and a running call whose progress cannot be sent is
 //! cancelled, as is the running call when the reader stops on the failure
-//! (or meets the end of the input after it). The worker stops once the
-//! running call's verb has returned.
+//! (or meets the end of the input after it), unless it is past its point of
+//! no return. The worker stops once the running call's verb has returned.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -109,6 +120,53 @@ pub struct CallSignals {
     /// The entries the verb has counted so far, which the call's progress
     /// reports: a scan adds each entry its walk reads.
     pub entries: Arc<AtomicU64>,
+    /// Where the call stands against its point of no return: [`RUNNING`],
+    /// [`COMMITTED`] or [`STOPPED`], each change claimed by one
+    /// compare-and-swap so that the verb and the worker cannot both win.
+    stage: Arc<AtomicU8>,
+}
+
+/// A call neither committed nor stopped.
+const RUNNING: u8 = 0;
+/// A call whose verb has passed its point of no return.
+const COMMITTED: u8 = 1;
+/// A call cancelled, past its deadline, or whose client has gone.
+const STOPPED: u8 = 2;
+
+impl CallSignals {
+    /// Claims the call's point of no return, for a verb about to change
+    /// what it cannot take back: true when the call is committed, now or
+    /// before, and is then answered with the verb's result whatever comes
+    /// after; false when the call was stopped first (cancelled, past its
+    /// deadline, its client gone), and the verb must change nothing.
+    pub fn commit(&self) -> bool {
+        self.claim(COMMITTED)
+    }
+
+    /// Whether the call's verb has passed its point of no return.
+    pub fn committed(&self) -> bool {
+        self.stage.load(Ordering::Acquire) == COMMITTED
+    }
+
+    /// Stops the call unless its verb has passed its point of no return,
+    /// setting [`cancel`](CallSignals::cancel): true when the call is
+    /// stopped, now or before; false when it is committed, and runs to its
+    /// end.
+    pub(crate) fn stop(&self) -> bool {
+        let stopped = self.claim(STOPPED);
+        if stopped {
+            self.cancel.store(true, Ordering::Relaxed);
+        }
+        stopped
+    }
+
+    /// Moves a running call to `stage`, by one compare-and-swap: whether
+    /// the call is at `stage` now, by this claim or an earlier one.
+    fn claim(&self, stage: u8) -> bool {
+        self.stage
+            .compare_exchange(RUNNING, stage, Ordering::AcqRel, Ordering::Acquire)
+            .map_or_else(|now| now == stage, |_| true)
+    }
 }
 
 /// A request waiting its turn.
@@ -142,6 +200,7 @@ impl Job {
             }
             Job::Call(call) => {
                 debug!("dropped tools/call {} before it ran", call.id);
+                // Never run, so never committed: it stops.
                 call.cancel();
             }
         }
@@ -169,13 +228,20 @@ impl Call {
         self.responder().is_some()
     }
 
-    /// Ends the call without a response, then tells its verb to stop. In
-    /// that order: a verb that stops can then no longer have it answered.
-    fn cancel(&self) {
-        if let Some(responder) = self.responder().take() {
+    /// Ends the call without a response and tells its verb to stop, unless
+    /// its verb is past its point of no return: whether it stopped. The
+    /// response is held while the call is stopped, so a verb that stops can
+    /// no longer have it answered; a committed call keeps it, to be
+    /// answered with its result.
+    fn cancel(&self) -> bool {
+        let mut owed = self.responder();
+        if !self.signals.stop() {
+            return false;
+        }
+        if let Some(responder) = owed.take() {
             responder.abandon();
         }
-        self.signals.cancel.store(true, Ordering::Relaxed);
+        true
     }
 }
 
@@ -295,7 +361,8 @@ impl Worker {
 
     /// Cancels the call `id` names: a queued one leaves the queue, the
     /// running one is told to stop; neither is answered. Whether `id` named a
-    /// call.
+    /// call that stopped: the running call past its point of no return does
+    /// not, and is answered with its result.
     pub(crate) fn cancel(&self, id: &Id) -> bool {
         let mut state = self.shared.state();
         let queued = state
@@ -310,9 +377,14 @@ impl Worker {
         }
         if let Some(call) = state.running.clone().filter(|call| call.id == *id) {
             drop(state);
-            debug!("request {id} is told to stop");
-            call.cancel();
-            return true;
+            if call.cancel() {
+                debug!("request {id} is told to stop");
+                return true;
+            }
+            info!(
+                "request {id} is past its point of no return: the cancellation is ignored, and \
+                 the call is answered with its result"
+            );
         }
         false
     }
@@ -322,8 +394,9 @@ impl Worker {
         self.stop();
     }
 
-    /// Drops the queued requests unanswered, cancels the running call, and
-    /// stops the worker thread once its verb has returned.
+    /// Drops the queued requests unanswered, cancels the running call
+    /// unless it is past its point of no return, and stops the worker
+    /// thread once its verb has returned.
     pub(crate) fn abort(mut self) {
         let mut state = self.shared.state();
         state.closed = true;
@@ -333,8 +406,13 @@ impl Worker {
         for job in dropped {
             job.drop_unanswered();
         }
-        if let Some(call) = running {
-            call.cancel();
+        if let Some(call) = running
+            && !call.cancel()
+        {
+            debug!(
+                "request {} is past its point of no return: it runs to its end",
+                call.id
+            );
         }
         self.stop();
     }
@@ -442,7 +520,10 @@ impl Setup {
                 debug!("request {} ended: its answer was sent or not owed", call.id);
                 return;
             }
-            let result = if due.is_some_and(|due| Instant::now() >= due) {
+            // A call past its point of no return is answered with what its
+            // verb did, however long it took.
+            let late = due.is_some_and(|due| Instant::now() >= due);
+            let result = if late && !call.signals.committed() {
                 self.expired(prepared, deadline)
             } else {
                 match outcome {
@@ -458,7 +539,8 @@ impl Setup {
     }
 
     /// Waits for the call's verb to return, sending the call's progress
-    /// meanwhile, and answers the call `deadline_exceeded` at `due`.
+    /// meanwhile, and answers the call `deadline_exceeded` at `due` unless
+    /// its verb is past its point of no return by then.
     fn watch(
         &self,
         call: &Call,
@@ -488,10 +570,12 @@ impl Setup {
             }
             let now = Instant::now();
             if due.is_some_and(|due| now >= due) {
-                self.expire(call, prepared, deadline);
-                // Answered: nothing more goes out about the call.
+                // Answered, nothing more goes out about the call; or past its
+                // point of no return, still reporting until its verb returns.
+                if self.expire(call, prepared, deadline) {
+                    reporter = None;
+                }
                 due = None;
-                reporter = None;
                 continue;
             }
             if let Some(reporter) = &mut reporter
@@ -506,11 +590,23 @@ impl Setup {
     }
 
     /// The call ran past its deadline: tells its verb to stop, and answers
-    /// it `deadline_exceeded`. The answer is taken first, so the verb, once
-    /// stopped, cannot have the call answered.
-    fn expire(&self, call: &Call, prepared: &Prepared<'_>, deadline: Duration) {
-        let responder = call.responder().take();
-        call.signals.cancel.store(true, Ordering::Relaxed);
+    /// it `deadline_exceeded`; whether it did. A call past its point of no
+    /// return is neither stopped nor answered here: it is answered with its
+    /// result once its verb returns. The answer is held while the call is
+    /// stopped, so the verb, once stopped, cannot have the call answered.
+    fn expire(&self, call: &Call, prepared: &Prepared<'_>, deadline: Duration) -> bool {
+        let mut owed = call.responder();
+        if !call.signals.stop() {
+            info!(
+                "request {} ran past its deadline of {}, past its point of no return: it is \
+                 answered with its result once its verb returns",
+                call.id,
+                spoken(deadline)
+            );
+            return false;
+        }
+        let responder = owed.take();
+        drop(owed);
         if let Some(responder) = responder {
             info!(
                 "request {} ran past its deadline of {}",
@@ -520,6 +616,7 @@ impl Setup {
             let result = self.expired(prepared, deadline);
             send(responder, self.written(call.revision, result));
         }
+        true
     }
 
     /// The result of a call past its deadline: `deadline_exceeded`, as its
@@ -568,7 +665,8 @@ impl Setup {
 
 /// Sends the call's progress, when its count has grown since the last and
 /// it is still owed an answer. A progress that cannot be sent means its
-/// answer could not be either: the call is cancelled.
+/// answer could not be either: the call is cancelled, unless it is past its
+/// point of no return.
 fn report(call: &Call, reporter: &mut Reporter) {
     let owed = call.responder();
     let Some(responder) = owed.as_ref() else {
@@ -582,11 +680,18 @@ fn report(call: &Call, reporter: &mut Reporter) {
     };
     // The cancellation takes the responder.
     drop(owed);
-    info!(
-        "request {} is told to stop: its progress could not be sent ({e})",
-        call.id
-    );
-    call.cancel();
+    if call.cancel() {
+        info!(
+            "request {} is told to stop: its progress could not be sent ({e})",
+            call.id
+        );
+    } else {
+        info!(
+            "request {}'s progress could not be sent ({e}); past its point of no return, it \
+             runs to its end",
+            call.id
+        );
+    }
 }
 
 /// Sends a response. A failed write stops the transport, which reports it.

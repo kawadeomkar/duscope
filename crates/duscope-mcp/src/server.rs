@@ -205,7 +205,8 @@ impl Server {
                 info!("cancelled request {id}: {}", reason.escape_debug());
             }
             _ => debug!(
-                "ignored the cancellation of request {id}: no call of that id is waiting or running"
+                "ignored the cancellation of request {id}: no call of that id is waiting, or \
+                 running and able to stop"
             ),
         }
     }

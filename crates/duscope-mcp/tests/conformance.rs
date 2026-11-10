@@ -1873,6 +1873,48 @@ fn p5_mcp_01_an_expect_bytes_mismatch_refuses_the_item_and_moves_nothing() {
     }
 }
 
+#[test]
+fn p5_mcp_01_a_real_call_past_its_deadline_before_it_acts_moves_nothing() {
+    // A deadline of 0 ms passes as the call starts, long before `clean` has
+    // made its plan: the call is answered `deadline_exceeded`, and `clean`,
+    // reaching its point of no return after that, moves nothing.
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (one, one_frees) = explained(&env, &root.join("one.bin"));
+        let (two, two_frees) = explained(&env, &root.join("dir"));
+        let arguments = json!({
+            "items": [item(&one, one_frees), item(&two, two_frees)],
+            "dry_run": false,
+        });
+        let ((stopped, next), transcript) = session(
+            spawn(
+                &env,
+                &roots(&root, &["--allow-delete", "--log-level", "debug"]),
+                &[("DUSCOPE_TEST_MCP_DEADLINE_MS", "0")],
+            ),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, stopped) = call(&client, "duscope_delete", &arguments).await;
+                // The next call runs once the first call's verb has returned.
+                let (_, next) = call(&client, "duscope_scans", &json!({})).await;
+                ((stopped, next), client)
+            },
+        );
+        assert_eq!(error_code(&stopped), "deadline_exceeded", "{stopped:?}");
+        assert_eq!(error_code(&next), "deadline_exceeded", "{next:?}");
+        assert!(
+            transcript
+                .stderr
+                .contains("the tool call was stopped before clean acted"),
+            "{}",
+            transcript.stderr
+        );
+        assert_untouched(&env, &root);
+    }
+}
+
 /// Has rmcp's client, speaking `lifecycle`, move a file and a directory of a
 /// fresh tree to the test's own Trash, and checks what moved.
 #[cfg(target_os = "linux")]
