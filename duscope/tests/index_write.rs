@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::Output;
 
@@ -115,7 +116,12 @@ fn p2_idx_02_a_kill_between_write_and_rename_leaves_no_db() {
         &["scan", root.to_str().unwrap(), "--save", "--json"],
         &[("DUSCOPE_TEST_KILL_BEFORE_RENAME", "1")],
     );
-    assert!(!out.status.success(), "the process was killed");
+    assert_eq!(
+        out.status.signal(),
+        Some(9),
+        "SIGKILL, before the rename: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let names = scans(&env.index_dir());
     let is_db = |n: &String| {
         Path::new(n)
