@@ -160,10 +160,12 @@ tree = "nav"
   press = ["s", "s", "s"]
   see = ["by count · in"]
 
+  # Back to size: the siblings' title starts with the folder again, no sort
+  # ahead of it.
   [[task.step]]
   press = ["s"]
-  see = ["in media ·"]
-  gone = ["by count"]
+  see = ["╭─ in media · "]
+  gone = ["by name", "by modified", "by count"]
 
   [[task.step]]
   press = ["q"]
