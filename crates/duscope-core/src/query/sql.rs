@@ -348,12 +348,11 @@ fn sandbox(index: &Index) -> Result<(Connection, Reader), CoreError> {
     // raises it again, so it outlives this statement and holds every later
     // use of SQLite in the process to 256 MiB. In `duscope mcp`, a long-lived
     // process, that is every `duscope_scan` save after the first
-    // `duscope_query`: a 1M-entry save after a query succeeded when run.
-    // What is to keep a larger save under it is P2-IDX-07, which takes most
-    // of the writer's SQLite memory away (its 64 MiB page cache, and the
-    // temporary storage it keeps in memory); until that has merged, a save of
-    // several million files after a query may fail for want of memory.
-    // Raising the limit again would need `unsafe`, which this crate forbids.
+    // `duscope_query`. A save's own SQLite memory is about 2 MB, its index
+    // sort spilling to a file; only if that file fails and the sort moves
+    // into memory may a save of several million files run out under the
+    // limit. Raising the limit again would need `unsafe`, which this crate
+    // forbids.
     db.execute_batch(&format!(
         "PRAGMA temp_store = MEMORY; PRAGMA hard_heap_limit = {HEAP_LIMIT};"
     ))
