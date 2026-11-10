@@ -463,3 +463,26 @@ fn p3_mcp_03_minify_keeps_strings_as_written() {
         r#"{"a b":[1,2],"c":"x \" y"}"#
     );
 }
+
+#[test]
+fn p5_sec_05_each_tool_names_its_verb_before_its_arguments_are_checked() {
+    let env = TestEnv::new();
+    let roots = Roots::new([env.work_dir()]).unwrap();
+    let index_dir = env.index_dir();
+    let context = Context {
+        roots: &roots,
+        index_dir: &index_dir,
+    };
+    for tool in shipped() {
+        let name = tool.name();
+        let expected = match name {
+            "duscope_delete" => "clean".to_owned(),
+            other => other.strip_prefix("duscope_").unwrap().replace('_', "-"),
+        };
+        assert_eq!(tool.verb(), Some(expected.as_str()), "{name}");
+        // Where no argument is needed, the command line says the same.
+        if let Ok(invocation) = tool.invocation(&Map::new(), &context) {
+            assert_eq!(invocation.verb, expected, "{name}");
+        }
+    }
+}

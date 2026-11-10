@@ -23,6 +23,10 @@ impl Tool for Scans {
         include_str!("schemas/duscope_scans.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("scans")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

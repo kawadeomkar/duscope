@@ -25,6 +25,10 @@ impl Tool for Caches {
         include_str!("schemas/duscope_caches.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("caches")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

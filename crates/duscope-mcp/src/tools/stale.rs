@@ -25,6 +25,10 @@ impl Tool for Stale {
         include_str!("schemas/duscope_stale.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("stale")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

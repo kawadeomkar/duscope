@@ -29,6 +29,10 @@ impl Tool for Diff {
         include_str!("schemas/duscope_diff.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("diff")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

@@ -22,6 +22,10 @@ impl Tool for Summary {
         include_str!("schemas/duscope_summary.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("summary")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

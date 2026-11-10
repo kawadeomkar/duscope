@@ -23,7 +23,9 @@
 //!   `deadline_exceeded`, with `isError: true`, and its cancellation flag is
 //!   set, which stops a scan's walk within one directory per walk worker. A
 //!   verb that returns after its deadline has passed is answered the same
-//!   way. `duscope_query`'s statement has the sandbox's own 5-second
+//!   way. The clock starts before the call's arguments are checked, which
+//!   the call's thread does first: binding a path to the roots and finding a
+//!   saved scan read the file system. `duscope_query`'s statement has the sandbox's own 5-second
 //!   deadline, which its verb answers `sql_timeout`, as the command line
 //!   does; the 30 seconds stand behind it.
 //! - **Cancellation.** `notifications/cancelled` naming a queued call takes

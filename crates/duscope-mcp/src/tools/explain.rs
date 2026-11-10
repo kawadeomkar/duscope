@@ -26,6 +26,10 @@ impl Tool for Explain {
         include_str!("schemas/duscope_explain.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("explain")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

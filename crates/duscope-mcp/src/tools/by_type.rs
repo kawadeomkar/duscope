@@ -24,6 +24,10 @@ impl Tool for ByType {
         include_str!("schemas/duscope_by_type.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("by-type")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use duscope_core::query::Regex;
@@ -134,6 +135,13 @@ pub trait Tool: Send + Sync {
 
     /// The output schema, as JSON text, when the tool declares one.
     fn output_schema(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The verb its calls run, known before its arguments are checked: what
+    /// a call past its deadline tells the client to run in a terminal. `None`,
+    /// the default, names the binary alone.
+    fn verb(&self) -> Option<&'static str> {
         None
     }
 
@@ -342,15 +350,14 @@ impl Registry {
         prepared.result(prepared.run(runner, &CallSignals::default()))
     }
 
-    /// `tools/call`'s `params`, checked: the tool they name and the command
-    /// line its arguments make, or the refusal the call is answered with
-    /// before its verb runs. An unknown tool or malformed params are a
-    /// protocol error.
-    pub fn prepare(
-        &self,
-        params: Option<&Map<String, Value>>,
-        context: &Context<'_>,
-    ) -> Result<Prepared<'_>, RpcError> {
+    /// `tools/call`'s `params`, ready to run: the tool they name and its
+    /// arguments, which [`Prepared::run`] checks, under the call's deadline.
+    /// An unknown tool or malformed params are a protocol error.
+    pub fn prepare<'a>(
+        &'a self,
+        params: Option<&'a Map<String, Value>>,
+        context: &Context<'a>,
+    ) -> Result<Prepared<'a>, RpcError> {
         let params = params.ok_or_else(|| RpcError::invalid_params("tools/call needs params"))?;
         let name = params
             .get("name")
@@ -362,38 +369,44 @@ impl Registry {
                 name.escape_debug()
             ))
         })?;
-        let empty = Map::new();
         let arguments = match params.get("arguments") {
-            None | Some(Value::Null) => &empty,
-            Some(Value::Object(arguments)) => arguments,
+            None | Some(Value::Null) => None,
+            Some(Value::Object(arguments)) => Some(arguments),
             Some(_) => {
                 return Err(RpcError::invalid_params(
                     "tools/call's arguments must be an object",
                 ));
             }
         };
-        let invocation = entry
-            .schema
-            .check(name, arguments)
-            .and_then(|()| entry.tool.invocation(arguments, context));
         Ok(Prepared {
             tool: entry.tool.as_ref(),
-            invocation,
+            schema: &entry.schema,
+            arguments,
+            context: *context,
+            invocation: OnceLock::new(),
         })
     }
 }
 
-/// A `tools/call` checked against the registry, ready to run.
+/// A `tools/call` whose tool is known, ready to run: its arguments are
+/// checked on the call's own thread, under its deadline, since binding a
+/// path to the roots reads the file system and reading a saved scan's id
+/// opens the index files.
 pub struct Prepared<'a> {
     tool: &'a dyn Tool,
-    invocation: Result<Invocation, Refusal>,
+    schema: &'a Schema,
+    arguments: Option<&'a Map<String, Value>>,
+    context: Context<'a>,
+    /// The command line the arguments make, or the refusal they get, once
+    /// they have been checked.
+    invocation: OnceLock<Result<Invocation, Refusal>>,
 }
 
 impl fmt::Debug for Prepared<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Prepared")
             .field("tool", &self.tool.name())
-            .field("invocation", &self.invocation)
+            .field("invocation", &self.invocation.get())
             .finish()
     }
 }
@@ -405,22 +418,34 @@ impl Prepared<'_> {
     }
 
     /// The verb the call runs; `None` for a call refused before its verb
-    /// runs.
+    /// runs. While the arguments are still being checked, the verb the tool
+    /// says it runs.
     pub fn verb(&self) -> Option<&'static str> {
-        self.invocation
-            .as_ref()
-            .ok()
-            .map(|invocation| invocation.verb)
+        match self.invocation.get() {
+            Some(checked) => checked.as_ref().ok().map(|invocation| invocation.verb),
+            None => self.tool.verb(),
+        }
     }
 
     /// What the call's verb writes, run by `runner` for the call `call`
-    /// signals; or, for a call refused before its verb runs, the error
-    /// envelope the verb would have written.
+    /// signals, once its arguments pass; or, for a call refused before its
+    /// verb runs, the error envelope the verb would have written. A call
+    /// stopped while its arguments were checked still reaches its verb,
+    /// which finds it stopped.
     pub fn run(&self, runner: &dyn Runner, call: &CallSignals) -> Outcome {
-        match &self.invocation {
+        match self.invocation.get_or_init(|| self.check()) {
             Ok(invocation) => runner.run_call(invocation, call),
             Err(refusal) => runner.refuse(refusal),
         }
+    }
+
+    /// The command line the arguments make, or why they are refused.
+    fn check(&self) -> Result<Invocation, Refusal> {
+        let none = Map::new();
+        let arguments = self.arguments.unwrap_or(&none);
+        self.schema
+            .check(self.tool.name(), arguments)
+            .and_then(|()| self.tool.invocation(arguments, &self.context))
     }
 
     /// The call's result, from what its verb wrote.

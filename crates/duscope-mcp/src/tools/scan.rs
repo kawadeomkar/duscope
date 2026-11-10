@@ -29,6 +29,10 @@ impl Tool for Scan {
         include_str!("schemas/duscope_scan.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("scan")
+    }
+
     fn annotations(&self) -> Annotations {
         // Each call writes a new index, unless max_age finds one.
         Annotations {

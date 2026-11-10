@@ -1436,7 +1436,8 @@ fn p3_mcp_08_under_unwinding_a_panicked_verb_is_answered_and_the_server_goes_on(
     );
 }
 
-// P5-SEC-05: the queue's limits.
+// P5-SEC-05: the queue's limits, and the deadline over a call's argument
+// checks.
 
 /// The busy error, as every refused request carries it.
 fn assert_busy(message: &Value, id: u64) {
@@ -1700,5 +1701,154 @@ fn p5_sec_05_a_request_the_worker_takes_at_once_is_never_busy() {
     let answered = client.next();
     assert_eq!(answered["id"], 1);
     assert_eq!(answered["result"]["isError"], true, "{answered}");
+    assert!(client.close().is_empty());
+}
+
+/// A tool whose argument checks wait for a latch, as binding a path to the
+/// roots waits on a slow file system.
+struct SlowChecks {
+    latch: Arc<Latch>,
+    runner: TestRunner,
+}
+
+impl Tool for SlowChecks {
+    fn name(&self) -> &'static str {
+        "test_slow_checks"
+    }
+
+    fn description(&self) -> &'static str {
+        "A tool whose checks wait (a test fixture)."
+    }
+
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"label":{"type":"string"}},"additionalProperties":false}"#
+    }
+
+    fn annotations(&self) -> Annotations {
+        Annotations {
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+        }
+    }
+
+    fn invocation(&self, _: &Map<String, Value>, _: &Context<'_>) -> Result<Invocation, Refusal> {
+        self.runner.note("checking".to_owned());
+        self.latch.wait(|| false);
+        self.runner.note("checked".to_owned());
+        Ok(Invocation {
+            verb: "echo",
+            args: vec!["slow".into()],
+        })
+    }
+
+    fn summary(&self, _: &Value) -> String {
+        "ran".to_owned()
+    }
+}
+
+#[test]
+fn p5_sec_05_the_deadline_covers_the_argument_checks() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let latch = Arc::new(Latch::default());
+    let mut tools = fake_tools(&env, &runner);
+    tools
+        .registry
+        .register(Box::new(SlowChecks {
+            latch: Arc::clone(&latch),
+            runner: runner.clone(),
+        }))
+        .unwrap();
+    let server = Server::new(ServerConfig::new(PLACEHOLDER_INSTRUCTIONS))
+        .with_tools(tools)
+        .with_timing(Timing {
+            progress_every: Duration::from_millis(20),
+            deadline: Some(Duration::from_millis(50)),
+        });
+    let mut client = Client::start(server);
+    client.send(&request(
+        1,
+        "tools/call",
+        &json!({"name": "test_slow_checks", "arguments": {}}),
+    ));
+    runner.wait_for("checking");
+    // Answered while its checks still wait.
+    let answered = client.next();
+    assert_eq!(answered["id"], 1);
+    assert_eq!(answered["result"]["isError"], true, "{answered}");
+    let error = &answered["result"]["structuredContent"]["error"];
+    assert_eq!(error["code"], "deadline_exceeded", "{answered}");
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap()
+            .contains("run duscope in a terminal"),
+        "the verb is not known yet: {answered}"
+    );
+    assert_eq!(runner.log(), ["checking"], "the checks are still running");
+    // The next call waits for them, and the stopped call's verb finds it
+    // stopped.
+    client.send(&call(2, "test_echo", "second"));
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(runner.log(), ["checking"], "the second call waits");
+    latch.open();
+    runner.wait_for("end second");
+    assert_eq!(
+        runner.log(),
+        [
+            "checking",
+            "checked",
+            "start slow",
+            "stopped slow",
+            "start second",
+            "end second"
+        ]
+    );
+    assert_eq!(client.next()["id"], 2);
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_sec_05_a_call_cancelled_during_its_checks_finds_it_stopped_and_gets_no_answer() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let latch = Arc::new(Latch::default());
+    let mut tools = fake_tools(&env, &runner);
+    tools
+        .registry
+        .register(Box::new(SlowChecks {
+            latch: Arc::clone(&latch),
+            runner: runner.clone(),
+        }))
+        .unwrap();
+    let server = Server::new(ServerConfig::new(PLACEHOLDER_INSTRUCTIONS))
+        .with_tools(tools)
+        .with_timing(quick());
+    let mut client = Client::start(server);
+    client.send(&request(
+        1,
+        "tools/call",
+        &json!({"name": "test_slow_checks", "arguments": {}}),
+    ));
+    runner.wait_for("checking");
+    client.send(&cancel(1));
+    client.send(&request(9, "ping", &json!({})));
+    assert_eq!(client.ids(1), [9]);
+    latch.open();
+    runner.wait_for("checked");
+    client.send(&call(2, "test_echo", "second"));
+    assert_eq!(client.ids(1), [2], "the cancelled call is not answered");
+    assert_eq!(
+        runner.log(),
+        [
+            "checking",
+            "checked",
+            "start slow",
+            "stopped slow",
+            "start second",
+            "end second"
+        ]
+    );
     assert!(client.close().is_empty());
 }
