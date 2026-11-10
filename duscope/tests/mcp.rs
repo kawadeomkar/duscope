@@ -1946,11 +1946,88 @@ fn p3_mcp_09_a_configuration_that_cannot_be_used_stops_the_server_at_start() {
     assert!(served.lines.is_empty(), "{:?}", served.lines);
 }
 
+/// With neither `--index-dir` nor `DUSCOPE_INDEX_DIR`, the server reads and
+/// saves in the directory the configuration names, which lies under the
+/// test's own work directory. The test environment sets the variable for
+/// every command, so this command removes it, as
+/// `p2_idx_02_the_index_dir_is_the_flag_then_the_variable_then_the_file` does.
+#[test]
+fn p3_mcp_09_the_server_reports_and_uses_the_configured_index_directory() {
+    let env = TestEnv::new();
+    let root = small_tree(&env).join("root");
+    let configured = env.work_dir().join("configured");
+    let file = configuration(
+        &env,
+        &format!("[defaults]\nindex_dir = \"{}\"\n", configured.display()),
+    );
+    // A scan already saved there, which the server must report.
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&root)
+        .args(["--save", "--json", "--index-dir"])
+        .arg(&configured)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let saved: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let saved = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let mut child = env
+        .cmd()
+        .arg("mcp")
+        .args(roots(&[&root]))
+        .args(config_flag(&file))
+        .env_remove("DUSCOPE_INDEX_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for message in [
+        call(1, "duscope_scans", &json!({})),
+        call(2, "duscope_scan", &json!({"root": root})),
+        call(3, "duscope_scans", &json!({})),
+    ] {
+        writeln!(stdin, "{message}").unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    let served = Served {
+        lines: String::from_utf8(output.stdout.clone())
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        output,
+    };
+    assert_eq!(served.output.status.code(), Some(0), "{}", served.stderr);
+    assert_eq!(
+        listed_ids(&served.result(1)["structuredContent"]),
+        [saved.as_str()],
+        "{}",
+        served.stderr
+    );
+    let scanned = served.result(2);
+    assert_eq!(scanned["isError"], false, "{scanned}");
+    let id = scanned["structuredContent"]["scan"]["id"].as_str().unwrap();
+    assert_eq!(
+        listed_ids(&served.result(3)["structuredContent"]),
+        sorted(&[saved.as_str(), id])
+    );
+    assert_eq!(saved_in(&configured), 2);
+    // Neither the variable's directory nor the default was written to.
+    assert!(saved_ids(&env).is_empty());
+    assert_eq!(saved_in(&env.xdg_cache_home().join("duscope")), 0);
+}
+
 /// The configuration's `index_dir` comes after `--index-dir` and
-/// `DUSCOPE_INDEX_DIR`. The test environment sets the variable for every
-/// command and offers no way to leave it unset, so the case of neither,
-/// where the server uses the configuration's directory, is the unit test
-/// `p3_mcp_09_the_configured_index_directory_comes_after_the_flag_and_the_variable`.
+/// `DUSCOPE_INDEX_DIR`.
 #[test]
 fn p3_mcp_09_the_flag_and_the_variable_come_before_the_configured_index_directory() {
     let env = TestEnv::new();
