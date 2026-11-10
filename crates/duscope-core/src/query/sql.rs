@@ -51,8 +51,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// `--timeout`'s ceiling.
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The memory `SQLite` may hold while the statement runs, sorts and
-/// temporary tables included.
+/// The memory `SQLite` may hold, sorts and temporary tables included, from
+/// the first statement on: the limit is the process's and outlives the
+/// statement (see [`sandbox`]).
 const HEAP_LIMIT: i64 = 256 << 20;
 
 /// The bytes of values an answer may hold: rows times columns times
@@ -343,7 +344,16 @@ fn sandbox(index: &Index) -> Result<(Connection, Reader), CoreError> {
         db.set_limit(limit, value).map_err(|e| setup(index, &e))?;
     }
     // Before the authorizer, which denies every PRAGMA. The heap limit is
-    // the process's: a pragma lowers it and never raises it.
+    // the process's: a pragma lowers it and never raises it, and nothing
+    // raises it again, so it outlives this statement and holds every later
+    // use of SQLite in the process to 256 MiB. In `duscope mcp`, a long-lived
+    // process, that is every `duscope_scan` save after the first
+    // `duscope_query`: a 1M-entry save after a query succeeded when run.
+    // What is to keep a larger save under it is P2-IDX-07, which takes most
+    // of the writer's SQLite memory away (its 64 MiB page cache, and the
+    // temporary storage it keeps in memory); until that has merged, a save of
+    // several million files after a query may fail for want of memory.
+    // Raising the limit again would need `unsafe`, which this crate forbids.
     db.execute_batch(&format!(
         "PRAGMA temp_store = MEMORY; PRAGMA hard_heap_limit = {HEAP_LIMIT};"
     ))

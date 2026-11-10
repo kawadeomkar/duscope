@@ -22,6 +22,9 @@
 //! two seconds), the deadline (`DUSCOPE_TEST_MCP_DEADLINE_MS`), a cancelled
 //! call, and the scans a client that died had queued.
 //!
+//! P3-MCP-09: a failed save through `duscope_scan`, and the index directory
+//! and the configuration file the server reads.
+//!
 //! P3-MCP-08: a verb that panics (`DUSCOPE_TEST_MCP_TOOLS=panic` adds the
 //! fixture tool `test_panic`), under `DUSCOPE_TEST_PANIC=abort`, which ends
 //! the process after the panic hook as the release build's abort does;
@@ -1823,4 +1826,173 @@ fn p3_mcp_08_where_panics_unwind_the_server_answers_and_goes_on() {
         "{}",
         served.stderr
     );
+}
+
+// P3-MCP-09.
+
+#[test]
+fn p3_mcp_09_a_failed_save_is_index_write_failed_and_no_scan_is_listed() {
+    let env = TestEnv::new();
+    let root = small_tree(&env).join("root");
+    // The index directory's scans/ is a regular file: no scan can be saved.
+    std::fs::write(env.index_dir().join("scans"), b"").unwrap();
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[
+            call(1, "duscope_scan", &json!({"root": root})),
+            call(2, "duscope_scans", &json!({})),
+        ],
+    );
+    assert_eq!(served.output.status.code(), Some(0), "{}", served.stderr);
+    let result = served.result(1);
+    assert_eq!(result["isError"], true, "{result}");
+    let envelope = &result["structuredContent"];
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert!(envelope.get("scan").is_none(), "a scan id in {envelope}");
+    let error = &envelope["error"];
+    assert_eq!(error["code"], "index_write_failed", "{envelope}");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.starts_with("cannot write the index"), "{message}");
+    let hint = error["hint"].as_str().unwrap();
+    assert_eq!(result["content"][0]["text"], format!("{message}. {hint}"));
+    // The envelope is the error alone: one JSON value, as the verb wrote it.
+    assert_eq!(
+        serde_json::from_str::<Value>(structured_content(served.line(1))).unwrap(),
+        *envelope
+    );
+    assert_eq!(served.result(2)["structuredContent"]["entries"], json!([]));
+
+    // The command line keeps its behaviour (DEV-75): the envelope it has
+    // printed stands, and the failure goes to stderr with exit 1.
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&root)
+        .args(["--save", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let printed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(printed["ok"], true);
+    assert!(printed["scan"]["id"].is_string());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot write the index"), "{stderr}");
+    assert!(stderr.contains(hint), "{stderr}");
+}
+
+/// A configuration file under the work directory naming `index_dir`.
+fn configuration(env: &TestEnv, text: &str) -> PathBuf {
+    let file = env.work_dir().join("duscope.toml");
+    std::fs::write(&file, text).unwrap();
+    file
+}
+
+fn config_flag(file: &Path) -> Vec<OsString> {
+    vec!["--config".into(), file.as_os_str().to_owned()]
+}
+
+/// The `.db` files directly under `dir/scans`.
+fn saved_in(dir: &Path) -> usize {
+    std::fs::read_dir(dir.join("scans")).map_or(0, |entries| {
+        entries
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|e| e.path().extension().is_some_and(|x| x == "db"))
+            })
+            .count()
+    })
+}
+
+#[test]
+fn p3_mcp_09_a_configuration_that_cannot_be_used_stops_the_server_at_start() {
+    let env = TestEnv::new();
+    let root = small_tree(&env).join("root");
+    for (text, why) in [
+        ("[defaults]\nindex_dir = 7\n", "a value of the wrong type"),
+        ("[defaults]\nindex_directory = \"x\"\n", "an unknown key"),
+    ] {
+        let file = configuration(&env, text);
+        let served = serve(
+            &env,
+            &[roots(&[&root]), config_flag(&file)].concat(),
+            &[request(1, "tools/list", &json!({}))],
+        );
+        assert_eq!(
+            served.output.status.code(),
+            Some(2),
+            "{why}: {}",
+            served.stderr
+        );
+        assert!(served.lines.is_empty(), "{why}: {:?}", served.lines);
+        assert!(
+            served.stderr.contains("duscope.toml"),
+            "{why}: {}",
+            served.stderr
+        );
+    }
+    // A file --config names that is not there.
+    let served = serve(
+        &env,
+        &[
+            roots(&[&root]),
+            config_flag(&env.work_dir().join("nowhere.toml")),
+        ]
+        .concat(),
+        &[request(1, "tools/list", &json!({}))],
+    );
+    assert_eq!(served.output.status.code(), Some(2), "{}", served.stderr);
+    assert!(served.lines.is_empty(), "{:?}", served.lines);
+}
+
+/// The configuration's `index_dir` comes after `--index-dir` and
+/// `DUSCOPE_INDEX_DIR`. The test environment sets the variable for every
+/// command and offers no way to leave it unset, so the case of neither,
+/// where the server uses the configuration's directory, is the unit test
+/// `p3_mcp_09_the_configured_index_directory_comes_after_the_flag_and_the_variable`.
+#[test]
+fn p3_mcp_09_the_flag_and_the_variable_come_before_the_configured_index_directory() {
+    let env = TestEnv::new();
+    let root = small_tree(&env).join("root");
+    let configured = env.work_dir().join("configured");
+    let file = configuration(
+        &env,
+        &format!("[defaults]\nindex_dir = \"{}\"\n", configured.display()),
+    );
+    let scan = [
+        call(1, "duscope_scan", &json!({"root": root})),
+        call(2, "duscope_scans", &json!({})),
+    ];
+    // DUSCOPE_INDEX_DIR, which the test environment sets.
+    let served = serve(&env, &[roots(&[&root]), config_flag(&file)].concat(), &scan);
+    let id = served.result(1)["structuredContent"]["scan"]["id"].clone();
+    assert!(id.is_string(), "{}", served.result(1));
+    assert_eq!(saved_ids(&env), [id.as_str().unwrap()]);
+    assert_eq!(
+        served.result(2)["structuredContent"]["entries"][0]["id"],
+        id
+    );
+    assert_eq!(saved_in(&configured), 0);
+    // --index-dir, before both.
+    let flagged = env.work_dir().join("flagged");
+    let served = serve(
+        &env,
+        &[
+            roots(&[&root]),
+            config_flag(&file),
+            vec!["--index-dir".into(), flagged.clone().into()],
+        ]
+        .concat(),
+        &scan,
+    );
+    let listed = &served.result(2)["structuredContent"]["entries"];
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(
+        listed[0]["id"],
+        served.result(1)["structuredContent"]["scan"]["id"]
+    );
+    assert_eq!(saved_in(&flagged), 1);
+    assert_eq!(saved_in(&configured), 0);
+    assert_eq!(saved_ids(&env).len(), 1);
 }
