@@ -666,6 +666,99 @@ fn p4_tui_05_tab_focuses_the_panes_and_the_arrows_act_in_them() {
     assert_eq!(press(&mut folded_app, &mut folded, &tab), Flow::Wait);
 }
 
+/// The legend's rows of `buf` from row `top` on, in the right column of a
+/// 120-column screen, that carry the `▸` marker.
+fn legend_marked(buf: &Buffer, top: u16) -> Vec<String> {
+    (top..buf.area.height - 1)
+        .map(|y| row(buf, y).chars().skip(85).collect::<String>())
+        .filter(|r| r.contains('▸'))
+        .collect()
+}
+
+#[test]
+fn p4_tui_05_with_the_facts_over_the_legend_the_keys_act_on_the_map() {
+    let tree = mockup();
+    let view = mockup_view(&tree);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = viewer(&view, &mocha, &classes);
+    let mut terminal = first_frame(&app, 120, 40);
+    let keys = |t: &Terminal<TestBackend>| row(t.backend().buffer(), 39);
+    let tab = key(KeyCode::Tab);
+    press(&mut app, &mut terminal, &tab);
+    press(&mut app, &mut terminal, &tab);
+    assert!(keys(&terminal).contains("⏎ filter"), "{}", keys(&terminal));
+    // `i` covers the siblings and the legend: the key line is the map's,
+    // and neither `⏎ filter` nor `⇥ pane` is offered where they do nothing.
+    assert_eq!(press(&mut app, &mut terminal, &char('i')), Flow::Redraw);
+    let line = keys(&terminal);
+    assert!(line.contains("⌫ up   z zoom"), "{line}");
+    assert!(!line.contains("filter") && !line.contains("pane"), "{line}");
+    assert_eq!(press(&mut app, &mut terminal, &tab), Flow::Wait);
+    // The arrows and ⏎ act on the map, not on the legend hidden under the
+    // facts: no filter is set.
+    press(&mut app, &mut terminal, &key(KeyCode::Down));
+    press(&mut app, &mut terminal, &key(KeyCode::Enter));
+    assert_eq!(app.filter, None);
+    assert!(!row(terminal.backend().buffer(), 2).contains("filter"));
+    // Closing the facts brings the legend back, and the focus with it, on
+    // the row it was on.
+    assert_eq!(press(&mut app, &mut terminal, &char('i')), Flow::Redraw);
+    assert!(keys(&terminal).contains("⏎ filter"), "{}", keys(&terminal));
+    let buf = terminal.backend().buffer();
+    let marked = legend_marked(buf, 29);
+    assert_eq!(marked.len(), 1, "{marked:?}");
+    assert!(
+        row(buf, 30)
+            .chars()
+            .skip(85)
+            .collect::<String>()
+            .contains('▸'),
+        "the first row: {marked:?}"
+    );
+}
+
+#[test]
+fn p4_tui_05_enter_in_a_legend_a_resize_shortened_filters_by_a_row_it_lists() {
+    let tree = mockup();
+    let view = mockup_view(&tree);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = viewer(&view, &mocha, &classes);
+    let mut terminal = first_frame(&app, 120, 40);
+    let tab = key(KeyCode::Tab);
+    press(&mut app, &mut terminal, &tab);
+    press(&mut app, &mut terminal, &tab);
+    for _ in 0..3 {
+        assert_eq!(
+            press(&mut app, &mut terminal, &key(KeyCode::Down)),
+            Flow::Redraw
+        );
+    }
+    // 24 rows leave the legend two rows and `… n more`: the marker is on
+    // the last row it lists, and ⏎ filters by that row.
+    let mut terminal = first_frame(&app, 120, 24);
+    let buf = terminal.backend().buffer();
+    let text = text_of(buf);
+    let marked = legend_marked(buf, 18);
+    assert_eq!(marked.len(), 1, "{text}");
+    assert!(text.contains("more"), "{text}");
+    let label = marked[0]
+        .split('■')
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap()
+        .trim_end_matches('…')
+        .to_owned();
+    assert_eq!(
+        press(&mut app, &mut terminal, &key(KeyCode::Enter)),
+        Flow::Redraw
+    );
+    let title = row(terminal.backend().buffer(), 2);
+    assert!(
+        title.contains(&format!("filter: type: {label}")),
+        "{label}: {title}"
+    );
+}
+
 #[test]
 fn p4_tui_05_question_mark_lists_exactly_the_bindings_in_the_key_map() {
     let tree = mockup();

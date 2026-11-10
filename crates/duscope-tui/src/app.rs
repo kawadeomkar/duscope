@@ -498,10 +498,11 @@ impl<'a> App<'a> {
         matches!(layout(w, h).panes, Panes::Column { .. })
     }
 
-    /// The pane the keys act in: the focus, unless the layout folded the
-    /// siblings and the legend away.
+    /// The pane the keys act in: the focus, unless the siblings and the
+    /// legend are not drawn, the layout folding them away or the facts
+    /// covering them; it comes back with them.
     fn focus(&self) -> Focus {
-        if self.has_column() {
+        if self.has_column() && !self.facts_open {
             self.focus
         } else {
             Focus::Map
@@ -710,7 +711,7 @@ impl<'a> App<'a> {
                     self.legend.0,
                     &self.legend.1,
                     total,
-                    (focus == Focus::Legend).then_some(self.legend_at),
+                    (focus == Focus::Legend).then_some(self.legend_row()),
                 );
             }
             Panes::Folded { selected } => {
@@ -1059,9 +1060,18 @@ impl<'a> App<'a> {
         }
     }
 
-    /// `⏎` in the legend: the map keeps that row's files.
+    /// The legend row the cursor is on, among the rows the legend lists at
+    /// the last frame's size: the last of them where a resize shortened it.
+    fn legend_row(&self) -> usize {
+        self.legend_at.min(self.legend_shown().saturating_sub(1))
+    }
+
+    /// `⏎` in the legend: the map keeps that row's files, a row it lists.
     fn filter_legend(&mut self) -> Flow {
-        let Some(row) = self.legend.1.get(self.legend_at) else {
+        if self.legend_shown() == 0 {
+            return Flow::Wait;
+        }
+        let Some(row) = self.legend.1.get(self.legend_row()) else {
             return Flow::Wait;
         };
         let word = color_word(&self.opts.color_by);
