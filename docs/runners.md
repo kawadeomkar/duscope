@@ -157,6 +157,18 @@ in 2,700). No abort in 8,000 scans puts the build's rate below 1 in 2,700 (95%),
 under that whole interval, which points at the host. Any abort on a hosted
 runner is a bug in the build, and reopens the allocator decision (DEV-47).
 
+A hosted runner has 4 CPUs against bench-linux's 10, so its scans start 8 threads
+where bench-linux's started 20 (twice the logical CPUs), and a clean run is strong
+evidence for the host, not proof. The `threads` input, blank by default, passes
+`--threads N` to every scan and adds it to each `count.txt` line, so a second
+dispatch can start as many as bench-linux did:
+
+```sh
+gh workflow run musl-loop.yml --repo kawadeomkar/duscope --ref <branch> -f threads=20
+```
+
+That matches the number of threads, not how many run at once: at most 4 do.
+
 ## Setting up a runner
 
 Each step is done once per machine, in this order. The commands for the Mac and

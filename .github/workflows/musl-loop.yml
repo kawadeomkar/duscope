@@ -27,6 +27,9 @@ on:
       scale:
         description: "T2's bench/run.sh --scale"
         default: "1"
+      threads:
+        description: "each scan's --threads; blank is the default, twice the CPUs (bench-linux ran 20)"
+        default: ""
 
 permissions:
   contents: read
@@ -87,10 +90,12 @@ jobs:
         run: bench/run.sh build --trees T2 --scale "$SCALE" --trees-dir "$RUNNER_TEMP/trees"
       # The harness's command line (bench/tools.py), warm: the tree was just
       # written, and every scan counts. A scan still running after 10 minutes
-      # is stopped and counted as failed (124).
+      # is stopped and counted as failed (124). `threads`, when set, adds
+      # --threads N where the harness's thread sweep writes it.
       - name: Scan T2 again and again
         env:
           RUNS: ${{ inputs.runs }}
+          THREADS: ${{ inputs.threads }}
           SHARD: ${{ strategy.job-index }}
           SHARDS: ${{ strategy.job-total }}
           DUSCOPE: target/repro/x86_64-unknown-linux-musl/release/duscope
@@ -98,6 +103,7 @@ jobs:
           OUT: ${{ runner.temp }}/musl-loop
         run: |
           [[ $RUNS =~ ^[1-9][0-9]*$ ]] || { echo "::error title=musl-loop::runs is not a whole number above 0: $RUNS"; exit 1; }
+          [[ -z $THREADS || $THREADS =~ ^[1-9][0-9]*$ ]] || { echo "::error title=musl-loop::threads is not blank or a whole number above 0: $THREADS"; exit 1; }
           shopt -s nullglob
           trees=("$TREES"/T2*/)
           if (( ${#trees[@]} != 1 )); then
@@ -113,7 +119,7 @@ jobs:
           failed=0
           for (( run = 1; run <= runs; run++ )); do
             status=0
-            timeout 600 "$DUSCOPE" scan --json --treemap never "$tree" > /dev/null 2> "$OUT/stderr" || status=$?
+            timeout 600 "$DUSCOPE" scan --json --treemap never ${THREADS:+--threads "$THREADS"} "$tree" > /dev/null 2> "$OUT/stderr" || status=$?
             echo "$run $status" >> "$OUT/exit-codes.txt"
             if (( status == 0 )); then continue; fi
             failed=$(( failed + 1 ))
@@ -130,7 +136,7 @@ jobs:
             echo "::error title=musl-loop::shard $(( SHARD + 1 )) of $SHARDS, run $run: $how (its stderr is in the artifact)"
           done
           rm -f "$OUT/stderr"
-          echo "shard $(( SHARD + 1 )) of $SHARDS: $runs scans of $RUNS, $failed failed" | tee "$OUT/count.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "shard $(( SHARD + 1 )) of $SHARDS: $runs scans of $RUNS, $failed failed${THREADS:+ (--threads $THREADS)}" | tee "$OUT/count.txt" | tee -a "$GITHUB_STEP_SUMMARY"
           (( failed == 0 ))
       # Kept on a failure and a timeout too: the exit codes so far are the count.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

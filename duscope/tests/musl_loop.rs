@@ -173,7 +173,7 @@ fn p5_bench_02_the_musl_loop_runs_on_a_dispatch_alone_and_gates_no_merge() {
             "musl-loop.yml is triggered by {event}"
         );
     }
-    // The two inputs and their defaults.
+    // The inputs and their defaults.
     let input = |name: &str| -> Vec<String> {
         on.iter()
             .skip_while(|line| line.trim_end() != format!("      {name}:"))
@@ -188,6 +188,10 @@ fn p5_bench_02_the_musl_loop_runs_on_a_dispatch_alone_and_gates_no_merge() {
     );
     assert!(
         input("scale").contains(&"default: \"1\"".to_owned()),
+        "{on:?}"
+    );
+    assert!(
+        input("threads").contains(&"default: \"\"".to_owned()),
         "{on:?}"
     );
     // One run at a time, never cancelled by the next.
@@ -306,7 +310,9 @@ fn p5_bench_02_each_shard_builds_the_musl_target_and_scans_t2_as_the_harness_doe
             .contains(r#"("duscope", "scan", "--json", "--treemap", "never", "{tree}")"#)
     );
     assert!(
-        scan.contains(r#""$DUSCOPE" scan --json --treemap never "$tree""#),
+        scan.contains(
+            r#""$DUSCOPE" scan --json --treemap never ${THREADS:+--threads "$THREADS"} "$tree""#
+        ),
         "{scan}"
     );
     // Each shard's files are kept after a failure or a timeout too.
@@ -352,6 +358,7 @@ type Case<'a> = ((&'a str, u32, u32, &'a str), (u32, bool, &'a str));
 fn run_loop(
     script: &str,
     (runs, shards, shard, fail): (&str, u32, u32, &str),
+    threads: &str,
 ) -> (tempfile::TempDir, std::process::Output) {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
@@ -377,6 +384,7 @@ fn run_loop(
         .env("PATH", std::env::join_paths(search).unwrap())
         .env("STUB_DIR", dir)
         .env("RUNS", runs)
+        .env("THREADS", threads)
         .env("SHARD", shard.to_string())
         .env("SHARDS", shards.to_string())
         .env("DUSCOPE", bin.join("duscope"))
@@ -416,7 +424,7 @@ fn p5_bench_02_the_loop_runs_every_scan_and_fails_on_any_that_exits_non_zero() {
     ];
     for &(input, (scans, succeeds, failures)) in cases {
         let (runs, shards, shard, fail) = input;
-        let (temp, out) = run_loop(&script, input);
+        let (temp, out) = run_loop(&script, input, "");
         let dir = temp.path();
         let case = format!("{runs} runs, shard {shard} of {shards}");
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -477,5 +485,39 @@ fn p5_bench_02_the_loop_runs_every_scan_and_fails_on_any_that_exits_non_zero() {
             count
         );
         assert_eq!(fs::read_to_string(dir.join("summary")).unwrap(), count);
+    }
+}
+
+/// P5-BENCH-02: the `threads` input, left blank by the test above, where the
+/// command line is the harness's as it stands. A number adds `--threads N`
+/// before the tree, as the harness's thread sweep writes it, and the count
+/// says so, since two dispatches' artifacts must be told apart; anything else
+/// is refused before any scan.
+#[test]
+fn p5_bench_02_the_threads_input_reaches_every_scan_and_a_bad_one_none() {
+    let jobs = jobs(&read(WORKFLOW));
+    let script = jobs[0].step_script("Scan T2 again and again");
+    let (temp, out) = run_loop(&script, ("2", 1, 0, ""), "20");
+    let dir = temp.path();
+    assert!(out.status.success(), "{out:?}");
+    let command = format!(
+        "scan --json --treemap never --threads 20 {}",
+        dir.join("trees/T2-x0.01").display()
+    );
+    let args = fs::read_to_string(dir.join("args")).unwrap();
+    assert_eq!(args, format!("{command}\n{command}\n"));
+    assert_eq!(
+        fs::read_to_string(dir.join("out/count.txt")).unwrap(),
+        "shard 1 of 1: 2 scans of 2, 0 failed (--threads 20)\n"
+    );
+    for threads in ["0", "lots", "20 --json"] {
+        let (temp, out) = run_loop(&script, ("2", 1, 0, ""), threads);
+        assert!(!out.status.success(), "{threads}: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout)
+                .contains("::error title=musl-loop::threads is not blank"),
+            "{threads}: {out:?}"
+        );
+        assert!(!temp.path().join("args").exists(), "{threads}");
     }
 }
