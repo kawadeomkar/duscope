@@ -125,7 +125,8 @@ pub enum Ended {
 
 /// What the viewer keeps across a reload, the view it ran on gone: the
 /// view, the sort, the mask, the colours and the cursor as paths, the marks
-/// that still exist. What is freed goes: the new scan measures it.
+/// as absolute paths, each kept only where the new scan holds the same
+/// path. What is freed goes: the new scan measures it.
 #[derive(Debug)]
 pub struct Carried {
     tab: Tab,
@@ -141,6 +142,7 @@ pub struct Carried {
     color_by: ColorBy,
     pack: String,
     cursor: crate::cursor::CursorPaths,
+    /// The marks, absolute.
     marks: Vec<Vec<u8>>,
     session: Session,
 }
@@ -500,7 +502,8 @@ impl<'a> App<'a> {
 
     /// Takes over what the previous viewer kept: the cursor goes to the
     /// same paths where they still exist and the nearest folder where not,
-    /// the marks to the paths still there, and the maps paint again.
+    /// each mark to the entry at its absolute path or nowhere (the notice
+    /// says how many were dropped), and the maps paint again.
     pub fn restore(&mut self, carried: Carried) {
         self.tab = carried.tab;
         self.focus = carried.focus;
@@ -518,17 +521,23 @@ impl<'a> App<'a> {
         self.session = carried.session;
         self.cursor.set_labels(self.labels);
         self.cursor.restore(self.view, &carried.cursor);
-        self.marks.set(
-            carried
-                .marks
-                .iter()
-                .filter_map(|path| crate::cursor::lookup(self.view, path)),
-        );
+        let dropped = self.marks.restore(self.view, &carried.marks);
         self.repaint();
         self.legend_at = carried.legend_at.min(self.legend.1.len().saturating_sub(1));
-        self.notice = Some(Message {
-            text: "rescanned".to_owned(),
-            kind: Notice::Success,
+        self.notice = Some(if dropped == 0 {
+            Message {
+                text: "rescanned".to_owned(),
+                kind: Notice::Success,
+            }
+        } else {
+            Message {
+                text: format!(
+                    "rescanned · {} mark{} dropped: not in the new scan",
+                    thousands(dropped as u64),
+                    if dropped == 1 { "" } else { "s" }
+                ),
+                kind: Notice::Warning,
+            }
         });
     }
 

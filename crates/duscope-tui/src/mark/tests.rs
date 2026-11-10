@@ -570,14 +570,92 @@ fn p4_tui_06_a_reload_keeps_the_view_the_cursor_and_the_marks_by_path() {
     let keep = id_of(&new_view, "keep");
     assert_eq!(app.selected(), keep);
     assert_eq!(app.zoom_root(), keep);
-    // The mark on what is gone is gone with it; the other is kept.
+    // The mark on what is gone is gone with it, and the notice counts it;
+    // the other is kept.
     assert_eq!(app.marked_ids(), [id_of(&new_view, "f.bin")]);
     let text = text_of(terminal.backend().buffer());
-    assert!(text.contains("rescanned"), "{text}");
+    assert!(
+        text.contains("rescanned · 1 mark dropped: not in the new scan"),
+        "{text}"
+    );
     assert!(text.contains("by name"), "{text}");
     // What the reload forgot: the freed tiles (a new App has none) and the
     // answer.
     assert_eq!(press(&mut app, &mut terminal, &char('x')), Flow::Redraw);
+}
+
+#[test]
+fn p4_tui_06_a_reload_rooted_elsewhere_never_moves_a_mark_onto_another_entry() {
+    let f = |name: &str, kib: u64| {
+        format!(r#"{{"name":"{name}","asize":{0},"dsize":{0}}}"#, kib * 1024)
+    };
+    let d = |name: &str, kids: String| format!(r#",[{{"name":"{name}"}},{kids}]"#);
+    // The viewer on `/r/proj`, a folder of the saved scan of `/r`, with
+    // `build` marked: `/r/proj/build`.
+    let old = tree_at(
+        "/r/proj",
+        &format!(
+            "{}{}",
+            d("build", f("x.bin", 80)),
+            format_args!(",{}", f("main.rs", 4))
+        ),
+    );
+    let old_view = ArenaView::new(&old.0, &old.1, PathBuf::from("/r/proj"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = viewer(&old_view, &mocha, &classes);
+    let mut marked = Marks::default();
+    marked.toggle(&old_view, id_of(&old_view, "build"));
+    app.set_marks(marked);
+    let carried = app.carry();
+
+    // `proj` has gone, and the rescan's viewer falls back to the scan's
+    // root, `/r`, which has a `build` of its own: `/r/build` is another
+    // folder, and the mark does not land on it.
+    let new = tree_at(
+        "/r",
+        &format!(
+            "{}{}",
+            d("build", f("y.bin", 90)),
+            format_args!(",{}", f("other.bin", 10))
+        ),
+    );
+    let new_view = ArenaView::new(&new.0, &new.1, PathBuf::from("/r"));
+    let mut app = viewer(&new_view, &mocha, &classes);
+    app.restore(carried);
+    assert!(app.marked_ids().is_empty(), "{:?}", app.marked_ids());
+    let terminal = first_frame(&app, 120, 40);
+    let text = text_of(terminal.backend().buffer());
+    assert!(
+        text.contains("rescanned · 1 mark dropped: not in the new scan"),
+        "{text}"
+    );
+
+    // Where the new scan still holds `/r/proj/build`, under a root above
+    // the old one, the mark lands on it: the same path, not the same
+    // relative one.
+    let mut app = viewer(&old_view, &mocha, &classes);
+    let mut marked = Marks::default();
+    marked.toggle(&old_view, id_of(&old_view, "build"));
+    app.set_marks(marked);
+    let carried = app.carry();
+    let kept = tree_at(
+        "/r",
+        &format!(
+            "{}{}",
+            d("build", f("y.bin", 90)),
+            d(
+                "proj",
+                format!("[{{\"name\":\"build\"}},{}]", f("x.bin", 80))
+            )
+        ),
+    );
+    let kept_view = ArenaView::new(&kept.0, &kept.1, PathBuf::from("/r"));
+    let mut app = viewer(&kept_view, &mocha, &classes);
+    app.restore(carried);
+    assert_eq!(app.marked_ids(), [id_of(&kept_view, "proj/build")]);
+    let terminal = first_frame(&app, 120, 40);
+    let text = text_of(terminal.backend().buffer());
+    assert!(!text.contains("dropped"), "{text}");
 }
 
 /// A tree on disk in `env`'s scratch directory (`big.bin`, `dir/b.bin`,

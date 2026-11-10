@@ -11,6 +11,9 @@
 //! and nowhere else; a plan with a refused item moves nothing, as `clean`
 //! without `--skip-refused` does, and a plan that cannot be made says why.
 //!
+//! The marks cross a reload by their absolute paths: each lands on the
+//! entry at the same path in the new scan, or is dropped.
+//!
 //! What moved stays on the map for the session as a freed tile (the saved
 //! scan is not changed; a rescan measures the tree again) and is counted for
 //! the summary the binary prints when the viewer closes.
@@ -86,17 +89,29 @@ impl Marks {
         self.ids.remove(&id);
     }
 
-    /// The marks, as what `view` calls them (the paths relative to its
-    /// root), to carry them across a reload.
+    /// The marks as absolute paths, to carry them across a reload: a new
+    /// scan may be rooted elsewhere than `view`, and a path relative to a
+    /// root would name another entry there.
     #[must_use]
     pub fn paths(&self, view: &dyn TreeView) -> Vec<Vec<u8>> {
-        self.ids.iter().map(|&id| view.path(id)).collect()
+        self.ids.iter().map(|&id| abs_path(view, id)).collect()
     }
 
-    /// Marks each entry in `ids` directly: a reload's, already free of
-    /// nesting.
-    pub fn set(&mut self, ids: impl IntoIterator<Item = u32>) {
-        self.ids.extend(ids);
+    /// Marks the entry of `view` at each of `paths` (absolute, as
+    /// [`Marks::paths`] gives them, already free of nesting): the entry at
+    /// that same path, or none when `view` no longer holds one there. How
+    /// many were dropped.
+    pub fn restore(&mut self, view: &dyn TreeView, paths: &[Vec<u8>]) -> usize {
+        let mut dropped = 0;
+        for path in paths {
+            match entry_at(view, path) {
+                Some(id) => {
+                    self.ids.insert(id);
+                }
+                None => dropped += 1,
+            }
+        }
+        dropped
     }
 
     /// `d` on `id`: the entry is marked, or unmarked if it was; a folder's
@@ -153,6 +168,23 @@ impl Marks {
             }
         }
     }
+}
+
+/// The entry of `view` at the absolute path `path`: `None` where `view`'s
+/// root does not hold it, where it is the root itself (which is never
+/// marked), or where there is no such entry.
+fn entry_at(view: &dyn TreeView, path: &[u8]) -> Option<u32> {
+    let root = view.root_path().as_os_str().as_bytes();
+    let rest = path.strip_prefix(root)?;
+    let rel = if root.ends_with(b"/") {
+        rest
+    } else {
+        rest.strip_prefix(b"/")?
+    };
+    if rel.is_empty() {
+        return None;
+    }
+    crate::cursor::lookup(view, rel)
 }
 
 /// What the viewer moved to the Trash this session: each freed subtree's
