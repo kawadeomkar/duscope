@@ -279,10 +279,10 @@ fn p1_test_01_scan_totals_equal_du_on_a_system_tree() {
 /// figure is still counted above what any save costs. Each pass also holds
 /// the small scan's own peak to a cap of its own. A budget or a cap of
 /// [`None`] is one not yet set from a nightly's figures: that pass prints
-/// its figures and ends with a `::warning` annotation saying that it
-/// enforced nothing ([`pending_warning`]), and fails no check. Each tree's
-/// saves are removed before the next is measured, so that the runner holds
-/// six index files per tree per attribute level at the most.
+/// its figures and ends with a `::warning` annotation naming each such limit
+/// ([`pending_warning`]), and none of them fails a check. Each tree's saves
+/// are removed before the next is measured, so that the runner holds seven
+/// index files per tree per attribute level at the most.
 #[test]
 #[ignore = "needs the bench trees and hyperfine; DUSCOPE_TEST_PLATFORM=1, run by nightly-bench.yml"]
 fn p1_test_01_peak_rss_per_entry_on_the_bench_trees() {
@@ -366,8 +366,9 @@ fn p1_test_01_peak_rss_per_entry_on_the_bench_trees() {
                     );
                 }
                 measured += 1;
-                // A pass with --save leaves six files for the tree (the
-                // warmup and five runs), each the size of an index of it.
+                // A pass with --save leaves seven files for the tree (the
+                // run that counts its entries, the warmup and five runs),
+                // each the size of an index of it.
                 let _ = fs::remove_dir_all(env.index_dir().join("scans"));
             }
         }
@@ -441,19 +442,30 @@ fn limit_text(limit: Option<u64>, what: &str) -> String {
     )
 }
 
+/// The limits of `gate` not yet set, as the report names them.
+fn pending_limits(gate: &RssGate) -> Vec<String> {
+    let cap = gate
+        .baseline_cap
+        .is_none()
+        .then(|| "the small scan's cap".to_owned());
+    let budgets = gate.budgets.iter().flat_map(|(attrs, rows)| {
+        rows.iter()
+            .filter(|(_, budget)| budget.is_none())
+            .map(move |(tree, _)| format!("{tree} --attrs {attrs}"))
+    });
+    cap.into_iter().chain(budgets).collect()
+}
+
 /// The annotation for a pass with a budget or a cap not yet set, which the
-/// nightly's run page shows beside its figures: a pass that enforces nothing
-/// must say so, and cannot fail or pass in silence.
+/// nightly's run page shows beside its figures: a limit that is not enforced
+/// must be named, and the limits that are must not be doubted.
 fn pending_warning(gate: &RssGate) -> Option<String> {
-    let pending = gate.baseline_cap.is_none()
-        || gate
-            .budgets
-            .iter()
-            .any(|(_, rows)| rows.iter().any(|(_, budget)| budget.is_none()));
-    pending.then(|| {
+    let pending = pending_limits(gate);
+    (!pending.is_empty()).then(|| {
         format!(
-            "::warning title=Peak RSS::`{}`: limits not yet set, so this pass reported its figures and enforced nothing (P2-IDX-07); set them from this nightly's figures",
-            gate.name
+            "::warning title=Peak RSS::`{}`: not enforced, no limit set yet (P2-IDX-07): {}; set from this nightly's figures",
+            gate.name,
+            pending.join(", ")
         )
     })
 }
@@ -503,6 +515,36 @@ fn p2_idx_07_the_rss_gate_runs_scan_save_and_says_when_a_limit_is_pending() {
     };
     let warning = pending_warning(&one_missing).expect("a pending budget warns");
     assert!(warning.starts_with("::warning title="), "{warning}");
+    assert!(warning.contains("T2 --attrs basic"), "{warning}");
+    assert!(!warning.contains("T1"), "only what is pending: {warning}");
+    assert!(!warning.contains("cap"), "only what is pending: {warning}");
+    // A pass whose budgets are set and whose cap is not, as `scan` has been:
+    // it names the cap alone, and does not say it enforced nothing.
+    let cap_missing = RssGate {
+        baseline_cap: None,
+        budgets: all_set.budgets,
+        ..one_missing
+    };
+    let warning = pending_warning(&cap_missing).expect("a pending cap warns");
+    assert!(warning.contains("the small scan's cap"), "{warning}");
+    assert!(!warning.contains("--attrs"), "only the cap: {warning}");
+    assert!(!warning.contains("enforced nothing"), "{warning}");
+    // Every limit pending names them all.
+    let none_set = RssGate {
+        budgets: [
+            ("basic", [("T1", None), ("T2", None), ("T3", None)]),
+            ("full", [("T1", None), ("T2", None), ("T3", None)]),
+        ],
+        ..cap_missing
+    };
+    let warning = pending_warning(&none_set).expect("pending limits warn");
+    assert!(warning.contains("the small scan's cap"), "{warning}");
+    for attrs in ["basic", "full"] {
+        for tree in ["T1", "T2", "T3"] {
+            let limit = format!("{tree} --attrs {attrs}");
+            assert!(warning.contains(&limit), "{limit}: {warning}");
+        }
+    }
     assert_eq!(limit_text(None, "budget"), "budget pending");
     assert_eq!(limit_text(Some(100), "budget"), "budget 100");
 }
