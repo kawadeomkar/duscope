@@ -13,7 +13,8 @@
 //! build's ending: the hook answers, then ends the process with
 //! [`TEST_ABORT_STATUS`]. It does not abort, since on macOS an abort leaves
 //! a crash report in the account's own `~/Library/Logs/DiagnosticReports`,
-//! which a test must not write to.
+//! which a test must not write to. `DUSCOPE_TEST_PANIC=sigabrt` (debug builds
+//! only) does abort once the hook has run, so only a Linux test sets it.
 
 use std::sync::Once;
 
@@ -27,12 +28,16 @@ pub const TEST_ABORT_STATUS: i32 = 134;
 pub fn install() {
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| {
-        // test-only: DUSCOPE_TEST_PANIC=abort, in a debug build, ends the
-        // process after a panic as the release build does, the MCP server's
-        // answers first (the viewer reads DUSCOPE_TEST_PANIC=1).
-        let test_abort = cfg!(debug_assertions)
-            && std::env::var_os("DUSCOPE_TEST_PANIC").is_some_and(|v| v == "abort");
-        let aborts = cfg!(panic = "abort") || test_abort;
+        // test-only: DUSCOPE_TEST_PANIC=abort or =sigabrt, in a debug build,
+        // ends the process after a panic as the release build does, the MCP
+        // server's answers first (the viewer reads DUSCOPE_TEST_PANIC=1).
+        let knob = |value: &str| {
+            cfg!(debug_assertions)
+                && std::env::var_os("DUSCOPE_TEST_PANIC").is_some_and(|v| v == value)
+        };
+        let test_abort = knob("abort");
+        let test_sigabrt = knob("sigabrt");
+        let aborts = cfg!(panic = "abort") || test_abort || test_sigabrt;
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             duscope_tui::restore();
@@ -40,6 +45,9 @@ pub fn install() {
                 duscope_mcp::worker::answer_before_abort();
             }
             previous(info);
+            if test_sigabrt {
+                std::process::abort();
+            }
             if test_abort {
                 std::process::exit(TEST_ABORT_STATUS);
             }
