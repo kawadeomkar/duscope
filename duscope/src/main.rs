@@ -310,6 +310,16 @@ fn refused(error: &clap::Error, args: &[OsString]) -> ExitCode {
             | ErrorKind::DisplayVersion
             | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
     );
+    if !shown && !Output::json_requested(&args) {
+        // clap repeats the argument it refused: one holding a control
+        // character is written as the rest of stderr is, without clap's
+        // colours, which are escapes themselves.
+        let text = error.render().to_string();
+        if text.chars().any(|c| c.is_control() && c != '\n') {
+            text.trim_end().lines().for_each(out::stderr_line);
+            return ExitCode::from(Exit::Usage.code());
+        }
+    }
     if shown || !Output::json_requested(&args) {
         error.exit();
     }
