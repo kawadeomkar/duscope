@@ -54,7 +54,7 @@ pub enum Action {
     Mark,
     /// `D`: the mark pane.
     MarkPane,
-    /// `r`: rescan the current root and reload.
+    /// `r`: rescan the view's root and reload.
     Rescan,
 }
 

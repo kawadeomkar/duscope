@@ -32,9 +32,10 @@
 //! `d` marks the selection and `D` opens the mark pane, the plan of the
 //! marks as `clean` prints it, which `yes` moves to the Trash
 //! ([`crate::mark`]). What moved stays on the map as a freed tile for the
-//! session. `r` rescans the current root with its saved options; the
-//! binary runs it beside the viewer and the viewer reloads when the new
-//! index lands, keeping the view, the mask and the cursor's path. A click
+//! session. `r` rescans the view's root (not the zoom's, which a reload
+//! carries) with the saved scan's options; the binary runs it beside the
+//! viewer and the viewer reloads when the new index lands, keeping the
+//! view, the mask and the cursor's path. A click
 //! selects the deepest tile under the cell or a row, a double click zooms
 //! and the wheel walks the path ([`crate::mouse`]).
 //!

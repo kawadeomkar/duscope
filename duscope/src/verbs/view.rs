@@ -17,8 +17,10 @@
 //!
 //! `D` plans against the saved scan the viewer shows, or the one a scan run
 //! for it was saved as. `r` runs a rescan beside the viewer, on a thread of
-//! its own (a saved scan again as `rescan` does it, or the walk again where
-//! nothing was saved), and the viewer reloads on the new index; the terminal
+//! its own: of the folder the viewer is rooted at, alone, where that lies
+//! below the saved scan's root (`view ~/proj` over a scan of `~`); of the
+//! saved scan again as `rescan` does it otherwise; or the walk again where
+//! nothing was saved. The viewer reloads on the new index; the terminal
 //! stays the viewer's, so nothing is logged while it runs. When the viewer
 //! closes, what it moved to the Trash is printed on stderr, and the
 //! `index_untouched` warning with it.
@@ -510,7 +512,10 @@ fn next_input(shared: &Shared<'_>, root: &Path, landed: &mut Option<Shown>) -> i
 /// off while it runs: the terminal is the viewer's.
 fn start_rescan(shown: &Shown, shared: &Shared<'_>) -> Result<(), String> {
     let job = match &shown.file {
-        Some(file) => Job::Saved(file.clone()),
+        Some(file) => Job::Saved {
+            file: file.clone(),
+            root: shown.source.view().root_path().to_owned(),
+        },
         None => Job::Walked(Box::new(shared.walk.clone()), shared.excludes.to_vec()),
     };
     let dir = shared
@@ -533,17 +538,17 @@ fn start_rescan(shown: &Shown, shared: &Shared<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// What `r` runs: a rescan of the saved scan the viewer shows, or the walk
-/// again for a scan not saved.
+/// What `r` runs: a rescan of the saved scan in `file` for a viewer rooted
+/// at `root`, or the walk again for a scan not saved.
 enum Job {
-    Saved(PathBuf),
+    Saved { file: PathBuf, root: PathBuf },
     Walked(Box<WalkArgs>, Vec<String>),
 }
 
 impl Job {
     fn run(self, dir: Option<&Path>) -> Result<Landing, Failure> {
         match self {
-            Job::Saved(file) => {
+            Job::Saved { file, root } => {
                 let dir = dir.ok_or_else(|| {
                     Failure::new(
                         Exit::NotFound,
@@ -552,7 +557,7 @@ impl Job {
                          XDG_CACHE_HOME is set",
                     )
                 })?;
-                rescan::in_viewer(&file, dir).map(Landing::Saved)
+                rescan::in_viewer(&file, dir, &root).map(Landing::Saved)
             }
             Job::Walked(walk, excludes) => {
                 scan::scan(&walk, &excludes).map(|scanned| Landing::Walked(Box::new(scanned)))

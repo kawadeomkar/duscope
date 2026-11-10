@@ -450,3 +450,152 @@ fn p4_tui_06_r_shows_what_changed_keeping_the_view_and_the_selection() {
     terminal.send(Key::Char('q')).unwrap();
     wait(&mut terminal, "exit=0");
 }
+
+/// The saved scans, as `scans --json` lists them.
+fn scans(env: &TestEnv) -> Vec<serde_json::Value> {
+    let out = env.cmd().args(["scans", "--json"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    envelope["entries"].as_array().unwrap().clone()
+}
+
+/// The one saved scan whose root is `root`.
+fn scan_of(scans: &[serde_json::Value], root: &Path) -> serde_json::Value {
+    let of: Vec<&serde_json::Value> = scans
+        .iter()
+        .filter(|e| e["root"] == root.to_str().unwrap())
+        .collect();
+    assert_eq!(of.len(), 1, "one scan of {}: {scans:?}", root.display());
+    of[0].clone()
+}
+
+#[test]
+fn p4_tui_06_r_below_the_saved_root_scans_that_folder_alone() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::create_dir_all(root.join("other")).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    fs::write(proj.join("small.bin"), vec![2u8; 8 * 1024]).unwrap();
+    fs::write(root.join("other/old.bin"), vec![3u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    // `view proj` over the scan of the tree: the viewer is rooted below the
+    // saved scan's root.
+    let mut terminal = viewer(&env, &proj, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    // `big.bin`, where the viewer starts, marked: a mark is carried by its
+    // absolute path.
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    terminal.send(Key::Char('2')).unwrap();
+    wait(&mut terminal, "list · ");
+    wait(&mut terminal, "big.bin");
+    // A change inside the folder, and one outside it.
+    fs::write(proj.join("fresh-new.bin"), vec![4u8; 2048 * 1024]).unwrap();
+    fs::write(root.join("other/elsewhere-new.bin"), vec![5u8; 2048 * 1024]).unwrap();
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "rescanned");
+    // The reload: still the list view of `proj`, the new file in it, the
+    // mark kept on `big.bin` and none dropped.
+    wait(&mut terminal, "list · ");
+    wait(&mut terminal, "fresh-new.bin");
+    let text = terminal.screen().text();
+    assert!(text.contains("big.bin") && text.contains('✕'), "{text}");
+    assert!(!text.contains("dropped"), "{text}");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    // What was read: `proj` alone, saved as a scan of its own, a fresh one
+    // (no parent: its root is not the tree's) holding the new file; the
+    // tree's scan is still the only one of the tree, so nothing outside
+    // `proj` was read again.
+    let scans = scans(&env);
+    assert_eq!(scans.len(), 2, "{scans:?}");
+    assert_eq!(scan_of(&scans, &root)["id"], tree_scan);
+    let folder = scan_of(&scans, &proj);
+    assert!(folder["parent_scan_id"].is_null(), "{folder}");
+    assert_eq!(folder["file_count"], 3, "{folder}");
+    assert_eq!(folder["dir_count"], 1, "{folder}");
+}
+
+#[test]
+fn p4_tui_06_r_rescans_the_saved_root_where_an_exclude_is_anchored_at_it() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(proj.join("build")).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    fs::write(proj.join("build/left-out.bin"), vec![2u8; 2048 * 1024]).unwrap();
+    // `/proj/build` leaves out `proj/build` in a scan of the tree; in a scan
+    // of `proj` it would name `proj/proj/build`, and leave out nothing.
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&root)
+        .args(["--save", "--json", "--exclude", "/proj/build"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let script = format!(
+        "'{}' view --scan {} '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        tree_scan.as_str().unwrap(),
+        proj.display()
+    );
+    let mut terminal = Terminal::builder()
+        .size(120, 40)
+        .timeout(Duration::from_secs(60))
+        .env_clear()
+        .envs(env.vars())
+        .current_dir(env.work_dir())
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap();
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "rescanned");
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    // The tree was rescanned, as `rescan` does it: the new scan is its
+    // child, and `proj/build` is still left out of it. No scan of `proj`.
+    let scans = scans(&env);
+    assert_eq!(scans.len(), 2, "{scans:?}");
+    let child = scans.iter().find(|e| e["id"] != tree_scan).unwrap().clone();
+    assert_eq!(child["root"], root.to_str().unwrap(), "{child}");
+    assert_eq!(child["parent_scan_id"], tree_scan, "{child}");
+    assert_eq!(child["file_count"], 1, "{child}");
+}
+
+#[test]
+fn p4_tui_06_r_below_the_saved_root_says_when_the_folder_has_gone() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    fs::write(root.join("other.bin"), vec![2u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    let mut terminal = viewer(&env, &proj, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    fs::remove_dir_all(&proj).unwrap();
+    terminal.send(Key::Char('r')).unwrap();
+    // The failure is said on the key line, and the viewer goes on over the
+    // scan it was showing: nothing was written.
+    wait(&mut terminal, "rescan failed");
+    let text = terminal.screen().text();
+    assert!(text.contains("big.bin"), "{text}");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    assert_eq!(scans(&env).len(), 1);
+}

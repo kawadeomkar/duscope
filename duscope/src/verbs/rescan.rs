@@ -20,7 +20,7 @@ use duscope_core::index::{Index, ScanId, index_path};
 use duscope_core::query::{
     ScanQuery, ScanSelector, TreeView, clock, resolve_scan, short_id, timegrammar,
 };
-use duscope_core::rescan::{self, Checks, Fallback, FsEvents, Stop};
+use duscope_core::rescan::{self, Checks, Fallback, FsEvents, ScanOptions, Stop};
 use duscope_core::resolve::resolve_path;
 use duscope_walk::{ScanEvent, WalkOptions};
 
@@ -137,19 +137,94 @@ fn read_again(
     Ok((scanned, fallback, took))
 }
 
-/// `r` in the viewer: the saved scan in `file` read again as `rescan` reads
-/// it (only what changed where it can, else the whole tree, with the options
-/// it was scanned with), saved under `dir`, without a word on the terminal,
-/// which is the viewer's. The new index's file.
-pub fn in_viewer(file: &Path, dir: &Path) -> Result<PathBuf, Failure> {
+/// `r` in the viewer, whose root is `shown`, over the saved scan in `file`,
+/// saved under `dir`, without a word on the terminal, which is the viewer's.
+/// Where `shown` is a folder below the saved scan's root, it is scanned
+/// alone with the saved scan's options and saved as a scan of its own, as
+/// `scan --save` of it with those options would be: its parent is no rescan
+/// of it, and what lies outside it has not been read, so nothing of the
+/// saved scan is carried into the new index. Otherwise the saved scan is
+/// read again as `rescan` reads it (only what changed where it can, else
+/// the whole tree). The new index's file.
+pub fn in_viewer(file: &Path, dir: &Path, shown: &Path) -> Result<PathBuf, Failure> {
     let index = Index::open(file).map_err(core_failure)?;
     let parent = Parent::of(index)?;
-    let walk = walk_args(&parent);
+    let mut walk = walk_args(&parent);
     let excludes = parent.options.excludes.clone();
-    let (scanned, _, _) = read_again(&parent, &walk, &excludes, Mode::Auto, rescan::MAX_AGE_NS)?;
+    let scanned = match folder_alone(&parent, shown) {
+        Some(folder) => {
+            walk.path = Some(folder);
+            scan::scan(&walk, &excludes)?
+        }
+        None => read_again(&parent, &walk, &excludes, Mode::Auto, rescan::MAX_AGE_NS)?.0,
+    };
     let id = scan::scan_id(&scanned)?;
     scan::write_index(&scanned, &walk, &excludes, &id, dir)?;
     Ok(index_path(dir, &id))
+}
+
+/// The folder `r` scans alone for a viewer rooted at `shown` over `parent`:
+/// `shown` where it is a directory below the saved scan's root that the scan
+/// entered, the walk would read it at that same path (a link followed under
+/// `--follow-symlinks` would not be, and the viewer's cursor and marks name
+/// that path), and the saved options leave out in a scan of it what they
+/// left out below the root. `None` where the saved scan is read again.
+fn folder_alone(parent: &Parent, shown: &Path) -> Option<PathBuf> {
+    let index = &parent.index;
+    let below = index.below_root(shown)?;
+    if below.is_empty() {
+        return None;
+    }
+    let id = index.lookup(below)?;
+    if !index.node(id).is_dir() || !index.entered(id) || !same_in_a_folder(&parent.options) {
+        return None;
+    }
+    match std::fs::canonicalize(shown) {
+        Ok(real) if real != shown => None,
+        // A folder gone since the scan: the walk says so.
+        _ => Some(shown.to_owned()),
+    }
+}
+
+/// Whether the saved options leave out the same in a scan of a folder below
+/// the root as in a scan of the root. Their patterns are matched against
+/// the path relative to the scan's root, so one anchored there (`/build`) or
+/// naming more than one component (`proj/build`) would leave out something
+/// else; one name at any depth (`node_modules`, `*.tmp`) leaves out the
+/// same. A file of patterns that cannot be read is no such file: the walk
+/// reports it.
+fn same_in_a_folder(options: &ScanOptions) -> bool {
+    options.excludes.iter().all(|p| one_name(p))
+        && options
+            .exclude_files
+            .iter()
+            .chain(&options.ignore_files)
+            .all(|file| std::fs::read(file).is_ok_and(|text| lines_one_name(&text)))
+}
+
+/// Whether every pattern of a pattern file, its lines read as the walk reads
+/// them, is [`one_name`]; a gitignore negation is judged by what it names.
+fn lines_one_name(text: &[u8]) -> bool {
+    String::from_utf8_lossy(text)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .all(|line| one_name(line.strip_prefix('!').unwrap_or(line)))
+}
+
+/// Whether `pattern` matches one name at any depth: not anchored at the
+/// root, and a single component once its leading `**/` and trailing `/` are
+/// set aside.
+fn one_name(pattern: &str) -> bool {
+    let trimmed = pattern.trim_end_matches('/');
+    if trimmed.starts_with('/') || trimmed.starts_with("./") {
+        return false;
+    }
+    let mut rest = trimmed;
+    while let Some(after) = rest.strip_prefix("**/") {
+        rest = after;
+    }
+    !rest.contains('/')
 }
 
 /// What the footer says of how the rescan read the tree: `rescanned 1,204
@@ -378,9 +453,75 @@ impl Parent {
 mod tests {
     use std::time::Duration;
 
-    use duscope_core::rescan::Fallback;
+    use duscope_core::rescan::{Fallback, ScanOptions};
 
-    use super::how;
+    use super::{how, lines_one_name, one_name, same_in_a_folder};
+
+    #[test]
+    fn p4_tui_06_a_pattern_of_one_name_leaves_out_the_same_in_a_folder() {
+        for same in [
+            "node_modules",
+            "*.tmp",
+            "build/",
+            "**/target",
+            "**/target/",
+            "**",
+        ] {
+            assert!(one_name(same), "{same}");
+        }
+        for tied in [
+            "/build",
+            "./build",
+            "/build/",
+            "proj/build",
+            "proj/build/",
+            "**/a/b",
+            "a/**",
+            "docs/*.pdf",
+        ] {
+            assert!(!one_name(tied), "{tied}");
+        }
+    }
+
+    #[test]
+    fn p4_tui_06_a_pattern_file_is_judged_by_the_lines_the_walk_reads() {
+        assert!(lines_one_name(
+            b"# a /comment/ with slashes\n\nnode_modules\r\n  *.log  \n!keep.log\n"
+        ));
+        assert!(!lines_one_name(b"node_modules\n/target\n"));
+        assert!(!lines_one_name(b"!/keep\n"));
+        assert!(!lines_one_name(b"docs/build\n"));
+    }
+
+    #[test]
+    fn p4_tui_06_the_saved_options_decide_whether_a_folder_is_scanned_alone() {
+        let plain = || -> ScanOptions { serde_json::from_str("{}").unwrap() };
+        assert!(same_in_a_folder(&plain()));
+        let mut names = plain();
+        names.excludes = vec!["node_modules".to_owned(), "*.tmp".to_owned()];
+        assert!(same_in_a_folder(&names));
+        let mut anchored = plain();
+        anchored.excludes = vec!["node_modules".to_owned(), "/Library".to_owned()];
+        assert!(!same_in_a_folder(&anchored));
+
+        let dir = tempfile::tempdir().unwrap();
+        let of_names = dir.path().join("names");
+        std::fs::write(&of_names, "target/\n*.log\n").unwrap();
+        let of_paths = dir.path().join("paths");
+        std::fs::write(&of_paths, "target/\n/docs/build\n").unwrap();
+        let text = |path: &std::path::Path| path.to_str().unwrap().to_owned();
+        let mut ignored = plain();
+        ignored.ignore_files = vec![text(&of_names)];
+        assert!(same_in_a_folder(&ignored));
+        ignored.ignore_files = vec![text(&of_paths)];
+        assert!(!same_in_a_folder(&ignored));
+        let mut excluded = plain();
+        excluded.exclude_files = vec![text(&of_paths)];
+        assert!(!same_in_a_folder(&excluded));
+        // One that cannot be read: the rescan of the saved scan reports it.
+        excluded.exclude_files = vec![text(&dir.path().join("gone"))];
+        assert!(!same_in_a_folder(&excluded));
+    }
 
     #[test]
     fn p5_core_01_the_footer_says_how_the_tree_was_read() {
