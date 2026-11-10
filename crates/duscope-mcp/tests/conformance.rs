@@ -2153,3 +2153,57 @@ fn p5_mcp_01_an_entry_no_saved_scan_holds_is_refused_whatever_its_expect_bytes()
         assert!(fresh.join("big.bin").exists());
     }
 }
+
+#[test]
+fn p5_mcp_01_an_item_whose_folder_became_a_link_out_of_the_roots_is_refused() {
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let base = env.work_dir().canonicalize().unwrap();
+        let root = base.join("served");
+        let victim = root.join("sub/victim.bin");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::create_dir_all(base.join("elsewhere")).unwrap();
+        fs::write(&victim, vec![8u8; 2_000]).unwrap();
+        let scanned = env
+            .cmd()
+            .args(["scan", "--save", "--json"])
+            .arg(&base)
+            .output()
+            .unwrap();
+        assert!(scanned.status.success(), "{scanned:?}");
+        let (handle, frees) = explained(&env, &victim);
+        // After the handle was issued, its folder moved out of the roots and
+        // a link to it took its place: the handle's path reaches the same
+        // entry, which now lies outside them.
+        let moved = base.join("elsewhere/sub");
+        fs::rename(root.join("sub"), &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, root.join("sub")).unwrap();
+        let (refused, _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, refused) = call(
+                    &client,
+                    "duscope_delete",
+                    &json!({"items": [item(&handle, frees)]}),
+                )
+                .await;
+                (refused, client)
+            },
+        );
+        assert_eq!(error_code(&refused), "refused_path", "{refused:?}");
+        let message = refused.structured_content.as_ref().unwrap()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            message.contains(&format!(
+                "resolves to {}",
+                moved.join("victim.bin").display()
+            )),
+            "{message}"
+        );
+        assert!(moved.join("victim.bin").exists());
+    }
+}
