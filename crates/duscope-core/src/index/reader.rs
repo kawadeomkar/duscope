@@ -19,7 +19,9 @@
 //!
 //! The queries' views cannot return errors, so a read that fails after the
 //! file opened is kept and the entry reads as empty; the verb asks
-//! [`Index::failure`] once its query is done.
+//! [`Index::failure`] once its query is done. A row whose ids break the
+//! layout, which a walk of the tree would follow for ever, fails its read
+//! (`dir_ids`).
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -766,7 +768,9 @@ impl Index {
         let dir = self
             .db
             .prepare(&format!("SELECT {DIR_COLUMNS} FROM dirs WHERE id = ?1"))?
-            .query_row([id], |row| Ok((dir_from_row(id, row)?, row.get(14)?)))
+            .query_row([id], |row| {
+                Ok((dir_from_row(id, row, self.len)?, row.get(14)?))
+            })
             .optional()?;
         if let Some(entry) = dir {
             return Ok(entry);
@@ -798,7 +802,7 @@ impl Index {
         let mut rows = dirs.query([start, end])?;
         while let Some(row) = rows.next()? {
             let id: u32 = row.get(0)?;
-            put(id, (dir_from_row(id, row)?, row.get(14)?));
+            put(id, (dir_from_row(id, row, self.len)?, row.get(14)?));
         }
         let mut files = self.db.prepare(&format!(
             "SELECT {FILE_COLUMNS} FROM files AS f LEFT JOIN dirs AS d ON d.id = f.parent_id \
@@ -960,12 +964,14 @@ impl TreeView for Index {
 
     /// From `dirs_parent_name`: a directory's subdirectories are rows that
     /// name it their parent, where the default hops from sibling to sibling
-    /// through blocks far apart.
+    /// through blocks far apart. Only rows after it: a row that names itself
+    /// its parent would be its own subdirectory, and a walk down the tree
+    /// would enter it for ever.
     fn child_dirs(&self, dir: u32) -> Vec<(u32, u32)> {
         let read = || -> rusqlite::Result<Vec<(u32, u32)>> {
-            let mut stmt = self
-                .db
-                .prepare("SELECT id, last_id FROM dirs WHERE parent_id = ?1 ORDER BY id")?;
+            let mut stmt = self.db.prepare(
+                "SELECT id, last_id FROM dirs WHERE parent_id = ?1 AND id > ?1 ORDER BY id",
+            )?;
             stmt.query_map([dir], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect()
         };
@@ -977,12 +983,17 @@ impl TreeView for Index {
 }
 
 /// A directory's node from its `dirs` row, as [`Index::read_block`] selects
-/// it (`id` first).
-fn dir_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
+/// it (`id` first), in a scan of `len` entries; a row whose ids break the
+/// layout fails ([`dir_ids`]).
+fn dir_from_row(id: u32, row: &Row<'_>, len: u32) -> rusqlite::Result<Node> {
     let flags: u32 = row.get(12)?;
+    let parent: Option<u32> = row.get(3)?;
+    let files_end: u32 = row.get(2)?;
+    let last_id: u32 = row.get(1)?;
+    dir_ids(id, parent, files_end, last_id, len)?;
     Ok(Node {
         id,
-        parent: row.get::<_, Option<u32>>(3)?.unwrap_or(0),
+        parent: parent.unwrap_or(0),
         depth: row.get(4)?,
         kind: Kind::Dir,
         allocated: unsigned(row.get(6)?),
@@ -1001,24 +1012,35 @@ fn dir_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
         flags: Flags::from_bits_truncate(flags),
         upper_bound: flags & UPPER_BOUND != 0,
         unreadable: row.get(13)?,
-        files_end: row.get(2)?,
-        last_id: row.get(1)?,
+        files_end,
+        last_id,
     })
 }
 
 /// A non-directory's node from its `files` row and its parent's depth, as
-/// [`Index::read_block`] selects them (`id` first).
+/// [`Index::read_block`] selects them (`id` first); a row whose parent is
+/// not before it fails, as a directory's does ([`dir_ids`]).
 fn file_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
     let flags: u32 = row.get(12)?;
     let kind: String = row.get(11)?;
     let parent_depth: Option<u32> = row.get(13)?;
+    let parent: u32 = row.get(1)?;
+    if id != 0 && parent >= id {
+        return Err(misplaced(
+            "files",
+            id,
+            &format!("its parent_id {parent} is not below its id"),
+        ));
+    }
     Ok(Node {
         id,
-        parent: row.get(1)?,
+        parent,
+        // Saturating: the parent's depth is its row's, which nothing
+        // checks against the rows above it.
         depth: if id == 0 {
             0
         } else {
-            parent_depth.map_or(0, |d| d + 1)
+            parent_depth.map_or(0, |d| d.saturating_add(1))
         },
         kind: match kind.as_str() {
             "file" => Kind::File,
@@ -1045,6 +1067,52 @@ fn file_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
         files_end: id,
         last_id: id,
     })
+}
+
+/// Refuses the row of directory `id` unless its ids keep the layout every
+/// index is written in (`docs/index-format.md`, Ids): numbered in pre-order,
+/// so it has a parent and the parent comes before it (the root's own
+/// `parent_id` is not checked), and its own files end at `files_end` and its
+/// subtree at `last_id`, within the scan's `len` entries. An index may come
+/// from anyone (SECURITY.md), and the queries that climb to the root or walk
+/// a subtree end on these terms alone: a parent cycle would climb for ever,
+/// and a subtree that ends before it starts or past the scan would count
+/// wrong or read for ever. Whether a row nests inside its parent's subtree
+/// is not checked: it needs the parent's row, and no query needs it to end.
+pub(crate) fn dir_ids(
+    id: u32,
+    parent: Option<u32>,
+    files_end: u32,
+    last_id: u32,
+    len: u32,
+) -> rusqlite::Result<()> {
+    if id != 0 && parent.is_none_or(|parent| parent >= id) {
+        let what = match parent {
+            Some(parent) => format!("its parent_id {parent} is not below its id"),
+            None => "its parent_id is NULL, which only the root's may be".to_owned(),
+        };
+        return Err(misplaced("dirs", id, &what));
+    }
+    if !(id <= files_end && files_end <= last_id && last_id < len) {
+        return Err(misplaced(
+            "dirs",
+            id,
+            &format!(
+                "id <= files_end <= last_id < n_entries fails (files_end {files_end}, \
+                 last_id {last_id}, n_entries {len})"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The error of a row whose ids break the layout: `SQLITE_CORRUPT`, which
+/// the verb reports as `index_corrupt`.
+fn misplaced(table: &str, id: u32, what: &str) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+        Some(format!("{table} row {id}: {what}")),
+    )
 }
 
 /// How a volume compares names: without case, in NFC, or both.

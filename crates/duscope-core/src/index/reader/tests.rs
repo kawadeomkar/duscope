@@ -676,3 +676,158 @@ fn p2_sec_01_tool_versions_are_versions() {
         assert!(!super::is_version(bad), "{bad}");
     }
 }
+
+/// A small index whose ids are known, under `dir`: `/t` holding `root.txt`
+/// (1), `a` (2) holding `b` (3) holding `f` (4), and `c` (5); then changed
+/// by `sql`, as whoever made a damaged or hostile file could.
+fn layout(dir: &Path, sql: &str) -> PathBuf {
+    let mut tree = MemProvider::new("/t");
+    tree.file("root.txt", 10).file("a/b/f", 8192).dir("c");
+    let file = small_index(dir, &tree, "abcdef012345", 1);
+    let db = Connection::open(&file).unwrap();
+    db.execute_batch(sql).unwrap();
+    drop(db);
+    file
+}
+
+/// Rows whose ids break the layout, each with the start of what the read
+/// reports: a parent cycle (two directories, two files), an entry its own
+/// parent, own files or a subtree that end before their directory or past
+/// the scan's six entries, a parent after the entry, and a directory with
+/// no parent below the root.
+const OUT_OF_LAYOUT: [(&str, &str); 11] = [
+    (
+        "UPDATE dirs SET parent_id = 3 WHERE id = 2",
+        "dirs row 2: its parent_id 3 is not below its id",
+    ),
+    (
+        "UPDATE dirs SET parent_id = 2 WHERE id = 2",
+        "dirs row 2: its parent_id 2 is not below its id",
+    ),
+    (
+        "UPDATE dirs SET last_id = 1 WHERE id = 2",
+        "dirs row 2: id <= files_end <= last_id < n_entries fails (files_end 2, last_id 1, \
+         n_entries 6)",
+    ),
+    (
+        "UPDATE dirs SET last_id = 6 WHERE id = 2",
+        "dirs row 2: id <= files_end <= last_id < n_entries fails (files_end 2, last_id 6,",
+    ),
+    (
+        "UPDATE dirs SET last_id = 6 WHERE id = 0",
+        "dirs row 0: id <= files_end <= last_id < n_entries fails (files_end 1, last_id 6,",
+    ),
+    (
+        "UPDATE dirs SET files_end = 2 WHERE id = 3",
+        "dirs row 3: id <= files_end <= last_id < n_entries fails (files_end 2, last_id 4,",
+    ),
+    (
+        "UPDATE dirs SET files_end = 5 WHERE id = 3",
+        "dirs row 3: id <= files_end <= last_id < n_entries fails (files_end 5, last_id 4,",
+    ),
+    (
+        "UPDATE files SET parent_id = 4 WHERE id = 1; UPDATE files SET parent_id = 1 WHERE id = 4",
+        "files row 1: its parent_id 4 is not below its id",
+    ),
+    (
+        "UPDATE files SET parent_id = 4 WHERE id = 4",
+        "files row 4: its parent_id 4 is not below its id",
+    ),
+    (
+        "UPDATE dirs SET parent_id = 5 WHERE id = 3",
+        "dirs row 3: its parent_id 5 is not below its id",
+    ),
+    (
+        "UPDATE dirs SET parent_id = NULL WHERE id = 3",
+        "dirs row 3: its parent_id is NULL, which only the root's may be",
+    ),
+];
+
+#[test]
+fn p5_sec_04_rows_out_of_layout_fail_the_read_and_every_walk_ends() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    // The layout the rows below break.
+    let sound = Index::open(&layout(&dir.join("sound"), "")).unwrap();
+    let paths: Vec<Vec<u8>> = (0..sound.len()).map(|id| sound.path(id)).collect();
+    assert_eq!(
+        paths,
+        [&b""[..], b"root.txt", b"a", b"a/b", b"a/b/f", b"c"],
+        "the ids the cases name"
+    );
+    assert!(sound.failure().is_none());
+    for (n, (sql, reported)) in OUT_OF_LAYOUT.into_iter().enumerate() {
+        let index = Index::open(&layout(&dir.join(n.to_string()), sql)).unwrap();
+        // Every climb to the root ends, and no directory is its own
+        // subdirectory.
+        for id in 0..index.len() {
+            index.path(id);
+            assert!(
+                index.child_dirs(id).iter().all(|&(child, _)| child > id),
+                "{sql}: {id}"
+            );
+        }
+        // So does every query that walks the tree.
+        query::top(
+            &index,
+            &TopQuery {
+                files: true,
+                ..TopQuery::default()
+            },
+        );
+        query::top(&index, &TopQuery::default());
+        query::tree(
+            &index,
+            &TreeQuery {
+                depth: Some(10),
+                ..TreeQuery::default()
+            },
+        );
+        let failure = index.failure();
+        assert!(
+            failure.as_deref().is_some_and(|f| f.starts_with(reported)),
+            "{sql}: {failure:?}"
+        );
+    }
+}
+
+#[test]
+fn p5_sec_04_a_directory_naming_itself_its_parent_is_not_its_own_subdirectory() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    let sound = Index::open(&layout(&dir.join("sound"), "")).unwrap();
+    let deep = TreeQuery {
+        depth: Some(10),
+        ..TreeQuery::default()
+    };
+    // The root names itself its parent: a row the reader accepts, since the
+    // root is its own parent, and its subdirectories are still `a` and `c`.
+    let index = Index::open(&layout(
+        &dir.join("root"),
+        "UPDATE dirs SET parent_id = 0 WHERE id = 0",
+    ))
+    .unwrap();
+    assert_eq!(index.child_dirs(0), [(2, 4), (5, 5)]);
+    assert_eq!(index.child_dirs(0), sound.child_dirs(0));
+    assert_eq!(
+        json(query::tree(&index, &deep).entries),
+        json(query::tree(&sound, &deep).entries)
+    );
+    assert!(index.failure().is_none());
+    // A directory below it: not its own subdirectory, and refused when read.
+    let index = Index::open(&layout(
+        &dir.join("below"),
+        "UPDATE dirs SET parent_id = 3 WHERE id = 3",
+    ))
+    .unwrap();
+    assert!(index.child_dirs(3).is_empty());
+    assert!(index.child_dirs(2).is_empty());
+    index.node(3);
+    assert!(
+        index
+            .failure()
+            .is_some_and(|f| f.starts_with("dirs row 3: its parent_id 3 is not below its id")),
+        "{:?}",
+        index.failure()
+    );
+}
