@@ -283,6 +283,42 @@ fn p2_idx_02_v_reports_the_write() {
     assert!(err.contains(" µs/entry"), "{err}");
 }
 
+/// P2-IDX-07, on either platform and with no mount: `SQLite` builds a
+/// temporary file's name in 512 bytes, so a directory it accepts but whose
+/// path leaves no room for the name fails the sort with a bare `SQLITE_ERROR`
+/// (`unixGetTempname`). Ten thousand directories with long names give more
+/// than the sort's 2 MB of memory, so it needs the file. The save is built
+/// again in memory and succeeds.
+#[test]
+fn p2_idx_07_a_temporary_directory_path_too_long_for_sqlite_builds_in_memory() {
+    let env = TestEnv::new();
+    let mut long = env.tmp_dir();
+    while long.as_os_str().len() < 520 {
+        long.push("d".repeat(200));
+    }
+    fs::create_dir_all(&long).unwrap();
+    let root = env.work_dir().join("tree");
+    let name = "x".repeat(245);
+    for n in 0..10_000 {
+        fs::create_dir_all(root.join(format!("{n:05}{name}"))).unwrap();
+    }
+    let out = run(
+        &env,
+        &["scan", root.to_str().unwrap(), "--save", "--json"],
+        &[("SQLITE_TMPDIR", long.to_str().unwrap())],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(envelope(&out)["ok"], true);
+    assert!(
+        err.contains("building the indexes failed"),
+        "the first build failed on the temporary name: {err}"
+    );
+    let names = scans(&env.index_dir());
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(names[0].ends_with(".db"), "{names:?}");
+}
+
 /// Mounts a 64 KiB tmpfs at `point` for the life of the guard.
 #[cfg(target_os = "linux")]
 struct Tmpfs<'e> {
@@ -340,7 +376,7 @@ fn p2_idx_07_linux_a_full_temporary_directory_does_not_fail_the_save() {
     assert!(out.status.success(), "{err}");
     assert_eq!(envelope(&out)["ok"], true);
     assert!(
-        err.contains("the temporary file of the index sort failed"),
+        err.contains("building the indexes failed"),
         "the first build failed on the full directory: {err}"
     );
     let names = scans(&env.index_dir());

@@ -187,7 +187,9 @@ fn write_file_with(
 ) -> Result<(), String> {
     match build(arena, rollup, meta, tmp, "FILE", create_indexes) {
         Err(Failure::SortFile(cause)) => {
-            log::warn!("the temporary file of the index sort failed ({cause}): sorting in memory");
+            log::warn!(
+                "building the indexes failed ({cause}): building the file again with the sort in memory"
+            );
             fs::remove_file(tmp).map_err(|e| e.to_string())?;
             build(arena, rollup, meta, tmp, "MEMORY", create_indexes).map_err(Failure::into_message)
         }
@@ -199,9 +201,11 @@ fn write_file_with(
 enum Failure {
     /// Building the indexes failed in a way their temporary sort file can:
     /// it could not be created (`SQLITE_CANTOPEN`), no directory would take
-    /// it (`SQLITE_IOERR_GETTEMPPATH`), or it could not be written
-    /// (`SQLITE_FULL`, `SQLITE_IOERR_WRITE`). The index file itself can fail
-    /// the same ways, which a second build then reports.
+    /// it (`SQLITE_IOERR_GETTEMPPATH`), its name did not fit (`SQLITE_ERROR`,
+    /// see [`from_sort_file`]), or it could not be written (`SQLITE_FULL`,
+    /// `SQLITE_IOERR_WRITE`). The index file itself can fail the same ways,
+    /// which a second build then reports: nothing tells the two apart, so
+    /// this names what the failure may be, not what it is.
     SortFile(String),
     /// Anything else.
     Other(String),
@@ -216,13 +220,21 @@ impl Failure {
 }
 
 /// Whether `error`, from building the indexes, is one their temporary sort
-/// file can cause. An error reading the database, a corrupt page or running
-/// out of memory is not, and sorting in memory would not help it.
+/// file can cause. A corrupt page or running out of memory is not, and
+/// sorting in memory would not help it. A bare `SQLITE_ERROR` is: `SQLite`
+/// builds a temporary file's name in 512 bytes and returns that code when a
+/// directory's path leaves no room for it (`unixGetTempname`). Elsewhere the
+/// code means a wrong statement, and these are this crate's own on a new
+/// file; were one wrong, the second build would report it.
 fn from_sort_file(error: &rusqlite::Error) -> bool {
-    matches!(
-        error.sqlite_error_code(),
-        Some(ErrorCode::DiskFull | ErrorCode::CannotOpen | ErrorCode::SystemIoFailure)
-    )
+    let rusqlite::Error::SqliteFailure(failure, _) = error else {
+        return false;
+    };
+    failure.extended_code == rusqlite::ffi::SQLITE_ERROR
+        || matches!(
+            failure.code,
+            ErrorCode::DiskFull | ErrorCode::CannotOpen | ErrorCode::SystemIoFailure
+        )
 }
 
 /// One build of the whole file at `tmp`, `SQLite`'s sort spilling as
