@@ -50,7 +50,8 @@ upgrade.
   to the user who ran the scan, and to the MCP clients that user starts `duscope mcp` for,
   within its `--roots`.
 - **The machine.** No input makes duscope run code it does not ship or write outside its index
-  directory and the outputs it is asked for. Each input's memory and time are bounded by a fixed
+  directory and the outputs it is asked for, apart from the temporary sort file of a save
+  ([Index files](#3-index-files)). Each input's memory and time are bounded by a fixed
   limit or by the size of the tree or saved scan it asked about, as
   [Limits on memory and time](#limits-on-memory-and-time) sets out.
 
@@ -186,6 +187,19 @@ virtual tables and crafted pages.
   index file, each spill file in `out` and the handle key are 0600. duscope still reads a looser
   directory, a looser index file, or one another user owns, but it prints a warning on stderr
   with the `chmod` that fixes it.
+- **The sort's temporary file.** While a save builds an index file's indexes, SQLite sorts their
+  keys in about 2 MB of memory and writes the rest to one temporary file: in `SQLITE_TMPDIR` if
+  that is set and writable, else `TMPDIR`, else the first of `/var/tmp`, `/usr/tmp` and `/tmp`
+  that is writable, and as a last resort the current directory.
+  - **Privacy.** The file has a random name and mode 0600, and SQLite unlinks it as it opens it,
+    so it is in no directory while it is in use and nothing of it remains however the process
+    ends. It holds the keys being sorted: a directory's name with its parent's id and its own
+    (about a dozen bytes beside the name), and a file's size on disk with its id (about a dozen
+    bytes in all). It never holds a file's name or a path.
+  - **Where it goes.** Set `SQLITE_TMPDIR` to choose the directory. The file is about as large as
+    the largest index being built: about 12 MB for a tree of a million files.
+  - **If it fails.** Where the temporary directory is full, or no directory will take the file,
+    duscope builds the index file again with the sort in memory, and warns on stderr.
 
 #### 4. The scanned tree
 

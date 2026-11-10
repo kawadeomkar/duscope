@@ -271,6 +271,18 @@ fn p1_test_01_scan_totals_equal_du_on_a_system_tree() {
 /// `bench/.trees`; hyperfine (`HYPERFINE`, else on the PATH) reads the peak,
 /// as the harness does. The binary is the [`shipped`] one: run it on a
 /// release build (`cargo test --release`).
+///
+/// The same measurement runs a second time with `--save`, the figure
+/// acceptance target 5 names (P2-IDX-07), against budgets of its own: the
+/// peak then includes `SQLite`'s page cache and the sort of the index keys
+/// besides the arena, and the small scan is saved too, so the per-entry
+/// figure is still counted above what any save costs. Each pass also holds
+/// the small scan's own peak to a cap of its own. A budget or a cap of
+/// [`None`] is one not yet set from a nightly's figures: that pass prints
+/// its figures and ends with a `::warning` annotation saying that it
+/// enforced nothing ([`pending_warning`]), and fails no check. Each tree's
+/// saves are removed before the next is measured, so that the runner holds
+/// six index files per tree per attribute level at the most.
 #[test]
 #[ignore = "needs the bench trees and hyperfine; DUSCOPE_TEST_PLATFORM=1, run by nightly-bench.yml"]
 fn p1_test_01_peak_rss_per_entry_on_the_bench_trees() {
@@ -294,51 +306,73 @@ fn p1_test_01_peak_rss_per_entry_on_the_bench_trees() {
             fs::write(dir.join(format!("f{file}")), b"x").unwrap();
         }
     }
-    let measure =
-        |root: &Path, attrs: &str, name: &str| rss_peaks(&env, &hyperfine, &bin, root, attrs, name);
     let tenths = |bytes: u64, entries: u64| {
         let tenths = bytes * 10 / entries;
         format!("{}.{}", tenths / 10, tenths % 10)
     };
     let mut measured = 0;
-    let budgets = [
-        ("basic", [("T1", 100u64), ("T2", 100), ("T3", 130)]),
-        ("full", [("T1", 130), ("T2", 130), ("T3", 160)]),
-    ];
-    for (attrs, rows) in &budgets {
-        if !rows.iter().any(|(tree, _)| trees.join(tree).is_dir()) {
-            for (tree, _) in rows {
-                eprintln!("skipped {tree}: not built under {}", trees.display());
-            }
-            continue;
-        }
-        let (base_entries, base_peaks) = measure(&small, attrs, "small");
-        let base = base_peaks[2];
-        for &(tree, budget) in rows {
-            let root = trees.join(tree);
-            if !root.is_dir() {
-                eprintln!("skipped {tree}: not built under {}", trees.display());
+    for gate in &RSS_GATES {
+        let measure = |root: &Path, attrs: &str, name: &str| {
+            rss_peaks(&env, &hyperfine, &bin, root, attrs, name, gate)
+        };
+        for (attrs, rows) in &gate.budgets {
+            if !rows.iter().any(|(tree, _)| trees.join(tree).is_dir()) {
+                for (tree, _) in rows {
+                    eprintln!("skipped {tree}: not built under {}", trees.display());
+                }
                 continue;
             }
-            let (entries, peaks) = measure(&root, attrs, tree);
-            let above = entries - base_entries;
-            let peak = peaks[2];
-            let per_entry = peak.saturating_sub(base);
-            let runs: Vec<String> = peaks
-                .iter()
-                .map(|&p| tenths(p.saturating_sub(base), above))
-                .collect();
+            let (base_entries, base_peaks) = measure(&small, attrs, "small");
+            let base = base_peaks[2];
             eprintln!(
-                "{tree} --attrs {attrs}: {entries} entries, median peak {peak} bytes, {} bytes per entry above a {base_entries}-entry scan's {base} (runs {}; budget {budget}); {} bytes per entry in all",
-                tenths(per_entry, above),
-                runs.join(", "),
-                tenths(peak, entries)
+                "{} --attrs {attrs}: {base_entries}-entry baseline {base} bytes ({})",
+                gate.name,
+                limit_text(gate.baseline_cap, "cap")
             );
-            assert!(
-                per_entry * 10 / above <= budget * 10,
-                "{tree} --attrs {attrs}: over {budget} bytes per entry"
-            );
-            measured += 1;
+            if let Some(cap) = gate.baseline_cap {
+                assert!(
+                    base <= cap,
+                    "{} --attrs {attrs}: the baseline is over {cap} bytes",
+                    gate.name
+                );
+            }
+            for &(tree, budget) in rows {
+                let root = trees.join(tree);
+                if !root.is_dir() {
+                    eprintln!("skipped {tree}: not built under {}", trees.display());
+                    continue;
+                }
+                let (entries, peaks) = measure(&root, attrs, tree);
+                let above = entries - base_entries;
+                let peak = peaks[2];
+                let per_entry = peak.saturating_sub(base);
+                let runs: Vec<String> = peaks
+                    .iter()
+                    .map(|&p| tenths(p.saturating_sub(base), above))
+                    .collect();
+                eprintln!(
+                    "{tree} {} --attrs {attrs}: {entries} entries, median peak {peak} bytes, {} bytes per entry above a {base_entries}-entry scan's {base} (runs {}; {}); {} bytes per entry in all",
+                    gate.name,
+                    tenths(per_entry, above),
+                    runs.join(", "),
+                    limit_text(budget, "budget"),
+                    tenths(peak, entries)
+                );
+                if let Some(budget) = budget {
+                    assert!(
+                        per_entry * 10 / above <= budget * 10,
+                        "{tree} {} --attrs {attrs}: over {budget} bytes per entry",
+                        gate.name
+                    );
+                }
+                measured += 1;
+                // A pass with --save leaves six files for the tree (the
+                // warmup and five runs), each the size of an index of it.
+                let _ = fs::remove_dir_all(env.index_dir().join("scans"));
+            }
+        }
+        if let Some(warning) = pending_warning(gate) {
+            eprintln!("{warning}");
         }
     }
     assert!(
@@ -348,8 +382,134 @@ fn p1_test_01_peak_rss_per_entry_on_the_bench_trees() {
     );
 }
 
-/// A `--json` scan of `root` by `bin`: its entries, and the peak RSS of each
-/// of five `scan --attrs <attrs>` runs under hyperfine, lowest first.
+/// A tree's budget: its name, and its bytes per entry above the small
+/// scan's peak, [`None`] until one is set.
+type TreeBudget = (&'static str, Option<u64>);
+
+/// An attribute level's budgets, one for each tree.
+type AttrsBudgets = (&'static str, [TreeBudget; 3]);
+
+/// One pass of the peak RSS gate: a `scan` command and its limits.
+struct RssGate {
+    /// What the report calls the command.
+    name: &'static str,
+    /// `scan`'s flags beyond the gate's own.
+    flags: &'static [&'static str],
+    /// The budgets of the two attribute levels.
+    budgets: [AttrsBudgets; 2],
+    /// The most the small scan's peak may be, in bytes, the fixed cost of
+    /// any run of this command, which nothing bounded (the implementation
+    /// audit, 3.3). [`None`] is a cap not yet set.
+    baseline_cap: Option<u64>,
+}
+
+/// The gate's passes. `scan` holds P1-TEST-01's budgets. `scan --save`, what
+/// acceptance target 5 names, has budgets of its own, not yet set: they come
+/// from the nightly's figures on both platforms (P2-IDX-07).
+const RSS_GATES: [RssGate; 2] = [
+    RssGate {
+        name: "scan",
+        flags: &[],
+        budgets: [
+            (
+                "basic",
+                [("T1", Some(100)), ("T2", Some(100)), ("T3", Some(130))],
+            ),
+            (
+                "full",
+                [("T1", Some(130)), ("T2", Some(130)), ("T3", Some(160))],
+            ),
+        ],
+        baseline_cap: None,
+    },
+    RssGate {
+        name: "scan --save",
+        flags: &["--save"],
+        budgets: [
+            ("basic", [("T1", None), ("T2", None), ("T3", None)]),
+            ("full", [("T1", None), ("T2", None), ("T3", None)]),
+        ],
+        baseline_cap: None,
+    },
+];
+
+/// A limit as the report prints it.
+fn limit_text(limit: Option<u64>, what: &str) -> String {
+    limit.map_or_else(
+        || format!("{what} pending"),
+        |limit| format!("{what} {limit}"),
+    )
+}
+
+/// The annotation for a pass with a budget or a cap not yet set, which the
+/// nightly's run page shows beside its figures: a pass that enforces nothing
+/// must say so, and cannot fail or pass in silence.
+fn pending_warning(gate: &RssGate) -> Option<String> {
+    let pending = gate.baseline_cap.is_none()
+        || gate
+            .budgets
+            .iter()
+            .any(|(_, rows)| rows.iter().any(|(_, budget)| budget.is_none()));
+    pending.then(|| {
+        format!(
+            "::warning title=Peak RSS::`{}`: limits not yet set, so this pass reported its figures and enforced nothing (P2-IDX-07); set them from this nightly's figures",
+            gate.name
+        )
+    })
+}
+
+/// The command hyperfine measures.
+fn rss_command(bin: &str, root: &str, attrs: &str, flags: &[&str]) -> String {
+    let mut command = format!(
+        "{} scan --attrs {attrs} --json --treemap never",
+        shell_quote(bin)
+    );
+    for flag in flags {
+        command.push(' ');
+        command.push_str(flag);
+    }
+    command.push(' ');
+    command.push_str(&shell_quote(root));
+    command
+}
+
+#[test]
+fn p2_idx_07_the_rss_gate_runs_scan_save_and_says_when_a_limit_is_pending() {
+    let save = RSS_GATES
+        .iter()
+        .find(|gate| gate.flags == ["--save"])
+        .expect("a pass with --save");
+    assert_eq!(
+        rss_command("bin", "/root", "basic", save.flags),
+        "'bin' scan --attrs basic --json --treemap never --save '/root'"
+    );
+    // A limit not set is reported, a limit set is not.
+    let all_set = RssGate {
+        name: "set",
+        flags: &[],
+        budgets: [
+            ("basic", [("T1", Some(1)), ("T2", Some(1)), ("T3", Some(1))]),
+            ("full", [("T1", Some(1)), ("T2", Some(1)), ("T3", Some(1))]),
+        ],
+        baseline_cap: Some(1),
+    };
+    assert!(pending_warning(&all_set).is_none());
+    let one_missing = RssGate {
+        budgets: [
+            ("basic", [("T1", Some(1)), ("T2", None), ("T3", Some(1))]),
+            ("full", [("T1", Some(1)), ("T2", Some(1)), ("T3", Some(1))]),
+        ],
+        ..all_set
+    };
+    let warning = pending_warning(&one_missing).expect("a pending budget warns");
+    assert!(warning.starts_with("::warning title="), "{warning}");
+    assert_eq!(limit_text(None, "budget"), "budget pending");
+    assert_eq!(limit_text(Some(100), "budget"), "budget 100");
+}
+
+/// A `--json` run of `gate`'s command on `root` by `bin`: its entries, and
+/// the peak RSS of each of five `scan --attrs <attrs>` runs under hyperfine,
+/// lowest first.
 fn rss_peaks(
     env: &TestEnv,
     hyperfine: &OsString,
@@ -357,14 +517,19 @@ fn rss_peaks(
     root: &Path,
     attrs: &str,
     name: &str,
+    gate: &RssGate,
 ) -> (u64, Vec<u64>) {
-    let scan = &scan_json(env, &["--attrs", attrs, "--treemap", "never"], root)["scan"];
+    let mut args = vec!["--attrs", attrs, "--treemap", "never"];
+    args.extend_from_slice(gate.flags);
+    let scan = &scan_json(env, &args, root)["scan"];
     let entries = scan["file_count"].as_u64().unwrap() + scan["dir_count"].as_u64().unwrap();
-    let export = env.tmp_dir().join(format!("{name}-{attrs}.json"));
-    let command = format!(
-        "{} scan --attrs {attrs} --json --treemap never {}",
-        shell_quote(&bin.to_string_lossy()),
-        shell_quote(&root.to_string_lossy())
+    let suffix = if gate.flags.is_empty() { "" } else { "-save" };
+    let export = env.tmp_dir().join(format!("{name}-{attrs}{suffix}.json"));
+    let command = rss_command(
+        &bin.to_string_lossy(),
+        &root.to_string_lossy(),
+        attrs,
+        gate.flags,
     );
     let out = env
         .command(hyperfine)

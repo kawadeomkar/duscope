@@ -8,6 +8,16 @@
 //! temporary file `scans --prune` removes. The rows come from the arena and
 //! its roll-up, which numbered the entries and charged the hard links and
 //! clones (DEV-36).
+//!
+//! `SQLite` runs with its default page cache of about 2 MB and sorts each
+//! index's keys through a file past that (`temp_store = FILE`), so a save
+//! costs little more memory than the scan it follows. The file is `SQLite`'s
+//! own, in the first of `SQLITE_TMPDIR`, `TMPDIR`, `/var/tmp`, `/usr/tmp`,
+//! `/tmp` and the current directory that can be written; it is unlinked as
+//! it is opened. If it cannot be created or written the save is built again
+//! with the sort in memory, so that a full temporary directory does not fail
+//! it: a failed statement under `journal_mode = OFF` leaves the file
+//! unusable, so the second build starts over.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
@@ -16,7 +26,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use duscope_walk::{Attrs, Boundary, DirId, FullAttrs, Skip};
-use rusqlite::{Connection, Statement, Transaction, params};
+use rusqlite::{Connection, ErrorCode, Statement, Transaction, params};
 
 use super::scanid::ScanId;
 use super::schema_parts;
@@ -161,7 +171,71 @@ fn kill_before_rename() {
 
 /// Builds the whole file at `tmp`, synced, ready to rename.
 fn write_file(arena: &Arena, rollup: &RollUp, meta: &ScanMeta, tmp: &Path) -> Result<(), String> {
-    let text = |e: &dyn Display| e.to_string();
+    write_file_with(arena, rollup, meta, tmp, &|db, indexes| {
+        db.execute_batch(indexes)
+    })
+}
+
+/// [`write_file`], building the indexes with `create_indexes`, which a test
+/// replaces to fail: a sort file on a full disk cannot be arranged portably.
+fn write_file_with(
+    arena: &Arena,
+    rollup: &RollUp,
+    meta: &ScanMeta,
+    tmp: &Path,
+    create_indexes: &dyn Fn(&Connection, &str) -> rusqlite::Result<()>,
+) -> Result<(), String> {
+    match build(arena, rollup, meta, tmp, "FILE", create_indexes) {
+        Err(Failure::SortFile(cause)) => {
+            log::warn!("the temporary file of the index sort failed ({cause}): sorting in memory");
+            fs::remove_file(tmp).map_err(|e| e.to_string())?;
+            build(arena, rollup, meta, tmp, "MEMORY", create_indexes).map_err(Failure::into_message)
+        }
+        built => built.map_err(Failure::into_message),
+    }
+}
+
+/// Why a build of the file failed.
+enum Failure {
+    /// Building the indexes failed in a way their temporary sort file can:
+    /// it could not be created (`SQLITE_CANTOPEN`), no directory would take
+    /// it (`SQLITE_IOERR_GETTEMPPATH`), or it could not be written
+    /// (`SQLITE_FULL`, `SQLITE_IOERR_WRITE`). The index file itself can fail
+    /// the same ways, which a second build then reports.
+    SortFile(String),
+    /// Anything else.
+    Other(String),
+}
+
+impl Failure {
+    fn into_message(self) -> String {
+        match self {
+            Failure::SortFile(message) | Failure::Other(message) => message,
+        }
+    }
+}
+
+/// Whether `error`, from building the indexes, is one their temporary sort
+/// file can cause. An error reading the database, a corrupt page or running
+/// out of memory is not, and sorting in memory would not help it.
+fn from_sort_file(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(ErrorCode::DiskFull | ErrorCode::CannotOpen | ErrorCode::SystemIoFailure)
+    )
+}
+
+/// One build of the whole file at `tmp`, `SQLite`'s sort spilling as
+/// `temp_store` says: `FILE`, or `MEMORY` to keep it in memory.
+fn build(
+    arena: &Arena,
+    rollup: &RollUp,
+    meta: &ScanMeta,
+    tmp: &Path,
+    temp_store: &str,
+    create_indexes: &dyn Fn(&Connection, &str) -> rusqlite::Result<()>,
+) -> Result<(), Failure> {
+    let other = |e: &dyn Display| Failure::Other(e.to_string());
     // Created empty first, so the file is 0600 from the start whatever the
     // umask; SQLite takes an empty file as an empty database.
     OpenOptions::new()
@@ -169,24 +243,29 @@ fn write_file(arena: &Arena, rollup: &RollUp, meta: &ScanMeta, tmp: &Path) -> Re
         .create_new(true)
         .mode(0o600)
         .open(tmp)
-        .map_err(|e| text(&e))?;
-    let mut db = Connection::open(tmp).map_err(|e| text(&e))?;
-    db.execute_batch(
+        .map_err(|e| other(&e))?;
+    let mut db = Connection::open(tmp).map_err(|e| other(&e))?;
+    db.execute_batch(&format!(
         "PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; \
-         PRAGMA locking_mode = EXCLUSIVE; PRAGMA temp_store = MEMORY; \
-         PRAGMA cache_size = -65536;",
-    )
-    .map_err(|e| text(&e))?;
+         PRAGMA locking_mode = EXCLUSIVE; PRAGMA temp_store = {temp_store};"
+    ))
+    .map_err(|e| other(&e))?;
     let (tables, indexes) = schema_parts();
-    let tx = db.transaction().map_err(|e| text(&e))?;
-    tx.execute_batch(tables).map_err(|e| text(&e))?;
-    rows(&tx, arena, rollup, meta).map_err(|e| text(&e))?;
-    tx.commit().map_err(|e| text(&e))?;
-    db.execute_batch(indexes).map_err(|e| text(&e))?;
-    db.close().map_err(|(_, e)| text(&e))?;
+    let tx = db.transaction().map_err(|e| other(&e))?;
+    tx.execute_batch(tables).map_err(|e| other(&e))?;
+    rows(&tx, arena, rollup, meta).map_err(|e| other(&e))?;
+    tx.commit().map_err(|e| other(&e))?;
+    create_indexes(&db, indexes).map_err(|e| {
+        if from_sort_file(&e) {
+            Failure::SortFile(e.to_string())
+        } else {
+            other(&e)
+        }
+    })?;
+    db.close().map_err(|(_, e)| other(&e))?;
     File::open(tmp)
         .and_then(|f| f.sync_all())
-        .map_err(|e| text(&e))
+        .map_err(|e| other(&e))
 }
 
 /// Every row of the index.

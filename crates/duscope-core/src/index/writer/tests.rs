@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -6,7 +7,7 @@ use duscope_walk::{Attrs, MemProvider, WalkOptions, walk_with};
 use rusqlite::Connection;
 use rusqlite::types::Value;
 
-use super::{IndexWriter, ScanMeta, index_path};
+use super::{IndexWriter, ScanMeta, index_path, write_file_with};
 use crate::arena::Arena;
 use crate::index::{SCAN_META_KEYS, ScanId};
 use crate::query::{ArenaView, TreeView};
@@ -250,6 +251,103 @@ fn p2_idx_02_a_failed_write_leaves_no_file() {
         [format!("{}.db", meta.scan_id)],
         "the temporary file is gone"
     );
+}
+
+/// What a build fails with when `SQLite` cannot write its temporary file:
+/// `SQLITE_FULL`.
+fn disk_full() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+        Some("database or disk is full".to_owned()),
+    )
+}
+
+/// `temp_store` as it reads inside a build: 1 is `FILE`, 2 is `MEMORY`.
+fn temp_store(db: &Connection) -> i64 {
+    db.pragma_query_value(None, "temp_store", |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn p2_idx_07_the_sort_spills_to_a_file_under_sqlites_default_cache() {
+    let env = duscope_testkit::TestEnv::new();
+    let tmp = env.tmp_dir().join("pragmas.db");
+    let (arena, rollup) = scanned();
+    let seen = RefCell::new(None);
+    let create = |db: &Connection, ddl: &str| {
+        let cache: i64 = db
+            .pragma_query_value(None, "cache_size", |row| row.get(0))
+            .unwrap();
+        *seen.borrow_mut() = Some((temp_store(db), cache));
+        db.execute_batch(ddl)
+    };
+    write_file_with(&arena, &rollup, &meta("pragmas"), &tmp, &create).unwrap();
+    assert_eq!(
+        seen.into_inner(),
+        Some((1, -2000)),
+        "temp_store = FILE and SQLite's own default cache of about 2 MB"
+    );
+}
+
+#[test]
+fn p2_idx_07_a_sort_file_that_fails_builds_the_file_again_in_memory() {
+    let env = duscope_testkit::TestEnv::new();
+    let tmp = env.tmp_dir().join("retry.db");
+    let (arena, rollup) = scanned();
+    let tries = RefCell::new(Vec::new());
+    let create = |db: &Connection, ddl: &str| {
+        tries.borrow_mut().push(temp_store(db));
+        if tries.borrow().len() == 1 {
+            return Err(disk_full());
+        }
+        db.execute_batch(ddl)
+    };
+    write_file_with(&arena, &rollup, &meta("retry"), &tmp, &create).unwrap();
+    assert_eq!(*tries.borrow(), [1, 2], "once on a file, once in memory");
+    // The second build started over: every row is there once, and the
+    // indexes, whatever the first one left behind.
+    let db = Connection::open(&tmp).unwrap();
+    let dirs = count(&db, "SELECT count(*) FROM dirs");
+    let files = count(&db, "SELECT count(*) FROM files");
+    assert_eq!(usize::try_from(dirs + files).unwrap(), rollup.len());
+    let indexes = "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND sql IS NOT NULL";
+    assert_eq!(count(&db, indexes), 5);
+    let ok: String = db
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ok, "ok");
+}
+
+#[test]
+fn p2_idx_07_a_second_failure_is_reported_after_one_retry() {
+    let env = duscope_testkit::TestEnv::new();
+    let tmp = env.tmp_dir().join("twice.db");
+    let (arena, rollup) = scanned();
+    let tries = Cell::new(0);
+    let create = |_: &Connection, _: &str| {
+        tries.set(tries.get() + 1);
+        Err(disk_full())
+    };
+    let error = write_file_with(&arena, &rollup, &meta("twice"), &tmp, &create).unwrap_err();
+    assert_eq!(tries.get(), 2, "one retry");
+    assert!(error.contains("full"), "{error}");
+}
+
+#[test]
+fn p2_idx_07_a_failure_the_sort_file_cannot_cause_is_not_retried() {
+    let env = duscope_testkit::TestEnv::new();
+    let tmp = env.tmp_dir().join("other.db");
+    let (arena, rollup) = scanned();
+    let tries = Cell::new(0);
+    let create = |_: &Connection, _: &str| {
+        tries.set(tries.get() + 1);
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOMEM),
+            None,
+        ))
+    };
+    write_file_with(&arena, &rollup, &meta("other"), &tmp, &create).unwrap_err();
+    assert_eq!(tries.get(), 1, "only the temporary file's failures retry");
 }
 
 #[test]
