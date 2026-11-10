@@ -6,10 +6,12 @@
 //! scan's root (`*.zip` at any depth, `/Library/*` from the root): a tile
 //! shows when its entry's path or a folder above it matches. A folder too
 //! small to open, a pool (`+N small`) and the files' tile show when
-//! something drawn in them would: their members are read, at most
-//! [`WALK_BUDGET`] entries for a map, and whatever the budget does not
-//! reach stays shown. Reading a tile's entry is O(depth), so a map costs
-//! its tiles, once per mask and map, and repainting costs a pass over the
+//! something drawn in them would: their members are read, each child a
+//! pool steps through and each entry under a folder counted, at most
+//! [`WALK_BUDGET`] entries for a map however large its folders, and a tile
+//! the budget runs out in, like whatever it does not reach, stays shown.
+//! Reading a tile's entry is O(depth), so a map costs its tiles and the
+//! budget, once per mask and map, and repainting costs a pass over the
 //! cells.
 //!
 //! The boxes and gutters of open folders are structure, drawn whatever the
@@ -20,7 +22,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use duscope_core::query::{Filters, Node, children, globs};
+use duscope_core::query::{Filters, Node, globs};
 use duscope_core::rules::Class;
 use duscope_treemap::Rect;
 use duscope_treemap::cells::Cell;
@@ -32,7 +34,7 @@ use crate::widgets::Canvas;
 use crate::zoom::Map;
 
 /// The entries read for one map while deciding what its folders hold.
-const WALK_BUDGET: usize = 256 * 1024;
+pub(crate) const WALK_BUDGET: usize = 256 * 1024;
 /// The entries read for one row of a list.
 const ROW_BUDGET: usize = 4096;
 /// The maps whose hidden tiles are kept.
@@ -175,7 +177,10 @@ impl Mask {
     }
 
     /// Whether a pool of `dir` (its children with no tile of their own on
-    /// `map`, for [`DrawnKind::Files`] its files) shows, within `budget`.
+    /// `map`, for [`DrawnKind::Files`] its files) shows, within `budget`:
+    /// each child read on the way counts, as each entry `below` reads
+    /// does, and a pool the budget runs out in shows, as a folder does
+    /// there.
     fn pool_shows(
         &self,
         ctx: &Context<'_>,
@@ -185,10 +190,30 @@ impl Mask {
         budget: &mut usize,
     ) -> bool {
         let node = ctx.view.node(dir);
-        children(ctx.view, &node)
-            .filter(|&id| map.own(id).is_none())
-            .filter(|&id| !files_only || !ctx.view.node(id).is_dir())
-            .any(|id| *budget == 0 || self.tile_shows(ctx, id, budget))
+        // The children in id order, the files and then each folder, whose
+        // subtree is stepped over (the files alone for the files' tile):
+        // one read each, as they are reached.
+        let last = if files_only {
+            node.files_end
+        } else {
+            node.last_id
+        };
+        let mut next = dir.checked_add(1);
+        while let Some(id) = next.filter(|&id| id <= last) {
+            if *budget == 0 {
+                return true;
+            }
+            *budget -= 1;
+            let child = ctx.view.node(id);
+            next = child.last_id.checked_add(1);
+            if map.own(id).is_some() {
+                continue;
+            }
+            if self.keeps(ctx, &child) || (child.is_dir() && self.below(ctx, &child, budget)) {
+                return true;
+            }
+        }
+        false
     }
 
     /// What the mask hides on `map`, worked out once.

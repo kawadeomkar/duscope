@@ -516,6 +516,160 @@ fn p4_tui_05_the_mask_hides_tiles_without_a_new_layout_and_esc_clears_it() {
     assert_ne!(terminal.backend().buffer()[(x, y)].bg, base);
 }
 
+/// A view of `view` that notes each entry read through it.
+struct Counting<'a> {
+    view: &'a ArenaView<'a>,
+    read: RefCell<Vec<bool>>,
+}
+
+impl Counting<'_> {
+    /// How many entries were read.
+    fn read(&self) -> usize {
+        self.read.borrow().iter().filter(|&&r| r).count()
+    }
+
+    fn note(&self, id: u32) {
+        self.read.borrow_mut()[usize::try_from(id).unwrap()] = true;
+    }
+}
+
+impl TreeView for Counting<'_> {
+    fn len(&self) -> u32 {
+        self.view.len()
+    }
+    fn node(&self, id: u32) -> duscope_core::query::Node {
+        self.note(id);
+        self.view.node(id)
+    }
+    fn root_path(&self) -> &Path {
+        self.view.root_path()
+    }
+    fn full_attrs(&self) -> bool {
+        self.view.full_attrs()
+    }
+    fn name(&self, id: u32) -> std::borrow::Cow<'_, [u8]> {
+        self.note(id);
+        self.view.name(id)
+    }
+}
+
+/// A root holding one file and `n` files a thousandth of its size each,
+/// which no map can give tiles of their own.
+fn pooled(n: usize) -> (Arena, RollUp) {
+    let mut json = String::from(r#"[1,2,{"progname":"ncdu"},[{"name":"/pool"}"#);
+    let big = n * 1000;
+    let _ = write!(json, r#",{{"name":"big","asize":{big},"dsize":{big}}}"#);
+    for i in 0..n {
+        let _ = write!(json, r#",{{"name":"f{i:07}","asize":1,"dsize":1}}"#);
+    }
+    json.push_str("]]");
+    let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
+        .unwrap()
+        .arena;
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
+#[test]
+fn p4_tui_05_a_pool_larger_than_the_walk_budget_is_read_within_it() {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use duscope_core::rules::Class;
+    use duscope_treemap::paint::{DrawnKind, classes_of};
+
+    use crate::mask::{Mask, WALK_BUDGET};
+    use crate::panes::{Context, ranks};
+
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let paint = opts(&mocha, &classes, ColorBy::Type);
+    // A pool within the budget is read whole: none of its files is an
+    // archive, so it is painted out. One past it is read as far as the
+    // budget goes, and shows, as a folder the budget runs out in does.
+    for (n, shows) in [(5_000, false), (WALK_BUDGET + 40_000, true)] {
+        let tree = pooled(n);
+        let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/pool"));
+        let counting = Counting {
+            view: &view,
+            read: RefCell::new(vec![false; usize::try_from(view.len()).unwrap()]),
+        };
+        let class_of = classes_of(&view, &classes);
+        let dominant = RefCell::new(HashMap::new());
+        let ranks = ranks(&view, &paint);
+        let ctx = Context {
+            view: &view,
+            opts: &paint,
+            class_of: &class_of,
+            dominant: &dominant,
+            ranks: &ranks,
+            root: "/pool",
+            root_parent: "/",
+        };
+        let map = Map::paint(&ctx, 0, 80, 20, false);
+        let pool = map
+            .tiles()
+            .iter()
+            .position(|t| t.kind == DrawnKind::Small && t.id == 0)
+            .unwrap_or_else(|| panic!("no pool: {:?}", map.tiles()));
+        let counted = Context {
+            view: &counting,
+            ..ctx
+        };
+        let hidden = Mask::class(Class::Archives).hidden_tiles(&counted, &map);
+        // The tiles' own entries, and at most the budget besides.
+        let read = counting.read();
+        assert!(
+            read <= WALK_BUDGET + map.tiles().len() + 1,
+            "{n} files: {read} read"
+        );
+        if !shows {
+            assert!(read > n, "{n} files: {read} read");
+        }
+        assert_eq!(!hidden.tile(pool), shows, "{n} files");
+    }
+    // Under `--pool-files` the files' tile reads the folder's files alone:
+    // an archive in a folder beside them, too small for a tile of its own,
+    // does not show it.
+    let json = r#"[1,2,{"progname":"ncdu"},[{"name":"/pool"},
+        [{"name":"sub"},{"name":"x.zip","asize":1,"dsize":1}],
+        {"name":"a","asize":3000,"dsize":3000},{"name":"b","asize":2000,"dsize":2000}]]"#;
+    let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
+        .unwrap()
+        .arena;
+    let rollup = roll_up(&mut arena);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/pool"));
+    let mut paint = paint;
+    paint.pool_files = true;
+    let class_of = classes_of(&view, &classes);
+    let dominant = RefCell::new(HashMap::new());
+    let ranks = ranks(&view, &paint);
+    let ctx = Context {
+        view: &view,
+        opts: &paint,
+        class_of: &class_of,
+        dominant: &dominant,
+        ranks: &ranks,
+        root: "/pool",
+        root_parent: "/",
+    };
+    let map = Map::paint(&ctx, 0, 80, 20, false);
+    let files = map
+        .tiles()
+        .iter()
+        .position(|t| t.kind == DrawnKind::Files && t.id == 0)
+        .unwrap_or_else(|| panic!("no files' tile: {:?}", map.tiles()));
+    assert!(
+        Mask::class(Class::Archives)
+            .hidden_tiles(&ctx, &map)
+            .tile(files)
+    );
+    assert!(
+        !Mask::class(Class::Other)
+            .hidden_tiles(&ctx, &map)
+            .tile(files)
+    );
+}
+
 #[test]
 fn p4_tui_05_the_prompt_takes_text_cancels_and_refuses_what_is_no_glob() {
     let tree = mockup();
