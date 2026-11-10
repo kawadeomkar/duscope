@@ -301,6 +301,28 @@ pub(crate) fn reaches(
     path.starts_with(root)
 }
 
+/// Whether a walk rooted at `folder` goes differently under it than a walk
+/// of `root` does.
+#[cfg(target_os = "macos")]
+pub(crate) fn walk_differs_below(
+    root: &std::path::Path,
+    folder: &std::path::Path,
+    opts: &crate::WalkOptions,
+) -> bool {
+    macos::walk_differs_below(root, folder, opts)
+}
+
+/// Whether a walk rooted at `folder` goes differently under it than a walk
+/// of `root` does: a walk here does not depend on where it starts.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn walk_differs_below(
+    _root: &std::path::Path,
+    _folder: &std::path::Path,
+    _opts: &crate::WalkOptions,
+) -> bool {
+    false
+}
+
 /// The app a Full Disk Access grant for this process belongs to.
 #[cfg(target_os = "macos")]
 pub(crate) fn host_app() -> Option<String> {

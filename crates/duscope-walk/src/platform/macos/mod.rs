@@ -151,6 +151,67 @@ fn firmlinks() -> &'static [Firmlink] {
 /// Where the Data volume is mounted in the boot volume group.
 const DATA_MOUNT: &str = "/System/Volumes/Data";
 
+/// The firmlinks of the System volume that exist here, as their paths.
+fn firmlink_sources() -> Vec<&'static Path> {
+    firmlinks()
+        .iter()
+        .map(|link| link.source.as_path())
+        .filter(|source| source.exists())
+        .collect()
+}
+
+/// Whether a walk rooted at `root`, absolute and resolved, leaves out the
+/// Data volume's way in at `way`, by the firmlink `sources`: see
+/// [`MacProvider::skip`]. A walk rooted at the way in enters it, and `-x`
+/// keeps the mount point out before this is asked.
+fn left_out(way: Boundary, sources: &[&Path], root: &Path, one_file_system: bool) -> bool {
+    let every = !sources.is_empty() && sources.iter().all(|source| source.starts_with(root));
+    match way {
+        Boundary::Firmlink => !every && !one_file_system && Path::new(DATA_MOUNT).starts_with(root),
+        Boundary::Mount => every,
+        _ => false,
+    }
+}
+
+/// Whether a walk rooted at `folder`, below `root` (both absolute and
+/// resolved), goes into the Data volume differently under it than a walk of
+/// `root` goes there.
+pub(super) fn walk_differs_below(root: &Path, folder: &Path, opts: &WalkOptions) -> bool {
+    differs_by(
+        &firmlink_sources(),
+        root,
+        folder,
+        opts.one_file_system,
+        opts.follow_symlinks,
+    )
+}
+
+/// [`walk_differs_below`], by the firmlink `sources`. Each way in that a
+/// walk of the folder can meet is asked of the two roots, its mount point
+/// and its firmlinks alike: at or below the folder, or anywhere when a
+/// followed link can lead there. The folder itself is a walk's root, which
+/// it always enters.
+fn differs_by(
+    sources: &[&Path],
+    root: &Path,
+    folder: &Path,
+    one_file_system: bool,
+    follow_symlinks: bool,
+) -> bool {
+    let leaves_out = |way: Boundary, from: &Path| {
+        (way == Boundary::Mount && one_file_system) || left_out(way, sources, from, one_file_system)
+    };
+    let differs_at = |way: Boundary, at: &Path| {
+        (follow_symlinks || at.starts_with(folder))
+            && leaves_out(way, root) != (at != folder && leaves_out(way, folder))
+    };
+    !sources.is_empty()
+        && (differs_at(Boundary::Mount, Path::new(DATA_MOUNT))
+            || sources
+                .iter()
+                .any(|&source| differs_at(Boundary::Firmlink, source)))
+}
+
 /// The device of the Data volume: the one the firmlinks lead to, read
 /// the way entries read theirs (`FSOPT_RETURN_REALDEV`), so the two compare
 /// on one definition of a device. `lstat` would give the volume group's
@@ -344,29 +405,21 @@ impl Provider for MacProvider {
     /// the Data volume is ordinary. Under `-x` the mount point stays out
     /// (another volume), so the firmlinks are the way in and are kept.
     fn skip(&self, dir: &DirHandle, entry: &Entry, opts: &WalkOptions) -> Option<Skip> {
-        if Some(entry.dev) != data_volume() {
+        if Some(entry.dev) != data_volume()
+            || !matches!(entry.boundary, Boundary::Mount | Boundary::Firmlink)
+        {
             return None;
         }
-        let firmlink = match entry.boundary {
-            Boundary::Mount => false,
-            Boundary::Firmlink => true,
-            _ => return None,
-        };
         // The walk root's own path, resolved: below a followed link the
         // directory's path is the link's target, not under the root.
         let root = self.real_root(dir.ancestors().last()?.path())?;
-        let sources: Vec<&PathBuf> = firmlinks()
-            .iter()
-            .map(|link| &link.source)
-            .filter(|s| s.exists())
-            .collect();
-        let every = !sources.is_empty() && sources.iter().all(|source| source.starts_with(&root));
-        let skip = if firmlink {
-            !every && !opts.one_file_system && Path::new(DATA_MOUNT).starts_with(&root)
-        } else {
-            every
-        };
-        skip.then_some(Skip::Firmlinked)
+        left_out(
+            entry.boundary,
+            &firmlink_sources(),
+            &root,
+            opts.one_file_system,
+        )
+        .then_some(Skip::Firmlinked)
     }
 
     fn clones_unavailable(&self, _opts: &WalkOptions) -> bool {

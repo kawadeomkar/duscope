@@ -698,6 +698,17 @@ pub fn reaches(root: &Path, path: &Path, opts: &WalkOptions) -> bool {
     platform::reaches(root, path, opts)
 }
 
+/// Whether a walk rooted at `folder`, a directory below `root`, both
+/// absolute and resolved, would go differently under `folder` than a walk
+/// of `root` goes there, for a reason that rests on where the walk starts.
+/// On macOS the Data volume has two ways in, its mount point
+/// (`/System/Volumes/Data`) and the firmlinks, and the root decides which
+/// one a walk takes: `/System` differs from `/`, and `/System/Library` from
+/// `/System`. Elsewhere a walk does not depend on where it starts.
+pub fn walk_differs_below(root: &Path, folder: &Path, opts: &WalkOptions) -> bool {
+    platform::walk_differs_below(root, folder, opts)
+}
+
 /// The app a Full Disk Access grant for this process belongs to: on macOS
 /// the app bundle the nearest such ancestor process runs from, named by its
 /// outermost bundle (`Terminal`, `iTerm`, `Visual Studio Code`, `Claude`),

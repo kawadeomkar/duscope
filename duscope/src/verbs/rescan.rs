@@ -176,7 +176,10 @@ fn folder_alone(parent: &Parent, shown: &Path) -> Option<PathBuf> {
         return None;
     }
     let id = index.lookup(below)?;
-    if !index.node(id).is_dir() || !index.entered(id) || !same_in_a_folder(&parent.options) {
+    if !index.node(id).is_dir()
+        || !index.entered(id)
+        || !same_in_a_folder(&parent.options, &parent.root, shown)
+    {
         return None;
     }
     match std::fs::canonicalize(shown) {
@@ -186,15 +189,23 @@ fn folder_alone(parent: &Parent, shown: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Whether the saved options leave out the same in a scan of a folder below
-/// the root as in a scan of the root. Their patterns are matched against
-/// the path relative to the scan's root, so one anchored there (`/build`) or
+/// Whether the saved options leave out the same in a scan of `folder` as
+/// in the scan of `root` above it. Their patterns are matched against the
+/// path relative to the scan's root, so one anchored there (`/build`) or
 /// naming more than one component (`proj/build`) would leave out something
 /// else; one name at any depth (`node_modules`, `*.tmp`) leaves out the
 /// same. A file of patterns that cannot be read is no such file: the walk
-/// reports it.
-fn same_in_a_folder(options: &ScanOptions) -> bool {
-    options.excludes.iter().all(|p| one_name(p))
+/// reports it. The walk's own rules for a platform's layout can rest on
+/// where it starts ([`duscope_walk::walk_differs_below`]), the same rule
+/// then reading another tree in the folder.
+fn same_in_a_folder(options: &ScanOptions, root: &Path, folder: &Path) -> bool {
+    let walk = WalkOptions {
+        one_file_system: options.one_file_system,
+        follow_symlinks: options.follow_symlinks,
+        ..WalkOptions::default()
+    };
+    !duscope_walk::walk_differs_below(root, folder, &walk)
+        && options.excludes.iter().all(|p| one_name(p))
         && options
             .exclude_files
             .iter()
@@ -451,11 +462,16 @@ impl Parent {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use duscope_core::arena::Arena;
+    use duscope_core::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
     use duscope_core::rescan::{Fallback, ScanOptions};
+    use duscope_core::rollup::roll_up;
+    use duscope_walk::{Attrs, MemProvider, ScanEvent, Skip, WalkOptions, walk_with};
 
-    use super::{how, lines_one_name, one_name, same_in_a_folder};
+    use super::{Parent, folder_alone, how, lines_one_name, one_name, same_in_a_folder};
 
     #[test]
     fn p4_tui_06_a_pattern_of_one_name_leaves_out_the_same_in_a_folder() {
@@ -493,16 +509,150 @@ mod tests {
         assert!(!lines_one_name(b"docs/build\n"));
     }
 
+    /// As a rescan's parent, a saved scan of an in-memory tree at `root`:
+    /// `nowhere/proj` and a file `nowhere/f`, `nowhere/skip` left out by an
+    /// exclude, `nowhere/nas` a mount the walk did not enter, and
+    /// `System/Volumes/Data`. Nothing under `nowhere` exists on the disk.
+    fn parent(dir: &Path, root: &str) -> Parent {
+        let mut tree = MemProvider::new(root);
+        tree.file("nowhere/proj/a", 10)
+            .file("nowhere/f", 10)
+            .file("nowhere/skip/b", 10)
+            .dir("nowhere/nas")
+            .dir("System/Volumes/Data");
+        let mut globs = globset::GlobSetBuilder::new();
+        globs.add(globset::Glob::new("**/skip").unwrap());
+        let opts = WalkOptions {
+            excludes: globs.build().unwrap(),
+            ..WalkOptions::default()
+        };
+        let mut arena = Arena::new(Attrs::Basic);
+        let mut volume = None;
+        walk_with(&tree, tree.root_path(), &opts, |event| {
+            if let ScanEvent::Volume(found) = &event {
+                volume.get_or_insert_with(|| found.clone());
+            }
+            arena.push(event).unwrap();
+        })
+        .unwrap();
+        let mut mount: duscope_walk::VolumeInfo = volume.unwrap();
+        mount.dev += 1;
+        mount.mnt_id += 1;
+        mount.mount_point = tree.root_path().join("nowhere/nas");
+        mount.reason = Some(Skip::Network);
+        arena.push(ScanEvent::Volume(mount)).unwrap();
+        let rollup = roll_up(&mut arena);
+        let root = root.as_bytes().to_vec();
+        let meta = ScanMeta {
+            scan_id: ScanId::new(&root, 1, [0; 8]),
+            root: root.clone(),
+            root_as_given: root,
+            started_at: 1,
+            finished_at: 2,
+            options: "{}".to_owned(),
+            platform: "test".to_owned(),
+            scanning_uid: 501,
+            thread_count: 4,
+            size_kind: "allocated",
+            volume_total: 1 << 40,
+            volume_free: 1 << 39,
+            unaccounted_bytes: None,
+            error_count: 0,
+            vanished_count: 0,
+            excluded_count: 1,
+            clones_unavailable: false,
+            incremental: false,
+            parent_scan_id: None,
+            source: "scan".to_owned(),
+            tool_version: "0.0.0".to_owned(),
+        };
+        IndexWriter::write(&arena, &rollup, &meta, dir).unwrap();
+        Parent::of(Index::open(&index_path(dir, &meta.scan_id)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn p4_tui_06_what_a_scan_of_slash_did_not_enter_goes_to_the_saved_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = parent(dir.path(), "/");
+        let alone = |path: &str| folder_alone(&parent, Path::new(path));
+        assert_eq!(
+            alone("/nowhere/proj"),
+            Some(PathBuf::from("/nowhere/proj")),
+            "a folder the scan entered"
+        );
+        assert_eq!(alone("/nowhere/nas"), None, "a mount it did not enter");
+        assert_eq!(alone("/nowhere/skip"), None, "an exclude's folder");
+        assert_eq!(alone("/nowhere/f"), None, "a file");
+        assert_eq!(alone("/"), None, "the root itself");
+        // The way into the Data volume, as the walk would decide it; only
+        // the system's firmlink table is read.
+        let system = Path::new("/System/Volumes");
+        assert_eq!(
+            folder_alone(&parent, system).is_some(),
+            !duscope_walk::walk_differs_below(Path::new("/"), system, &WalkOptions::default())
+        );
+    }
+
+    #[test]
+    fn p4_tui_06_what_a_scan_below_slash_did_not_enter_goes_to_the_saved_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = parent(dir.path(), "/tree");
+        assert_eq!(folder_alone(&parent, Path::new("/tree/nowhere/nas")), None);
+    }
+
+    /// Whether the saved options leave a folder to be scanned alone, for
+    /// `root` and `folder` that need not exist.
+    fn alone_under(options: &ScanOptions, root: &str, folder: &str) -> bool {
+        same_in_a_folder(options, Path::new(root), Path::new(folder))
+    }
+
+    #[test]
+    fn p4_tui_06_the_walks_way_into_the_data_volume_decides_as_the_walk_does() {
+        let mut x: ScanOptions = serde_json::from_str("{}").unwrap();
+        x.one_file_system = true;
+        let mut follow: ScanOptions = serde_json::from_str("{}").unwrap();
+        follow.follow_symlinks = true;
+        let plain: ScanOptions = serde_json::from_str("{}").unwrap();
+        let walk = |options: &ScanOptions| WalkOptions {
+            one_file_system: options.one_file_system,
+            follow_symlinks: options.follow_symlinks,
+            ..WalkOptions::default()
+        };
+        // Stats the system's firmlink table where it has one; walks nothing.
+        for (root, folder) in [
+            ("/", "/System"),
+            ("/", "/System/Volumes"),
+            ("/", "/System/Volumes/Data"),
+            ("/", "/System/Library"),
+            ("/", "/usr/lib"),
+            ("/System", "/System/Library"),
+            ("/System", "/System/Volumes"),
+        ] {
+            for options in [&plain, &x, &follow] {
+                assert_eq!(
+                    alone_under(options, root, folder),
+                    !duscope_walk::walk_differs_below(
+                        Path::new(root),
+                        Path::new(folder),
+                        &walk(options)
+                    ),
+                    "{root} {folder}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn p4_tui_06_the_saved_options_decide_whether_a_folder_is_scanned_alone() {
         let plain = || -> ScanOptions { serde_json::from_str("{}").unwrap() };
-        assert!(same_in_a_folder(&plain()));
+        let same = |options: &ScanOptions| alone_under(options, "/tree", "/tree/proj");
+        assert!(same(&plain()));
         let mut names = plain();
         names.excludes = vec!["node_modules".to_owned(), "*.tmp".to_owned()];
-        assert!(same_in_a_folder(&names));
+        assert!(same(&names));
         let mut anchored = plain();
         anchored.excludes = vec!["node_modules".to_owned(), "/Library".to_owned()];
-        assert!(!same_in_a_folder(&anchored));
+        assert!(!same(&anchored));
 
         let dir = tempfile::tempdir().unwrap();
         let of_names = dir.path().join("names");
@@ -512,15 +662,15 @@ mod tests {
         let text = |path: &std::path::Path| path.to_str().unwrap().to_owned();
         let mut ignored = plain();
         ignored.ignore_files = vec![text(&of_names)];
-        assert!(same_in_a_folder(&ignored));
+        assert!(same(&ignored));
         ignored.ignore_files = vec![text(&of_paths)];
-        assert!(!same_in_a_folder(&ignored));
+        assert!(!same(&ignored));
         let mut excluded = plain();
         excluded.exclude_files = vec![text(&of_paths)];
-        assert!(!same_in_a_folder(&excluded));
+        assert!(!same(&excluded));
         // One that cannot be read: the rescan of the saved scan reports it.
         excluded.exclude_files = vec![text(&dir.path().join("gone"))];
-        assert!(!same_in_a_folder(&excluded));
+        assert!(!same(&excluded));
     }
 
     #[test]

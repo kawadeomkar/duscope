@@ -902,6 +902,141 @@ fn p1_walk_07_a_scan_of_system_skips_the_firmlinks_below_it() {
     assert_eq!(crate::Provider::skip(&provider, &dir, &caches, &opts), None);
 }
 
+/// The firmlink sources of a table like the system's, none of them read
+/// from the disk.
+const FIRMLINK_TABLE: [&[u8]; 6] = [
+    b"/Applications\tApplications",
+    b"/Library\tLibrary",
+    b"/System/Library/Caches\tSystem/Library/Caches",
+    b"/Users\tUsers",
+    b"/private\tprivate",
+    b"/usr/local\tusr/local",
+];
+
+/// `differs_by` over [`FIRMLINK_TABLE`].
+fn differs(root: &str, folder: &str, one_file_system: bool, follow_symlinks: bool) -> bool {
+    let table: Vec<super::Firmlink> = FIRMLINK_TABLE
+        .into_iter()
+        .filter_map(super::Firmlink::parse)
+        .collect();
+    let sources: Vec<&Path> = table.iter().map(|link| link.source.as_path()).collect();
+    super::differs_by(
+        &sources,
+        Path::new(root),
+        Path::new(folder),
+        one_file_system,
+        follow_symlinks,
+    )
+}
+
+#[test]
+fn p4_tui_06_the_data_volumes_way_in_differs_between_slash_and_a_folder_that_holds_it() {
+    // A scan of / keeps the firmlinks and skips the mount point; a folder
+    // that holds the mount point enters it, and skips the firmlinks.
+    for folder in ["/System", "/System/Volumes", "/System/Volumes/Data"] {
+        assert!(differs("/", folder, false, false), "{folder}");
+    }
+}
+
+#[test]
+fn p4_tui_06_the_data_volumes_way_in_differs_between_system_and_a_folder_with_firmlinks() {
+    // A scan of /System enters the mount point and skips the firmlinks
+    // below it; a scan of /System/Library holds no mount point, so it keeps
+    // them, and a firmlink at the folder's own path is entered as its root.
+    assert!(differs("/System", "/System/Library", false, false));
+    assert!(differs("/System", "/System/Library/Caches", false, false));
+}
+
+#[test]
+fn p4_tui_06_a_folder_with_no_way_in_below_it_walks_as_its_root_does() {
+    // Nothing the firmlink rule decides lies at or below the folder.
+    for (root, folder) in [
+        ("/", "/Users/a/proj"),
+        ("/", "/System/Applications"),
+        ("/System", "/System/Applications"),
+        ("/System/Volumes/Data", "/System/Volumes/Data/Users"),
+        ("/Users", "/Users/a"),
+        ("/tree", "/tree/proj"),
+    ] {
+        assert!(!differs(root, folder, false, false), "{root} {folder}");
+    }
+}
+
+#[test]
+fn p4_tui_06_a_folder_whose_ways_in_are_decided_alike_walks_as_its_root_does() {
+    // Each root keeps the firmlinks: /System/Library holds no mount point,
+    // and the firmlink at /Users is the folder's own root.
+    for (root, folder) in [
+        ("/", "/System/Library"),
+        ("/", "/usr"),
+        ("/", "/Users"),
+        ("/", "/System/Library/Caches"),
+        // Both roots enter the mount point, and the firmlinks are not below.
+        ("/System", "/System/Volumes"),
+        ("/System", "/System/Volumes/Data"),
+    ] {
+        assert!(!differs(root, folder, false, false), "{root} {folder}");
+    }
+}
+
+#[test]
+fn p4_tui_06_under_x_only_the_mount_point_itself_differs() {
+    // -x keeps the mount point out of every walk that meets it and the
+    // firmlinks in, whatever the root.
+    for (root, folder) in [
+        ("/", "/System"),
+        ("/", "/System/Volumes"),
+        ("/System", "/System/Library"),
+    ] {
+        assert!(!differs(root, folder, true, false), "{root} {folder}");
+    }
+    // A scan of the mount point itself enters what -x left out.
+    assert!(differs("/", "/System/Volumes/Data", true, false));
+}
+
+#[test]
+fn p4_tui_06_a_followed_link_can_meet_a_way_in_anywhere() {
+    // A link followed out of the folder can lead to either way in, which
+    // the two roots decide differently.
+    assert!(differs("/", "/Users/a/proj", false, true));
+    // Two roots above neither way in decide them alike.
+    assert!(!differs("/tree", "/tree/proj", false, true));
+}
+
+#[test]
+fn p4_tui_06_no_firmlink_table_means_no_difference() {
+    assert!(!super::differs_by(
+        &[],
+        Path::new("/"),
+        Path::new("/System"),
+        false,
+        false
+    ));
+}
+
+#[test]
+fn p4_tui_06_the_systems_table_decides_the_public_answer() {
+    if super::data_volume().is_none() || !Path::new("/System/Volumes/Data").exists() {
+        duscope_testkit::skip("this system has no Data volume at /System/Volumes/Data");
+        return;
+    }
+    // Reads /usr/share/firmlinks and stats its paths; nothing is walked.
+    let plain = WalkOptions::default();
+    let x = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    let answer = |root: &str, folder: &str, opts: &WalkOptions| {
+        crate::walk_differs_below(Path::new(root), Path::new(folder), opts)
+    };
+    assert!(answer("/", "/System", &plain));
+    assert!(answer("/", "/System/Volumes", &plain));
+    assert!(answer("/System", "/System/Library", &plain));
+    assert!(!answer("/", "/System", &x));
+    assert!(!answer("/", "/System/Library", &plain));
+    assert!(!answer("/", "/Users/a/proj", &plain));
+}
+
 /// A scan of `/` on the machine running the test: `/Users` is counted once,
 /// through its firmlink, and `/System/Volumes/Data` is listed but not
 /// entered. It reads the whole disk, so it runs only with
