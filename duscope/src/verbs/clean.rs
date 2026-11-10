@@ -9,7 +9,11 @@
 //! item that has changed since is measured from the tree, and a
 //! `changed_since_scan` warning counts them, with the rescan that measures
 //! the tree again; a handle's item that has changed fails the run
-//! (`path_changed`). With no saved scan, the run fails `scan_not_found`.
+//! (`path_changed`). A directory that holds one the scan did not enter
+//! counts what a walk found there too, as an upper bound. One a walk could
+//! not read whole has no figure (`partial_read`): no `--expect-bytes` is met
+//! then, and `--expect-item-bytes` refuses it. With no saved scan, the run
+//! fails `scan_not_found`.
 //!
 //! A refused item makes the whole run a dry run (`refused_path`) unless
 //! `--skip-refused`; so does a plan whose `total_frees_bytes` is not within
@@ -113,6 +117,7 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         .then(|| stale_index(&resolved.index, &lookup.max_age))
         .into_iter()
         .chain(changed_since_scan(&resolved.index, plan.changed_count()))
+        .chain(unread_items(plan.unread_count()))
         .collect();
 
     // On a terminal, without --yes, the plan is shown and `yes` asked for
@@ -301,11 +306,25 @@ fn failure(
         );
     }
     if let Some(expected) = mismatch {
-        let message = format!(
-            "the plan frees {} bytes, not within 1% of --expect-bytes {}, so nothing was {moved}",
-            thousands(plan.plan.total_frees_bytes),
-            thousands(expected)
-        );
+        let unknown = plan
+            .plan
+            .items
+            .iter()
+            .find(|item| item.action != "refused" && item.frees_bytes.is_none());
+        let message = match unknown {
+            Some(item) => format!(
+                "{} could not be read whole, so what it frees is not known and --expect-bytes \
+                 {} cannot be met: nothing was {moved}",
+                item.path,
+                thousands(expected)
+            ),
+            None => format!(
+                "the plan frees {} bytes, not within 1% of --expect-bytes {}, so nothing was \
+                 {moved}",
+                thousands(plan.plan.total_frees_bytes),
+                thousands(expected)
+            ),
+        };
         return Some(
             Failure::new(Exit::Runtime, "expectation_mismatch", message)
                 .hint("Run duscope clean without --yes and review the plan again"),
@@ -391,13 +410,25 @@ fn unexpected(plan: &Plan, expected: &[u64], moved: &str) -> Option<Failure> {
         thousands(plan.refused_count() as u64),
         thousands(items.len() as u64),
     );
-    // A directory the saved scan did not measure: what it frees comes from
-    // the plan's own walk, so no figure is met until a scan measures it.
+    // A directory a walk could not read whole: nothing says what it frees.
+    if item.frees_bytes.is_none() {
+        let message = format!(
+            "{count}: {} could not be read whole, so what it frees is not known",
+            item.path
+        );
+        return Some(
+            Failure::new(Exit::Runtime, "expectation_mismatch", message)
+                .hint("Make what is under it readable, then explain it again"),
+        );
+    }
+    // A directory the saved scan did not measure, or not all of: what it
+    // frees comes from the plan's own walk, so no figure is met until a
+    // scan measures it.
     let frees = item.frees_bytes.filter(|_| !plan.unmeasured(at));
     let Some(frees) = frees else {
         let message = format!(
-            "{count}: the saved scan does not hold what is under {}, so no figure from it can \
-             be checked",
+            "{count}: the saved scan does not hold everything under {}, so no figure from it \
+             can be checked",
             item.path
         );
         return Some(
@@ -530,6 +561,22 @@ fn changed_since_scan(index: &Index, changed: usize) -> Option<Warning> {
             "Run {} to measure the tree again",
             measure_again(index)
         )),
+    })
+}
+
+/// `unread` items could not be read whole, so what they free is not known;
+/// none when there are none.
+fn unread_items(unread: usize) -> Option<Warning> {
+    (unread > 0).then(|| Warning {
+        code: "partial_read",
+        message: format!(
+            "{} could not be read whole while the plan measured {}, so what {} is not known",
+            count(unread, "item"),
+            if unread == 1 { "it" } else { "them" },
+            if unread == 1 { "it frees" } else { "they free" },
+        ),
+        count: Some(unread as u64),
+        hint: Some("Make what is under it readable, then run duscope clean again".to_owned()),
     })
 }
 

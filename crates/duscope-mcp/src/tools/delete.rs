@@ -13,7 +13,8 @@
 //! and moves nothing. `dry_run: false` is `--yes`. Either way the plan's
 //! refusals stand: one item refused, or one whose `frees_bytes` is not
 //! within 1% of its `expect_bytes` or is a directory no saved scan measured
-//! (made since the scan, or not entered by it), stops the whole call, as
+//! (made since the scan, not entered by it, or holding what it did not
+//! enter) or that a walk could not read whole, stops the whole call, as
 //! `clean` stops a list it cannot wholly move; and an item that has changed
 //! since the scan its handle was read from fails the call (`path_changed`).
 //!

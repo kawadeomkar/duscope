@@ -112,6 +112,9 @@ pub enum CoreError {
     /// `explain` examined. The message names the path and which.
     #[error("{0}")]
     PathChanged(String),
+    /// A plan was stopped before it finished: the caller gave up on it.
+    #[error("the plan was stopped before it finished")]
+    PlanStopped,
     /// `clean` was given an item twice, or one inside another.
     #[error("{0}")]
     CleanOverlap(String),

@@ -796,6 +796,7 @@ pub fn core_failure(error: CoreError) -> Failure {
                 "Rescan the tree that holds it (duscope rescan), then run duscope explain --json \
                  again for a handle of what is there now",
             ),
+        CoreError::PlanStopped => Failure::new(Exit::Interrupted, "interrupted", error.to_string()),
         CoreError::CleanOverlap(_) => Failure::new(Exit::Usage, "usage", error.to_string())
             .hint("Rerun duscope clean naming each item once, and none inside another"),
         CoreError::ImportInvalid(_) => Failure::new(Exit::Usage, "usage", error.to_string())

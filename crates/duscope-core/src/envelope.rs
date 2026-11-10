@@ -1380,9 +1380,10 @@ pub struct PlanItem {
     /// What deleting it would free now: its bytes less those a link or
     /// clone member outside it keeps, measured from the tree for an item
     /// that changed since the saved scan or whose bytes the scan does not
-    /// hold (a directory: what its walk found, at most); null where that is
-    /// not known (a refused directory outside the scan's root, or one it did
-    /// not enter).
+    /// hold (a directory: what its walk found, at most), and with what a
+    /// walk found under a directory it holds but did not enter added; null
+    /// where that is not known (a directory a walk could not read whole, a
+    /// refused directory outside the scan's root, or one it did not enter).
     pub frees_bytes: Option<u64>,
     /// `exact`, `lower_bound` or `upper_bound`; null with `frees_bytes`.
     #[cfg_attr(test, schemars(extend("enum" = nullable(&values::FREEABLE_KINDS))))]

@@ -1229,6 +1229,48 @@ fn p5_core_04_an_unchanged_fixture_tree_keeps_index_figures() {
         }
     }
     assert!(planned > 20, "{planned}");
+    // Every file in the cases, as items of one plan: a file is compared
+    // through its `lstat`, where the scan read it through the directory
+    // listing, and the two must agree on clones, compressed and sparse
+    // files and file types. `wide` is the same file a hundred thousand
+    // times over.
+    let mut files = Vec::new();
+    let mut folders = vec![root.join("cases")];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            // A folder that may be listed but not entered holds entries no
+            // one can stat.
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let kind = meta.file_type();
+            if kind.is_dir() {
+                if path.file_name().unwrap() != "wide" && fs::read_dir(&path).is_ok() {
+                    folders.push(path);
+                }
+            } else if !kind.is_symlink() {
+                files.push(path);
+            }
+        }
+    }
+    assert!(files.len() > 50, "{}", files.len());
+    let mut args = vec!["clean", "--scan", &id, "--dry-run", "--json"];
+    args.extend(files.iter().map(|p| s(p)));
+    let value = json(&run(&env, &args));
+    assert_eq!(
+        value["result"]["plan"]["items"].as_array().unwrap().len(),
+        files.len(),
+        "{value}"
+    );
+    let warnings = value["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().all(|w| w["code"] != "changed_since_scan"),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -1275,4 +1317,356 @@ fn p5_core_04_clean_from_an_entry_changed_since_the_scan_is_path_changed() {
         value["result"]["plan"]["items"][0]["frees_kind"],
         "upper_bound"
     );
+}
+
+/// Bytes on disk of `path` itself, as a scan counts them.
+fn on_disk(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path).unwrap().blocks() * 512
+}
+
+#[test]
+fn p5_core_04_expect_bytes_counts_what_the_scan_did_not_enter() {
+    // The audit's reproduction, through an exclude: 50 MiB under a folder
+    // the scan listed and did not enter, nothing changed since. On APFS the
+    // plan read 4,096 bytes and the deletion freed 52,432,896.
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    let (app, cache) = (top.join("app"), top.join("app/cache"));
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(app.join("main.rs"), b"fn main() {}\n").unwrap();
+    zeros(&cache.join("blob"), 52_428_800);
+    let saved = ok(&run(
+        &env,
+        &[
+            "scan",
+            s(&top),
+            "--exclude",
+            "app/cache",
+            "--save",
+            "--json",
+        ],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let scanned = on_disk(&app) + on_disk(&app.join("main.rs")) + on_disk(&cache);
+    let live = scanned + on_disk(&cache.join("blob"));
+    let delete = |figure: u64| {
+        let figure = figure.to_string();
+        run(
+            &env,
+            &[
+                "clean",
+                s(&app),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                &figure,
+                "--yes",
+                "--json",
+            ],
+        )
+    };
+    let value = failed(&delete(scanned), 1, "expectation_mismatch");
+    assert!(cache.join("blob").exists(), "{value}");
+    assert_eq!(value["result"]["deleted_count"], 0);
+    let item = &value["result"]["plan"]["items"][0];
+    assert_eq!(item["frees_bytes"], live, "{value}");
+    assert_eq!(item["frees_kind"], "upper_bound", "{value}");
+    assert!(
+        value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["code"] != "changed_since_scan"),
+        "{value}"
+    );
+    // What is there is met, and is what the deletion frees.
+    let value = ok(&delete(live));
+    assert!(!app.exists());
+    assert_eq!(value["result"]["freed_bytes"], live, "{value}");
+}
+
+#[test]
+fn p5_core_04_a_tool_item_holding_what_the_scan_did_not_enter_is_refused() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    let (app, cache) = (top.join("app"), top.join("app/cache"));
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(app.join("main.rs"), b"fn main() {}\n").unwrap();
+    fs::write(cache.join("blob"), vec![6u8; 64 * 1024]).unwrap();
+    ok(&run(
+        &env,
+        &[
+            "scan",
+            s(&top),
+            "--exclude",
+            "app/cache",
+            "--save",
+            "--json",
+        ],
+    ));
+    let (token, frees) = handle(&env, &app);
+    let from = format!("--from={token}");
+    let figure = format!("--expect-item-bytes={frees}");
+    let value = failed(
+        &run(&env, &["clean", &from, &figure, "--dry-run", "--json"]),
+        1,
+        "expectation_mismatch",
+    );
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("does not hold everything under"),
+        "{value}"
+    );
+    assert!(cache.join("blob").exists());
+}
+
+#[test]
+fn p5_core_04_a_sparse_file_made_dense_with_its_time_restored_fails_expect_bytes() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("sparse");
+    let dir = top.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("s.bin");
+    let len = 52_428_800u64;
+    fs::File::create(&file).unwrap().set_len(len).unwrap();
+    let saved = ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let scanned = on_disk(&dir) + on_disk(&file);
+    let was = fs::metadata(&file).unwrap().modified().unwrap();
+    let mut open = fs::OpenOptions::new().write(true).open(&file).unwrap();
+    let chunk = vec![5u8; 1 << 20];
+    for _ in 0..50 {
+        open.write_all(&chunk).unwrap();
+    }
+    open.sync_all().unwrap();
+    open.set_modified(was).unwrap();
+    drop(open);
+    let figure = scanned.to_string();
+    let value = failed(
+        &run(
+            &env,
+            &[
+                "clean",
+                s(&dir),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                &figure,
+                "--yes",
+                "--json",
+            ],
+        ),
+        1,
+        "expectation_mismatch",
+    );
+    assert!(file.exists(), "{value}");
+    assert_eq!(
+        value["warnings"][0]["code"], "changed_since_scan",
+        "{value}"
+    );
+    let live = value["result"]["plan"]["total_frees_bytes"]
+        .as_u64()
+        .unwrap();
+    assert!(live >= len, "{value}");
+    assert_eq!(live, on_disk(&dir) + on_disk(&file), "{value}");
+}
+
+#[test]
+fn p5_core_04_a_links_other_half_removed_fails_expect_bytes() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("links");
+    let (d, e) = (top.join("d"), top.join("e"));
+    fs::create_dir_all(&d).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    fs::write(d.join("a"), vec![4u8; 1 << 20]).unwrap();
+    fs::hard_link(d.join("a"), e.join("b")).unwrap();
+    let saved = ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let plan = ok(&run(
+        &env,
+        &["clean", s(&d), "--scan", &id, "--dry-run", "--json"],
+    ));
+    let scanned = plan["result"]["plan"]["total_frees_bytes"]
+        .as_u64()
+        .unwrap();
+    assert!(scanned < 1 << 20, "{plan}");
+    fs::remove_file(e.join("b")).unwrap();
+    let figure = scanned.to_string();
+    let value = failed(
+        &run(
+            &env,
+            &[
+                "clean",
+                s(&d),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                &figure,
+                "--yes",
+                "--json",
+            ],
+        ),
+        1,
+        "expectation_mismatch",
+    );
+    assert!(d.join("a").exists(), "{value}");
+    assert_eq!(
+        value["warnings"][0]["code"], "changed_since_scan",
+        "{value}"
+    );
+    assert!(
+        value["result"]["plan"]["total_frees_bytes"]
+            .as_u64()
+            .unwrap()
+            >= 1 << 20,
+        "{value}"
+    );
+}
+
+#[test]
+fn p5_core_04_a_linked_file_appended_to_is_not_priced_at_nothing() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("linked");
+    let x = top.join("x");
+    fs::create_dir_all(&x).unwrap();
+    let (p, q) = (x.join("p"), x.join("q"));
+    fs::write(&p, vec![4u8; 1 << 20]).unwrap();
+    fs::hard_link(&p, &q).unwrap();
+    let saved = ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let mut file = fs::OpenOptions::new().append(true).open(&p).unwrap();
+    file.write_all(b"more").unwrap();
+    drop(file);
+    let delete = |figure: u64| {
+        let figure = figure.to_string();
+        run(
+            &env,
+            &[
+                "clean",
+                s(&p),
+                s(&q),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                &figure,
+                "--yes",
+                "--json",
+            ],
+        )
+    };
+    let value = failed(&delete(0), 1, "expectation_mismatch");
+    assert!(p.exists() && q.exists(), "{value}");
+    let live = on_disk(&p);
+    assert_eq!(
+        value["result"]["plan"]["total_frees_bytes"], live,
+        "{value}"
+    );
+    let value = ok(&delete(live));
+    assert!(!p.exists() && !q.exists());
+    assert_eq!(value["result"]["freed_bytes"], live, "{value}");
+}
+
+/// Whether the test runs as root, whom no mode stops.
+fn is_root(env: &TestEnv) -> bool {
+    let uid = env.command("id").arg("-u").output().unwrap();
+    String::from_utf8_lossy(&uid.stdout).trim() == "0"
+}
+
+#[test]
+fn p5_core_04_a_directory_the_walk_cannot_read_meets_no_figure() {
+    let env = TestEnv::new();
+    if is_root(&env) {
+        return;
+    }
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    let (d, secret) = (top.join("d"), top.join("d/secret"));
+    fs::create_dir_all(&secret).unwrap();
+    fs::write(d.join("a"), vec![1u8; 4096]).unwrap();
+    zeros(&secret.join("blob"), 1 << 20);
+    let saved = ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let mode = |bits| fs::set_permissions(&secret, fs::Permissions::from_mode(bits)).unwrap();
+    mode(0o000);
+    // The plan names no figure for it, and says why.
+    let value = ok(&run(
+        &env,
+        &["clean", s(&d), "--scan", &id, "--dry-run", "--json"],
+    ));
+    let plan = &value["result"]["plan"];
+    assert_eq!(plan["items"][0]["frees_bytes"], Value::Null, "{value}");
+    assert_eq!(plan["items"][0]["frees_kind"], Value::Null, "{value}");
+    let codes: Vec<&str> = value["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"partial_read"), "{value}");
+    assert!(codes.contains(&"changed_since_scan"), "{value}");
+    // Not the total's own figure, nor the one the scan gave.
+    let total = plan["total_frees_bytes"].as_u64().unwrap().to_string();
+    for figure in ["0", total.as_str()] {
+        let out = run(
+            &env,
+            &[
+                "clean",
+                s(&d),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                figure,
+                "--yes",
+                "--json",
+            ],
+        );
+        let value = failed(&out, 1, "expectation_mismatch");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("could not be read whole"), "{value}");
+        assert!(d.join("a").exists(), "{value}");
+    }
+    mode(0o755);
+    assert!(secret.join("blob").exists());
+}
+
+#[test]
+fn p5_core_04_a_tool_item_a_walk_cannot_read_is_refused() {
+    let env = TestEnv::new();
+    if is_root(&env) {
+        return;
+    }
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    let (d, secret) = (top.join("d"), top.join("d/secret"));
+    fs::create_dir_all(&secret).unwrap();
+    fs::write(secret.join("blob"), vec![1u8; 4096]).unwrap();
+    let mode = |bits| fs::set_permissions(&secret, fs::Permissions::from_mode(bits)).unwrap();
+    // Unreadable at the scan as now: nothing has changed, so the handle
+    // plans, and no figure is held to account by what was never read.
+    mode(0o000);
+    ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let (token, _) = handle(&env, &d);
+    let from = format!("--from={token}");
+    let value = failed(
+        &run(
+            &env,
+            &[
+                "clean",
+                &from,
+                "--expect-item-bytes=0",
+                "--dry-run",
+                "--json",
+            ],
+        ),
+        1,
+        "expectation_mismatch",
+    );
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("could not be read whole"), "{value}");
+    mode(0o755);
+    assert!(secret.join("blob").exists());
 }

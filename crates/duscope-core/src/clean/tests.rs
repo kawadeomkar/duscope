@@ -15,7 +15,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write as _;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -730,12 +730,30 @@ fn p5_core_04_a_directory_the_scan_did_not_enter_is_measured_and_has_not_changed
     let app = top.join("app");
     let cache = app.join("cache");
 
-    // The folder that holds it: what the scan read has not changed, so its
-    // figures are the scan's, and it plans from a handle.
+    // The folder that holds it: what the scan read has not changed, and it
+    // plans from a handle, but moving it moves what the scan never read. Its
+    // figure is the scan's and what a walk found there, at most, and no
+    // figure a caller read before the walk is held to account by it.
     let plan = clean_plan(&[signed(&app)], &index, &q, Method::Trash).unwrap();
     assert_eq!(plan.changed_count(), 0);
-    assert_ne!(plan.plan.items[0].frees_kind, Some("upper_bound"));
-    assert!(!plan.unmeasured(0));
+    let read = blocks(&app) + blocks(&app.join("main.rs")) + blocks(&cache);
+    let never_read = blocks(&cache.join("blob.bin"))
+        + blocks(&cache.join("deeper"))
+        + blocks(&cache.join("deeper/more.bin"));
+    let item0 = &plan.plan.items[0];
+    assert_eq!(
+        (item0.allocated_bytes, item0.frees_bytes, item0.frees_kind),
+        (
+            read + never_read,
+            Some(read + never_read),
+            Some("upper_bound")
+        )
+    );
+    assert_eq!(plan.plan.total_frees_bytes, read + never_read);
+    assert!(plan.unmeasured(0));
+    let mut own_figure = clean_plan(&[signed(&app)], &index, &q, Method::Trash).unwrap();
+    own_figure.refuse_unexpected(&[read + never_read]);
+    assert_eq!(own_figure.plan.items[0].action, "refused");
 
     // The folder itself: the scan holds nothing under it, so a walk prices
     // it, at most; it has not changed, and its handle plans.
@@ -752,12 +770,336 @@ fn p5_core_04_a_directory_the_scan_did_not_enter_is_measured_and_has_not_changed
     );
     assert!(plan.unmeasured(0));
 
-    // A change inside it is not one the scan could see: still unchanged.
+    // A change inside it is not one the scan could see, so the folder has
+    // not changed; the walk counts what is there now.
     fs::write(cache.join("deeper/new.bin"), vec![2u8; 8 * 1024]).unwrap();
     let plan = clean_plan(&[signed(&app)], &index, &q, Method::Trash).unwrap();
     assert_eq!(plan.changed_count(), 0);
+    let grown = read + never_read + blocks(&cache.join("deeper/new.bin"));
+    assert_eq!(plan.plan.items[0].frees_bytes, Some(grown));
+    assert_eq!(plan.plan.items[0].frees_kind, Some("upper_bound"));
     // A change beside it is.
     fs::write(app.join("lib.rs"), b"x").unwrap();
     let plan = clean_plan(&[item(app.clone())], &index, &q, Method::Trash).unwrap();
     assert_eq!(plan.changed_count(), 1);
+}
+
+#[test]
+fn p5_core_04_a_folder_the_scan_did_not_enter_with_nothing_under_it_changes_no_figure() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    fs::create_dir_all(top.join("app/cache")).unwrap();
+    fs::write(top.join("app/main.rs"), vec![1u8; 3000]).unwrap();
+    let mut arena = Arena::new(Attrs::Basic);
+    let opts = WalkOptions {
+        excludes: globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("app/cache").unwrap())
+            .build()
+            .unwrap(),
+        ..WalkOptions::default()
+    };
+    walk(&top, &opts, |e| arena.push(e).unwrap()).unwrap();
+    let rollup = roll_up(&mut arena);
+    let meta = meta(&top);
+    let dir = env.tmp_dir().join("index");
+    fs::create_dir_all(&dir).unwrap();
+    IndexWriter::write(&arena, &rollup, &meta, &dir).unwrap();
+    let index = Index::open(&index_path(&dir, &meta.scan_id)).unwrap();
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let plan = clean_plan(&[signed(&top.join("app"))], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.plan.items[0].frees_kind, Some("exact"));
+    assert!(!plan.unmeasured(0));
+}
+
+/// `index` with `sql` run on its file: the saved scan as it would have read
+/// a tree that has moved on in a way the test cannot make happen.
+fn edited(index: Index, sql: &str) -> Index {
+    let file = index.file().to_owned();
+    drop(index);
+    let db = rusqlite::Connection::open(&file).unwrap();
+    assert!(db.execute(sql, []).unwrap() > 0, "{sql}");
+    drop(db);
+    Index::open(&file).unwrap()
+}
+
+#[test]
+fn p5_core_04_bytes_allocated_since_the_scan_show_though_times_and_size_do_not() {
+    // A cloud placeholder that has come back keeps its times and length:
+    // only the bytes on disk differ from the row.
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let index = edited(
+        index,
+        "UPDATE files SET allocated = 0 WHERE name = CAST('b.bin' AS BLOB)",
+    );
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let (dir, file) = (root.join("dir"), root.join("dir/b.bin"));
+    for path in [&file, &dir] {
+        let plan = clean_plan(&[item(path.clone())], &index, &q, Method::Trash).unwrap();
+        assert_eq!(plan.changed_count(), 1, "{}", path.display());
+        assert_eq!(plan.plan.items[0].frees_kind, Some("upper_bound"));
+    }
+    let plan = clean_plan(&[item(file.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.plan.items[0].frees_bytes, Some(blocks(&file)));
+}
+
+#[test]
+fn p5_core_04_a_change_of_a_files_status_alone_shows_in_its_change_time() {
+    // The same bytes, length and modification time: its mode changed, which
+    // only the change time records.
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let (dir, file) = (root.join("dir"), root.join("dir/b.bin"));
+    let plan = clean_plan(&[item(file.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    let was = fs::metadata(&file).unwrap().ctime_nsec();
+    let mut moved = false;
+    for _ in 0..200 {
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        moved = fs::metadata(&file).unwrap().ctime_nsec() != was;
+        if moved {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(moved, "the change time did not move");
+    for path in [&file, &dir] {
+        let plan = clean_plan(&[item(path.clone())], &index, &q, Method::Trash).unwrap();
+        assert_eq!(plan.changed_count(), 1, "{}", path.display());
+    }
+}
+
+#[test]
+fn p5_core_04_a_write_with_its_time_restored_is_priced_live() {
+    // Sparse when scanned, every block written since, the modification time
+    // put back: the same length, the same time, 64 KiB more on disk.
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("sparse");
+    let dir = top.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("s.bin");
+    let len = 64 * 1024;
+    fs::File::create(&file).unwrap().set_len(len).unwrap();
+    let index = scan_of(&env, &top);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let plan = clean_plan(&[item(dir.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    let scanned = plan.plan.items[0].frees_bytes.unwrap();
+    let was = fs::metadata(&file).unwrap().modified().unwrap();
+    let mut open = fs::OpenOptions::new().write(true).open(&file).unwrap();
+    open.write_all(&vec![8u8; usize::try_from(len).unwrap()])
+        .unwrap();
+    open.sync_all().unwrap();
+    open.set_modified(was).unwrap();
+    drop(open);
+    assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), was);
+    assert!(blocks(&file) >= len, "{}", blocks(&file));
+    for path in [&file, &dir] {
+        let plan = clean_plan(&[item(path.clone())], &index, &q, Method::Trash).unwrap();
+        assert_eq!(plan.changed_count(), 1, "{}", path.display());
+        assert_eq!(plan.plan.items[0].frees_kind, Some("upper_bound"));
+        assert!(plan.plan.items[0].frees_bytes.unwrap() >= len + scanned);
+    }
+}
+
+#[test]
+fn p5_core_04_a_links_other_half_gone_is_seen_and_priced_live() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    // The second link lies in dir: dir frees nothing of it, so its figure
+    // leaves those bytes out.
+    let dir = root.join("dir");
+    let again = dir.join("a-again.bin");
+    let plan = clean_plan(&[item(dir.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    assert_eq!(plan.plan.items[0].frees_kind, Some("lower_bound"));
+    // Its other half gone, deleting dir frees those bytes too.
+    fs::remove_file(root.join("a.bin")).unwrap();
+    for path in [&dir, &again] {
+        let plan = clean_plan(&[item(path.clone())], &index, &q, Method::Trash).unwrap();
+        assert_eq!(plan.changed_count(), 1, "{}", path.display());
+        assert_eq!(plan.plan.items[0].frees_kind, Some("upper_bound"));
+    }
+    let plan = clean_plan(&[item(dir.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(
+        plan.plan.items[0].frees_bytes,
+        Some(blocks(&dir) + blocks(&again) + blocks(&dir.join("b.bin")))
+    );
+}
+
+#[test]
+fn p5_core_04_a_file_whose_link_count_alone_differs_has_changed() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let index = edited(
+        index,
+        "UPDATE files SET nlink = 7 WHERE name = CAST('b.bin' AS BLOB)",
+    );
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let plan = clean_plan(&[item(root.join("dir/b.bin"))], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 1);
+}
+
+#[test]
+fn p5_core_04_a_changed_file_with_other_links_frees_its_bytes_at_most_once() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let (a, again) = (root.join("a.bin"), root.join("dir/a-again.bin"));
+    grow(&a, 40 * 1024);
+    // Alone: its other link may keep the bytes, so at most its bytes, and
+    // never nothing.
+    let plan = clean_plan(&[item(a.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 1);
+    let item0 = &plan.plan.items[0];
+    assert_eq!(
+        (item0.frees_bytes, item0.frees_kind),
+        (Some(blocks(&a)), Some("upper_bound"))
+    );
+    // Both links in the plan: deleting them frees the bytes, once.
+    let plan = clean_plan(
+        &[item(a.clone()), item(again.clone())],
+        &index,
+        &q,
+        Method::Trash,
+    )
+    .unwrap();
+    assert_eq!(plan.changed_count(), 2);
+    assert_eq!(plan.plan.total_frees_bytes, blocks(&a));
+    assert!(plan.meets(blocks(&a)));
+    assert!(!plan.meets(0));
+    assert_eq!(plan.plan.items[1].frees_kind, Some("upper_bound"));
+}
+
+/// Takes all permissions from a directory until dropped, so the test's
+/// tree can be removed; `None` as root, whom no mode stops.
+struct Unreadable(PathBuf);
+
+impl Unreadable {
+    fn new(path: &Path) -> Option<Unreadable> {
+        if duscope_walk::effective_uid() == 0 {
+            return None;
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        Some(Unreadable(path.to_owned()))
+    }
+}
+
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[test]
+fn p5_core_04_a_directory_a_walk_cannot_read_has_no_figure() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let dir = root.join("dir");
+    let secret = dir.join("secret");
+    // Made since the scan: the plan cannot see what is under it.
+    let made = root.join("made");
+    fs::create_dir(&made).unwrap();
+    fs::create_dir(made.join("secret")).unwrap();
+    fs::write(made.join("secret/big.bin"), vec![3u8; 64 * 1024]).unwrap();
+    let Some(_made) = Unreadable::new(&made.join("secret")) else {
+        return;
+    };
+    let plan = clean_plan(&[item(made.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.unread_count(), 1);
+    assert_eq!(plan.changed_count(), 0);
+    let item0 = &plan.plan.items[0];
+    assert_eq!((item0.frees_bytes, item0.frees_kind), (None, None));
+    assert_eq!(item0.action, "trash");
+    // No figure is met, not even the one that the total reads as.
+    assert!(!plan.meets(0));
+    assert!(!plan.meets(plan.plan.total_frees_bytes));
+    let mut held = clean_plan(&[item(made)], &index, &q, Method::Trash).unwrap();
+    held.refuse_unexpected(&[0]);
+    assert_eq!(held.plan.items[0].action, "refused");
+
+    // A folder read at the scan, one under it unreadable now: it differs
+    // from its rows, and the bytes the walk could not reach are not known.
+    fs::create_dir(&secret).unwrap();
+    fs::write(secret.join("big.bin"), vec![3u8; 64 * 1024]).unwrap();
+    let Some(_secret) = Unreadable::new(&secret) else {
+        return;
+    };
+    let plan = clean_plan(&[item(dir)], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(plan.unread_count(), 1);
+    assert_eq!(plan.plan.items[0].frees_bytes, None);
+    assert_eq!(plan.plan.items[0].frees_kind, None);
+    assert!(!plan.meets(plan.plan.total_frees_bytes));
+}
+
+#[test]
+fn p5_core_04_a_folder_listed_but_not_searchable_has_no_figure() {
+    // Its names can be read and its entries cannot: what they hold is no
+    // more known than under a folder that cannot be opened.
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    if duscope_walk::effective_uid() == 0 {
+        return;
+    }
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let made = root.join("made");
+    let listed = made.join("listed");
+    fs::create_dir_all(&listed).unwrap();
+    fs::write(listed.join("big.bin"), vec![3u8; 64 * 1024]).unwrap();
+    fs::set_permissions(&listed, fs::Permissions::from_mode(0o444)).unwrap();
+    let plan = clean_plan(&[item(made)], &index, &q, Method::Trash).unwrap();
+    fs::set_permissions(&listed, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(plan.unread_count(), 1);
+    assert_eq!(plan.plan.items[0].frees_bytes, None);
+}
+
+#[test]
+fn p5_core_04_a_folder_unreadable_at_the_scan_and_still_has_no_figure() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    let secret = top.join("app/secret");
+    fs::create_dir_all(&secret).unwrap();
+    fs::write(top.join("app/main.rs"), vec![1u8; 3000]).unwrap();
+    fs::write(secret.join("big.bin"), vec![2u8; 64 * 1024]).unwrap();
+    let Some(_secret) = Unreadable::new(&secret) else {
+        return;
+    };
+    let index = scan_of(&env, &top);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    // Nothing has changed, so nothing warns of it and a handle plans; what
+    // is under the folder has never been read, so no figure holds.
+    let plan = clean_plan(&[signed(&top.join("app"))], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    assert_eq!(plan.unread_count(), 1);
+    assert_eq!(plan.plan.items[0].frees_bytes, None);
+    assert!(plan.unmeasured(0));
+    assert!(!plan.meets(plan.plan.total_frees_bytes));
+}
+
+#[test]
+fn p5_core_04_a_plan_given_up_on_never_reads_as_made() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let stop = Arc::new(AtomicBool::new(true));
+    let made = super::clean_plan_until(&[item(root.join("dir"))], &index, &q, Method::Trash, &stop);
+    assert!(matches!(made, Err(CoreError::PlanStopped)), "{made:?}");
 }
