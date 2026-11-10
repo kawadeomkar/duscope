@@ -7,6 +7,7 @@
 - A directory that holds one the scan listed without entering (`--exclude`, `--exclude-caches`) counts what a walk finds there, as an `upper_bound`, where the plan called the scan's smaller figure `exact` and `--expect-bytes` passed against it.
 - A changed file with other links counts its bytes, at most and once however many of its links the plan holds, where it counted nothing and `--expect-bytes 0` passed.
 - A directory that cannot be read whole has no `frees_bytes` (a figure from what could be read would look like a measurement): the plan carries a `partial_read` warning, and neither `--expect-bytes` nor `duscope_delete`'s `expect_bytes` is met by it.
+- The viewer's mark pane no longer freezes the viewer while the plan walks the marked folders: `D` opens it measuring, the viewer goes on answering, `Esc` gives the plan up and `Ctrl-C` quits, and nothing typed counts until the plan is on the screen.
 
 ### Changed
 - `clean --from` fails with `path_changed` when the entry a handle names has changed since the saved scan, as it does when another entry has taken its place: the handle signs what the scan saw. `duscope_delete`, which runs `clean`, refuses such an item the same way, and still refuses a directory whose bytes no saved scan measured (made since it, not entered by it, or holding what it did not enter), whatever its `expect_bytes`.

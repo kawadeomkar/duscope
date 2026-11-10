@@ -32,6 +32,25 @@ fn viewer(env: &TestEnv, tree: &Path, cols: u16, rows: u16) -> Terminal {
         .unwrap()
 }
 
+/// `viewer`, its mark pane's plans held until the file `gate` exists.
+fn held_viewer(env: &TestEnv, tree: &Path, gate: &Path) -> Terminal {
+    let script = format!(
+        "'{}' view '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        tree.display()
+    );
+    Terminal::builder()
+        .size(120, 40)
+        .timeout(Duration::from_secs(60))
+        .env_clear()
+        .envs(env.vars())
+        .envs([("DUSCOPE_TEST_PLAN_GATE", gate.to_str().unwrap())])
+        .current_dir(env.work_dir())
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap()
+}
+
 fn wait(terminal: &mut Terminal, what: &str) {
     terminal
         .wait_until(|screen| screen.text().contains(what))
@@ -799,4 +818,51 @@ fn p4_tui_06_a_second_r_rescans_the_folders_own_scan() {
     if duscope_walk::fsevents::current_event_id().is_none() {
         assert_eq!(block["scan"]["incremental"], false, "{block}");
     }
+}
+
+#[test]
+fn p5_core_04_the_viewer_answers_while_the_pane_measures() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    tree(&env, &root);
+    let gate = fs::canonicalize(env.tmp_dir()).unwrap().join("gate");
+    let mut terminal = held_viewer(&env, &root, &gate);
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    // The plan is held, and the pane says it is measuring.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "measuring 1 item on the disk");
+    // `Esc` gives it up: the viewer was answering all along.
+    terminal.send(Key::Esc).unwrap();
+    wait_gone(&mut terminal, "measuring 1 item");
+    wait(&mut terminal, "1 marked");
+    // Asked again, and let go: the plan lands in the pane by itself.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "measuring 1 item on the disk");
+    fs::write(&gate, b"").unwrap();
+    wait(&mut terminal, "Type yes to move them to the Trash");
+    wait_gone(&mut terminal, "measuring");
+    terminal.send(Key::Esc).unwrap();
+    wait_gone(&mut terminal, "Type yes");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    assert!(root.join("a.bin").exists());
+}
+
+#[test]
+fn p5_core_04_ctrl_c_quits_while_the_pane_measures() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    tree(&env, &root);
+    let gate = fs::canonicalize(env.tmp_dir()).unwrap().join("gate");
+    let mut terminal = held_viewer(&env, &root, &gate);
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "measuring 1 item on the disk");
+    terminal.send(Key::Ctrl('c')).unwrap();
+    wait(&mut terminal, "exit=0");
+    assert!(root.join("a.bin").exists());
 }

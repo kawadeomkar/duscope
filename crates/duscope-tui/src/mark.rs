@@ -15,7 +15,15 @@
 //! A plan that measured items from the tree, since they changed after the
 //! saved scan, says so under its line, as `clean` warns of it
 //! (`changed_since_scan`): the map shows the scan's sizes, the pane what is
-//! there now.
+//! there now. So does one with an item it could not read whole.
+//!
+//! A plan walks every marked folder, which takes as long as a scan of it,
+//! so it is made beside the viewer ([`PlanJob`]). The pane opens measuring,
+//! the viewer answering its keys meanwhile: `Esc` gives the plan up,
+//! `Ctrl-C` quits, and nothing typed counts until the plan has been shown.
+//! The result comes back as [`Input::Planned`](crate::Input::Planned), and
+//! only the pane that asked for it takes it, by its serial number, so a
+//! plan given up on can never stand for marks made since.
 //!
 //! The marks cross a reload by their absolute paths: each lands on the
 //! entry at the same path in the new scan, or is dropped.
@@ -27,15 +35,19 @@
 //! scan still counts its bytes, which a second move would count twice.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use duscope_core::clean::{CleanItem, CleanOutcome, Method, Plan, clean_execute, clean_plan};
+use duscope_core::clean::{CleanItem, CleanOutcome, Method, Plan, clean_execute, clean_plan_until};
 use duscope_core::envelope::{CleanPlan, PlanItem};
+use duscope_core::index::Index;
 use duscope_core::query::{ExplainQuery, SizeKind, TreeView, abs_path};
 use duscope_core::resolve::resolve_path;
+use duscope_core::rules::Caches;
 use duscope_treemap::cells::{Cell, Color};
 use duscope_treemap::packs::Roles;
 use duscope_treemap::paint::{DrawnKind, Glyphs};
@@ -300,6 +312,9 @@ pub type SizeText<'a> = dyn Fn(u64) -> String + 'a;
 /// What the pane holds.
 #[derive(Debug)]
 enum State {
+    /// The plan is being made beside the viewer, under this number; setting
+    /// `stop` gives it up.
+    Measuring { serial: u64, stop: Arc<AtomicBool> },
     /// A plan waiting for the answer.
     Planned(Box<Plan>),
     /// The plan acted on, with what happened: the pane stays open only when
@@ -503,6 +518,18 @@ fn changed_note(changed: usize) -> Option<String> {
     })
 }
 
+/// What `clean` warns of a plan with `unread` items it could not read
+/// whole; none when there are none.
+fn unread_note(unread: usize) -> Option<String> {
+    (unread > 0).then(|| {
+        format!(
+            "{} could not be read whole, so what {} is not known",
+            count(unread, "item"),
+            if unread == 1 { "it frees" } else { "they free" },
+        )
+    })
+}
+
 /// What a plan with a refused item says: `clean` moves nothing either.
 fn refused_note(plan: &CleanPlan) -> String {
     let refused = refused_count(plan);
@@ -582,6 +609,22 @@ impl Body {
             count,
             rows,
             under,
+            answer: None,
+        }
+    }
+
+    /// The plan is being made: what is happening and the way out.
+    pub(crate) fn measuring(items: usize, roles: &Roles) -> Body {
+        Body {
+            count: items,
+            rows: Vec::new(),
+            under: vec![
+                (
+                    format!("measuring {} on the disk…", count(items, "item")),
+                    roles.text,
+                ),
+                ("Esc gives up, moving nothing".to_owned(), roles.subtext),
+            ],
             answer: None,
         }
     }
@@ -689,34 +732,37 @@ fn fit_row(canvas: &Canvas<'_>, row: &PlanRow, room: u16) -> String {
 }
 
 impl Pane {
-    /// The pane of the marks in `view`, planned against the saved scan in
-    /// `sources`, or saying why it cannot be planned. Each mark is planned
-    /// at its own path ([`marked_item`]), and a mark whose folder leads
-    /// elsewhere now fails the plan, as a changed item from a handle fails
-    /// `clean`'s. The saved scan holds no entry's inode, so the plan checks
-    /// what is at the path when the pane opens, as `clean` does for a path.
-    pub fn open(marks: &Marks, view: &dyn TreeView, sources: &Sources<'_>) -> Pane {
+    /// The pane of the marks in `view`, its plan against the saved scan in
+    /// `sources` asked of `start` under the number `serial`, or saying why
+    /// it cannot be planned. The pane holds the marks as they are now, and
+    /// the plan is of those, each at its own path ([`marked_item`]).
+    pub fn open(
+        marks: &Marks,
+        view: &dyn TreeView,
+        sources: &Sources<'_>,
+        serial: u64,
+        start: Option<&mut Planner<'_>>,
+    ) -> Pane {
         let ids = marks.ids();
-        let state = match sources.index {
-            None => State::Unplanned(format!(
+        let state = match (sources.index, start) {
+            (None, _) => State::Unplanned(format!(
                 "no saved scan holds this map, and clean plans from a saved scan: run duscope \
                  scan --save {}",
                 view.root_path().display()
             )),
-            Some((index, _)) => {
-                let query = ExplainQuery {
-                    caches: &sources.caches,
-                    env: &*sources.env,
+            (Some(_), None) => State::Unplanned("the plan cannot be made here".to_owned()),
+            (Some((index, _)), Some(start)) => {
+                let stop = Arc::new(AtomicBool::new(false));
+                let job = PlanJob {
+                    serial,
+                    file: index.file().to_owned(),
+                    paths: ids.iter().map(|&id| abs_path(view, id)).collect(),
+                    caches: sources.caches.clone(),
+                    stop: Arc::clone(&stop),
                 };
-                let items: Result<Vec<CleanItem>, String> = ids
-                    .iter()
-                    .map(|&id| marked_item(&abs_path(view, id)))
-                    .collect();
-                match items.and_then(|items| {
-                    clean_plan(&items, index, &query, Method::Trash).map_err(|e| e.to_string())
-                }) {
-                    Ok(plan) => State::Planned(Box::new(plan)),
-                    Err(why) => State::Unplanned(why),
+                match start(job) {
+                    Ok(()) => State::Measuring { serial, stop },
+                    Err(why) => State::Unplanned(format!("the plan could not start: {why}")),
                 }
             }
         };
@@ -725,6 +771,19 @@ impl Pane {
             state,
             input: String::new(),
         }
+    }
+
+    /// Takes `planned` if it is the plan this pane is measuring; a plan
+    /// given up on, whose pane has gone, is nobody's. True when it landed.
+    pub fn land(&mut self, planned: Planned) -> bool {
+        if !matches!(&self.state, State::Measuring { serial, .. } if *serial == planned.serial) {
+            return false;
+        }
+        self.state = match planned.plan {
+            Ok(plan) => State::Planned(plan),
+            Err(why) => State::Unplanned(why),
+        };
+        true
     }
 
     /// Whether `yes` is what the pane is waiting for: a plan with nothing
@@ -792,16 +851,97 @@ impl Pane {
         let body = match &self.state {
             State::Planned(plan) => {
                 let mut body = Body::planned(&plan.plan, count, &self.input, size, &roles);
-                if let Some(note) = changed_note(plan.changed_count()) {
+                let notes = [
+                    changed_note(plan.changed_count()),
+                    unread_note(plan.unread_count()),
+                ];
+                for note in notes.into_iter().flatten().rev() {
                     body.under.insert(1, (note, roles.subtext));
                 }
                 body
             }
+            State::Measuring { .. } => Body::measuring(count, &roles),
             State::Acted(plan, outcome) => Body::acted(&plan.plan, outcome, count, size, &roles),
             State::Unplanned(why) => Body::unplanned(why, count, &roles),
         };
         body.draw(canvas, pane);
     }
+}
+
+impl Drop for Pane {
+    /// A pane that goes while it measures gives its plan up: the walks stop
+    /// within a directory per worker.
+    fn drop(&mut self) {
+        if let State::Measuring { stop, .. } = &self.state {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Starts a plan beside the viewer: `Ok` when it started, or why not. What
+/// it starts delivers [`PlanJob::run`]'s answer as
+/// [`Input::Planned`](crate::Input::Planned).
+pub type Planner<'a> = Box<dyn FnMut(PlanJob) -> Result<(), String> + 'a>;
+
+/// The plan of the marks when the pane opened, to be made on another
+/// thread: it holds everything it needs, the path of the saved scan rather
+/// than the viewer's open [`Index`], whose connection stays on the viewer's
+/// thread.
+#[derive(Debug)]
+pub struct PlanJob {
+    /// The pane's number, which the answer carries back.
+    serial: u64,
+    /// The saved scan.
+    file: PathBuf,
+    /// The marks' absolute paths, in the pane's order.
+    paths: Vec<Vec<u8>>,
+    /// The cache rules.
+    caches: Caches,
+    /// Set when the pane goes.
+    stop: Arc<AtomicBool>,
+}
+
+impl PlanJob {
+    /// Whether the pane that asked has gone.
+    #[must_use]
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Makes the plan, reading the saved scan through a connection of its
+    /// own and the environment through `env`. Each mark is planned at its
+    /// own path (`marked_item`), and a mark whose folder leads elsewhere
+    /// now fails the plan, as a changed item from a handle fails `clean`'s.
+    /// The saved scan holds no entry's inode, so the plan checks what is at
+    /// the path as it runs, as `clean` does for a path.
+    #[must_use]
+    pub fn run(self, env: &dyn Fn(&str) -> Option<OsString>) -> Planned {
+        let query = ExplainQuery {
+            caches: &self.caches,
+            env,
+        };
+        let items: Result<Vec<CleanItem>, String> =
+            self.paths.iter().map(|path| marked_item(path)).collect();
+        let plan = items.and_then(|items| {
+            Index::open(&self.file)
+                .and_then(|index| {
+                    clean_plan_until(&items, &index, &query, Method::Trash, &self.stop)
+                })
+                .map(Box::new)
+                .map_err(|e| e.to_string())
+        });
+        Planned {
+            serial: self.serial,
+            plan,
+        }
+    }
+}
+
+/// A plan made beside the viewer, or why it could not be.
+#[derive(Debug)]
+pub struct Planned {
+    serial: u64,
+    plan: Result<Box<Plan>, String>,
 }
 
 /// The item to plan for the mark at `path`, absolute as the scan names it,

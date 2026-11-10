@@ -37,6 +37,7 @@ pub use app::{
     run_session, snapshot,
 };
 pub use crossterm::event::Event;
+pub use mark::{PlanJob, Planned, Planner};
 pub use panes::{ScanFacts, Sources};
 pub use term::{Background, MIN_SIZE, Tui, event_ready, next_event, open_detached, restore, size};
 
