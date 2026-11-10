@@ -39,7 +39,8 @@ crossbeam-utils = "=0.8.23"
 # The viewer's terminal (P4-TUI-01): raw mode, the alternate screen, mouse
 # capture and the key, mouse and resize events. Default features: ratatui-crossterm
 # asks for them, so `bracketed-paste` and `derive-more` are compiled in whatever
-# this line says (DEV-72); the viewer never turns bracketed paste on.
+# this line says (DEV-72); the viewer turns bracketed paste on while it holds
+# the terminal, so that a paste is never read as keys (P4-TUI-06).
 crossterm = "=0.29.0"
 # The gzip of `export --format gpscan` (P2-CLI-02): the pure-Rust backend
 # (miniz_oxide) alone.
