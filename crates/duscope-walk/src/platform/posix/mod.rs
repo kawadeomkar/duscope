@@ -194,6 +194,72 @@ pub(crate) fn cachedir_tag(dir: &Path) -> bool {
         && &head == CACHEDIR_SIGNATURE
 }
 
+/// Reads the regular file at `path` whole, at most `cap` bytes; see the
+/// crate's `read_regular`. A `stat` (an `lstat` without `follow`) answers
+/// first, so a FIFO or a device is refused without being opened and a
+/// FIFO's writer never sees a reader come and go; the file is then opened
+/// without blocking and checked again through the descriptor, so nothing
+/// swapped in after the first check is read.
+pub(crate) fn read_regular(path: &Path, cap: u64, follow: bool) -> io::Result<Vec<u8>> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let absent = || io::Error::new(io::ErrorKind::NotFound, "a symbolic link, not followed");
+    let check = |meta: &std::fs::Metadata| {
+        if meta.is_symlink() {
+            Err(absent())
+        } else if meta.is_dir() {
+            Err(io::ErrorKind::IsADirectory.into())
+        } else if !meta.is_file() {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ))
+        } else if meta.len() > cap {
+            Err(too_large(cap))
+        } else {
+            Ok(meta.len())
+        }
+    };
+    check(&if follow {
+        std::fs::metadata(path)
+    } else {
+        std::fs::symlink_metadata(path)
+    }?)?;
+    let nofollow = if follow { 0 } else { libc::O_NOFOLLOW };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | nofollow)
+        .open(path)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ELOOP) if !follow => absent(),
+            _ => e,
+        })?;
+    let len = check(&file.metadata()?)?;
+    read_capped(file, len, cap)
+}
+
+/// Reads `source` to its end into room for the `len` bytes it should hold,
+/// refusing it once it gives more than `cap`: a file that grew after its
+/// length was checked is refused, never truncated.
+fn read_capped(source: impl io::Read, len: u64, cap: u64) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    source.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_or(true, |read| read > cap) {
+        return Err(too_large(cap));
+    }
+    Ok(bytes)
+}
+
+/// The refusal of a file longer than `cap` bytes.
+fn too_large(cap: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!("more than {cap} bytes, the most read of this file"),
+    )
+}
+
 /// Room for a name of up to `NAME_MAX` (255) bytes and its terminating NUL.
 const NAME_BUF: usize = 256;
 
@@ -523,7 +589,7 @@ mod tests {
     use super::FD_TABLE;
     use super::{
         KEEP_LIMIT, KEPT, KEPT_PEAK, NOFILE_TARGET, OPEN_MAX, list_names, open_at, open_dir,
-        raise_nofile_limit, with_c_name,
+        raise_nofile_limit, read_capped, read_regular, with_c_name,
     };
     use crate::{DirHandle, NameRef, STAT_BATCH, ScanEvent, WalkOptions, walk};
 
@@ -821,6 +887,90 @@ mod tests {
             "the most kept at once"
         );
         assert_eq!(KEPT.load(Ordering::Relaxed), 0, "kept after the walk");
+    }
+
+    #[test]
+    fn p5_sec_03_read_regular_reads_to_its_cap_and_refuses_past_it() {
+        let env = TestEnv::new();
+        let file = env.tmp_dir().join("eight");
+        std::fs::write(&file, b"12345678").unwrap();
+        for follow in [true, false] {
+            assert_eq!(read_regular(&file, 8, follow).unwrap(), b"12345678");
+            let error = read_regular(&file, 7, follow).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        }
+        // More than its length said (a file that grew after the check):
+        // refused once past the cap, never truncated, the memory bounded.
+        let endless = read_capped(io::repeat(0), 0, 1 << 20).unwrap_err();
+        assert_eq!(endless.kind(), io::ErrorKind::FileTooLarge);
+        assert_eq!(read_capped(&b"abc"[..], 0, 3).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn p5_sec_03_read_regular_refuses_what_is_not_a_regular_file_unopened() {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::mpsc;
+
+        let env = TestEnv::new();
+        let dir = env.tmp_dir();
+        // A FIFO with a writer blocked opening it, which only a reader's
+        // open would wake.
+        let fifo = dir.join("fifo");
+        let made = env.command("mkfifo").arg(&fifo).status().unwrap();
+        assert!(made.success(), "mkfifo {}", fifo.display());
+        let (tx, woke) = mpsc::channel();
+        let writer = {
+            let fifo = fifo.clone();
+            thread::spawn(move || {
+                let _open = OpenOptions::new().write(true).open(&fifo);
+                let _ = tx.send(());
+            })
+        };
+        thread::sleep(Duration::from_millis(100));
+        std::os::unix::fs::symlink("/dev/zero", dir.join("zero")).unwrap();
+        for (path, follow) in [
+            (fifo.clone(), true),
+            (fifo.clone(), false),
+            (PathBuf::from("/dev/zero"), true),
+            (dir.join("zero"), true),
+        ] {
+            let error = read_regular(&path, 1 << 20, follow).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::InvalidInput,
+                "{} {follow}: {error}",
+                path.display()
+            );
+        }
+        assert!(
+            woke.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the FIFO was opened"
+        );
+        let error = read_regular(&dir, 1 << 20, true).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
+        // Wakes the writer.
+        let _read = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .unwrap();
+        writer.join().unwrap();
+        assert!(woke.recv().is_ok(), "the writer did not wake");
+    }
+
+    #[test]
+    fn p5_sec_03_read_regular_follows_a_final_link_only_when_asked() {
+        let env = TestEnv::new();
+        let dir = env.tmp_dir();
+        std::fs::write(dir.join("file"), b"text").unwrap();
+        std::os::unix::fs::symlink("file", dir.join("link")).unwrap();
+        std::os::unix::fs::symlink("gone", dir.join("dangling")).unwrap();
+        assert_eq!(read_regular(&dir.join("link"), 4, true).unwrap(), b"text");
+        for (name, follow) in [("link", false), ("dangling", false), ("dangling", true)] {
+            let error = read_regular(&dir.join(name), 4, follow).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{name} {follow}");
+        }
     }
 
     #[test]
