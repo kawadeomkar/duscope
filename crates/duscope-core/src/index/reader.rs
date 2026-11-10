@@ -43,7 +43,7 @@ use super::writer::{
     EXCLUDED, EXCLUDED_CACHE, LATER_LINK, SKIPPED_CONTAINERS, ScanMeta, UPPER_BOUND,
 };
 use crate::CoreError;
-use crate::query::{Dataless, Node, TreeView};
+use crate::query::{Dataless, Node, TreeView, abs_path};
 
 /// The major version of the index this build reads.
 const MAJOR: u32 = 2;
@@ -643,13 +643,8 @@ impl Index {
                 return false;
             }
         }
-        // Its path as the scan stored it, which a mount point is spelt as.
-        let mut path = self.root.as_os_str().as_bytes().to_vec();
-        let rel = self.path(id);
-        if !rel.is_empty() {
-            path.push(b'/');
-            path.extend_from_slice(&rel);
-        }
+        // Its absolute path, which a mount point is spelt as.
+        let path = abs_path(self, id);
         !self
             .volumes()
             .iter()
