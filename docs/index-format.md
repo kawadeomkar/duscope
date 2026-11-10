@@ -251,16 +251,14 @@ Created after the rows are inserted:
 | Index | Columns | For |
 | --- | --- | --- |
 | `dirs_parent_name` | `dirs (parent_id, name)` | resolving a path downwards, one component at a time, and listing a directory's subdirectories |
-| `dirs_cum_allocated` | `dirs (cum_allocated DESC)` | the largest directories |
 | `files_allocated` | `files (allocated DESC)` | the largest files |
-| `files_mtime` | `files (mtime)` | files by age |
 | `dirs_errors` | `dirs (id) WHERE errors IS NOT NULL` | the unreadable directories of a subtree, counted without reading every row |
 | `dirs_excluded` | `dirs (id) WHERE flags & 3072 != 0` | the directories the excludes kept the scan out of (flags bits 10 and 11) |
 | `files_dataless` | `files (id) WHERE flags & 4 != 0` | the dataless files (flags bit 2), which `summary`, `explain` and the `dataless_present` warning add up without reading every file |
 
 There is no name or extension index, and no path column: a path is resolved
 through `parent_id`, and a directory's own files are an id range. For the
-largest files of a small subtree the id range is faster than either index;
+largest files of a small subtree the id range is faster than `files_allocated`;
 duscope chooses between them itself (with `INDEXED BY`), since SQLite's planner
 prefers the range even where the index is thousands of times faster.
 
@@ -378,3 +376,10 @@ A program that writes index files for duscope to read keeps within these.
 ### 2.0
 
 The first version, written from the first release that saves indexes.
+
+Secondary indexes are not part of the format's contract: a reader relies on
+the tables, and no reader names an index. Files written before duscope dropped
+them also hold `dirs_cum_allocated` (`dirs (cum_allocated DESC)`) and
+`files_mtime` (`files (mtime)`), which no query read. They are still 2.0 and
+answer every query the same; only a hand-written query may run slower without
+them.
