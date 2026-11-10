@@ -198,7 +198,10 @@ fn viewer(env: &TestEnv, root: &Path, size: (u16, u16)) -> Terminal {
         .unwrap()
 }
 
-/// Whether a screen is what `step` waits for.
+/// Whether a screen is what `step` waits for. A resize step waits for the
+/// frame drawn at the new size: the grid takes the size at once and keeps
+/// the old frame, clipped or padded, until the viewer repaints, so the key
+/// line (`… q quit`) must be on the new last row.
 fn met(screen: &Screen, step: &Step) -> bool {
     let text = screen.text();
     let full = screen.full_text();
@@ -210,7 +213,7 @@ fn met(screen: &Screen, step: &Step) -> bool {
             .iter()
             .any(|want| full.contains(want.as_str()))
         && step.resize.is_none_or(|(cols, rows)| {
-            screen.size() == (cols, rows) && !screen.row_text(rows - 1).trim().is_empty()
+            screen.size() == (cols, rows) && screen.row_text(rows - 1).contains("q quit")
         })
 }
 
@@ -394,11 +397,8 @@ fn p4_test_01_a_resize_storm_ends_at_its_last_size() {
         see: vec!["treemap · ".to_owned()],
         ..Step::default()
     };
+    // The frame drawn at 150×44, its key line on the last row.
     perform(&mut terminal, &last);
-    // The size arrives before the frame does: the key line is the frame's last row.
-    terminal
-        .wait_until(|screen| screen.row_text(43).contains("q quit"))
-        .unwrap_or_else(|e| panic!("{e}:\n{}", shown(&terminal)));
     terminal.send(Key::Char('q')).unwrap();
     // crossterm returns a resize without reading the terminal when both wake
     // one poll, and the poll reports a byte once, so a key on a storm's heels

@@ -18,7 +18,8 @@
 # XDG Trash, macOS's disk image); `only = "no-trash"` for where there is none.
 # Every step must check something: the harness waits for what the step
 # promises before pressing the next key, so an Esc is never read as the start
-# of an Alt chord.
+# of an Alt chord. A resize step waits for the key line on the new last row,
+# the frame drawn at the new size.
 
 [[task]]
 id = "reach_largest_file"
