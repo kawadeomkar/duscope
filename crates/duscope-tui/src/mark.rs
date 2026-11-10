@@ -17,7 +17,9 @@
 //!
 //! What moved stays on the map for the session as a freed tile (the saved
 //! scan is not changed; a rescan measures the tree again) and is counted for
-//! the summary the binary prints when the viewer closes.
+//! the summary the binary prints when the viewer closes. Neither it nor a
+//! folder that holds it can be marked again before a rescan: the saved
+//! scan still counts its bytes, which a second move would count twice.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -214,6 +216,13 @@ impl Freed {
             .range(..=id)
             .next_back()
             .is_some_and(|(_, &last)| id <= last)
+    }
+
+    /// Whether something below `id`, whose subtree ends at `last`, was
+    /// freed: the folder holds what moved.
+    #[must_use]
+    pub fn below(&self, id: u32, last: u32) -> bool {
+        id < last && self.ranges.range(id + 1..=last).next().is_some()
     }
 
     /// Paints what was freed: every tile drawn for a freed entry takes the

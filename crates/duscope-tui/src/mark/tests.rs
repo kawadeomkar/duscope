@@ -807,3 +807,41 @@ fn p4_tui_06_a_wrong_answer_closes_the_pane_and_a_paste_is_not_keys() {
     assert!(!app.pane_open());
     assert!(root.join("big.bin").exists());
 }
+
+#[test]
+fn p4_tui_06_d_refuses_a_folder_that_holds_what_was_moved() {
+    let tree = mockup();
+    let view = mockup_view(&tree);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = viewer(&view, &mocha, &classes);
+    let mut terminal = first_frame(&app, 120, 40);
+    let caches = id_of(&view, "Caches");
+    let safari = id_of(&view, "Caches/com.apple.Safari");
+    let wal = id_of(&view, "Caches/com.apple.Safari/Cache.db-wal");
+    let downloads = id_of(&view, "Caches/Homebrew/downloads");
+    // The file moved to the Trash, as the pane's `yes` records it.
+    app.free(wal);
+    // Its folder, and the one above that, still count its bytes in the
+    // saved scan: `d` refuses them and says why, so nothing is counted
+    // twice.
+    for folder in [safari, caches] {
+        app.jump(folder);
+        assert_eq!(press(&mut app, &mut terminal, &char('d')), Flow::Redraw);
+        assert!(app.marked_ids().is_empty());
+        let text = text_of(terminal.backend().buffer());
+        assert!(
+            text.contains("this holds what was moved to the Trash: r rescans it first"),
+            "{text}"
+        );
+    }
+    // The file itself is in the Trash already.
+    app.jump(wal);
+    press(&mut app, &mut terminal, &char('d'));
+    assert!(app.marked_ids().is_empty());
+    assert!(text_of(terminal.backend().buffer()).contains("this is in the Trash already"));
+    // A folder that holds nothing moved is marked, and the marked total is
+    // its own bytes.
+    app.jump(downloads);
+    press(&mut app, &mut terminal, &char('d'));
+    assert_eq!(app.marked_ids(), [downloads]);
+}

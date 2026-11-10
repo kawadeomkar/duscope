@@ -1293,11 +1293,17 @@ impl<'a> App<'a> {
     }
 
     /// `d`: marks the selection, or unmarks it; the map's root, an entry a
-    /// marked folder covers and what has gone to the Trash stay as they are.
+    /// marked folder covers, what has gone to the Trash and a folder that
+    /// holds some of it stay as they are: the saved scan still counts what
+    /// moved, and its bytes would be counted again.
     fn mark_selection(&mut self) -> Flow {
         let id = self.selected();
         if self.freed.covers(id) {
             return self.warn("this is in the Trash already".to_owned());
+        }
+        if self.freed.below(id, self.view.node(id).last_id) {
+            return self
+                .warn("this holds what was moved to the Trash: r rescans it first".to_owned());
         }
         match self.marks.toggle(self.view, id) {
             Toggled::Marked | Toggled::Unmarked => Flow::Redraw,
