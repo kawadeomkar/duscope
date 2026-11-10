@@ -238,14 +238,11 @@ tree = "fixture"
   text = "no"
   see = ["no▌"]
 
+  # A wrong answer closes the pane, moving nothing: it asks once.
   [[task.step]]
   only = "no-trash"
   press = ["enter"]
-  see = ["the answer was not yes"]
-
-  [[task.step]]
-  only = "no-trash"
-  press = ["esc"]
+  see = ["the answer was not yes, so nothing was moved"]
   gone = ["mark pane"]
 
   [[task.step]]
