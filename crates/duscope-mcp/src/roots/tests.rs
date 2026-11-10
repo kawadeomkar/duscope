@@ -243,3 +243,139 @@ fn p5_mcp_01_an_item_whose_folder_became_a_link_out_of_the_roots_is_refused() {
     // The link itself lies inside, and is judged there.
     assert_eq!(roots.bound_item(&tree.path("root/inside")), Ok(()));
 }
+
+// P5-SEC-05: a path's length, and what resolving one costs.
+
+/// A path of exactly `bytes` bytes under `base`, of one-letter parts that do
+/// not exist.
+fn long_path(base: &Path, bytes: usize) -> PathBuf {
+    let base = base.as_os_str().to_str().unwrap();
+    let mut path = format!("{base}/");
+    while path.len() + 2 <= bytes {
+        path.push_str("a/");
+    }
+    if path.len() < bytes {
+        path.push('b');
+    } else {
+        path.pop();
+        path.push('b');
+    }
+    assert_eq!(path.len(), bytes);
+    PathBuf::from(path)
+}
+
+#[test]
+fn p5_sec_05_a_path_past_the_limit_is_refused_by_its_length() {
+    let tree = Tree::new();
+    let roots = tree.roots();
+    // Sixteen million bytes, as a message's limit allows: bisection or not,
+    // it is refused before anything looks at it.
+    for bytes in [MAX_PATH_BYTES + 1, 16 * 1024 * 1024] {
+        let path = long_path(&tree.path("root"), bytes);
+        let refused = roots.bound_path(&path, None).unwrap_err();
+        assert_eq!(refused.code, "refused_path");
+        assert!(
+            refused.message.contains(&format!("{bytes} bytes")),
+            "{refused}"
+        );
+        assert!(
+            refused.message.len() < 200,
+            "the path is not repeated: {refused}"
+        );
+        let refused = roots.bound_item(&path).unwrap_err();
+        assert_eq!(refused.code, "refused_path");
+        assert!(
+            refused.message.contains(&format!("{bytes} bytes")),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn p5_sec_05_a_path_at_the_limit_is_read() {
+    let tree = Tree::new();
+    let roots = tree.roots();
+    let path = long_path(&tree.path("root"), MAX_PATH_BYTES);
+    let bound = roots.bound_path(&path, None).unwrap();
+    assert!(bound.starts_with(tree.path("root")), "{}", bound.display());
+    assert_eq!(bound.components().count(), path.components().count());
+}
+
+#[test]
+fn p5_sec_05_a_relative_path_is_measured_once_joined_to_its_scan_root() {
+    let tree = Tree::new();
+    let roots = tree.roots();
+    let root = tree.path("root");
+    let relative = "a/".repeat(MAX_PATH_BYTES / 2 - 1);
+    assert!(relative.len() < MAX_PATH_BYTES);
+    assert!(root.join(&relative).as_os_str().len() > MAX_PATH_BYTES);
+    let refused = roots
+        .bound_path(Path::new(&relative), Some(&root))
+        .unwrap_err();
+    assert_eq!(refused.code, "refused_path");
+    assert!(refused.message.contains("bytes long"), "{refused}");
+}
+
+#[test]
+fn p5_sec_05_resolving_a_path_takes_a_logarithmic_number_of_looks() {
+    // A path of 2,000 parts, of which the first five exist.
+    let path = PathBuf::from(format!("/{}", vec!["d"; 2000].join("/")));
+    let exists = PathBuf::from("/d/d/d/d/d");
+    let mut looks = 0;
+    let resolved = resolve_with(&path, |part| {
+        looks += 1;
+        if exists.starts_with(part) {
+            Ok(Path::new("/real").join(part.strip_prefix("/").unwrap()))
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    });
+    assert!(looks <= 13, "{looks} looks for 2,000 parts");
+    let tail = vec!["d"; 1995].join("/");
+    assert_eq!(resolved, Path::new("/real/d/d/d/d/d").join(tail));
+}
+
+#[test]
+fn p5_sec_05_resolving_keeps_what_the_tree_says() {
+    let tree = Tree::new();
+    // Every part exists: no remainder, and nothing is added to it.
+    let whole = resolve(&tree.path("root/inside/file"));
+    assert_eq!(whole, tree.path("root/inside/file"));
+    assert_eq!(whole.as_os_str(), tree.path("root/inside/file").as_os_str());
+    // Below a link, as the file system resolves it.
+    let below = resolve(&tree.path("root/outside_link/gone/deeper"));
+    assert_eq!(below, tree.path("elsewhere/gone/deeper"));
+    // Doubled separators and `.` in the remainder are not kept.
+    let tidy = resolve(Path::new(&format!(
+        "{}//gone/./deeper",
+        tree.path("root/inside").display()
+    )));
+    assert_eq!(tidy, tree.path("root/inside/gone/deeper"));
+    assert_eq!(
+        tidy.as_os_str(),
+        tree.path("root/inside/gone/deeper").as_os_str()
+    );
+}
+
+#[test]
+fn p5_sec_05_a_search_the_tree_changed_under_stops_at_a_part_that_resolves() {
+    // The bisection saw the deeper part resolve, and it is gone by the time
+    // it is read: the part above it answers, not the path as written.
+    let path = Path::new("/a/b/c");
+    let mut first = true;
+    let resolved = resolve_with(path, |part| {
+        if part == Path::new("/a/b") {
+            let then = first;
+            first = false;
+            if then {
+                return Ok(PathBuf::from("/real/a/b"));
+            }
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        if part == path {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        Ok(Path::new("/real").join(part.strip_prefix("/").unwrap()))
+    });
+    assert_eq!(resolved, Path::new("/real/a/b/c"));
+}
