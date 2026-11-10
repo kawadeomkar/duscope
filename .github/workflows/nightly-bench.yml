@@ -309,7 +309,7 @@ jobs:
           STATUS: ${{ steps.index.outputs.status }}
       # P4-TEST-01: the viewer's redraw at 120x40 on T2 (bench/README.md, "The
       # redraw budget"). The result goes to bench-results beside the harness's;
-      # Gate 4 -> 5 reads its number. A gate failing is no failure of the run.
+      # Gate 4 -> 5 reads its two lines. A gate failing is no failure of the run.
       - name: Redraw measurements
         id: redraw
         if: ${{ !cancelled() && env.SWEEP != 'true' }}
@@ -487,7 +487,7 @@ jobs:
           STATUS: ${{ steps.index.outputs.status }}
       # P4-TEST-01: the viewer's redraw at 120x40 on T2 (bench/README.md, "The
       # redraw budget"). The result goes to bench-results beside the harness's;
-      # Gate 4 -> 5 reads its number. A gate failing is no failure of the run.
+      # Gate 4 -> 5 reads its two lines. A gate failing is no failure of the run.
       - name: Redraw measurements
         id: redraw
         if: ${{ !cancelled() && env.SWEEP != 'true' }}

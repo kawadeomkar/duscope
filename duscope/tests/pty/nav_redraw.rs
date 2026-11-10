@@ -54,27 +54,89 @@ fn p4_test_01_the_redraw_measurement_runs_end_to_end() {
     assert_eq!(result["failures"], serde_json::json!([]), "{stderr}");
     assert_eq!(result["harness"]["note"], "smoke");
     assert_eq!(result["gates_tree"], "T2");
-    let gate = &result["gates"][0];
-    assert_eq!(gate["name"], "redraw_p95_ms_at_120x40");
-    assert_eq!(gate["limit"], 16.0);
-    assert!(gate["value"].is_number(), "{gate}");
-    assert!(gate["holds"].is_boolean(), "{gate}");
-    let kinds: Vec<&str> = result["results"]
-        .as_array()
-        .unwrap()
+    let gates = result["gates"].as_array().unwrap();
+    let lines: Vec<(&str, f64)> = gates
         .iter()
-        .map(|row| row["kind"].as_str().unwrap())
+        .map(|gate| {
+            assert!(gate["value"].is_number(), "{gate}");
+            assert!(gate["holds"].is_boolean(), "{gate}");
+            (
+                gate["name"].as_str().unwrap(),
+                gate["limit"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            ("redraw_p95_ms_at_120x40", 16.0),
+            ("redraw_recompute_max_ms", 1000.0)
+        ]
+    );
+    let rows = result["results"].as_array().unwrap();
+    let kinds: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["kind"].as_str().unwrap(),
+                row["class"].as_str().unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         kinds,
         [
-            "move", "descend", "zoom", "repaint", "focus", "views", "resize"
+            ("move", "navigation"),
+            ("descend", "navigation"),
+            ("zoom", "navigation"),
+            ("zoom", "recompute"),
+            ("repaint", "recompute"),
+            ("focus", "navigation"),
+            ("views", "navigation"),
+            ("views", "recompute"),
+            ("resize", "recompute"),
         ]
     );
-    for row in result["results"].as_array().unwrap() {
+    for row in rows {
         assert!(row["samples"].as_u64().unwrap() > 0, "{row}");
         assert!(row["p95_ms"].is_number(), "{row}");
+        assert!(row["max_ms"].is_number(), "{row}");
+        assert!(row["over_limit"].is_u64(), "{row}");
     }
+    // The first-time frames stand in rows of their own: each table once, and
+    // every first zoom.
+    let row = |kind: &str| {
+        rows.iter()
+            .find(|row| row["kind"] == kind && row["class"] == "recompute")
+            .unwrap()
+    };
+    assert_eq!(row("views")["first"], 3);
+    assert_eq!(row("views")["keys"], serde_json::json!(["2", "3", "4"]));
+    assert!(row("zoom")["first"].as_u64().unwrap() >= 1);
+    assert_eq!(row("repaint")["first"], 0);
+    // Every press is recorded in order, those that drew nothing too.
+    let sessions = result["sessions"].as_array().unwrap();
+    let played: Vec<(&str, usize)> = sessions
+        .iter()
+        .map(|session| {
+            (
+                session["kind"].as_str().unwrap(),
+                session["presses"].as_array().unwrap().len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        played,
+        [
+            ("move", 8),
+            ("descend", 4),
+            ("zoom", 6),
+            ("repaint", 4),
+            ("focus", 2),
+            ("views", 12),
+            ("resize", 4),
+        ]
+    );
 }
 
 #[test]
