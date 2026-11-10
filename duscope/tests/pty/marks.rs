@@ -599,3 +599,154 @@ fn p4_tui_06_r_below_the_saved_root_says_when_the_folder_has_gone() {
     wait(&mut terminal, "exit=0");
     assert_eq!(scans(&env).len(), 1);
 }
+
+/// `duscope view --scan <scan> <path>`, as `viewer` runs it.
+fn viewer_of_scan(env: &TestEnv, scan: &serde_json::Value, path: &Path) -> Terminal {
+    let script = format!(
+        "'{}' view --scan {} '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        scan.as_str().unwrap(),
+        path.display()
+    );
+    Terminal::builder()
+        .size(120, 40)
+        .timeout(Duration::from_secs(60))
+        .env_clear()
+        .envs(env.vars())
+        .current_dir(env.work_dir())
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap()
+}
+
+/// Presses `r` in `terminal`, waits for the reload, and quits.
+fn rescan_and_quit(mut terminal: Terminal) {
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "rescanned");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+}
+
+/// That `r` rescanned the saved scan `tree_scan` of `root`, as `rescan`
+/// does: two scans in all, the new one its child at its root.
+fn renewed_the_saved_scan(env: &TestEnv, root: &Path, tree_scan: &serde_json::Value) {
+    let scans = scans(env);
+    assert_eq!(scans.len(), 2, "{scans:?}");
+    let child = scans.iter().find(|e| e["id"] != *tree_scan).unwrap();
+    assert_eq!(child["root"], root.to_str().unwrap(), "{child}");
+    assert_eq!(child["parent_scan_id"], *tree_scan, "{child}");
+}
+
+#[test]
+fn p4_tui_06_r_rescans_the_saved_root_where_the_folder_has_become_a_link() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    let elsewhere = root.with_file_name("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("other.bin"), vec![2u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let mut terminal = viewer(&env, &proj, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    // Replaced by a link since the viewer opened: the walk would read the
+    // link's target, and the new scan would hold another path.
+    fs::remove_dir_all(&proj).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &proj).unwrap();
+    rescan_and_quit(terminal);
+    renewed_the_saved_scan(&env, &root, &tree_scan);
+}
+
+#[test]
+fn p4_tui_06_r_rescans_the_saved_root_where_the_viewer_is_on_what_the_scan_did_not_enter() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let skipped = root.join("skipped");
+    fs::create_dir_all(&skipped).unwrap();
+    fs::write(skipped.join("left-out.bin"), vec![1u8; 64 * 1024]).unwrap();
+    fs::write(root.join("kept.bin"), vec![2u8; 64 * 1024]).unwrap();
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&root)
+        .args(["--save", "--json", "--exclude", "skipped"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let mut terminal = viewer_of_scan(&env, &tree_scan, &skipped);
+    wait(&mut terminal, "treemap · ");
+    rescan_and_quit(terminal);
+    renewed_the_saved_scan(&env, &root, &tree_scan);
+}
+
+#[test]
+fn p4_tui_06_r_rescans_the_saved_root_where_the_viewer_is_on_a_file() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    fs::create_dir_all(&root).unwrap();
+    let file = root.join("only.bin");
+    fs::write(&file, vec![1u8; 64 * 1024]).unwrap();
+    fs::write(root.join("other.bin"), vec![2u8; 8 * 1024]).unwrap();
+    saved(&env, &root);
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let mut terminal = viewer_of_scan(&env, &tree_scan, &file);
+    wait(&mut terminal, "treemap · ");
+    rescan_and_quit(terminal);
+    renewed_the_saved_scan(&env, &root, &tree_scan);
+}
+
+#[test]
+fn p4_tui_06_a_second_r_rescans_the_folders_own_scan() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    fs::write(root.join("outside.bin"), vec![2u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let mut terminal = viewer(&env, &proj, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('2')).unwrap();
+    wait(&mut terminal, "list · ");
+    fs::write(proj.join("first-new.bin"), vec![3u8; 2048 * 1024]).unwrap();
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "first-new.bin");
+    let first = scan_of(&scans(&env), &proj);
+    assert!(first["parent_scan_id"].is_null(), "{first}");
+    fs::write(proj.join("second-new.bin"), vec![4u8; 4096 * 1024]).unwrap();
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "second-new.bin");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    // The folder's scan renewed, as `rescan` renews a scan: its child at
+    // the folder; the scan of the tree is not renewed.
+    let scans = scans(&env);
+    assert_eq!(scans.len(), 3, "{scans:?}");
+    assert_eq!(scan_of(&scans, &root)["id"], tree_scan);
+    let second = scans
+        .iter()
+        .find(|e| e["parent_scan_id"] == first["id"])
+        .unwrap_or_else(|| panic!("no child of the folder's scan: {scans:?}"));
+    assert_eq!(second["root"], proj.to_str().unwrap(), "{second}");
+    assert_eq!(second["file_count"], 3, "{second}");
+    // A second press reads only what changed where the platform keeps the
+    // history and the history's checks pass; never where it keeps none.
+    let top = env
+        .cmd()
+        .args(["top", "--scan", second["id"].as_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    let block: serde_json::Value = serde_json::from_slice(&top.stdout).unwrap();
+    assert_eq!(block["scan"]["parent_scan_id"], first["id"], "{block}");
+    if duscope_walk::fsevents::current_event_id().is_none() {
+        assert_eq!(block["scan"]["incremental"], false, "{block}");
+    }
+}
