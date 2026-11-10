@@ -831,3 +831,60 @@ fn p5_sec_04_a_directory_naming_itself_its_parent_is_not_its_own_subdirectory() 
         index.failure()
     );
 }
+
+/// The rows an import writes keep the layout: the reference fixture tree
+/// exported as ncdu's JSON, as gdu's and as a `.gpscan`, imported again and
+/// saved as the `import` verb saves it, reads whole with no failed read.
+#[test]
+fn p5_sec_04_imported_indexes_keep_the_layout() {
+    use crate::interchange::gpscan::{self, GpscanOpts};
+    use crate::interchange::import::import;
+    use crate::interchange::ncdu::{self, NcduOpts};
+    use std::os::unix::ffi::OsStrExt;
+
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    let (_, _, _, scanned) = fixture_index(&dir.join("scan"), Attrs::Basic);
+    let mut ncdu_json = Vec::new();
+    let opts = NcduOpts {
+        progver: "0.0.0",
+        timestamp: 1,
+    };
+    ncdu::write(&scanned, 0, &opts, &mut ncdu_json).unwrap();
+    let mut gdu_json = ncdu_json.clone();
+    let at = gdu_json
+        .windows(9)
+        .position(|w| w == b"\"duscope\"")
+        .unwrap();
+    gdu_json.splice(at..at + 9, b"\"gdu\"".iter().copied());
+    let mut gpscan_xml = Vec::new();
+    let opts = GpscanOpts {
+        apparent: false,
+        volume_path: b"/".to_vec(),
+        volume_size: 1 << 40,
+        free_space: 1 << 39,
+        scan_time_ns: 1,
+        app_version: "0.0.0",
+    };
+    gpscan::write(&scanned, 0, &opts, &mut gpscan_xml).unwrap();
+    for (name, bytes) in [
+        ("ncdu", ncdu_json),
+        ("gdu", gdu_json),
+        ("gpscan", gpscan_xml),
+    ] {
+        let mut imported = import(bytes.as_slice(), None).unwrap();
+        assert_eq!(imported.format.as_str(), name);
+        let rollup = roll_up(&mut imported.arena);
+        let root = PathBuf::from(std::ffi::OsStr::from_bytes(&imported.root));
+        let mut meta = meta(ScanId::new(name.as_bytes(), 1, [0; 8]), &root, 1);
+        meta.source = imported.format.source().to_owned();
+        IndexWriter::write(&imported.arena, &rollup, &meta, &dir.join(name)).unwrap();
+        let index = Index::open(&index_path(&dir.join(name), &meta.scan_id)).unwrap();
+        assert!(index.len() > 100, "{name}: {} entries", index.len());
+        for id in 0..index.len() {
+            index.path(id);
+            index.child_dirs(id);
+        }
+        assert!(index.failure().is_none(), "{name}: {:?}", index.failure());
+    }
+}

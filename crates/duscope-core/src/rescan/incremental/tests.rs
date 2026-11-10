@@ -21,6 +21,7 @@ use super::{Changes, Checks, Fallback, History, MAX_AGE_NS, Merged, Stop, merge,
 use crate::CoreError;
 use crate::arena::Arena;
 use crate::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
+use crate::query::TreeView;
 use crate::rollup::roll_up;
 
 /// The mark every volume of a test's scans carries, on every platform.
@@ -910,4 +911,45 @@ fn p5_sec_04_a_saved_scan_whose_rows_break_the_layout_is_index_corrupt() {
             other => panic!("{case}: {other:?}"),
         }
     }
+}
+
+/// The rows an incremental rescan writes keep the layout: a merged index
+/// after creates, deletes and a rename reads whole with no failed read, and
+/// the next rescan loads its directories.
+#[test]
+fn p5_sec_04_a_merged_index_keeps_the_layout() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    let (parent, _) = full(
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        now_ns(),
+        "{}",
+    );
+    file(&root.join("a/a4/newdir/inner/file"), 4000);
+    fs::remove_dir_all(root.join("doomed/sub1")).unwrap();
+    fs::rename(root.join("mover/m"), root.join("b/m")).unwrap();
+    let reported = [
+        "a/a4",
+        "a/a4/newdir",
+        "a/a4/newdir/inner",
+        "doomed",
+        "doomed/sub1",
+        "doomed/sub1/sub2",
+        "mover",
+        "b",
+    ];
+    let replay = |under: &Path| Ok(reporting(under, &reported));
+    let history = script(&replay);
+    let (merged, _) = incremental(&parent, &root, &env.tmp_dir().join("merged"), &history).unwrap();
+    assert!(merged.meta().incremental);
+    for id in 0..merged.len() {
+        merged.path(id);
+        merged.child_dirs(id);
+    }
+    assert!(merged.failure().is_none(), "{:?}", merged.failure());
+    let saved = super::Saved::load(&merged).unwrap();
+    assert_eq!(saved.dirs.len() as u64, merged.node(0).dir_count);
 }
