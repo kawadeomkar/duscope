@@ -29,6 +29,12 @@
 //! slash: an index file no scan wrote) is not read, and counts as changed,
 //! so a crafted file cannot lead the sweep outside its root.
 //!
+//! Before any of that, every row of `dirs` and `files` is held to the
+//! index's layout, as a query holds the rows it reads
+//! (`rows_keep_the_layout`). A query reads only the rows its answer needs,
+//! so a damaged row it never reaches goes unreported; here it does not, and
+//! the verb fails `index_corrupt` with nothing read from the tree.
+//!
 //! The answer is only ever reported: nothing reads it to skip work.
 
 use std::os::unix::ffi::OsStrExt;
@@ -37,6 +43,7 @@ use std::time::Instant;
 
 use crate::CoreError;
 use crate::index::Index;
+use crate::index::reader::{dir_ids, file_ids};
 use crate::query::TreeView;
 
 /// Directories read per call to [`duscope_walk::stamp_dirs`]: the paths of
@@ -94,14 +101,16 @@ fn listable(name: &[u8]) -> bool {
 ///
 /// # Errors
 ///
-/// [`CoreError::IndexCorrupt`] when the index's directories or its scan
-/// options cannot be read.
+/// [`CoreError::IndexCorrupt`] when a row of `dirs` or `files` breaks the
+/// index's layout, or the index's directories or its scan options cannot be
+/// read.
 pub fn sweep(index: &Index, leave_out: &[PathBuf]) -> Result<Sweep, CoreError> {
     let started = Instant::now();
     let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
         file: index.file().display().to_string(),
         message: e.to_string(),
     };
+    rows_keep_the_layout(index).map_err(corrupt)?;
     let (options, _) = crate::rescan::options(index)?;
     let meta = index.meta();
     // Touched while the scan ran, with the margin on either side.
@@ -185,6 +194,33 @@ pub fn sweep(index: &Index, leave_out: &[PathBuf]) -> Result<Sweep, CoreError> {
         found.changed_count
     );
     Ok(found)
+}
+
+/// Holds every row of `dirs` and `files` to the layout, through the
+/// functions the reader holds a row to it with, so the two cannot disagree:
+/// a NULL or a value that does not fit fails here as it does there. `NOT
+/// INDEXED`: the rows come from the tables a query reads, never from a
+/// covering index, whose content `PRAGMA quick_check` does not compare with
+/// its table and a crafted file can make say anything.
+fn rows_keep_the_layout(index: &Index) -> rusqlite::Result<()> {
+    let db = index.db();
+    let mut stmt = db.prepare("SELECT id, parent_id, files_end, last_id FROM dirs NOT INDEXED")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        dir_ids(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            index.len(),
+        )?;
+    }
+    let mut stmt = db.prepare("SELECT id, parent_id FROM files NOT INDEXED")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        file_ids(row.get(0)?, row.get(1)?)?;
+    }
+    Ok(())
 }
 
 /// Reads the stamps of the directories in `chunk`, following links when

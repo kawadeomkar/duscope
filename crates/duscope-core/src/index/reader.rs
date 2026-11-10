@@ -21,7 +21,14 @@
 //! file opened is kept and the entry reads as empty; the verb asks
 //! [`Index::failure`] once its query is done. A row whose ids break the
 //! layout, which a walk of the tree would follow for ever, fails its read
-//! (`dir_ids`).
+//! (`dir_ids`, `file_ids`).
+//!
+//! So a saved index whose rows break the layout never makes a verb read for
+//! ever; a verb that reads a damaged row fails `index_corrupt`; a verb that
+//! does not may answer from the rows it read, with no warning. Only `scans
+//! --check` holds every row to the layout ([`crate::check`]): the check is
+//! a pass over both tables, which at open would cost more than the query it
+//! came before.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -1025,13 +1032,7 @@ fn file_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
     let kind: String = row.get(11)?;
     let parent_depth: Option<u32> = row.get(13)?;
     let parent: u32 = row.get(1)?;
-    if id != 0 && parent >= id {
-        return Err(misplaced(
-            "files",
-            id,
-            &format!("its parent_id {parent} is not below its id"),
-        ));
-    }
+    file_ids(id, parent)?;
     Ok(Node {
         id,
         parent,
@@ -1101,6 +1102,20 @@ pub(crate) fn dir_ids(
                 "id <= files_end <= last_id < n_entries fails (files_end {files_end}, \
                  last_id {last_id}, n_entries {len})"
             ),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses the row of file `id` unless its parent comes before it, as a
+/// directory's must ([`dir_ids`]). A scan of a single file stores the file
+/// as the root, whose `parent_id` is not checked.
+pub(crate) fn file_ids(id: u32, parent: u32) -> rusqlite::Result<()> {
+    if id != 0 && parent >= id {
+        return Err(misplaced(
+            "files",
+            id,
+            &format!("its parent_id {parent} is not below its id"),
         ));
     }
     Ok(())
