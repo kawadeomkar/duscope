@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use duscope_testkit::{TestEnv, duscope_bin};
-use termlens::{Key, Terminal};
+use termlens::{Key, Screen, Terminal};
 
 /// `duscope view <tree>` in a `cols`×`rows` pseudo-terminal, run by the
 /// shell, which prints its exit status after it.
@@ -279,6 +279,21 @@ fn p4_tui_06_a_refused_item_stops_the_plan_and_moves_nothing() {
     wait(&mut terminal, "exit=0");
 }
 
+/// Whether `screen`, a 120×40 viewer, shows a freed tile's word on the map:
+/// ` freed ` whole inside the map's rectangle, where the selected pane's
+/// title (`selected · freed`) cannot be.
+fn freed_on_map(screen: &Screen) -> bool {
+    let map = duscope_tui::layout::layout(120, 40).map;
+    let word = " freed ".len();
+    screen.find_all(" freed ").iter().any(|&(row, col)| {
+        let col = usize::from(col);
+        row >= map.y
+            && row < map.y + map.height
+            && col >= usize::from(map.x)
+            && col + word <= usize::from(map.x + map.width)
+    })
+}
+
 /// Marks `a.bin` and `c.bin` under `root`, confirms with `yes`, and checks
 /// what the pane promised: both gone from the tree and whole in the
 /// `trashed` place, the map's freed tiles, and the summary on the way out.
@@ -293,7 +308,12 @@ fn confirm_and_check(env: &TestEnv, root: &Path, trashed: &dyn Fn(&str) -> PathB
     wait(&mut terminal, "yes▌");
     terminal.send(Key::Enter).unwrap();
     wait(&mut terminal, "moved 2 items to the Trash");
-    wait(&mut terminal, " freed ");
+    terminal.wait_until(freed_on_map).unwrap_or_else(|e| {
+        panic!(
+            "no freed tile on the map: {e}:\n{}",
+            terminal.screen().text()
+        )
+    });
     assert!(!a.exists() && !c.exists());
     assert_eq!(fs::read(trashed("a.bin")).unwrap(), vec![1u8; 512 * 1024]);
     assert_eq!(fs::read(trashed("c.bin")).unwrap(), vec![3u8; 32 * 1024]);
