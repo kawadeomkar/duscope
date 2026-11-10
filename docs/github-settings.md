@@ -57,7 +57,10 @@ under [Auditing](#auditing) read it again.
   broken Intel build still stops a release. `mcp-smoke`, which has Claude Code,
   Codex CLI and Gemini CLI call `duscope mcp` with the vendors' keys, runs on
   the schedule and a dispatch alone, and on no pull request: it is not
-  required, since each run pays the vendors and waits on their uptime. This PUT replaces the whole
+  required, since each run pays the vendors and waits on their uptime.
+  [musl-loop.yml](../.github/workflows/musl-loop.yml) (P5-BENCH-02, the musl
+  build's T2 loop) runs on a dispatch alone, never on a pull request, so none of
+  its jobs is a check here. This PUT replaces the whole
   protection of `main`, so it restates the settings above unchanged. `app_id`
   15368 is GitHub Actions, so only a workflow run can report these checks.
 
