@@ -1,6 +1,6 @@
 //! The terminal the viewer draws on: raw mode, the alternate screen, mouse
-//! capture and bracketed paste (so that a paste arrives as one event the
-//! viewer ignores, never as keys), taken on entry and given back on every
+//! capture and bracketed paste (so that a paste arrives as one event, text
+//! for the filter prompt alone, never as keys), taken on entry and given back on every
 //! way out (a return, an error, a panic through the binary's hook); the
 //! size the viewer checks before it starts; and the background probe.
 

@@ -1124,9 +1124,9 @@ impl<'a> App<'a> {
             Event::Resize(..) => Flow::Redraw,
             Event::Key(key) if key.kind != KeyEventKind::Release => self.key(key),
             Event::Mouse(mouse) => self.mouse(*mouse, Instant::now()),
-            // The rest waits; a paste among it (the terminal brackets
-            // pastes) is never keys: not an answer in the mark pane, not a
-            // filter, not a command.
+            // The terminal brackets pastes: one is text for the filter
+            // prompt, never keys.
+            Event::Paste(text) => self.paste(text),
             _ => Flow::Wait,
         };
         self.released(flow)
@@ -1615,6 +1615,31 @@ impl<'a> App<'a> {
                 Flow::Redraw
             }
             _ => Flow::Wait,
+        }
+    }
+
+    /// A paste: in the filter prompt, its text up to the first line break,
+    /// control characters left out, so that it never applies the filter
+    /// itself; anywhere else (the mark pane included) nothing, since a paste
+    /// is never keys.
+    fn paste(&mut self, pasted: &str) -> Flow {
+        if self.pane.is_some() {
+            return Flow::Wait;
+        }
+        let Some(text) = &mut self.prompt else {
+            return Flow::Wait;
+        };
+        let before = text.len();
+        text.extend(
+            pasted
+                .chars()
+                .take_while(|c| !matches!(c, '\n' | '\r'))
+                .filter(|c| !c.is_control()),
+        );
+        if text.len() == before {
+            Flow::Wait
+        } else {
+            Flow::Redraw
         }
     }
 

@@ -809,6 +809,37 @@ fn p4_tui_06_a_wrong_answer_closes_the_pane_and_a_paste_is_not_keys() {
 }
 
 #[test]
+fn p4_tui_06_a_paste_is_text_in_the_filter_prompt_and_never_applies_it() {
+    let tree = mockup();
+    let view = mockup_view(&tree);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = viewer(&view, &mocha, &classes);
+    let mut terminal = first_frame(&app, 120, 40);
+    let paste = |text: &str| Event::Paste(text.to_owned());
+    // Outside the prompt a paste does nothing.
+    assert_eq!(press(&mut app, &mut terminal, &paste("/*.db")), Flow::Wait);
+    assert_eq!(app.filter, None);
+    // In it, the text up to the first line break, without control
+    // characters; the line break does not apply the filter.
+    press(&mut app, &mut terminal, &char('/'));
+    assert_eq!(
+        press(&mut app, &mut terminal, &paste("*.d\u{1b}b\nd")),
+        Flow::Redraw
+    );
+    let text = text_of(terminal.backend().buffer());
+    assert!(text.contains(">  *.db▌"), "{text}");
+    assert_eq!(app.filter, None);
+    // A paste of nothing it keeps changes nothing.
+    assert_eq!(press(&mut app, &mut terminal, &paste("\n*")), Flow::Wait);
+    // `⏎`, typed, applies it.
+    assert_eq!(
+        press(&mut app, &mut terminal, &key(KeyCode::Enter)),
+        Flow::Redraw
+    );
+    assert_eq!(app.filter.as_deref(), Some("*.db"));
+}
+
+#[test]
 fn p4_tui_06_d_refuses_a_folder_that_holds_what_was_moved() {
     let tree = mockup();
     let view = mockup_view(&tree);
