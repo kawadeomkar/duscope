@@ -29,7 +29,7 @@ under [Auditing](#auditing) read it again.
   - `msrv (pinned)` and `msrv (stable)`
   - `deny`
   - `fuzz-smoke` for each fuzz target (`sql`, `ncdu`, `gdu`, `gpscan`, `args`,
-    `jsonrpc`)
+    `jsonrpc`, `index_rows`)
   - `mcp-conformance` on `ubuntu-24.04` and `macos-26`: rmcp's client, the
     conformance oracle, against `duscope mcp`
   - `docs`
@@ -68,9 +68,9 @@ under [Auditing](#auditing) read it again.
   2026-11-02, with P2-IDX-03, DEV-73 folded macOS's `clippy` and both its
   `test` legs into `checks (macos-26)`, leaving 34. P2-TEST-01 adds the five
   `fuzz-smoke` checks, 39, P3-MCP-01 `fuzz-smoke (jsonrpc)`, 40, P4-TUI-07
-  `pixels (macos-26)` and `pixels (ubuntu-24.04)`, 42, and P3-MCP-06
-  `mcp-conformance (ubuntu-24.04)` and `mcp-conformance (macos-26)`, 44 in all
-  below, once they merge.
+  `pixels (macos-26)` and `pixels (ubuntu-24.04)`, 42, P3-MCP-06
+  `mcp-conformance (ubuntu-24.04)` and `mcp-conformance (macos-26)`, 44, and
+  P5-SEC-04 `fuzz-smoke (index_rows)`, 45 in all below, once they merge.
 
   These checks run on a pull request into `main`, and on one labelled
   `full-ci`. GitHub's stacked pull requests run as if into `main`: the pull
@@ -111,6 +111,7 @@ under [Auditing](#auditing) read it again.
         { "context": "fuzz-smoke (gpscan)", "app_id": 15368 },
         { "context": "fuzz-smoke (args)", "app_id": 15368 },
         { "context": "fuzz-smoke (jsonrpc)", "app_id": 15368 },
+        { "context": "fuzz-smoke (index_rows)", "app_id": 15368 },
         { "context": "mcp-conformance (ubuntu-24.04)", "app_id": 15368 },
         { "context": "mcp-conformance (macos-26)", "app_id": 15368 },
         { "context": "docs", "app_id": 15368 },

@@ -51,6 +51,7 @@ const REQUIRED_CHECKS: &[&str] = &[
     "fuzz-smoke (gpscan)",
     "fuzz-smoke (args)",
     "fuzz-smoke (jsonrpc)",
+    "fuzz-smoke (index_rows)",
     "mcp-conformance (ubuntu-24.04)",
     "mcp-conformance (macos-26)",
     "docs",
