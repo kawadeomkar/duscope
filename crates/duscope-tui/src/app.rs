@@ -26,7 +26,8 @@
 //! ([`crate::mask`]), and with a mask on the map is drawn in cells.
 //! `?` lists the key map over the panes; `y` copies the selection's path
 //! with OSC 52 where the terminal takes it, the path on the key line
-//! either way; `o` opens the selection through the system's opener.
+//! either way; `o` shows the selection in the file manager, selected in
+//! the folder that holds it, never opened.
 //!
 //! With `--treemap pixels` the map pane shows a picture over its cells: of
 //! the zoom's root, in the whole map's colours, drawn once per root and
@@ -86,17 +87,18 @@ pub enum Flow {
 
 /// Writes to the terminal, between frames.
 pub type TermWrite<'a> = Box<dyn FnMut(&[u8]) -> io::Result<()> + 'a>;
-/// Opens a path with the desktop's opener.
+/// Shows a path in the desktop's file manager.
 pub type Opener<'a> = Box<dyn FnMut(&Path) -> io::Result<()> + 'a>;
 
 /// What the viewer does outside its cells: write to the terminal between
-/// frames, open a path, read the variables that tell what the terminal
-/// allows. A test replaces them; the binary wires them to the terminal and
-/// the system's opener.
+/// frames, show a path in the file manager, read the variables that tell
+/// what the terminal allows. A test replaces them; the binary wires them to
+/// the terminal and the file manager.
 pub struct Effects<'a> {
     /// Writes to the terminal, between frames (OSC 52).
     pub write: TermWrite<'a>,
-    /// Opens a path with the desktop's opener, detached.
+    /// Shows a path in the file manager (reveals it, never opens it),
+    /// detached.
     pub open: Opener<'a>,
     /// Reads a variable: the terminal's name, and tmux's and screen's marks.
     pub env: panes::facts::Env<'a>,
@@ -1159,13 +1161,13 @@ impl<'a> App<'a> {
         Flow::Redraw
     }
 
-    /// `o`: the selection through the system's opener, detached.
+    /// `o`: the selection shown in the file manager, detached.
     fn open_selection(&mut self) -> Flow {
         let path = abs_path(self.view, self.selected());
         let opened = (self.effects.open)(Path::new(OsStr::from_bytes(&path)));
         if let Err(e) = opened {
             self.notice = Some(Message {
-                text: format!("could not open it: {e}"),
+                text: format!("could not show it: {e}"),
                 kind: Notice::Warning,
             });
             return Flow::Redraw;

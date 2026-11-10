@@ -11,6 +11,7 @@ mod linux;
 mod macos;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
+mod reveal;
 
 use std::sync::Once;
 
@@ -160,16 +161,16 @@ pub(crate) fn process_alive(_pid: u32) -> bool {
     true
 }
 
-/// The program that opens a path as the desktop would: macOS's `open`.
-#[cfg(target_os = "macos")]
-pub(crate) fn opener() -> &'static str {
-    "open"
-}
-
-/// The program that opens a path as the desktop would: `xdg-open`.
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn opener() -> &'static str {
-    "xdg-open"
+/// The command lines that show `path` in the file manager, to be tried in
+/// order: Finder's reveal on macOS; elsewhere the freedesktop file manager
+/// interface, then `xdg-open` on the folder holding it ([`reveal`]). Both
+/// are compiled on every platform; `cfg!` picks this one's.
+pub(crate) fn reveal_commands(path: &std::path::Path) -> Vec<Vec<std::ffi::OsString>> {
+    if cfg!(target_os = "macos") {
+        reveal::finder(path)
+    } else {
+        reveal::freedesktop(path)
+    }
 }
 
 /// The user's cache directory under `home` when `XDG_CACHE_HOME` is unset:

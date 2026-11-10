@@ -3,13 +3,14 @@
 //! return, an error, a panic through the binary's hook); the size the
 //! viewer checks before it starts; and the background probe.
 
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Stdout, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::Show;
@@ -119,24 +120,54 @@ pub fn size() -> io::Result<(u16, u16)> {
     terminal::size()
 }
 
-/// Opens `path` with the program `opener` (the desktop's, which the binary
-/// names: `open` on macOS, `xdg-open` elsewhere), detached from the
-/// terminal: its own process group, its streams on the null device, reaped
-/// in the background so that a finished opener leaves no zombie. An error
-/// says it could not be started; what the opener does with the path is its
+/// Starts the first of `commands` (each a program and its arguments: the
+/// ones that show a path in the file manager, which the binary has from
+/// `duscope-walk`) that will start, detached from the terminal: its own
+/// process group, its streams on the null device. A thread waits for it, so
+/// that a finished one leaves no zombie, and starts the next when it exits
+/// with a failure, and so on down the list; the viewer never waits. An
+/// error says none could be started; what they do with the path is their
 /// own business.
-pub fn open_detached(opener: &str, path: &Path) -> io::Result<()> {
-    let mut child = Command::new(opener)
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+pub fn open_detached(commands: Vec<Vec<OsString>>) -> io::Result<()> {
+    run_down(commands)?;
     Ok(())
+}
+
+/// [`open_detached`]: the thread that waits, which a test joins.
+fn run_down(commands: Vec<Vec<OsString>>) -> io::Result<JoinHandle<()>> {
+    let mut rest = commands.into_iter();
+    let mut child = start_next(&mut rest)?;
+    Ok(std::thread::spawn(move || {
+        while child.wait().is_ok_and(|status| !status.success()) {
+            match start_next(&mut rest) {
+                Ok(next) => child = next,
+                Err(_) => break,
+            }
+        }
+    }))
+}
+
+/// Starts the next of `commands` that will start, detached; when none
+/// will, the error of the last.
+fn start_next(commands: &mut impl Iterator<Item = Vec<OsString>>) -> io::Result<Child> {
+    let mut failed = io::Error::new(io::ErrorKind::NotFound, "no command to start");
+    for line in commands {
+        let Some((program, args)) = line.split_first() else {
+            continue;
+        };
+        let started = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn();
+        match started {
+            Ok(child) => return Ok(child),
+            Err(e) => failed = e,
+        }
+    }
+    Err(failed)
 }
 
 /// Waits for the next key, mouse or resize event.
@@ -218,4 +249,64 @@ pub(crate) fn parse_background(bytes: &[u8]) -> Option<Background> {
     } else {
         Background::Light
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! P4-TUI-05: `o`'s command lines, started detached, each that cannot
+    //! start or fails giving way to the next.
+
+    use std::ffi::OsString;
+    use std::fs;
+    use std::io;
+    use std::path::Path;
+
+    use duscope_testkit::TestEnv;
+
+    use super::run_down;
+
+    fn line(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    /// A command line that appends `what` to `log` and exits with `status`.
+    fn record(log: &Path, what: &str, status: u8) -> Vec<OsString> {
+        let script = format!("echo {what} >> \"$0\"; exit {status}");
+        line(&["sh", "-c", &script, log.to_str().unwrap()])
+    }
+
+    #[test]
+    fn p4_tui_05_o_runs_down_its_command_lines_until_one_succeeds() {
+        let env = TestEnv::new();
+        let log = env.work_dir().join("ran");
+        // A program that cannot start and one that fails give way; the
+        // first that succeeds ends the list.
+        let commands = vec![
+            line(&["/nonexistent/duscope-no-such-program"]),
+            record(&log, "failed", 3),
+            record(&log, "shown", 0),
+            record(&log, "never", 0),
+        ];
+        run_down(commands).unwrap().join().unwrap();
+        assert_eq!(fs::read_to_string(&log).unwrap(), "failed\nshown\n");
+        // A last one that fails ends it too.
+        fs::remove_file(&log).unwrap();
+        run_down(vec![record(&log, "only", 1)])
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(fs::read_to_string(&log).unwrap(), "only\n");
+    }
+
+    #[test]
+    fn p4_tui_05_o_says_so_when_no_command_line_starts() {
+        let failed = run_down(vec![
+            line(&["/nonexistent/duscope-first"]),
+            line(&["/nonexistent/duscope-second"]),
+        ])
+        .unwrap_err();
+        assert_eq!(failed.kind(), io::ErrorKind::NotFound);
+        assert!(run_down(Vec::new()).is_err());
+        assert!(run_down(vec![Vec::new()]).is_err());
+    }
 }

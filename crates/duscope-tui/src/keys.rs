@@ -48,7 +48,7 @@ pub enum Action {
     Help,
     /// `y`: copy the selection's path.
     Copy,
-    /// `o`: open the selection in the file manager.
+    /// `o`: show the selection in the file manager, selected in its folder.
     Open,
 }
 
@@ -269,7 +269,7 @@ pub static OPEN_OUT: Binding = Binding {
     strokes: &[key(KeyCode::Char('o'), Action::Open)],
     label: "o",
     ascii: "o",
-    what: "open in the file manager",
+    what: "show in the file manager",
 };
 /// `?`.
 pub static HELP: Binding = Binding {

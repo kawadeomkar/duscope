@@ -1221,7 +1221,7 @@ fn p4_tui_05_y_copies_with_osc_52_and_falls_back_to_the_key_line() {
 }
 
 #[test]
-fn p4_tui_05_o_opens_the_selection_through_the_opener_it_was_given() {
+fn p4_tui_05_o_shows_the_selection_through_the_effect_it_was_given() {
     let tree = mockup();
     let view = mockup_view(&tree);
     let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
@@ -1246,14 +1246,14 @@ fn p4_tui_05_o_opens_the_selection_through_the_opener_it_was_given() {
     // A failed start says why on the key line, and the key line recovers.
     let mut app = viewer(&view, &mocha, &classes);
     app.with_effects(Effects {
-        open: Box::new(|_| Err(std::io::Error::other("no opener"))),
+        open: Box::new(|_| Err(std::io::Error::other("no file manager"))),
         ..Effects::default()
     });
     let mut terminal = first_frame(&app, 120, 40);
     assert_eq!(press(&mut app, &mut terminal, &char('o')), Flow::Redraw);
-    assert!(row(terminal.backend().buffer(), 39).contains("could not open it: no opener"));
+    assert!(row(terminal.backend().buffer(), 39).contains("could not show it: no file manager"));
     assert_eq!(press(&mut app, &mut terminal, &char('x')), Flow::Redraw);
-    assert!(!row(terminal.backend().buffer(), 39).contains("could not open"));
+    assert!(!row(terminal.backend().buffer(), 39).contains("could not show"));
 }
 
 #[test]

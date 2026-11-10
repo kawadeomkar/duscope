@@ -9,7 +9,7 @@
 │Z           zoom out one step                                                  Shift-⇥     focus the previous pane                                            │
 │0           zoom all the way out                                               i           the selection's full facts                                         │
 │g Home      first sibling or row                                               y           copy the path                                                      │
-│G End       last sibling or row                                                o           open in the file manager                                           │
+│G End       last sibling or row                                                o           show in the file manager                                           │
 │PgUp PgDn   page of siblings or rows                                           ?           this help                                                          │
 │1 2 3 4     treemap list largest types                                         q Ctrl-C    quit                                                               │
 │s           sort: size name date count                                                                                                                        │

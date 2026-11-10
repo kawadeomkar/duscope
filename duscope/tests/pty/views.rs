@@ -1,7 +1,8 @@
 //! P4-TUI-05: the views and the keys in the viewer the binary runs: the
 //! tabs and the tables, the colour and pack keys, the sort, the filter
 //! prompt, the help, the focus, `y`'s key line and `o` through its test
-//! knob, which appends to a file instead of starting an opener.
+//! knob, which appends the command lines it would start to a file instead
+//! of starting them.
 
 use std::fs;
 use std::path::Path;
@@ -108,13 +109,29 @@ fn p4_tui_05_the_tabs_the_modes_and_the_keys_in_the_binary() {
     let text = terminal.screen().text();
     assert!(text.contains("big.bin"), "{text}");
 
-    // `o` goes through the opener the test set; no opener starts.
+    // `o` goes through the knob the test set, which writes down the command
+    // lines that show the selection in the file manager; none starts. They
+    // are this platform's (`duscope-walk` tests each platform's), and none
+    // hands the file itself to an opener: only `open -R` names it.
+    let big = tree.join("data/big.bin");
+    let expected: String = duscope_walk::reveal_commands(&big)
+        .iter()
+        .map(|line| {
+            let args: Vec<_> = line.iter().map(|arg| arg.to_str().unwrap()).collect();
+            args.join(" ") + "\n"
+        })
+        .collect();
     terminal.send(Key::Char('o')).unwrap();
     terminal
-        .wait_until(|_| fs::read_to_string(&opened).is_ok_and(|log| log.ends_with("big.bin\n")))
+        .wait_until(|_| fs::read_to_string(&opened).is_ok_and(|log| log == expected))
         .unwrap_or_else(|e| panic!("{e}: {:?}", fs::read_to_string(&opened)));
-    let log = fs::read_to_string(&opened).unwrap();
-    assert!(log.starts_with('/') && log.lines().count() == 1, "{log}");
+    let named = format!(" {}", big.display());
+    for line in expected.lines() {
+        assert!(
+            !line.ends_with(&named) || line.starts_with("open -R "),
+            "{line}"
+        );
+    }
 
     terminal.send(Key::Char('q')).unwrap();
     wait(&mut terminal, "exit=0");
