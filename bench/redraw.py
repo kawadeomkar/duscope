@@ -61,6 +61,10 @@ FRAME_WAIT_S = 5.0
 # Silence that ends a frame: the viewer writes a frame without a pause, so
 # this much silence after its first byte means the frame is over.
 SETTLE_S = 0.05
+# Erases the screen. When the terminal's size changes ratatui writes and flushes
+# this by itself, then lays the frame out and writes it: bytes that do no more
+# than this are not a frame, and the silence after them is the viewer working.
+ERASE = b"\x1b[2J"
 # How long a viewer may take to open a million-entry saved scan and draw.
 OPEN_WAIT_S = 120.0
 
@@ -156,21 +160,32 @@ class Viewer:
                 raise measure.MeasureError(f"no first frame in {OPEN_WAIT_S:.0f} s; the viewer wrote: {bytes(seen[-200:])!r}")
         self.settle(SETTLE_S, 0.1)
 
+    def frame(self, start: float) -> Tuple[Optional[float], int]:
+        """Reads the frame of what happened at `start`: the time to its last
+        byte and its size in bytes, `(None, 0)` when no frame came. What only
+        erases the screen ([`ERASE`]) is read past, for the frame after it."""
+        seen = bytearray()
+        deadline = start + self.frame_wait
+        while True:
+            last, _ = self.settle(max(deadline - time.perf_counter(), 0.0), keep=seen)
+            if last is None:
+                return None, 0
+            if seen.replace(ERASE, b""):
+                return last - start, len(seen)
+
     def press(self, key: bytes) -> Tuple[Optional[float], int]:
         """Presses `key`; the time to the frame's last byte and its size in
         bytes, `(None, 0)` when no frame came."""
         start = time.perf_counter()
         os.write(self.fd, key)
-        last, count = self.settle(self.frame_wait)
-        return (None if last is None else last - start), count
+        return self.frame(start)
 
     def resize(self, columns: int, rows: int) -> Tuple[Optional[float], int]:
         """Resizes the terminal; the time to the frame's last byte and its
         size in bytes, `(None, 0)` when no frame came."""
         start = time.perf_counter()
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
-        last, count = self.settle(self.frame_wait)
-        return (None if last is None else last - start), count
+        return self.frame(start)
 
     def close(self) -> None:
         """Quits the viewer and reaps it."""

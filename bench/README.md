@@ -413,10 +413,12 @@ status 1 means something could not be measured, not that a gate failed.
 runs on a pseudo-terminal of that size, in a true-colour terminal's environment; what it writes is
 read and dropped, not parsed, so the terminal's own drawing is not in the time. One redraw is from
 the write of a key (or the change of the terminal's size) to the last byte of the frame it caused,
-the end of a frame being 50 ms of silence after its first byte. A key that changes nothing on the
-screen, a move at a block's edge, writes no frame and is counted, not timed; `--frame-wait`
-(default 5 s) is how long a press waits for a frame's first byte before it counts as one of those,
-longer than T2's slowest frame, so that a slow frame is not read by the next press.
+the end of a frame being 50 ms of silence after its first byte. Bytes that only erase the screen
+are not a frame: on a change of size ratatui writes and flushes the erase by itself, then lays the
+frame out, and that silence is the work being timed. A key that changes nothing on the screen, a
+move at a block's edge, writes no frame and is counted, not timed; `--frame-wait` (default 5 s) is
+how long a press waits for a frame's first byte before it counts as one of those, longer than T2's
+slowest frame, so that a slow frame is not read by the next press.
 
 The kinds, each in a session of its own, `--rounds` cycles (default 30):
 
