@@ -264,15 +264,16 @@ prefers the range even where the index is thousands of times faster.
 
 The indexes are built once, after the rows, with SQLite's default page cache
 (about 2 MB). SQLite sorts each index's keys in that much memory and spills the
-rest to a temporary file: in `SQLITE_TMPDIR` if that is set, else `TMPDIR`,
-else the first writable of `/var/tmp`, `/usr/tmp` and `/tmp`, and as a last
-resort the current directory. The file has a random name and mode 0600, and
-SQLite unlinks it as it opens it, so no directory lists it and nothing of it
-remains. It holds the keys being sorted: each directory's name with two ids,
-and each file's size on disk with its id, about a dozen bytes beside the name,
-never a file's name or a path. Where a temporary directory cannot hold it the
-file is built again with the sort in memory; [SECURITY.md](../SECURITY.md) says
-what it holds and what that reveals.
+rest to a temporary file, with a second one to merge them past 16 sorted runs:
+in `SQLITE_TMPDIR` if that is set, else `TMPDIR`, else the first writable of
+`/var/tmp`, `/usr/tmp` and `/tmp`, and as a last resort the current directory.
+Each file has a random name and mode 0600, and SQLite unlinks it as it opens
+it, so no directory lists it and nothing of it remains. They hold the keys
+being sorted: each directory's name with two ids, and each file's size on disk
+with its id, about a dozen bytes beside the name, never a file's name or a
+path. Where a temporary directory cannot hold them the file is built again with
+the sort in memory; [SECURITY.md](../SECURITY.md) says what they hold and what
+that reveals.
 
 ## Flags
 

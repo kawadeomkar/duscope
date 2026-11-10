@@ -187,17 +187,19 @@ virtual tables and crafted pages.
   index file, each spill file in `out` and the handle key are 0600. duscope still reads a looser
   directory, a looser index file, or one another user owns, but it prints a warning on stderr
   with the `chmod` that fixes it.
-- **The sort's temporary file.** While a save builds an index file's indexes, SQLite sorts their
-  keys in about 2 MB of memory and writes the rest to one temporary file: in `SQLITE_TMPDIR` if
-  that is set and writable, else `TMPDIR`, else the first of `/var/tmp`, `/usr/tmp` and `/tmp`
-  that is writable, and as a last resort the current directory.
-  - **Privacy.** The file has a random name and mode 0600, and SQLite unlinks it as it opens it,
-    so it is in no directory while it is in use and nothing of it remains however the process
-    ends. It holds the keys being sorted: a directory's name with its parent's id and its own
-    (about a dozen bytes beside the name), and a file's size on disk with its id (about a dozen
-    bytes in all). It never holds a file's name or a path.
-  - **Where it goes.** Set `SQLITE_TMPDIR` to choose the directory. The file is about as large as
-    the largest index being built: about 12 MB for a tree of a million files.
+- **The sort's temporary files.** While a save builds an index file's indexes, SQLite sorts their
+  keys in about 2 MB of memory and writes the rest to a temporary file, in sorted runs. Past 16
+  runs, a tree of more than about a million files, it opens a second file to merge them. Both go
+  in `SQLITE_TMPDIR` if that is set and writable, else `TMPDIR`, else the first of `/var/tmp`,
+  `/usr/tmp` and `/tmp` that is writable, and as a last resort the current directory.
+  - **Privacy.** Each file has a random name and mode 0600, and SQLite unlinks it as it opens it,
+    so neither is in a directory while it is in use and nothing of them remains however the
+    process ends. They hold the keys being sorted: a directory's name with its parent's id and its
+    own (about a dozen bytes beside the name), and a file's size on disk with its id (about a dozen
+    bytes in all). They never hold a file's name or a path.
+  - **Where they go.** Set `SQLITE_TMPDIR` to choose the directory. The first file is about as
+    large as the largest index being built, about 12 MB for a tree of a million files, and the
+    second about 1 MB for every 16 runs.
   - **If it fails.** Where the temporary directory is full, or no directory will take the file,
     duscope builds the index file again with the sort in memory, and warns on stderr.
 
