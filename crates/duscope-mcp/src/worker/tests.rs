@@ -1459,11 +1459,6 @@ fn p5_sec_05_the_busy_code_lies_outside_what_mcp_and_json_rpc_reserve() {
     );
 }
 
-/// A call whose label is `bytes` long.
-fn call_of(id: u64, tool: &str, bytes: usize) -> Value {
-    call(id, tool, &"x".repeat(bytes))
-}
-
 #[test]
 fn p5_sec_05_a_request_past_the_count_limit_is_answered_busy_and_never_runs() {
     let env = TestEnv::new();
@@ -1506,15 +1501,27 @@ fn p5_sec_05_a_request_past_the_byte_limit_is_answered_busy() {
     let mut client = Client::start(server(&env, &runner, quick()));
     client.send(&call(1, "test_block", "first"));
     runner.wait_for("start first");
-    let quarter = MAX_QUEUED_BYTES / 4;
-    // Four fit; the fifth does not, nor does what follows it until one
-    // is answered.
-    for id in 2..7 {
-        client.send(&call_of(id, "test_echo", quarter - 4096));
-    }
-    assert_busy(&client.next(), 6);
+    // Measured parsed: each is about 240 KB of text and over half the limit
+    // in memory, so the first waits and the second does not.
+    let objects = vec![json!({"a": 0}); 30_000];
+    let heavy = |id| {
+        request(
+            id,
+            "tools/call",
+            &json!({"name": "test_echo", "arguments": {"label": objects}}),
+        )
+    };
+    let held = heavy(2)["params"].as_object().map_or(0, held_by_fields);
+    assert!(
+        held > MAX_QUEUED_BYTES / 2 && held <= MAX_QUEUED_BYTES,
+        "{held}"
+    );
+    assert!(heavy(2).to_string().len() < crate::transport::MAX_MESSAGE_BYTES);
+    client.send(&heavy(2));
+    client.send(&heavy(3));
+    assert_busy(&client.next(), 3);
     runner.latch.open();
-    assert_eq!(client.ids(5), [1, 2, 3, 4, 5]);
+    assert_eq!(client.ids(2), [1, 2]);
     assert!(client.close().is_empty());
 }
 

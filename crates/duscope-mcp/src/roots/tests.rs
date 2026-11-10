@@ -268,9 +268,9 @@ fn long_path(base: &Path, bytes: usize) -> PathBuf {
 fn p5_sec_05_a_path_past_the_limit_is_refused_by_its_length() {
     let tree = Tree::new();
     let roots = tree.roots();
-    // Sixteen million bytes, as a message's limit allows: bisection or not,
-    // it is refused before anything looks at it.
-    for bytes in [MAX_PATH_BYTES + 1, 16 * 1024 * 1024] {
+    // As long as a message allows: bisection or not, it is refused before
+    // anything looks at it.
+    for bytes in [MAX_PATH_BYTES + 1, crate::transport::MAX_MESSAGE_BYTES] {
         let path = long_path(&tree.path("root"), bytes);
         let refused = roots.bound_path(&path, None).unwrap_err();
         assert_eq!(refused.code, "refused_path");

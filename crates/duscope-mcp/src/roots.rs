@@ -9,7 +9,8 @@
 //! to. A part of the path that does not exist (a file deleted since the scan)
 //! is taken as written below the deepest part that does. A path longer than
 //! [`MAX_PATH_BYTES`] is refused before any of that: a client's message may
-//! hold millions of components, and each costs the file system a look.
+//! hold hundreds of thousands of components, and each costs the file system
+//! a look.
 //!
 //! A saved scan is named by its id or `latest`, never by an index file, so a
 //! client cannot point a tool at a file outside the index directory. A saved

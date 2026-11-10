@@ -486,3 +486,46 @@ fn p5_sec_05_each_tool_names_its_verb_before_its_arguments_are_checked() {
         }
     }
 }
+
+#[test]
+fn p5_sec_05_the_largest_real_requests_fit_in_a_message() {
+    let limit = crate::transport::MAX_MESSAGE_BYTES;
+    let line = |tool: &str, arguments: Value| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": u64::MAX,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {"name": "client", "version": "1.0.0"},
+                },
+                "name": tool,
+                "arguments": arguments,
+            },
+        })
+        .to_string()
+        .len()
+    };
+    // duscope_delete: as many items as its schema allows, each with the
+    // longest handle and the largest size.
+    let schema: Value = serde_json::from_str(delete::Delete.input_schema()).unwrap();
+    let items = &schema["properties"]["items"];
+    let count = usize::try_from(items["maxItems"].as_u64().unwrap()).unwrap();
+    let longest = items["items"]["properties"]["handle"]["maxLength"]
+        .as_u64()
+        .unwrap();
+    let handle = "h".repeat(usize::try_from(longest).unwrap());
+    let item = json!({"handle": handle, "expect_bytes": u64::MAX});
+    let delete = line(
+        "duscope_delete",
+        json!({"items": vec![item; count], "dry_run": false}),
+    );
+    assert!(delete < limit, "duscope_delete: {delete} bytes of {limit}");
+    // duscope_query: the sandbox's longest statement (100,000 bytes, its
+    // SQLITE_LIMIT_SQL_LENGTH), each byte one JSON writes in six.
+    let sql = "\u{1}".repeat(100_000);
+    let query = line("duscope_query", json!({"sql": sql, "scan_id": "latest"}));
+    assert!(query < limit, "duscope_query: {query} bytes of {limit}");
+}

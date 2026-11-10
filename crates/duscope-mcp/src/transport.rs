@@ -27,9 +27,12 @@ use serde_json::{Value, json};
 
 use crate::jsonrpc::{self, Id, Incoming, Notification, Request, RpcError};
 
-/// The longest message read, newline excluded: 16 MiB. A longer line is
-/// refused with `-32600` and skipped without being held in memory.
-pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+/// The longest message read, newline excluded: 1 MiB. A longer line is
+/// refused with `-32600` and skipped without being held in memory. Every
+/// request duscope's tools take fits: the largest, 100 `duscope_delete`
+/// items of the longest handles, is about 825 KB. Parsing costs up to some
+/// 85 times a line's length, so this limit is what bounds that cost.
+pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// The reader thread's buffer.
 const READ_BUFFER_BYTES: usize = 64 * 1024;

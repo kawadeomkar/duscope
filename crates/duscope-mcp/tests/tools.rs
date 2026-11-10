@@ -344,11 +344,12 @@ fn p3_mcp_03_rmcp_lists_and_calls_a_tool_after_initialize() {
 #[test]
 fn p5_sec_05_a_path_as_long_as_a_message_allows_is_refused_by_its_tool() {
     let env = TestEnv::new();
-    // Eight million parts, the most a message holds: resolving them one at a
-    // time would take hours.
+    // Half a million parts, the most a message holds: resolving them one at
+    // a time would take half a minute.
     let root = env.work_dir().canonicalize().unwrap();
-    let path = format!("{}/{}", root.display(), "a/".repeat(8 * 1024 * 1024 - 2048));
-    assert!(path.len() < duscope_mcp::transport::MAX_MESSAGE_BYTES);
+    let limit = duscope_mcp::transport::MAX_MESSAGE_BYTES;
+    let path = format!("{}/{}", root.display(), "a/".repeat(limit / 2 - 2048));
+    assert!(path.len() < limit);
     let lines = serve(
         server(&env),
         &[modern(

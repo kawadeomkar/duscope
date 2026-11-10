@@ -78,7 +78,8 @@ call.
 The server runs one call at a time; the rest wait in order. A client that sends requests faster
 than they finish meets these limits:
 
-- A message is at most 16 MiB.
+- A message is at most 1 MiB; a longer line is refused (`-32600`) and skipped. Every tool's largest
+  request fits.
 - At most 64 requests, holding 32 MiB between them once parsed, wait behind the running call. A
   request past either is not queued and never runs: it is answered at once with the JSON-RPC error
   `-31000` ("the server is busy"), whose `data` gives `max_queued_requests` and

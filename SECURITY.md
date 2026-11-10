@@ -68,7 +68,7 @@ A fixed limit bounds what a client or a file can make duscope hold or do:
 
 | Input | Limit |
 | --- | --- |
-| An MCP message | 16 MiB; a longer line is refused and skipped. Parsing one holds more than its length while it lasts: about 1.3 GiB for 16 MiB of very small JSON objects (measured on arm64 macOS), the most a single message can cost |
+| An MCP message | 1 MiB; a longer line is refused and skipped. Parsing one holds more than its length while it lasts: about 90 MB for 1 MiB of very small JSON objects, the most a single message can cost. With a running call holding such a message, a full queue and another such message being parsed, the server peaked at 212 MB (both measured on arm64 macOS) |
 | Requests waiting behind a running call | 64, holding 32 MiB between them once parsed; past either a request is answered "busy" and never runs |
 | A path a client names | 4096 bytes, refused before anything resolves it |
 | A running tool call | 10 minutes for `duscope_scan`, 30 seconds for the other tools, counted from before its arguments are checked. The answer comes at the deadline; a verb that reads a saved scan has no point at which to stop and runs to its end, for a time that grows with the scan, and the next call waits for it |
@@ -247,7 +247,7 @@ characters shown as escapes.
   deletes one permanently. A root itself is refused, each item needs a handle that verifies and
   the bytes it should free, and a call is a dry run unless it says otherwise. No tool writes
   anywhere else.
-- **Limits.** A message is at most 16 MiB; a longer line is refused and skipped. Calls run one
+- **Limits.** A message is at most 1 MiB; a longer line is refused and skipped. Calls run one
   at a time, in the order they came. At most 64 requests, holding 32 MiB between them once parsed,
   wait behind the running call: a request past either is answered at once with the JSON-RPC error
   `-31000` and never runs, and the server keeps reading, so a client can still cancel. A path is

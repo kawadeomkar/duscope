@@ -254,8 +254,8 @@ fn request_of_size(id: u64, size: usize) -> Vec<u8> {
 }
 
 #[test]
-fn p3_mcp_01_a_message_over_16_mib_is_refused_and_the_next_one_answered() {
-    assert_eq!(MAX_MESSAGE_BYTES, 16 * 1024 * 1024);
+fn p3_mcp_01_a_message_over_1_mib_is_refused_and_the_next_one_answered() {
+    assert_eq!(MAX_MESSAGE_BYTES, 1024 * 1024);
     let mut input = request_of_size(1, MAX_MESSAGE_BYTES + 1);
     input.push(b'\n');
     input.extend_from_slice(&request_of_size(2, MAX_MESSAGE_BYTES));
@@ -270,10 +270,10 @@ fn p3_mcp_01_a_message_over_16_mib_is_refused_and_the_next_one_answered() {
         assert_eq!(error_code(refused, None), -32600);
         assert_eq!(
             refused["error"]["data"],
-            json!({"max_message_bytes": 16_777_216})
+            json!({"max_message_bytes": 1_048_576})
         );
     }
-    // Exactly 16 MiB is read.
+    // Exactly 1 MiB is read.
     assert_eq!(messages[1]["id"], 2);
     assert_eq!(
         messages[1]["result"]["pad"].as_str().unwrap().len(),
