@@ -5,7 +5,10 @@
 //! - **The way there.** [`CheckedDir::open`] opens `/`, then each component
 //!   of the path relative to the one above with `O_NOFOLLOW | O_DIRECTORY`:
 //!   a component replaced by a symbolic link fails the open rather than
-//!   leading elsewhere.
+//!   leading elsewhere. On Linux each is opened as a path only (`O_PATH`),
+//!   which needs search permission alone, as a lookup by path does, so a
+//!   directory that may be searched but not listed (mode 0711) is passed
+//!   through; only a directory to be emptied is opened to read.
 //! - **The entry.** [`unlink_checked`] and [`remove_dir_checked`] read the
 //!   entry's device and inode through the parent's descriptor, without
 //!   following a link, and remove nothing unless they are the expected ones.
@@ -56,8 +59,9 @@ pub struct CheckedDir {
 impl CheckedDir {
     /// Opens the directory `path`, absolute and without `..`: `/`, then
     /// each component relative to the one above with `O_NOFOLLOW |
-    /// O_DIRECTORY`. Mounts on the way are crossed: it is the removal below
-    /// that never crosses one.
+    /// O_DIRECTORY`, on Linux as a path only (`O_PATH`), so that a directory
+    /// on the way needs only search permission. Mounts on the way are
+    /// crossed: it is the removal below that never crosses one.
     ///
     /// # Errors
     ///
@@ -81,16 +85,18 @@ impl CheckedDir {
         // a walk raises, raised.
         super::raise_nofile_limit();
         let mut reached = PathBuf::from("/");
-        let mut fd = super::open_dir(&reached).map_err(|source| RemoveError::Io {
-            path: reached.clone(),
-            source,
-        })?;
+        let mut fd =
+            super::open_with(None, c"/", ON_THE_WAY).map_err(|source| RemoveError::Io {
+                path: reached.clone(),
+                source,
+            })?;
         for component in components {
             let Component::Normal(name) = component else {
                 return Err(invalid());
             };
             reached.push(name);
-            fd = open_child(fd.as_fd(), name.as_bytes(), &reached)?;
+            fd = open_at(fd.as_fd(), name.as_bytes(), &reached, ON_THE_WAY)
+                .map_err(|e| classify(e, &reached))?;
         }
         let dev = stat_fd(fd.as_fd())
             .map_err(|source| RemoveError::Io {
@@ -498,7 +504,7 @@ fn empty(
             if stat.mount == Some(true) || stat.dev != level.dev {
                 return Err(RemoveError::Mount { path: child });
             }
-            let fd = match open_at(level.fd.as_fd(), name.as_bytes(), &child) {
+            let fd = match open_at(level.fd.as_fd(), name.as_bytes(), &child, super::OPEN_DIR) {
                 Ok(fd) => fd,
                 // Removed meanwhile by someone else: gone either way.
                 Err(e) if e.raw_os_error() == Some(libc::ENOENT) => continue,
@@ -584,20 +590,38 @@ fn checked(
     Ok(stat)
 }
 
+/// How [`CheckedDir::open`] opens each directory on the way to an entry:
+/// never through a symbolic link, and on Linux as a path only (`O_PATH`).
+/// Such a descriptor asks for search permission on the directory above and
+/// none on the directory itself, as a lookup by path does, so a directory
+/// that may be searched but not listed (mode 0711) is passed through. It
+/// serves only as the directory of `*at` calls (`openat`, `fstatat` and
+/// `statx`, `renameat2`, `unlinkat`), `statx` and `fstat` of itself, and
+/// `name_to_handle_at` with `AT_EMPTY_PATH`, which all take one; a
+/// directory to be emptied is opened to read ([`open_child`]).
+#[cfg(target_os = "linux")]
+const ON_THE_WAY: c_int = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+/// How [`CheckedDir::open`] opens each directory on the way to an entry:
+/// to read, never through a symbolic link, so on macOS a directory on the
+/// way needs read permission.
+#[cfg(not(target_os = "linux"))]
+const ON_THE_WAY: c_int = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
 /// Opens the directory `name`, at `path`, in the directory open on `dir`,
-/// never through a symbolic link.
+/// to read it, never through a symbolic link.
 fn open_child(dir: BorrowedFd<'_>, name: &[u8], path: &Path) -> Result<OwnedFd, RemoveError> {
-    open_at(dir, name, path).map_err(|e| classify(e, path))
+    open_at(dir, name, path, super::OPEN_DIR).map_err(|e| classify(e, path))
 }
 
 /// Opens the directory `name`, at `path`, in the directory open on `dir`
-/// with `O_NOFOLLOW | O_DIRECTORY`.
-fn open_at(dir: BorrowedFd<'_>, name: &[u8], path: &Path) -> io::Result<OwnedFd> {
+/// with `flags`, which hold `O_NOFOLLOW | O_DIRECTORY`.
+fn open_at(dir: BorrowedFd<'_>, name: &[u8], path: &Path, flags: c_int) -> io::Result<OwnedFd> {
     #[cfg(test)]
     hook::step(path);
     #[cfg(not(test))]
     let _ = path;
-    super::with_c_name(name, |c_name| super::open_at(Some(dir), c_name))
+    super::with_c_name(name, |c_name| super::open_with(Some(dir), c_name, flags))
 }
 
 /// An error at `path`: [`RemoveError::Changed`] when what is there is gone
