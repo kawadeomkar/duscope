@@ -12,6 +12,8 @@
 //! such history: every rescan there reads the whole tree, and `diff`
 //! compares it with its parent.
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -22,7 +24,7 @@ use duscope_core::query::{
 };
 use duscope_core::rescan::{self, Checks, Fallback, FsEvents, ScanOptions, Stop};
 use duscope_core::resolve::resolve_path;
-use duscope_walk::{ScanEvent, WalkOptions};
+use duscope_walk::{ScanEvent, Skip, WalkOptions};
 
 use super::next;
 use super::query::top_envelope;
@@ -167,8 +169,17 @@ pub fn in_viewer(file: &Path, dir: &Path, shown: &Path) -> Result<PathBuf, Failu
 /// `shown` where it is a directory below the saved scan's root that the scan
 /// entered, the walk would read it at that same path (a link followed under
 /// `--follow-symlinks` would not be, and the viewer's cursor and marks name
-/// that path), and the saved options leave out in a scan of it what they
-/// left out below the root. `None` where the saved scan is read again.
+/// that path), the saved options leave out in a scan of it what they left
+/// out below the root, and no bind mount the scan did not enter as a cycle
+/// lies at or below it. `None` where the saved scan is read again.
+///
+/// A bind cycle rests on where the walk starts: the walk stops at a mount
+/// of a folder already on its path, and a walk that starts below that
+/// folder has not met it, so it enters the mount and reads the tree it
+/// leads to (`/mnt/x` bound to `/`, which a scan of `/` stops at, is all of
+/// `/` again to a walk of `/mnt`). The saved scan does not record which
+/// folder a mount binds, so any such mount at or below `shown` sends it to
+/// the saved scan.
 fn folder_alone(parent: &Parent, shown: &Path) -> Option<PathBuf> {
     let index = &parent.index;
     let below = index.below_root(shown)?;
@@ -179,6 +190,7 @@ fn folder_alone(parent: &Parent, shown: &Path) -> Option<PathBuf> {
     if !index.node(id).is_dir()
         || !index.entered(id)
         || !same_in_a_folder(&parent.options, &parent.root, shown)
+        || bind_cycle_below(index, shown)
     {
         return None;
     }
@@ -189,15 +201,26 @@ fn folder_alone(parent: &Parent, shown: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Whether a mount the scan in `index` did not enter as a bind cycle lies at
+/// or below `folder`.
+fn bind_cycle_below(index: &Index, folder: &Path) -> bool {
+    let cycle = Skip::BindCycle.as_str();
+    index.volumes().iter().any(|volume| {
+        volume.reason.as_deref() == Some(cycle)
+            && Path::new(OsStr::from_bytes(&volume.mount_point)).starts_with(folder)
+    })
+}
+
 /// Whether the saved options leave out the same in a scan of `folder` as
 /// in the scan of `root` above it. Their patterns are matched against the
 /// path relative to the scan's root, so one anchored there (`/build`) or
 /// naming more than one component (`proj/build`) would leave out something
 /// else; one name at any depth (`node_modules`, `*.tmp`) leaves out the
 /// same. A file of patterns that cannot be read is no such file: the walk
-/// reports it. The walk's own rules for a platform's layout can rest on
-/// where it starts ([`duscope_walk::walk_differs_below`]), the same rule
-/// then reading another tree in the folder.
+/// reports it. The walk's rule for macOS's Data volume rests on where it
+/// starts ([`duscope_walk::walk_differs_below`]), the same rule then
+/// reading another tree in the folder; so does a bind cycle, which
+/// [`folder_alone`] asks of the saved scan's volumes.
 fn same_in_a_folder(options: &ScanOptions, root: &Path, folder: &Path) -> bool {
     let walk = WalkOptions {
         one_file_system: options.one_file_system,
@@ -511,7 +534,8 @@ mod tests {
 
     /// As a rescan's parent, a saved scan of an in-memory tree at `root`:
     /// `nowhere/proj` and a file `nowhere/f`, `nowhere/skip` left out by an
-    /// exclude, `nowhere/nas` a mount the walk did not enter, and
+    /// exclude, `nowhere/nas` a mount the walk did not enter,
+    /// `nowhere/bound/loop` a bind mount it did not enter as a cycle, and
     /// `System/Volumes/Data`. Nothing under `nowhere` exists on the disk.
     fn parent(dir: &Path, root: &str) -> Parent {
         let mut tree = MemProvider::new(root);
@@ -519,6 +543,8 @@ mod tests {
             .file("nowhere/f", 10)
             .file("nowhere/skip/b", 10)
             .dir("nowhere/nas")
+            .file("nowhere/bound/c", 10)
+            .dir("nowhere/bound/loop")
             .dir("System/Volumes/Data");
         let mut globs = globset::GlobSetBuilder::new();
         globs.add(globset::Glob::new("**/skip").unwrap());
@@ -540,6 +566,11 @@ mod tests {
         mount.mnt_id += 1;
         mount.mount_point = tree.root_path().join("nowhere/nas");
         mount.reason = Some(Skip::Network);
+        arena.push(ScanEvent::Volume(mount.clone())).unwrap();
+        mount.dev += 1;
+        mount.mnt_id += 1;
+        mount.mount_point = tree.root_path().join("nowhere/bound/loop");
+        mount.reason = Some(Skip::BindCycle);
         arena.push(ScanEvent::Volume(mount)).unwrap();
         let rollup = roll_up(&mut arena);
         let root = root.as_bytes().to_vec();
@@ -590,6 +621,26 @@ mod tests {
         assert_eq!(
             folder_alone(&parent, system).is_some(),
             !duscope_walk::walk_differs_below(Path::new("/"), system, &WalkOptions::default())
+        );
+    }
+
+    #[test]
+    fn p4_tui_06_a_bind_cycle_at_or_below_a_folder_goes_to_the_saved_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = parent(dir.path(), "/");
+        let alone = |path: &str| folder_alone(&parent, Path::new(path));
+        // `/nowhere/bound/loop` binds a folder above it, so the scan of `/`
+        // did not enter it. Which folder the scan does not say, and from a
+        // folder below that one it is no cycle: a walk of `/nowhere/bound`
+        // or `/nowhere` could read the whole tree through it (`/mnt/x`
+        // bound to `/`, under a viewer of `/mnt`).
+        assert_eq!(alone("/nowhere/bound"), None, "a folder that holds it");
+        assert_eq!(alone("/nowhere"), None, "a folder above that");
+        assert_eq!(alone("/nowhere/bound/loop"), None, "the mount itself");
+        assert_eq!(
+            alone("/nowhere/proj"),
+            Some(PathBuf::from("/nowhere/proj")),
+            "a folder beside it"
         );
     }
 

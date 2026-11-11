@@ -700,11 +700,20 @@ pub fn reaches(root: &Path, path: &Path, opts: &WalkOptions) -> bool {
 
 /// Whether a walk rooted at `folder`, a directory below `root`, both
 /// absolute and resolved, would go differently under `folder` than a walk
-/// of `root` goes there, for a reason that rests on where the walk starts.
-/// On macOS the Data volume has two ways in, its mount point
+/// of `root` goes there by the rule for macOS's Data volume, which rests on
+/// where the walk starts. The Data volume has two ways in, its mount point
 /// (`/System/Volumes/Data`) and the firmlinks, and the root decides which
 /// one a walk takes: `/System` differs from `/`, and `/System/Library` from
-/// `/System`. Elsewhere a walk does not depend on where it starts.
+/// `/System`. Elsewhere there is no such rule, and the answer is false.
+///
+/// It is not the only thing that rests on where a walk starts, and it reads
+/// only the system's firmlink table: a bind mount of a folder already on
+/// the walk's path is a cycle the walk does not enter
+/// ([`Skip::BindCycle`]), and a walk that starts below that folder has not
+/// met it, so it enters the mount and reads the tree it leads to (Linux's
+/// `/mnt/x` bound to `/` is all of `/` again to a walk of `/mnt`). Whether
+/// such a mount lies below `folder` is the saved scan's to say, by the
+/// volumes it did not enter.
 pub fn walk_differs_below(root: &Path, folder: &Path, opts: &WalkOptions) -> bool {
     platform::walk_differs_below(root, folder, opts)
 }

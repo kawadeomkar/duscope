@@ -313,7 +313,8 @@ pub(crate) fn walk_differs_below(
 }
 
 /// Whether a walk rooted at `folder` goes differently under it than a walk
-/// of `root` does: a walk here does not depend on where it starts.
+/// of `root` does by a rule for the Data volume: there is none here. (A bind
+/// cycle does rest on where a walk starts; the caller asks the saved scan.)
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn walk_differs_below(
     _root: &std::path::Path,
