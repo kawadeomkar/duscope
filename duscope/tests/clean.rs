@@ -991,3 +991,63 @@ fn p5_mcp_01_an_item_whose_bytes_no_scan_knows_is_refused_whatever_its_figure() 
         }
     }
 }
+
+/// The message of the first item in the plan that failed.
+fn first_failure(value: &Value) -> &str {
+    value["result"]["plan"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|item| item["error"]["message"].as_str())
+        .unwrap_or_else(|| panic!("no item failed: {value}"))
+}
+
+#[test]
+fn p5_mcp_01_a_run_that_acted_on_some_items_says_how_many_of_how_many() {
+    // An item in a directory that cannot be written fails, the others go:
+    // the run's message, all an MCP client may show, says how many of the
+    // items went before the first failure.
+    let env = TestEnv::new();
+    let root = tree(&env);
+    for name in ["e.bin", "f.bin"] {
+        fs::write(root.join(name), vec![4u8; 2000]).unwrap();
+    }
+    fs::write(root.join("dir/c.bin"), vec![6u8; 2000]).unwrap();
+    save(&env, &root);
+    let dir = root.join("dir");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let delete = |items: &[&str]| {
+        let mut args = vec!["clean"];
+        args.extend_from_slice(items);
+        args.extend(["--permanent", "--yes", "--json"]);
+        run(&env, &args)
+    };
+    let gone = [root.join("a.bin"), root.join("e.bin"), root.join("f.bin")];
+    let kept = [dir.join("b.bin"), dir.join("c.bin")];
+    let one = delete(&[s(&gone[0]), s(&kept[0])]);
+    let two = delete(&[s(&gone[1]), s(&gone[2]), s(&kept[0]), s(&kept[1])]);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let value = json(&one);
+    assert_eq!(one.status.code(), Some(1), "{value}");
+    assert_eq!(value["result"]["deleted_count"], 1, "{value}");
+    let message = value["error"]["message"].as_str().unwrap();
+    let item = first_failure(&value);
+    assert_eq!(
+        message,
+        format!("1 of the 2 items was deleted; one was not: {item}")
+    );
+    assert!(!gone[0].exists() && kept[0].exists());
+
+    let value = json(&two);
+    assert_eq!(two.status.code(), Some(1), "{value}");
+    assert_eq!(value["result"]["deleted_count"], 2, "{value}");
+    let message = value["error"]["message"].as_str().unwrap();
+    let item = first_failure(&value);
+    assert_eq!(
+        message,
+        format!("2 of the 4 items were deleted; 2 were not, the first: {item}")
+    );
+    assert!(gone.iter().all(|path| !path.exists()));
+    assert!(kept.iter().all(|path| path.exists()));
+}

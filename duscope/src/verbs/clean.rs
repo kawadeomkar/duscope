@@ -152,13 +152,9 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
             args,
         )
     });
-    let error = failure.as_ref().map(|f| match outcome {
-        // An item's own error, as the plan holds it.
-        Some(_) if !blocked => first_error(&plan)
-            .cloned()
-            .unwrap_or_else(|| out::error_object(f)),
-        _ => out::error_object(f),
-    });
+    let error = failure
+        .as_ref()
+        .map(|f| run_error(f, &plan, outcome.is_some() && !blocked));
     let next = match outcome {
         Some(_) => renew(changed, &resolved.index),
         None if args.dry_run || stopped => Vec::new(),
@@ -312,10 +308,30 @@ fn failure(
     }
     if let Some(outcome) = outcome {
         return first_error(plan).map(|error| {
-            let message = if outcome.failed_count > 1 {
+            let done = match plan.method() {
+                Method::Trash => outcome.trashed_count,
+                Method::Permanent => outcome.deleted_count,
+            };
+            let failed = outcome.failed_count;
+            // Some went: a reader of this line alone, as an MCP client's
+            // text is, must not take it that nothing did.
+            let message = if done > 0 {
+                let rest = if failed > 1 {
+                    format!("{} were not, the first: ", thousands(failed))
+                } else {
+                    "one was not: ".to_owned()
+                };
+                format!(
+                    "{} of the {} items {} {moved}; {rest}{}",
+                    thousands(done),
+                    thousands(done + failed),
+                    if done == 1 { "was" } else { "were" },
+                    error.message
+                )
+            } else if failed > 1 {
                 format!(
                     "{} items were not {moved}; the first: {}",
-                    thousands(outcome.failed_count),
+                    thousands(failed),
                     error.message
                 )
             } else {
@@ -458,6 +474,19 @@ fn envelope(
         error,
         warnings: warnings.to_vec(),
         next: Vec::new(),
+    }
+}
+
+/// The run's error, for `failure`: once the plan was acted on (`acted`),
+/// the first failed item's own error, as the plan holds it, with the run's
+/// message, which says how many of the items went.
+fn run_error(failure: &Failure, plan: &Plan, acted: bool) -> ErrorObject {
+    match first_error(plan).filter(|_| acted) {
+        Some(error) => ErrorObject {
+            message: failure.message.clone(),
+            ..error.clone()
+        },
+        None => out::error_object(failure),
     }
 }
 
