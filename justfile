@@ -18,7 +18,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # main at 6b740b8c (run 42611223243) and phases 3 to 5 still to come, the
 # ceiling is re-based once to 10 MB and the measured-plus-10% ratchet ends
 # (P0-CI-03): the budget is the ceiling, packages report their size (the size
-# job's comment posts it on every pull request) and do not re-derive it.
+# job's comment posts it on every pull request to main) and do not re-derive it.
 size_budget := "10000000"
 
 # Developer tools installed by `just setup`, mirrored in CONTRIBUTING.md.
