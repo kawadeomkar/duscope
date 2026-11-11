@@ -356,6 +356,11 @@ runs:
   - `stale`;
   - `explain` of the scan's largest file;
   - `by-type` over the whole scan and over its largest directory.
+- **The filtered shapes:** `top --files` and `stale` with the filters the index answers
+  (P2-QRY-10), timed as the queries are: `--depth 3`; `--min-size 1M`, which keeps nothing on T2;
+  `--size apparent`, alone and with `--min-size 1K`; `--since` a date that splits T2's
+  modification times, which the generator sets; and `stale --min-size 1 --max-depth 4`. Each is
+  recorded per tree under `shapes` with the rows it matched (`total_count`), and holds no gate.
 - **The first query after a cache drop:** `top --scan`, cold, against a scan saved beside the
   cold trees.
 - **The index's size:** bytes per entry of a basic index and of an `--attrs full` one.
@@ -383,7 +388,8 @@ on scaled trees). It holds:
 - the usual header;
 - the runs, as `results` rows with a `kind`: `query`, `first_query` or `d34`;
 - for each tree, its two scans, `index_size`, `write` (the runs and their percentiles),
-  `query_targets` and `speedups`;
+  `query_targets`, `shapes` (each shape's row, as `results` holds a query's, with `kind`
+  `shape` and its `total_count`) and `speedups`;
 - `gates`: each line of the targets with the value measured, its limit, the platform it binds,
   and whether it holds, read from T2 (`gates_tree`; the first tree when T2 was not measured).
 

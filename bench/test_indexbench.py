@@ -1,12 +1,15 @@
 """Unit tests of bench/indexbench.py (P2-BENCH-01): reading `scan -v`, the
-gates, and the pseudo-terminal dua runs on (bench/ptyrun.py). The whole
+gates, the filtered shapes (P2-QRY-10), and the pseudo-terminal dua runs on
+(bench/ptyrun.py). The whole
 subcommand runs in duscope/tests/index_bench.rs, against the binary."""
 
 from __future__ import annotations
 
+import calendar
 import os
 import subprocess
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -14,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import indexbench  # noqa: E402
 import measure  # noqa: E402
 import ptyrun  # noqa: E402
+import trees  # noqa: E402
 
 
 class Verbose(unittest.TestCase):
@@ -90,6 +94,34 @@ class Gates(unittest.TestCase):
         self.assertEqual(subtree(40_000, 49.0), (50.0, True))
         self.assertEqual(subtree(300_000, 148.0), (150.0, True))
         self.assertEqual(subtree(300_000, 151.0), (150.0, False))
+
+
+class Shapes(unittest.TestCase):
+    def test_p2_qry_10_the_filtered_shapes_are_the_audits_and_select_on_t2(self):
+        shapes = dict(indexbench.SHAPES)
+        self.assertEqual(len(shapes), len(indexbench.SHAPES), "each shape has a name of its own")
+        # The three shapes the 2026-11-09 audit timed on T2 (0.37-0.92 s).
+        self.assertEqual(shapes["top_files_depth"], ("top", "--files", "--depth", "3"))
+        self.assertEqual(shapes["top_files_min_size"], ("top", "--files", "--min-size", "1M"))
+        self.assertEqual(shapes["top_files_apparent"], ("top", "--files", "--size", "apparent"))
+        self.assertTrue(all(verb in ("top", "stale") for verb, *_ in shapes.values()))
+        # T2's files tie densely and none reaches 1 MiB, so a shape selects
+        # by time: `--since` falls inside the generator's modification times
+        # and splits them.
+        since = shapes["top_files_since"]
+        stamp = since[since.index("--since") + 1]
+        at = calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+        first, last = trees.BASE_MTIME_S, trees.BASE_MTIME_S + 2 * (10_000 - 1)
+        self.assertTrue(first < at < last, (first, at, last))
+        self.assertGreater((last - at) / (last - first), 0.5)
+
+    def test_p2_qry_10_a_shape_is_recorded_with_the_rows_it_matched(self):
+        answer = [sys.executable, "-c", "print('{\"ok\": true, \"total_count\": 594990}')"]
+        self.assertEqual(indexbench.matched(answer, "a shape"), 594_990)
+        with self.assertRaises(measure.MeasureError):
+            indexbench.matched([sys.executable, "-c", "print('{}')"], "a shape")
+        with self.assertRaises(measure.MeasureError):
+            indexbench.matched([sys.executable, "-c", "import sys; sys.exit(3)"], "a shape")
 
 
 class Pty(unittest.TestCase):
