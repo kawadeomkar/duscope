@@ -676,15 +676,21 @@ impl Worker {
     }
 
     /// Sends a request's answer, `outcome`, now when nothing is ahead of it
-    /// in the queue, else once the requests ahead have been answered.
-    pub(crate) fn answer(&self, responder: Responder, outcome: Result<Box<RawValue>, RpcError>) {
+    /// in the queue, else once the requests ahead have been answered; past
+    /// the queue's limits it is answered [`jsonrpc::SERVER_BUSY`] at once
+    /// instead. Whether `outcome` was sent or queued: false when refused.
+    pub(crate) fn answer(
+        &self,
+        responder: Responder,
+        outcome: Result<Box<RawValue>, RpcError>,
+    ) -> bool {
         let mut state = self.shared.state();
         if state.queue.is_empty() && !state.busy {
             // Only the reader queues, and the reader is here: nothing can
             // come ahead of this answer before it is sent.
             drop(state);
             send(responder, outcome);
-            return;
+            return true;
         }
         let job = Job::Answer(responder, outcome);
         if !state.admits(job.bytes()) {
@@ -692,7 +698,7 @@ impl Worker {
             if let Job::Answer(responder, _) = job {
                 refuse_busy(responder);
             }
-            return;
+            return false;
         }
         if let Job::Answer(responder, _) = &job {
             debug!(
@@ -703,6 +709,7 @@ impl Worker {
         state.push(job);
         drop(state);
         self.shared.wake.notify_one();
+        true
     }
 
     /// Cancels the call `id` names: a queued one leaves the queue, the

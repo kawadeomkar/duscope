@@ -1660,6 +1660,54 @@ fn p5_sec_05_an_answer_past_the_limit_is_answered_busy() {
 }
 
 #[test]
+fn p5_sec_05_an_initialize_refused_as_busy_leaves_the_session_unset() {
+    // A 2025-11-25 handshake, without the per-request version.
+    let initialize = |id: u64| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {}},
+        })
+    };
+    let list = |id: u64| json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    let queued = u64::try_from(MAX_QUEUED_REQUESTS).unwrap();
+    for id in 2..2 + queued {
+        client.send(&call(id, "test_echo", &format!("queued {id}")));
+    }
+    let refused = 2 + queued;
+    client.send(&initialize(refused));
+    assert_busy(&client.next(), refused);
+    // The client was told it did not run: a request naming no version
+    // still belongs to no session, and is answered at once as one of
+    // 2026-07-28's without its _meta.
+    client.send(&list(refused + 1));
+    let listed = client.next();
+    assert_eq!(listed["id"], refused + 1, "{listed}");
+    assert_eq!(listed["error"]["code"], -32602, "{listed}");
+    runner.latch.open();
+    assert_eq!(
+        client.ids(MAX_QUEUED_REQUESTS + 1).len(),
+        MAX_QUEUED_REQUESTS + 1
+    );
+    // Once there is room, the same handshake starts the session.
+    client.send(&initialize(refused + 2));
+    let answered = client.next();
+    assert_eq!(answered["id"], refused + 2, "{answered}");
+    assert_eq!(answered["result"]["protocolVersion"], "2025-11-25");
+    client.send(&list(refused + 3));
+    let listed = client.next();
+    assert_eq!(listed["id"], refused + 3, "{listed}");
+    assert!(listed["result"]["tools"].is_array(), "{listed}");
+    assert!(client.close().is_empty());
+}
+
+#[test]
 fn p5_sec_05_the_measure_counts_what_a_parsed_message_holds() {
     // A long string costs its length.
     let label = "x".repeat(1024 * 1024);
