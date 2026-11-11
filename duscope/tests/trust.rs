@@ -319,3 +319,41 @@ fn p2_sec_01_a_spilled_envelope_is_the_owners_alone() {
     assert_eq!(mode(&file), 0o600, "{}", file.display());
     assert_eq!(mode(file.parent().unwrap()), 0o700, "{}", file.display());
 }
+
+#[test]
+fn p2_sec_01_a_spill_into_a_new_index_directory_makes_it_the_owners_alone() {
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("tree");
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(root.join("sub/big.bin"), vec![b'x'; 50_000]).unwrap();
+    // An index directory nothing has written to yet: the spill makes it,
+    // and each directory on the way to it.
+    let index_dir = env.tmp_dir().join("new").join("index");
+    let stub = ok(&run(
+        &env,
+        &[
+            "scan",
+            root.to_str().unwrap(),
+            "--index-dir",
+            index_dir.to_str().unwrap(),
+            "--json",
+            "--max-chars",
+            "1",
+        ],
+    ));
+    let file = PathBuf::from(stub["spilled"]["path"].as_str().unwrap());
+    assert!(
+        file.starts_with(index_dir.join("out")),
+        "{}",
+        file.display()
+    );
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&file), 0o600, "{}", file.display());
+    for dir in [
+        env.tmp_dir().join("new"),
+        index_dir.clone(),
+        index_dir.join("out"),
+    ] {
+        assert_eq!(mode(&dir), 0o700, "{}", dir.display());
+    }
+}
