@@ -1,18 +1,29 @@
 //! P2-QRY-01: the plans against the arena, path resolution with folding,
-//! and `--under`.
+//! and `--under`. P2-QRY-10: every plan, with the filters that read no
+//! path, against the arena.
 
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use duscope_testkit::TestEnv;
-use duscope_walk::{Attrs, MemProvider, Normalization, WalkOptions, walk, walk_with};
+use duscope_walk::{
+    Attrs, Boundary, DirId, Entry, Flags, FullAttrs, Kind, MemProvider, NameRef, Normalization,
+    ScanEvent, Share, WalkOptions, walk, walk_with,
+};
+use proptest::prelude::*;
 
-use super::{Cut, Plan};
+use super::{Cut, Plan, walks};
 use crate::CoreError;
 use crate::arena::Arena;
+use crate::envelope::{StaleEntry, TopEntry};
 use crate::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
-use crate::query::{self, ArenaView, StaleQuery, Subtree, TopQuery, TreeView, abs_path, under};
+use crate::query::{
+    self, After, ArenaView, Filters, Page, SizeKind, StaleQuery, Subtree, TimeField, TopQuery,
+    TreeView, abs_path, under,
+};
 use crate::resolve::resolve_in_index;
 use crate::rollup::{RollUp, roll_up};
 
@@ -132,12 +143,13 @@ fn p2_qry_01_both_plans_answer_as_the_arena() {
             .unwrap();
             let want: Vec<String> = stale.entries.iter().map(|e| e.path.clone()).collect();
             let cut = Cut {
-                before: now - DAY,
-                min_allocated: 4096,
+                unchanged_before: Some(now - DAY),
+                min_size: 4096,
+                ..Cut::default()
             };
             for plan in [Plan::Range, Plan::Walk] {
                 let got = index
-                    .largest_files(d, limit, Some(cut), Some(plan))
+                    .largest_files(d, limit, Some(cut.clone()), Some(plan))
                     .unwrap();
                 assert_eq!(paths(&index, &got.ids), want, "stale {d} {limit} {plan:?}");
                 assert_eq!(
@@ -239,8 +251,9 @@ fn p2_qry_01_a_file_subtree_and_out_of_range_bounds() {
             0,
             10,
             Some(Cut {
-                before: i64::MAX,
-                min_allocated: u64::MAX,
+                unchanged_before: Some(i64::MAX),
+                min_size: u64::MAX,
+                ..Cut::default()
             }),
             None,
         )
@@ -349,8 +362,8 @@ fn p2_qry_01_timings() {
             })
             .unwrap();
         let cut = Cut {
-            before: i64::MAX,
-            min_allocated: 0,
+            unchanged_before: Some(i64::MAX),
+            ..Cut::default()
         };
         for (name, d) in [
             ("root", 0),
@@ -358,15 +371,18 @@ fn p2_qry_01_timings() {
             ("small subtree", small),
         ] {
             let t = best(&mut || {
-                index.largest_files(d, 25, Some(cut), None).unwrap();
+                index.largest_files(d, 25, Some(cut.clone()), None).unwrap();
             });
             eprintln!("{name}: a cut every file passes, the chosen plan {t:?}");
             let default = Cut {
-                before: i64::MAX,
-                min_allocated: query::DEFAULT_MIN_SIZE,
+                unchanged_before: Some(i64::MAX),
+                min_size: query::DEFAULT_MIN_SIZE,
+                ..Cut::default()
             };
             let t = best(&mut || {
-                index.largest_files(d, 25, Some(default), None).unwrap();
+                index
+                    .largest_files(d, 25, Some(default.clone()), None)
+                    .unwrap();
             });
             eprintln!("{name}: stale's default 10 MiB cut, the chosen plan {t:?}");
             for plan in [Plan::Range, Plan::Walk] {
@@ -391,4 +407,850 @@ fn p2_qry_01_timings() {
         assert_eq!(resolve_in_index(&index, &path), Some(deep));
     });
     eprintln!("22-level path: {t:?}");
+}
+
+// P2-QRY-10: filters on the index path.
+
+const YEAR: i64 = 365 * DAY;
+/// "Now" for the generated trees: 2027-01-15.
+const NOW: i64 = 1_800_000_000_000_000_000;
+/// The plans a read can be forced to, and the one the count chooses.
+const PLANS: [Option<Plan>; 4] = [None, Some(Plan::Range), Some(Plan::Walk), Some(Plan::Dirs)];
+
+/// One file of a generated tree: the directories it is in (each from a
+/// set of names whose path order differs from their name order), its
+/// name, kind, sizes and times, each an index into a small set.
+#[derive(Debug, Clone)]
+struct Pick {
+    dirs: Vec<u8>,
+    name: u8,
+    kind: u8,
+    apparent: u8,
+    allocated: u8,
+    times: [u8; 4],
+}
+
+fn pick() -> impl Strategy<Value = Pick> {
+    (
+        prop::collection::vec(any::<u8>(), 0..4),
+        any::<u8>(),
+        any::<u8>(),
+        any::<u8>(),
+        any::<u8>(),
+        any::<[u8; 4]>(),
+    )
+        .prop_map(|(dirs, name, kind, apparent, allocated, times)| Pick {
+            dirs,
+            name,
+            kind,
+            apparent,
+            allocated,
+            times,
+        })
+}
+
+/// The arena (`--attrs full`) and roll-up of the tree `picks` describe,
+/// under `/r`; with `equal`, every file has the same sizes.
+fn generated(picks: &[Pick], equal: bool) -> (Arena, crate::rollup::RollUp) {
+    // `a-b` and `a.b` sort before `a/` in a path, after `a` by name.
+    const DIRS: [&str; 5] = ["a", "a-b", "a.b", "b", "c"];
+    const NAMES: [&str; 5] = ["a", "a-", "a.b", "b", "z"];
+    const KINDS: [Kind; 5] = [
+        Kind::File,
+        Kind::File,
+        Kind::Symlink,
+        Kind::Fifo,
+        Kind::Socket,
+    ];
+    // One file in sixteen is large, so that a band of large sizes is
+    // narrow in a large enough subtree.
+    const APPARENT: [u64; 4] = [0, 7, 4096, 5000];
+    const ALLOCATED: [u64; 3] = [0, 4096, 8192];
+    const LARGE: u64 = 1 << 20;
+    const AGES: [i64; 4] = [3 * YEAR, 30 * DAY, DAY, 0];
+    let at = |i: u8| NOW - AGES[usize::from(i) % AGES.len()];
+    let entry = |name: &str, parent: u32, kind: Kind, sizes: (u64, u64), times: [u8; 4]| Entry {
+        name: NameRef::from(name),
+        parent: DirId::new(parent),
+        dir: None,
+        kind,
+        apparent: sizes.0,
+        allocated: sizes.1,
+        mtime_ns: at(times[0]),
+        ctime_ns: at(times[1]),
+        nlink: 1,
+        dev: 7,
+        ino: 0,
+        mnt_id: 7,
+        share: Share::None,
+        boundary: Boundary::None,
+        flags: Flags::empty(),
+        full: Some(FullAttrs {
+            atime_ns: at(times[2]),
+            btime_ns: (times[3] % 3 != 0).then(|| at(times[3])),
+            mode: 0o100_644,
+            uid: 1,
+            gid: 1,
+        }),
+    };
+    let mut arena = Arena::new(Attrs::Full);
+    let mut push = |e: Entry| arena.push(ScanEvent::Entry(e)).unwrap();
+    push(Entry {
+        dir: Some(DirId::new(0)),
+        ..entry("r", 0, Kind::Dir, (0, 0), [3; 4])
+    });
+    let mut dirs: HashMap<Vec<u8>, u32> = HashMap::new();
+    for (i, p) in picks.iter().enumerate() {
+        let mut parent = 0;
+        let mut path = Vec::new();
+        for &d in &p.dirs {
+            let d = d % 5;
+            path.push(d);
+            let next = u32::try_from(dirs.len() + 1).unwrap();
+            parent = *dirs.entry(path.clone()).or_insert_with(|| {
+                push(Entry {
+                    dir: Some(DirId::new(next)),
+                    ..entry(DIRS[usize::from(d)], parent, Kind::Dir, (0, 0), [0; 4])
+                });
+                next
+            });
+        }
+        let sizes = if equal {
+            (1000, 4096)
+        } else {
+            let size = |i: u8, sizes: &[u64]| match i {
+                0..16 => LARGE,
+                i => sizes[usize::from(i) % sizes.len()],
+            };
+            (size(p.apparent, &APPARENT), size(p.allocated, &ALLOCATED))
+        };
+        let name = format!("{}{i}", NAMES[usize::from(p.name) % NAMES.len()]);
+        let kind = KINDS[usize::from(p.kind) % KINDS.len()];
+        push(entry(&name, parent, kind, sizes, p.times));
+    }
+    let rollup = crate::rollup::roll_up(&mut arena);
+    (arena, rollup)
+}
+
+/// A query of a generated tree, each part an index into a small set: the
+/// verb, the size kind, the filters (kinds as a bit set), `top`'s depth,
+/// `stale`'s age and `--atime`, the limit, the subtree and whether a
+/// second page is read.
+#[derive(Debug, Clone)]
+struct Ask {
+    stale: bool,
+    apparent: bool,
+    kinds: u8,
+    sizes: (Option<u8>, Option<u8>),
+    depths: (Option<u8>, Option<u8>, Option<u8>),
+    time: (u8, Option<u8>, Option<u8>),
+    older: u8,
+    atime: bool,
+    limit: u8,
+    under: u8,
+}
+
+fn ask() -> impl Strategy<Value = Ask> {
+    (
+        any::<bool>(),
+        any::<bool>(),
+        prop_oneof![Just(0u8), any::<u8>()],
+        any::<(Option<u8>, Option<u8>)>(),
+        any::<(Option<u8>, Option<u8>, Option<u8>)>(),
+        any::<(u8, Option<u8>, Option<u8>)>(),
+        any::<u8>(),
+        any::<bool>(),
+        any::<u8>(),
+        any::<u8>(),
+    )
+        .prop_map(
+            |(stale, apparent, kinds, sizes, depths, time, older, atime, limit, under)| Ask {
+                stale,
+                apparent,
+                kinds,
+                sizes,
+                depths,
+                time,
+                older,
+                atime,
+                limit,
+                under,
+            },
+        )
+}
+
+/// A page of either verb.
+#[derive(Debug, PartialEq)]
+enum Answer {
+    Top(Page<TopEntry>),
+    Stale(Page<StaleEntry>),
+}
+
+impl Answer {
+    /// The rows' paths, the count, and the next page's start.
+    fn parts(&self) -> (Vec<String>, u64, Option<After>) {
+        match self {
+            Answer::Top(p) => (
+                p.entries.iter().map(|e| e.path.clone()).collect(),
+                p.total_count,
+                p.next,
+            ),
+            Answer::Stale(p) => (
+                p.entries.iter().map(|e| e.path.clone()).collect(),
+                p.total_count,
+                p.next,
+            ),
+        }
+    }
+}
+
+/// `ask` as the verb's query, the page after `after`.
+enum Query {
+    Top(TopQuery),
+    Stale(StaleQuery),
+}
+
+impl Query {
+    fn of(ask: &Ask, after: Option<After>) -> Query {
+        const KINDS: [&str; 4] = ["file", "symlink", "other", "dir"];
+        const BOUNDS: [u64; 6] = [0, 1, 4096, 5000, 8192, 1 << 20];
+        const MARKS: [i64; 5] = [
+            NOW - 2 * YEAR,
+            NOW - 10 * DAY,
+            NOW - DAY,
+            NOW - DAY + 1,
+            NOW + 1,
+        ];
+        const TIMES: [TimeField; 4] = [
+            TimeField::Mtime,
+            TimeField::Atime,
+            TimeField::Ctime,
+            TimeField::Btime,
+        ];
+        const OLDER: [i64; 4] = [0, DAY, 7 * DAY, YEAR];
+        let bound = |i: Option<u8>| i.map(|i| BOUNDS[usize::from(i) % BOUNDS.len()]);
+        let depth = |i: Option<u8>| i.map(|i| u32::from(i % 6));
+        let mark = |i: Option<u8>| i.map(|i| MARKS[usize::from(i) % MARKS.len()]);
+        let filters = Filters {
+            kinds: (0..4)
+                .filter(|b| ask.kinds & (1 << b) != 0)
+                .map(|b| KINDS[b])
+                .collect(),
+            min_size: bound(ask.sizes.0),
+            max_size: bound(ask.sizes.1),
+            min_depth: depth(ask.depths.0),
+            max_depth: depth(ask.depths.1),
+            time: TIMES[usize::from(ask.time.0) % TIMES.len()],
+            after: mark(ask.time.1),
+            before: mark(ask.time.2),
+            ..Filters::default()
+        };
+        let size = if ask.apparent {
+            SizeKind::Apparent
+        } else {
+            SizeKind::Allocated
+        };
+        let limit = Some(usize::from(ask.limit % 8) + 1);
+        if ask.stale {
+            Query::Stale(StaleQuery {
+                now: NOW,
+                older_than: OLDER[usize::from(ask.older) % OLDER.len()],
+                atime: ask.atime,
+                min_size: BOUNDS[usize::from(ask.older / 4) % BOUNDS.len()],
+                filters,
+                limit,
+                size,
+                after,
+                ..StaleQuery::default()
+            })
+        } else {
+            Query::Top(TopQuery {
+                depth: depth(ask.depths.2),
+                files: true,
+                filters,
+                limit,
+                size,
+                after,
+                ..TopQuery::default()
+            })
+        }
+    }
+
+    fn run(&self, view: &(impl TreeView + ?Sized)) -> Answer {
+        match self {
+            Query::Top(q) => Answer::Top(query::top(view, q)),
+            Query::Stale(q) => Answer::Stale(query::stale(view, q).unwrap()),
+        }
+    }
+
+    fn cut(&self) -> Cut {
+        match self {
+            Query::Top(q) => q.cut(),
+            Query::Stale(q) => q.cut(),
+        }
+        .unwrap()
+    }
+
+    fn limit(&self) -> usize {
+        match self {
+            Query::Top(q) => q.limit,
+            Query::Stale(q) => q.limit,
+        }
+        .unwrap()
+    }
+}
+
+/// Whether `ask`, on the subtree at `d`, answers on the index as on the
+/// arena: the verb's page and the page after it, and each plan forced, by
+/// ids and count.
+fn answers_as_the_arena(
+    arena: &ArenaView<'_>,
+    index: &Index,
+    d: u32,
+    ask: &Ask,
+) -> Result<(), TestCaseError> {
+    let on_arena = Subtree::new(arena, d);
+    let on_index = Subtree::new(index, d);
+    let mut after: Option<After> = None;
+    for page in 0..2 {
+        let q = Query::of(ask, after);
+        let want = q.run(&on_arena);
+        prop_assert_eq!(
+            &q.run(&on_index),
+            &want,
+            "page {} of {:?} at {}",
+            page,
+            ask,
+            d
+        );
+        let (paths_wanted, total, next) = want.parts();
+        let seen = after
+            .as_ref()
+            .map_or(0, |a| usize::try_from(a.seen).unwrap());
+        for plan in PLANS {
+            let got = index
+                .largest_files(d, seen + q.limit(), Some(q.cut()), plan)
+                .unwrap();
+            prop_assert_eq!(got.total_count, total, "{:?} {:?} at {}", plan, ask, d);
+            prop_assert_eq!(
+                paths(index, got.ids.get(seen..).unwrap_or_default()),
+                paths_wanted.clone(),
+                "{:?} page {} of {:?} at {}",
+                plan,
+                page,
+                ask,
+                d
+            );
+        }
+        match next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    prop_assert!(index.failure().is_none(), "{:?}", index.failure());
+    Ok(())
+}
+
+/// Every directory of `arena`'s tree.
+fn dirs_of(view: &ArenaView<'_>) -> Vec<u32> {
+    (0..view.len())
+        .filter(|&id| view.node(id).is_dir())
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Each plan, and the plan the count chooses, answers a random query
+    /// of a random tree as the arena does: at its root and in a subtree,
+    /// with ties by path (a quarter of the trees have equal sizes), on
+    /// both pages.
+    #[test]
+    fn p2_qry_10_every_plan_answers_as_the_arena(
+        picks in prop::collection::vec(pick(), 1..64),
+        equal in prop::bool::weighted(0.25),
+        asks in prop::collection::vec(ask(), 1..8),
+    ) {
+        let env = TestEnv::new();
+        let (arena, rollup) = generated(&picks, equal);
+        let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
+        let index = write(&arena, &rollup, Path::new("/r"), &env.tmp_dir());
+        let dirs = dirs_of(&view);
+        for ask in &asks {
+            answers_as_the_arena(&view, &index, 0, ask)?;
+            let d = dirs[usize::from(ask.under) % dirs.len()];
+            answers_as_the_arena(&view, &index, d, ask)?;
+        }
+    }
+}
+
+/// A tree of equal files, more than a page of them in one directory, in
+/// directories whose path order is not their name order: the ties are
+/// found in path order past each page and depth, under every plan.
+#[test]
+fn p2_qry_10_ties_of_equal_files_are_found_in_path_order_at_every_depth() {
+    let env = TestEnv::new();
+    let names = ["a", "a-b", "a.b", "b"];
+    let picks: Vec<Pick> = (0..900u32)
+        .map(|i| {
+            let i8 = u8::try_from(i % 251).unwrap();
+            Pick {
+                // A third in the root, so that it holds more than a page.
+                dirs: if i % 3 == 0 {
+                    Vec::new()
+                } else {
+                    vec![i8 % 4, (i8 / 4) % 4][..=usize::from(i8 % 2)].to_vec()
+                },
+                name: i8,
+                kind: u8::from(i % 7 == 0) * 2,
+                apparent: 0,
+                allocated: 0,
+                times: [i8 % 4, 0, 3, 3],
+            }
+        })
+        .collect();
+    let (arena, rollup) = generated(&picks, true);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
+    let index = write(&arena, &rollup, Path::new("/r"), &env.tmp_dir());
+    assert!(names.iter().all(|n| index.lookup([n.as_bytes()]).is_some()));
+    let mut asks = Vec::new();
+    for depths in [
+        (None, None, None),
+        (Some(2), None, None),
+        (None, None, Some(1)),
+        (Some(3), Some(3), None),
+    ] {
+        for (kinds, limit) in [(0, 0), (1, 2), (2, 7), (0, 3)] {
+            for stale in [false, true] {
+                asks.push(Ask {
+                    stale,
+                    apparent: limit % 2 == 1,
+                    kinds,
+                    sizes: (None, None),
+                    depths,
+                    time: (0, None, None),
+                    older: 1,
+                    atime: false,
+                    // Limits of 1, 3, 8 and 4 rows, of 300 and more ties.
+                    limit,
+                    under: 0,
+                });
+            }
+        }
+    }
+    for ask in &asks {
+        for d in dirs_of(&view) {
+            answers_as_the_arena(&view, &index, d, ask).unwrap();
+        }
+    }
+}
+
+/// The plan the count chooses, for each kind of cut, on a tree of 1,200
+/// files a twentieth of which are large: the files each keeps are counted
+/// as the arena counts them, and read where they cost least.
+#[test]
+fn p2_qry_10_the_count_chooses_each_plan() {
+    let env = TestEnv::new();
+    let picks: Vec<Pick> = (0..1200u32)
+        .map(|i| {
+            let i8 = u8::try_from(i % 251).unwrap();
+            Pick {
+                dirs: if i % 3 == 0 { Vec::new() } else { vec![i8 % 5] },
+                name: i8,
+                // A symbolic link in forty.
+                kind: if i % 40 == 1 { 2 } else { 0 },
+                apparent: 20,
+                // 1 MiB (the generator's large size) in twenty, else 4 KiB.
+                allocated: if i % 20 == 0 { 0 } else { 16 },
+                times: [i8 % 4, 0, 3, 3],
+            }
+        })
+        .collect();
+    let (arena, rollup) = generated(&picks, false);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
+    let index = write(&arena, &rollup, Path::new("/r"), &env.tmp_dir());
+    let root = index.node(0);
+    let large = 1 << 20;
+    let cases: [(&str, Cut, Plan); 6] = [
+        (
+            "a narrow band, judged on the way",
+            Cut {
+                min_size: large,
+                kinds: vec!["file"],
+                ..Cut::default()
+            },
+            Plan::Walk,
+        ),
+        (
+            "a band the index alone judges",
+            Cut {
+                min_size: 1,
+                ..Cut::default()
+            },
+            Plan::Walk,
+        ),
+        (
+            "a rare kind",
+            Cut {
+                kinds: vec!["symlink"],
+                ..Cut::default()
+            },
+            Plan::Range,
+        ),
+        (
+            "a common kind",
+            Cut {
+                kinds: vec!["file"],
+                ..Cut::default()
+            },
+            Plan::Walk,
+        ),
+        (
+            "the root's own files",
+            Cut {
+                max_depth: Some(1),
+                ..Cut::default()
+            },
+            Plan::Dirs,
+        ),
+        (
+            "apparent sizes, which have no index",
+            Cut {
+                size: SizeKind::Apparent,
+                kinds: vec!["file"],
+                ..Cut::default()
+            },
+            Plan::Range,
+        ),
+    ];
+    for (what, cut, plan) in cases {
+        let q = TopQuery {
+            files: true,
+            filters: Filters {
+                kinds: cut.kinds.clone(),
+                min_size: (cut.min_size > 0).then_some(cut.min_size),
+                ..Filters::default()
+            },
+            depth: cut.max_depth,
+            size: cut.size,
+            limit: Some(25),
+            ..TopQuery::default()
+        };
+        let want = query::top(&view, &q).total_count;
+        let terms = super::Terms::new(&cut, &root).unwrap();
+        assert_eq!(
+            index.choose(&terms, &root, 25).unwrap(),
+            (plan, want),
+            "{what}"
+        );
+        let got = index.largest_files(0, 25, Some(cut), None).unwrap();
+        assert_eq!(got.total_count, want, "{what}");
+    }
+}
+
+/// A band is narrow below a sixteenth of the subtree, and the count that
+/// finds it stops there: at the cap it is wide, and no capped count is
+/// taken for the band's.
+#[test]
+fn p2_qry_10_a_band_at_a_sixteenth_of_the_subtree_is_wide() {
+    let env = TestEnv::new();
+    for (large, narrow) in [(2, Some(2)), (3, None), (4, None)] {
+        // 32 files in `a` (a cap of 3), of which `large` are 1 MiB, and
+        // 200 more files of 4 KiB in the root.
+        let picks: Vec<Pick> = (0..232u32)
+            .map(|i| Pick {
+                dirs: if i < 32 { vec![0] } else { Vec::new() },
+                name: 0,
+                kind: 0,
+                apparent: 20,
+                allocated: if i < large { 0 } else { 16 },
+                times: [0; 4],
+            })
+            .collect();
+        let (arena, rollup) = generated(&picks, false);
+        let dir = env.tmp_dir().join(large.to_string());
+        let index = write(&arena, &rollup, Path::new("/r"), &dir);
+        let a = index.lookup([&b"a"[..]]).unwrap();
+        let cut = Cut {
+            min_size: 1 << 20,
+            ..Cut::default()
+        };
+        let root = index.node(a);
+        assert_eq!(root.file_count, 32);
+        let terms = super::Terms::new(&cut, &root).unwrap();
+        assert_eq!(
+            index.by_band(&terms, &root, 232).unwrap(),
+            narrow,
+            "{large}"
+        );
+    }
+}
+
+#[test]
+fn p2_qry_10_filters_that_read_paths_stay_off_the_index() {
+    let size = SizeKind::Apparent;
+    let pushed = Filters {
+        kinds: vec!["file"],
+        min_size: Some(1),
+        max_size: Some(9),
+        min_depth: Some(2),
+        max_depth: Some(4),
+        time: TimeField::Btime,
+        after: Some(1),
+        before: Some(2),
+        ..Filters::default()
+    };
+    let cut = Cut::of(&pushed, size).unwrap();
+    assert_eq!(
+        cut,
+        Cut {
+            size,
+            kinds: vec!["file"],
+            min_size: 1,
+            max_size: Some(9),
+            min_depth: Some(2),
+            max_depth: Some(4),
+            time: TimeField::Btime,
+            after: Some(1),
+            before: Some(2),
+            unchanged_before: None,
+            atime: false,
+        }
+    );
+    let glob = query::globs(["*.log"]).unwrap();
+    for paths in [
+        Filters {
+            glob: Some(glob.clone()),
+            ..pushed.clone()
+        },
+        Filters {
+            regex: Some(query::Regex::new("x").unwrap()),
+            ..Filters::default()
+        },
+        Filters {
+            exclude: Some(glob),
+            ..Filters::default()
+        },
+    ] {
+        assert_eq!(Cut::of(&paths, size), None);
+    }
+    // top's --depth lists to a depth, stale's cut is its own.
+    let top = TopQuery {
+        depth: Some(3),
+        filters: pushed.clone(),
+        size,
+        ..TopQuery::default()
+    };
+    assert_eq!(top.cut().unwrap().max_depth, Some(3));
+    let stale = StaleQuery {
+        now: 100,
+        older_than: 30,
+        atime: true,
+        min_size: 5,
+        filters: pushed,
+        size,
+        ..StaleQuery::default()
+    };
+    let cut = stale.cut().unwrap();
+    assert_eq!(
+        (cut.min_size, cut.unchanged_before, cut.atime),
+        (5, Some(70), true)
+    );
+}
+
+#[test]
+fn p2_qry_10_the_count_chooses_the_walk_when_matches_are_common() {
+    // A million files, 25 rows: every file matching walks; a sixteenth,
+    // with a condition the index does not hold, walks; a few do not.
+    let n = 1_000_000;
+    assert!(walks(n, n, n, n, 25, true));
+    assert!(walks(n / 16, n, n, n, 25, true));
+    assert!(!walks(200, n, n, n, 25, true));
+    assert!(!walks(0, n, n, n, 25, false));
+    // Without a residual condition the walk reads the index alone.
+    assert!(walks(1_000, n, n, n, 25, false));
+    // The directories at three levels hold few rows: read them, not the
+    // index.
+    assert!(!walks(480, 480, n, n, 25, true));
+}
+
+/// Each plan's statements read the tables as designed: the walk along the
+/// size index without a sort, the range and the directories by their
+/// primary keys, the band count on the index alone.
+#[test]
+fn p2_qry_10_each_plan_reads_as_designed() {
+    let env = TestEnv::new();
+    let mut tree = MemProvider::new("/t");
+    tree.file("a/x", 10).file("a/b/y", 20).file("c/z", 30);
+    let index = mem_index(&tree, &env.tmp_dir());
+    let explain = |sql: &str| -> String {
+        let mut stmt = index
+            .db()
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let n = stmt.parameter_count();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(vec![0i64; n]), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        rows.join("; ")
+    };
+    let cut = Cut {
+        kinds: vec!["file"],
+        min_size: 1,
+        max_depth: Some(2),
+        unchanged_before: Some(1),
+        ..Cut::default()
+    };
+    let root = index.node(0);
+    let terms = super::Terms::new(&cut, &root).unwrap();
+    let ranked = |plan| {
+        let read = terms.read(plan);
+        format!(
+            "SELECT f.id, f.allocated {} ORDER BY f.allocated DESC, f.id LIMIT 5",
+            read.rows()
+        )
+    };
+    let walk = explain(&ranked(Plan::Walk));
+    assert!(walk.contains("USING INDEX files_allocated"), "{walk}");
+    assert!(
+        !walk.contains("TEMP B-TREE"),
+        "the walk sorts nothing: {walk}"
+    );
+    let range = explain(&ranked(Plan::Range));
+    assert!(
+        range.contains("SEARCH f USING INTEGER PRIMARY KEY"),
+        "{range}"
+    );
+    let dirs = explain(&ranked(Plan::Dirs));
+    assert!(
+        dirs.contains("SEARCH d USING INTEGER PRIMARY KEY")
+            && dirs.contains("SEARCH f USING INTEGER PRIMARY KEY"),
+        "{dirs}"
+    );
+    assert!(!dirs.contains("files_allocated"), "{dirs}");
+    let probe = explain(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM files AS f INDEXED BY files_allocated \
+         WHERE f.id BETWEEN ?1 AND ?2 AND f.allocated >= ?3 LIMIT 9)",
+    );
+    assert!(
+        probe.contains("COVERING INDEX files_allocated"),
+        "the band is counted on the index alone: {probe}"
+    );
+}
+
+/// The filtered shapes `p2_qry_10_timings` times.
+fn timed_shapes() -> [(&'static str, Cut); 9] {
+    [
+        (
+            "depth 3",
+            Cut {
+                max_depth: Some(3),
+                ..Cut::default()
+            },
+        ),
+        (
+            "min-size 1M",
+            Cut {
+                min_size: 1 << 20,
+                ..Cut::default()
+            },
+        ),
+        (
+            "min-size 1",
+            Cut {
+                min_size: 1,
+                ..Cut::default()
+            },
+        ),
+        (
+            "apparent",
+            Cut {
+                size: SizeKind::Apparent,
+                ..Cut::default()
+            },
+        ),
+        (
+            "apparent, min-size 1K",
+            Cut {
+                size: SizeKind::Apparent,
+                min_size: 1024,
+                ..Cut::default()
+            },
+        ),
+        (
+            "type symlink",
+            Cut {
+                kinds: vec!["symlink"],
+                ..Cut::default()
+            },
+        ),
+        (
+            "type file",
+            Cut {
+                kinds: vec!["file"],
+                ..Cut::default()
+            },
+        ),
+        (
+            "min-depth 7",
+            Cut {
+                min_depth: Some(7),
+                ..Cut::default()
+            },
+        ),
+        (
+            "stale 1 B, a day",
+            Cut {
+                min_size: 1,
+                unchanged_before: Some(query::clock::now() - DAY),
+                ..Cut::default()
+            },
+        ),
+    ]
+}
+
+/// What a filtered `top --files` and `stale` cost on `DUSCOPE_BENCH_INDEX`
+/// (an index of T2), each plan forced and the one the count chooses,
+/// printed: `cargo test --release -p duscope-core p2_qry_10_timings --
+/// --ignored --nocapture`.
+#[test]
+#[ignore = "prints timings; set DUSCOPE_BENCH_INDEX and run in release"]
+fn p2_qry_10_timings() {
+    let Some(file) = std::env::var_os("DUSCOPE_BENCH_INDEX") else {
+        return;
+    };
+    let index = Index::open(Path::new(&file)).unwrap();
+    let median = |f: &mut dyn FnMut()| {
+        let mut runs: Vec<_> = (0..9)
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed()
+            })
+            .collect();
+        runs.sort();
+        runs[runs.len() / 2]
+    };
+    let shapes = timed_shapes();
+    let sub = index.child_dirs(0)[0].0;
+    for (name, cut) in shapes {
+        for d in [0, sub] {
+            let mut line = format!("{name:24} {:>6}:", if d == 0 { "root" } else { "subdir" });
+            for plan in PLANS {
+                let mut total = 0;
+                let t = median(&mut || {
+                    total = index
+                        .largest_files(d, 25, Some(cut.clone()), plan)
+                        .unwrap()
+                        .total_count;
+                });
+                write!(line, " {plan:?} {:.1} ms ({total})", t.as_secs_f64() * 1e3).unwrap();
+            }
+            eprintln!("{line}");
+        }
+    }
 }

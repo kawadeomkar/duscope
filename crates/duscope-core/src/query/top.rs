@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use crate::envelope::{TopEntry, name_fields};
 
 use super::{
-    After, Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, ids, kind_name,
-    next_after, page_of, pct, ranked_after, ranked_files, remain, timegrammar::iso8601,
+    After, Cut, Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, ids,
+    kind_name, next_after, page_of, pct, ranked_after, ranked_files, remain, timegrammar::iso8601,
 };
 
 /// A child holding at least this share of its directory replaces it.
@@ -46,6 +46,19 @@ pub struct TopQuery {
     pub after: Option<After>,
 }
 
+impl TopQuery {
+    /// What `--files` keeps, as an index reads it: the filters that read
+    /// no path, and the depth; `None` when a filter reads paths.
+    pub(crate) fn cut(&self) -> Option<Cut> {
+        let mut cut = Cut::of(&self.filters, self.size)?;
+        cut.max_depth = match (cut.max_depth, self.depth) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        Some(cut)
+    }
+}
+
 /// The largest entries under the root of `view`.
 pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
     if view.is_empty() {
@@ -62,20 +75,15 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
     // The ids each row was cut through, for the rows that were.
     let mut vias: HashMap<u32, Vec<u32>> = HashMap::new();
     let size_of = |node: &Node| node.size(q.size);
-    // The largest files as the whole view's are, without a filter: from
-    // the view's own ranking where it has one (the index's plans).
-    let from_view = (q.files
-        && root.is_dir()
-        && q.depth.is_none()
-        && q.filters.is_empty()
-        && q.sort == SortKey::Size
-        && !q.reverse
-        && q.size == SizeKind::Allocated)
-        .then_some(q.limit)
+    // The largest files, from the view's own ranking where it has one (the
+    // index's plans), kept to the filters that read no path and the depth.
+    let from_view = (q.files && root.is_dir() && q.sort == SortKey::Size && !q.reverse)
+        .then(|| q.cut())
         .flatten()
-        .and_then(|limit| {
+        .zip(q.limit)
+        .and_then(|(cut, limit)| {
             let first = usize::try_from(seen).ok()?.checked_add(limit)?;
-            page_of(ranked_files(view, 0, first, None)?, after)
+            page_of(ranked_files(view, 0, first, Some(cut))?, after)
         });
     let (ids, total_count) = if let Some(from_view) = from_view {
         (from_view.ids, from_view.total_count)
