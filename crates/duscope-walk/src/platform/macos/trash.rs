@@ -15,11 +15,15 @@ use crate::platform::posix;
 /// Data volume, which holds the account's home and its Trash.
 const STARTUP: [&str; 2] = ["/", "/System/Volumes/Data"];
 
-/// Moves `path` to its volume's Trash. In a test run (`guarded`) an item on
-/// the startup volume is refused: `NSFileManager` puts it in the account's own
-/// Trash whatever `HOME` says, so a test moves only items on a disk image it
-/// attached.
-pub(in crate::platform) fn trash(path: &Path, guarded: bool) -> Result<(), TrashError> {
+/// Moves `path` to its volume's Trash when its device and inode are
+/// `expect`. In a test run (`guarded`) an item on the startup volume is
+/// refused: `NSFileManager` puts it in the account's own Trash whatever
+/// `HOME` says, so a test moves only items on a disk image it attached.
+pub(in crate::platform) fn trash(
+    path: &Path,
+    expect: (u64, u64),
+    guarded: bool,
+) -> Result<(), TrashError> {
     if guarded {
         let mount = volume::of(path)
             .map_err(|e| TrashError::Failed(format!("cannot read {}: {e}", path.display())))?
@@ -48,6 +52,19 @@ pub(in crate::platform) fn trash(path: &Path, guarded: bool) -> Result<(), Trash
             "cannot move {}: permission denied on its directory",
             path.display()
         )));
+    }
+    // Still the entry the plan saw. `trashItemAtURL` takes a URL, not a
+    // descriptor, so it is read by path, just before the call.
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if (meta.dev(), meta.ino()) == expect => {}
+            _ => {
+                return Err(TrashError::Changed {
+                    path: path.to_owned(),
+                });
+            }
+        }
     }
     let mut context = trash::TrashContext::default();
     // Not the crate's default, Finder through osascript, which needs a

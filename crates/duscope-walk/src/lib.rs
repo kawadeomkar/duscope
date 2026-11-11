@@ -775,14 +775,33 @@ pub fn cache_dir(home: &Path) -> PathBuf {
 }
 
 /// Moves `path` itself (a link, not what it leads to) to the Trash, as
-/// `clean` does: on macOS through `NSFileManager`'s `trashItemAtURL`, into
-/// the volume's Trash; on Linux by the XDG Trash specification, renamed into
-/// the home Trash for an item on its filesystem and the volume's own
-/// (`.Trash/$uid` or `.Trash-$uid`) otherwise, never copied. Nothing is ever
-/// removed: where the item's volume has no Trash the move can use, it is
-/// [`TrashError::Unavailable`].
-pub fn move_to_trash(path: &Path) -> Result<(), TrashError> {
-    platform::trash(path)
+/// `clean` does, only when its device and inode are still `expect`, the
+/// plan's.
+///
+/// - **macOS.** Through `NSFileManager`'s `trashItemAtURL`, into the
+///   volume's Trash. The call takes a URL, so the entry is read by path
+///   just before it.
+/// - **Linux.** By the XDG Trash specification, renamed into the home Trash
+///   for an item on its filesystem and the volume's own (`.Trash/$uid` or
+///   `.Trash-$uid`) otherwise, never copied, and through descriptors, as
+///   [`unlink_checked`] deletes: its directory opened from `/` one
+///   component at a time without following a link, the entry read through
+///   that directory's descriptor, the Trash chosen by that directory's
+///   device, and the entry renamed into the Trash's `files` directory,
+///   itself opened without following a link, with `renameat2`'s
+///   `RENAME_NOREPLACE`. What was moved is read again in the Trash and
+///   moved back when it is not `expect`.
+///
+/// Nothing is ever removed.
+///
+/// # Errors
+///
+/// [`TrashError::Changed`] when the item, or a directory on the way to it,
+/// is not what the plan saw; [`TrashError::Unavailable`] where the item's
+/// volume has no Trash the move can use; [`TrashError::Failed`] when the
+/// item cannot be read or moved.
+pub fn move_to_trash(path: &Path, expect: (u64, u64)) -> Result<(), TrashError> {
+    platform::trash(path, expect)
 }
 
 /// Deletes `name`, any entry but a directory (a symbolic link itself, never
