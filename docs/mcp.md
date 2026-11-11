@@ -66,8 +66,8 @@ The server lists them in this order; a test holds this list to its `tools/list`.
 The MCP tools above read and scan. An agent with a shell can still run
 `duscope clean --yes` itself. This [Claude Code
 hook](https://code.claude.com/docs/en/hooks) asks you first whenever a Bash
-command runs `duscope clean`, whatever its flags. It goes in
-`~/.claude/settings.json`, or in a project's `.claude/settings.json`:
+command starts with `duscope clean`. It goes in `~/.claude/settings.json`, or
+in a project's `.claude/settings.json`:
 
 ```json
 {
@@ -87,6 +87,11 @@ command runs `duscope clean`, whatever its flags. It goes in
   }
 }
 ```
+
+The hook matches the command's text, so it is a prompt, not a guarantee: it
+does not see `duscope clean` behind a global flag (`duscope -q clean …`), a
+pipe, a script or another name for the binary. An agent that must never delete
+files should not have a shell that can run `duscope clean --yes` at all.
 
 ## The registry manifest
 
