@@ -6,8 +6,10 @@
 //! through the list where its tile is too small to draw (or the map has
 //! none), shows the nine it falls among, under a `… n more` row for the
 //! larger ones above. `⇥` focuses it: the arrows then move along it, and
-//! its border takes the accent colour. Reading the list is O(children),
-//! once for a folder and sort.
+//! its border takes the accent colour. The list is read once for a folder
+//! and sort ([`Viewing::listed`]: O(children), in id order), with the
+//! running total of its sizes, so a frame reads the rows it draws and adds
+//! up a `… n more` row from two of those totals.
 
 use duscope_treemap::paint::compact;
 use ratatui_core::layout::Rect;
@@ -53,21 +55,26 @@ pub fn siblings(
     };
     canvas.pane(pane, &title, frame);
     let area = inner(pane);
-    let listed = viewing.children(ctx, parent.id);
+    let listed = viewing.listed(ctx, parent.id);
     let lonely = [parent.id];
-    let kids: &[u32] = if listed.is_empty() { &lonely } else { &listed };
-    let size = |id: u32| ctx.size(&ctx.view.node(id));
+    let kids: &[u32] = if listed.ids.is_empty() {
+        &lonely
+    } else {
+        &listed.ids
+    };
     let whole = ctx.size(&parent);
     let name_width = area.width.saturating_sub(23).min(16);
     let at = kids.iter().position(|&k| k == id).unwrap_or(0);
     let (start, shown) = window(kids.len(), at, SIBLINGS, usize::from(area.height));
     let mut y = area.y;
     let bottom = area.bottom();
-    let more = |canvas: &mut Canvas<'_>, y: u16, left: &[u32]| {
+    // The rows in `left`, of the list read: never the lonely parent's, a
+    // list of one, which needs no `… n more`.
+    let more = |canvas: &mut Canvas<'_>, y: u16, left: std::ops::Range<usize>| {
         if y >= bottom {
             return;
         }
-        let bytes: u64 = left.iter().map(|&k| size(k)).sum();
+        let bytes = listed.bytes(left.clone());
         let (label, size) = (format!("… {} more", left.len()), compact(bytes));
         canvas.list_row(
             area.x,
@@ -86,7 +93,7 @@ pub fn siblings(
         );
     };
     if start > 0 {
-        more(canvas, y, &kids[..start]);
+        more(canvas, y, 0..start);
         y += 1;
     }
     for &kid in &kids[start..start + shown] {
@@ -114,7 +121,7 @@ pub fn siblings(
         y += 1;
     }
     if start + shown < kids.len() {
-        more(canvas, y, &kids[start + shown..]);
+        more(canvas, y, start + shown..kids.len());
     }
 }
 

@@ -673,6 +673,236 @@ fn p4_tui_05_a_pool_larger_than_the_walk_budget_is_read_within_it() {
     );
 }
 
+/// A view of `view` that counts the entries read through it, and the
+/// blocks of 256 ids that a reader keeping the 32 it used last, as the
+/// index's does, would read for them: what a frame costs on a saved scan.
+struct Reads<'a> {
+    view: &'a ArenaView<'a>,
+    reads: std::cell::Cell<usize>,
+    blocks: RefCell<std::collections::VecDeque<u32>>,
+    missed: std::cell::Cell<usize>,
+}
+
+impl<'a> Reads<'a> {
+    fn new(view: &'a ArenaView<'a>) -> Reads<'a> {
+        Reads {
+            view,
+            reads: std::cell::Cell::new(0),
+            blocks: RefCell::new(std::collections::VecDeque::new()),
+            missed: std::cell::Cell::new(0),
+        }
+    }
+
+    /// The entries read and the blocks missed since the last call.
+    fn take(&self) -> (usize, usize) {
+        (self.reads.replace(0), self.missed.replace(0))
+    }
+
+    fn note(&self, id: u32) {
+        self.reads.set(self.reads.get() + 1);
+        let block = id / 256;
+        let mut blocks = self.blocks.borrow_mut();
+        if let Some(at) = blocks.iter().position(|&b| b == block) {
+            blocks.remove(at);
+        } else {
+            self.missed.set(self.missed.get() + 1);
+            blocks.truncate(31);
+        }
+        blocks.push_front(block);
+    }
+}
+
+impl TreeView for Reads<'_> {
+    fn len(&self) -> u32 {
+        self.view.len()
+    }
+    fn node(&self, id: u32) -> duscope_core::query::Node {
+        self.note(id);
+        self.view.node(id)
+    }
+    fn root_path(&self) -> &Path {
+        self.view.root_path()
+    }
+    fn full_attrs(&self) -> bool {
+        self.view.full_attrs()
+    }
+    fn name(&self, id: u32) -> std::borrow::Cow<'_, [u8]> {
+        self.note(id);
+        self.view.name(id)
+    }
+}
+
+/// A root of `n` files whose sizes and times follow neither their ids nor
+/// each other, and a folder of a few: no sort reads them in id order.
+fn shuffled(n: usize) -> (Arena, RollUp) {
+    let mut json = String::from(r#"[1,2,{"progname":"ncdu"},[{"name":"/big"}"#);
+    for i in 0..n {
+        let size = (i * 7919 % 10_007 + 1) * 64;
+        let mtime = 1_000_000 + i * 104_729 % 99_991;
+        let _ = write!(
+            json,
+            r#",{{"name":"f{i:06}","asize":{size},"dsize":{size},"mtime":{mtime}}}"#
+        );
+    }
+    json.push_str(r#",[{"name":"sub"},{"name":"a","asize":10,"dsize":10}]"#);
+    json.push_str("]]");
+    let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
+        .unwrap()
+        .arena;
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
+#[test]
+fn p4_tui_05_a_frame_in_a_large_folder_reads_what_it_draws() {
+    // The siblings pane of a folder of 20,000: a frame that only moves
+    // reads the rows it draws, whatever the sort, and adds up its `… n
+    // more` rows without reading the rest; a sort or a mask reads the
+    // folder once, in id order, a block at a time.
+    const N: usize = 20_000;
+    let tree = shuffled(N);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/big"));
+    let reads = Reads::new(&view);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = App::new(
+        &reads,
+        opts(&mocha, &classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let mut terminal = first_frame(&app, 160, 45);
+    // The blocks the folder fills: a sort reads them twice, once for the
+    // sizes and the mask and once in `sort_ids`, each time in id order;
+    // and a few for the ancestors and the panes.
+    let once = 2 * (N / 256 + 1) + 32;
+    let mut frame = |event: &Event, what: &str| {
+        reads.take();
+        assert_eq!(
+            press(&mut app, &mut terminal, event),
+            Flow::Redraw,
+            "{what}"
+        );
+        let (read, missed) = reads.take();
+        let text = text_of(terminal.backend().buffer());
+        (read, missed, text)
+    };
+    let (read, _, text) = frame(&key(KeyCode::Tab), "the siblings pane");
+    assert!(text.contains("more"), "{text}");
+    assert!(read < 2_000, "a focus change read {read} entries");
+    for sort in ["name", "modified", "count", "size"] {
+        let (read, missed, text) = frame(&char('s'), sort);
+        assert!(text.contains(&format!("s sort {sort}")), "{text}");
+        assert!(
+            missed <= once,
+            "by {sort}: {missed} blocks for {read} reads"
+        );
+        for what in ["a move", "a page"] {
+            let event = if what == "a move" {
+                key(KeyCode::Down)
+            } else {
+                key(KeyCode::PageDown)
+            };
+            let (read, _, text) = frame(&event, what);
+            assert!(text.contains("more"), "{text}");
+            assert!(read < 2_000, "by {sort}, {what} read {read} entries");
+        }
+    }
+    // A mask that keeps half of them: the folder read once, in id order,
+    // and the map's tiles; then frames as before.
+    for c in "/f00*".chars() {
+        frame(&char(c), "the prompt");
+    }
+    let (read, missed, _) = frame(&key(KeyCode::Enter), "the mask");
+    assert!(
+        missed <= 2 * once,
+        "a mask: {missed} blocks for {read} reads"
+    );
+    for _ in 0..3 {
+        let (read, _, text) = frame(&key(KeyCode::Down), "a move under the mask");
+        assert!(text.contains("more"), "{text}");
+        assert!(read < 2_000, "a move under the mask read {read} entries");
+    }
+}
+
+/// A root of `folders` folders of `files` empty files each.
+fn folders(folders: usize, files: usize) -> (Arena, RollUp) {
+    let mut json = String::from(r#"[1,2,{"progname":"ncdu"},[{"name":"/many"}"#);
+    for d in 0..folders {
+        let _ = write!(json, r#",[{{"name":"d{d:03}"}}"#);
+        for f in 0..files {
+            let size = f + d + 1;
+            let _ = write!(
+                json,
+                r#",{{"name":"f{f:05}","asize":{size},"dsize":{size}}}"#
+            );
+        }
+        json.push(']');
+    }
+    json.push_str("]]");
+    let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
+        .unwrap()
+        .arena;
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
+#[test]
+fn p4_tui_05_a_mask_reads_a_list_and_the_largest_files_within_one_budget() {
+    use crate::mask::WALK_BUDGET;
+
+    // A hundred folders of 4,100 files, none of which the mask keeps: the
+    // list of the root reads below its folders within one budget, not one
+    // for each, and the folders it does not read to their end show; the
+    // largest files are ranked from the first entries the budget allows,
+    // and the title says so.
+    const FILES: usize = 4_100;
+    let tree = folders(100, FILES);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/many"));
+    let counting = Counting {
+        view: &view,
+        read: RefCell::new(vec![false; usize::try_from(view.len()).unwrap()]),
+    };
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = App::new(
+        &counting,
+        opts(&mocha, &classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let mut terminal = first_frame(&app, 120, 40);
+    // The cursor on the largest folder, the list on the root's folders.
+    press(&mut app, &mut terminal, &key(KeyCode::Backspace));
+    press(&mut app, &mut terminal, &char('2'));
+    for c in "/*.zip".chars() {
+        press(&mut app, &mut terminal, &char(c));
+    }
+    counting.read.borrow_mut().fill(false);
+    press(&mut app, &mut terminal, &key(KeyCode::Enter));
+    let read = counting.read();
+    assert!(read <= WALK_BUDGET + 5_000, "the list read {read} entries");
+    let left_out = WALK_BUDGET / FILES;
+    let more = format!("… {} more", 100 - left_out - 9);
+    let text = text_of(terminal.backend().buffer());
+    assert!(text.contains(&more), "{more}:\n{text}");
+    // The largest files.
+    counting.read.borrow_mut().fill(false);
+    press(&mut app, &mut terminal, &char('3'));
+    let read = counting.read();
+    assert!(
+        read <= WALK_BUDGET + 5_000,
+        "the largest files read {read} entries"
+    );
+    let title = row(terminal.backend().buffer(), 2);
+    assert!(
+        title.contains("· 0 files in the first 262,144 entries · filter: *.zip"),
+        "{title}"
+    );
+}
+
 #[test]
 fn p4_tui_05_the_prompt_takes_text_cancels_and_refuses_what_is_no_glob() {
     let tree = mockup();
@@ -1418,8 +1648,110 @@ fn p4_tui_05_the_tables_and_a_mask_on_t2() {
         .chain([key(KeyCode::Enter)])
         .collect();
     step("mask, its tiles read", &typed);
+    step("the list, masked", &[char('2')]);
+    step("the largest files, masked", &[char('3')]);
+    step("back to the map", &[char('1')]);
     step("mask cleared", &[key(KeyCode::Esc)]);
     step("the colour mode, map and legend again", &[char('c')]);
     step("sort, one folder", &[char('s')]);
     step("the help", &[char('?')]);
+}
+
+/// A saved scan of the benchmark tree `name` (`bench/.trees/<name>`), as
+/// [`crate::cursor::tests::t2`] makes T2's.
+fn bench_index(env: &duscope_testkit::TestEnv, name: &str) -> Option<duscope_core::index::Index> {
+    use duscope_core::index::Index;
+    use duscope_core::query::index_files;
+
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return None;
+    }
+    let tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bench/.trees")
+        .join(name);
+    let tree = std::fs::canonicalize(&tree).unwrap_or_else(|e| {
+        panic!(
+            "{name} is not built at {}: {e}: run `just bench build --trees {name}`",
+            tree.display()
+        )
+    });
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&tree)
+        .args(["--save", "--treemap", "never"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let files = index_files(&env.index_dir());
+    Some(Index::open(&files[0].1).unwrap())
+}
+
+/// A folder of a million files, T3, as the T2 test measures: the frames
+/// that sort it, move in it and mask it. Reported rather than asserted.
+#[test]
+#[ignore = "needs bench/.trees/T3 and the release binary; DUSCOPE_TEST_PLATFORM=1"]
+fn p4_tui_05_a_folder_of_a_million_files_on_t3() {
+    use std::time::Instant;
+
+    use duscope_core::rules::Classes;
+    use duscope_testkit::TestEnv;
+
+    let env = TestEnv::new();
+    let Some(index) = bench_index(&env, "T3") else {
+        return;
+    };
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
+    let start = Instant::now();
+    let mut app = App::new(
+        &index,
+        opts(&mocha, &classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let mut terminal = first_frame(&app, 120, 40);
+    eprintln!("the first frame: {} ms", start.elapsed().as_millis());
+    let mut step = |what: &str, events: &[Event]| {
+        let start = Instant::now();
+        for event in events {
+            press(&mut app, &mut terminal, event);
+        }
+        eprintln!("{what}: {} ms", start.elapsed().as_millis());
+    };
+    // The map has no tiles (T3's files are empty): the siblings pane is
+    // where the arrows move.
+    step("the siblings pane focused", &[key(KeyCode::Tab)]);
+    step("a move", &[key(KeyCode::Down)]);
+    step("a move", &[key(KeyCode::Down)]);
+    step("sort by name", &[char('s')]);
+    step("a move", &[key(KeyCode::Down)]);
+    step("sort by modified", &[char('s')]);
+    step("a move", &[key(KeyCode::Down)]);
+    step("sort by count", &[char('s')]);
+    step("a move", &[key(KeyCode::Down)]);
+    step("sort by size, kept", &[char('s')]);
+    step("a page", &[key(KeyCode::PageDown)]);
+    step("the last", &[char('G')]);
+    step("the list", &[char('2')]);
+    step("a move in the list", &[key(KeyCode::Down)]);
+    step("the largest files", &[char('3')]);
+    step("back to the map", &[char('1')]);
+    let typed: Vec<Event> = "/*.nothing"
+        .chars()
+        .map(char)
+        .chain([key(KeyCode::Enter)])
+        .collect();
+    step("a mask that keeps nothing", &typed);
+    step("the list, masked", &[char('2')]);
+    step("the largest files, masked", &[char('3')]);
+    step("back to the map", &[char('1')]);
+    step("mask cleared", &[key(KeyCode::Esc)]);
+    step("a move", &[key(KeyCode::Up)]);
 }

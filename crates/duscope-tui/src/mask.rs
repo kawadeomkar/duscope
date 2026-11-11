@@ -12,7 +12,9 @@
 //! the budget runs out in, like whatever it does not reach, stays shown.
 //! Reading a tile's entry is O(depth), so a map costs its tiles and the
 //! budget, once per mask and map, and repainting costs a pass over the
-//! cells.
+//! cells. A list (the siblings pane, the list view) reads each of its rows
+//! and, below its folders, at most [`WALK_BUDGET`] entries for the whole
+//! list, a folder the budget does not reach the end of shown.
 //!
 //! The boxes and gutters of open folders are structure, drawn whatever the
 //! mask leaves; what the mask hides takes the base colour, half a cell at a
@@ -33,10 +35,9 @@ use crate::panes::{Context, legend_label};
 use crate::widgets::Canvas;
 use crate::zoom::Map;
 
-/// The entries read for one map while deciding what its folders hold.
+/// The entries read for one map, or one list, while deciding what its
+/// folders hold.
 pub(crate) const WALK_BUDGET: usize = 256 * 1024;
-/// The entries read for one row of a list.
-const ROW_BUDGET: usize = 4096;
 /// The maps whose hidden tiles are kept.
 const KEPT: usize = 32;
 /// A map's cell marked hidden in its top half, and in its bottom half.
@@ -141,17 +142,12 @@ impl Mask {
         }
     }
 
-    /// Whether entry `id` shows: its own path, or for a folder something
-    /// inside it within [`ROW_BUDGET`] entries; a folder the budget does
-    /// not reach the end of shows.
+    /// Whether `node`, a row of a list, shows: its own path, or for a
+    /// folder something inside it within `budget` entries, which the whole
+    /// list shares; a folder the budget does not reach the end of shows.
     #[must_use]
-    pub fn shows(&self, ctx: &Context<'_>, id: u32) -> bool {
-        let node = ctx.view.node(id);
-        if self.keeps(ctx, &node) {
-            return true;
-        }
-        let mut budget = ROW_BUDGET;
-        node.is_dir() && self.below(ctx, &node, &mut budget)
+    pub fn shows(&self, ctx: &Context<'_>, node: &Node, budget: &mut usize) -> bool {
+        self.keeps(ctx, node) || (node.is_dir() && self.below(ctx, node, budget))
     }
 
     /// Whether a file under `dir` is kept, within `budget` entries; out of

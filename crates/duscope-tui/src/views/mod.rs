@@ -21,14 +21,15 @@ pub mod table;
 pub mod types;
 
 use std::cell::RefCell;
+use std::cmp::Reverse;
+use std::ops::Range;
 use std::rc::Rc;
 
-use duscope_core::query::{SortKey, sort_ids};
+use duscope_core::query::{SortKey, children, sort_ids};
 use ratatui_core::layout::Rect;
 
-use crate::mask::Mask;
+use crate::mask::{Mask, WALK_BUDGET};
 use crate::panes::Context;
-use crate::path::siblings;
 use crate::widgets::Canvas;
 
 /// The rows of a list kept: the folders visited last.
@@ -158,28 +159,96 @@ impl Viewing<'_> {
     /// once for each folder and sort.
     #[must_use]
     pub fn children(&self, ctx: &Context<'_>, dir: u32) -> Rc<Vec<u32>> {
+        Rc::clone(&self.listed(ctx, dir).ids)
+    }
+
+    /// [`Viewing::children`], with their sizes added up as they run.
+    #[must_use]
+    pub fn listed(&self, ctx: &Context<'_>, dir: u32) -> Rc<Children> {
         let key = (dir, self.sort);
         if let Some(found) = self.rows.list(key) {
             return found;
         }
-        let mut ids = if self.sort == Sort::Size {
-            siblings(ctx.view, dir, ctx.opts.size)
+        let listed = Rc::new(self.list(ctx, dir));
+        self.rows.keep_list(key, Rc::clone(&listed));
+        listed
+    }
+
+    /// The children of `dir`, read in id order, the order the index keeps
+    /// them in, so that whatever the sort a block of entries is read once:
+    /// each one's size, and whether the mask keeps it, within one budget
+    /// for the list. Then sorted: by size from what was read; in another
+    /// sort as `sort_ids` sorts them, which reads them again in the same
+    /// order.
+    fn list(&self, ctx: &Context<'_>, dir: u32) -> Children {
+        let (view, size) = (ctx.view, ctx.opts.size);
+        let node = view.node(dir);
+        let mut budget = WALK_BUDGET;
+        let mut read: Vec<(u32, u64)> = if node.is_dir() {
+            children(view, &node)
+                .filter_map(|id| {
+                    let kid = view.node(id);
+                    let shows = self
+                        .mask
+                        .is_none_or(|mask| mask.shows(ctx, &kid, &mut budget));
+                    shows.then(|| (id, kid.size(size)))
+                })
+                .collect()
         } else {
-            let mut ids = siblings(ctx.view, dir, ctx.opts.size);
-            sort_ids(ctx.view, &mut ids, self.sort.key(), ctx.opts.size, false);
-            ids
+            Vec::new()
         };
-        if let Some(mask) = self.mask {
-            ids.retain(|&id| mask.shows(ctx, id));
+        let sorted = if self.sort == Sort::Size {
+            // Stable: equals keep their order, as `path::siblings` has it.
+            read.sort_by_key(|&(_, bytes)| Reverse(bytes));
+            read
+        } else {
+            let mut ids: Vec<u32> = read.iter().map(|&(id, _)| id).collect();
+            sort_ids(view, &mut ids, self.sort.key(), size, false);
+            read.sort_unstable_by_key(|&(id, _)| id);
+            ids.into_iter()
+                .map(|id| {
+                    let at = read.binary_search_by_key(&id, |&(id, _)| id);
+                    (id, at.map_or(0, |at| read[at].1))
+                })
+                .collect()
+        };
+        let mut sums = Vec::with_capacity(sorted.len() + 1);
+        let mut total = 0u64;
+        sums.push(total);
+        for &(_, bytes) in &sorted {
+            total = total.saturating_add(bytes);
+            sums.push(total);
         }
-        let ids = Rc::new(ids);
-        self.rows.keep_list(key, Rc::clone(&ids));
-        ids
+        Children {
+            ids: Rc::new(sorted.into_iter().map(|(id, _)| id).collect()),
+            sums,
+        }
     }
 }
 
-/// A folder's children in a sort, as a table keeps them.
-type Listed = ((u32, Sort), Rc<Vec<u32>>);
+/// A folder's children in a sort, those the mask keeps, and the running
+/// total of their sizes: what a `… n more` row adds up, without reading
+/// them again.
+#[derive(Debug)]
+pub struct Children {
+    /// The ids, in the sort.
+    pub ids: Rc<Vec<u32>>,
+    /// The bytes of the first `i` ids, at `i`: one more than the ids.
+    sums: Vec<u64>,
+}
+
+impl Children {
+    /// The bytes of the ids in `range`.
+    #[must_use]
+    pub fn bytes(&self, range: Range<usize>) -> u64 {
+        let last = self.sums.len().saturating_sub(1);
+        let sum = |i: usize| self.sums.get(i.min(last)).copied().unwrap_or(0);
+        sum(range.end).saturating_sub(sum(range.start))
+    }
+}
+
+/// A folder's children in a sort, as the lists keep them.
+type Listed = ((u32, Sort), Rc<Children>);
 
 /// The rows the tables have worked out: a list of the folders visited, the
 /// largest files and the classes of the map's root, each read once and
@@ -187,12 +256,12 @@ type Listed = ((u32, Sort), Rc<Vec<u32>>);
 #[derive(Debug, Default)]
 pub struct Rows {
     lists: RefCell<Vec<Listed>>,
-    largest: RefCell<Option<(u32, Rc<Vec<u32>>)>>,
+    largest: RefCell<Option<(u32, largest::Found)>>,
     types: RefCell<Option<(u32, Rc<Vec<types::Row>>)>>,
 }
 
 impl Rows {
-    fn list(&self, key: (u32, Sort)) -> Option<Rc<Vec<u32>>> {
+    fn list(&self, key: (u32, Sort)) -> Option<Rc<Children>> {
         self.lists
             .borrow()
             .iter()
@@ -200,7 +269,7 @@ impl Rows {
             .map(|(_, ids)| Rc::clone(ids))
     }
 
-    fn keep_list(&self, key: (u32, Sort), ids: Rc<Vec<u32>>) {
+    fn keep_list(&self, key: (u32, Sort), ids: Rc<Children>) {
         let mut lists = self.lists.borrow_mut();
         if lists.len() >= KEPT_LISTS {
             lists.remove(0);
