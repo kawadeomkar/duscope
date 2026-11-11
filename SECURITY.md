@@ -82,11 +82,13 @@ Other costs are bounded only by what the user asks duscope to read, and by decis
 applies:
 
 - **A scan** takes memory and time that grow with the tree: no limit on its entries or its depth.
-  duscope reads a tree deeper than `PATH_MAX` whole, so only a cap on depth could bound the time of
-  a deep chain, and there is none. A chain of 20,000 directories took 36 s on macOS; at 3,000
-  levels a walker that builds no paths took as long as duscope, so that time is the kernel's for
-  each open of a deep directory. A scan's memory is about the square of the depth (598 MB at
-  20,000 levels) until P5-WALK-05 makes it linear.
+  Its memory grows in proportion to the depth, as each directory on the way down holds its name,
+  not its path: a chain of 3,000 directories peaked at 11.7 MB, 1.6 MB more than a scan of an
+  empty directory (arm64 macOS). Its time grows faster than the depth, and nothing bounds it but
+  the tree: duscope reads a tree deeper than `PATH_MAX` whole, so only a cap on depth could bound
+  the time of a deep chain, and by decision there is none. A chain of 20,000 directories took
+  36 s on macOS; at 3,000 levels a walker that builds no paths took as long as duscope, so that
+  time is the kernel's for each open of a deep directory.
 - **A query or a verb on a saved scan** takes time and memory that grow with the scan.
 
 ### The four untrusted inputs

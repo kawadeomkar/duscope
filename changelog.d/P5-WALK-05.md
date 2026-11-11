@@ -1,0 +1,2 @@
+### Fixed
+- A scan of a very deep tree no longer takes memory that grows with the square of its depth: each directory on the way down now holds its name rather than its path, so the memory grows in proportion to the depth. A chain of 3,000 directories peaks at about 12 MB instead of 34 MB (before, a chain of 20,000 took about 600 MB). The time of such a scan is unchanged: most of it is the system's, opening each deep directory.
