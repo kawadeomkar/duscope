@@ -1532,6 +1532,37 @@ fn p5_walk_05_handle_bytes_grow_linearly_with_depth() {
 }
 
 #[test]
+fn p5_walk_05_a_chain_of_200000_handles_drops_on_a_worker_stack() {
+    // The walk's workers run on a thread's default 2 MiB stack. A chain of
+    // handles dropped field by field takes a stack frame a level; this one
+    // is built in memory, since one this deep on disk would take hours to
+    // make.
+    const DEPTH: usize = 200_000;
+    let dropped = thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            let mut dir = Arc::new(DirHandle::detached("/chain", 0));
+            let mut kept = None;
+            for depth in 1..=DEPTH {
+                dir = Arc::new(DirHandle::below(dir, "d"));
+                if depth == DEPTH / 2 {
+                    kept = Some(Arc::clone(&dir));
+                }
+            }
+            drop(dir);
+            // A handle something else holds stops the drop: it and every
+            // handle above it are left whole.
+            let kept = kept.unwrap();
+            assert_eq!(Arc::strong_count(&kept), 1);
+            assert_eq!(kept.ancestors().count(), DEPTH / 2 + 1);
+            drop(kept);
+        })
+        .unwrap()
+        .join();
+    assert!(dropped.is_ok(), "the drop panicked");
+}
+
+#[test]
 fn p5_walk_05_globs_below_a_followed_link_match_the_path_it_was_reached_by() {
     // A directory reached through a followed link is read from where the
     // link leads, and matched by the link's own path: two levels down,

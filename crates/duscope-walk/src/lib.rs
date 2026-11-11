@@ -30,6 +30,7 @@ mod tests;
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic;
@@ -247,7 +248,6 @@ pub trait Provider: Send + Sync {
 /// is kept alive by it, so a handle that held its path would make a chain
 /// `n` levels deep hold about `n²` bytes; [`path`](DirHandle::path) builds
 /// the path from the names when it is asked for.
-#[derive(Debug)]
 pub struct DirHandle {
     id: DirId,
     /// The name its parent listed it by: under `--follow-symlinks`, a
@@ -354,6 +354,23 @@ impl DirHandle {
             ino: 0,
             mnt_id: 0,
             parent,
+            parent_fd: Mutex::new(None),
+            fd: Mutex::new(None),
+        }
+    }
+
+    /// A handle for tests: the directory `name` inside `parent`.
+    #[cfg(test)]
+    pub(crate) fn below(parent: Arc<DirHandle>, name: &str) -> DirHandle {
+        DirHandle {
+            id: DirId::ROOT,
+            name: NameRef::from(name),
+            base: None,
+            depth: parent.depth + 1,
+            dev: 0,
+            ino: 0,
+            mnt_id: 0,
+            parent: Some(parent),
             parent_fd: Mutex::new(None),
             fd: Mutex::new(None),
         }
@@ -472,6 +489,39 @@ impl DirHandle {
     #[must_use]
     pub fn depth(&self) -> u32 {
         self.depth
+    }
+}
+
+/// The parents only this handle keeps are dropped one after another, in a
+/// loop. Dropped as fields, each would drop its own parent inside its
+/// drop, a stack frame a level, and the walk reads chains deeper than
+/// `PATH_MAX` allows to name: a deep enough one would overflow a worker's
+/// 2 MiB stack. [`Arc::into_inner`] hands a parent over only to the last
+/// of its holders, even when two of its children are dropped at once on
+/// two workers, so each parent is dropped once.
+impl Drop for DirHandle {
+    fn drop(&mut self) {
+        let mut next = self.parent.take();
+        while let Some(mut parent) = next.and_then(Arc::into_inner) {
+            next = parent.parent.take();
+        }
+    }
+}
+
+/// The parent by its id alone: a derived `Debug` would print every handle
+/// up to the root, recursively.
+impl fmt::Debug for DirHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirHandle")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("base", &self.base)
+            .field("depth", &self.depth)
+            .field("dev", &self.dev)
+            .field("ino", &self.ino)
+            .field("mnt_id", &self.mnt_id)
+            .field("parent", &self.parent.as_ref().map(|parent| parent.id))
+            .finish_non_exhaustive()
     }
 }
 
