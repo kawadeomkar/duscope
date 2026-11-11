@@ -279,6 +279,56 @@ fn p4_tui_06_a_refused_item_stops_the_plan_and_moves_nothing() {
     wait(&mut terminal, "exit=0");
 }
 
+#[test]
+fn p4_tui_06_no_yes_moves_what_a_marks_folder_leads_to_now() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let (dir, other) = (root.join("dir"), root.join("other"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    fs::write(dir.join("b.bin"), vec![1u8; 512 * 1024]).unwrap();
+    fs::write(other.join("b.bin"), vec![2u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    // `view tree/dir` over the scan of the tree: `dir/b.bin`, where it
+    // starts, marked.
+    let mut terminal = viewer(&env, &dir, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    // `dir` replaced by a link to `other` once the plan asks: `yes` finds
+    // another entry at the path, and moves nothing.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "Type yes to move them");
+    fs::rename(&dir, root.join("dir.old")).unwrap();
+    std::os::unix::fs::symlink(&other, &dir).unwrap();
+    send(&mut terminal, "yes");
+    wait(&mut terminal, "yes▌");
+    terminal.send(Key::Enter).unwrap();
+    wait(&mut terminal, "1 not moved");
+    terminal.send(Key::Esc).unwrap();
+    wait_gone(&mut terminal, "mark pane");
+    // `D` again: no plan of what the link leads to, so no question, and
+    // `yes` moves nothing.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "the folder of a mark leads elsewhere now");
+    assert!(
+        !terminal.screen().text().contains("Type yes"),
+        "{}",
+        terminal.screen().text()
+    );
+    send(&mut terminal, "yes");
+    terminal.send(Key::Enter).unwrap();
+    terminal.send(Key::Esc).unwrap();
+    wait_gone(&mut terminal, "mark pane");
+    wait(&mut terminal, "1 marked");
+    assert!(other.join("b.bin").exists());
+    assert!(root.join("dir.old/b.bin").exists());
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    let text = terminal.screen().full_text();
+    assert!(!text.contains("moved 1 item"), "{text}");
+}
+
 /// Whether `screen`, a 120×40 viewer, shows a freed tile's word on the map:
 /// ` freed ` whole inside the map's rectangle, where the selected pane's
 /// title (`selected · freed`) cannot be.

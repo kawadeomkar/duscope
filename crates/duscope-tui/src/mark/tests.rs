@@ -1,8 +1,9 @@
 //! P4-TUI-06: marks and the mark pane, on the canvas's example tree: what
 //! `d` keeps, the pane's table beside `clean`'s, what a plan with a refused
 //! item says, the freed tiles and the reload; and on a small tree on disk,
-//! saved: a mark planned as `clean` plans its path, the question asked
-//! once, a paste that is not keys. Nothing here moves a file:
+//! saved: a mark planned at its own path and never where a folder that
+//! has become a link leads, the question asked once, a paste that is not
+//! keys. Nothing here moves a file:
 //! `clean_execute` only runs through the binary, in `duscope/tests/pty`,
 //! where the test environment guards the real Trash.
 
@@ -28,7 +29,7 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::terminal::Terminal;
 
-use super::{Body, DECLINED, Marks, Pane, State, Toggled, plan_rows};
+use super::{Answer, Body, DECLINED, Marks, Pane, State, Toggled, plan_rows};
 use crate::cursor::tests::{char, first_frame, key, press};
 use crate::panes::Sources;
 use crate::panes::tests::{classes, mockup, opts, status};
@@ -705,7 +706,7 @@ fn planned(pane: &Pane) -> &CleanPlan {
 }
 
 #[test]
-fn p4_tui_06_a_mark_is_planned_as_clean_plans_its_path() {
+fn p4_tui_06_a_mark_is_planned_at_its_own_path() {
     let env = TestEnv::new();
     let (root, index) = on_disk(&env);
     let mut marks = Marks::default();
@@ -718,28 +719,70 @@ fn p4_tui_06_a_mark_is_planned_as_clean_plans_its_path() {
     assert!(pane.asks());
 
     // `dir` replaced since the scan by a link to a folder outside the
-    // scan's root: the mark is planned where the link leads and refused
-    // there, `outside_root`, as `clean` plans and refuses the path it is
-    // given (its parent resolved); the pane asks nothing.
+    // scan's root: the mark is not planned where the link leads, which is
+    // where `clean` of the path would plan it (and refuse it,
+    // `outside_root`); the plan fails, and the pane asks nothing.
     let outside = fs::canonicalize(env.tmp_dir()).unwrap().join("outside");
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("b.bin"), vec![9u8; 1024]).unwrap();
     fs::rename(root.join("dir"), root.join("dir.old")).unwrap();
     std::os::unix::fs::symlink(&outside, root.join("dir")).unwrap();
     let pane = Pane::open(&marks, &index, &Sources::of(&index));
-    let item = &planned(&pane).items[0];
-    assert_eq!(
-        (item.action, item.reason),
-        ("refused", Some("outside_root"))
+    let State::Unplanned(why) = &pane.state else {
+        panic!("a plan of what the mark's path leads to: {:?}", pane.state);
+    };
+    assert!(
+        why.ends_with(&format!(" leads to {}", outside.display())),
+        "{why}"
     );
-    assert_eq!(item.path, outside.join("b.bin").to_string_lossy());
     assert!(!pane.asks());
-    let mocha = Pack::named("mocha").unwrap();
-    let body = Body::planned(planned(&pane), 1, "", &iec, &mocha.roles);
-    let text = frame(&body, &mocha, 120, 40);
-    assert!(text.contains("refused: outside root"), "{text}");
-    assert!(!text.contains("Type yes"), "{text}");
     assert!(outside.join("b.bin").exists());
+}
+
+#[test]
+fn p4_tui_06_a_mark_whose_folder_leads_elsewhere_plans_nothing() {
+    let env = TestEnv::new();
+    let (root, index) = on_disk(&env);
+    let mut marks = Marks::default();
+    marks.toggle(&index, id_of(&index, "dir/b.bin"));
+    // `dir` replaced since the scan by a link to `other`, a folder inside
+    // the scan's root that holds a `b.bin` of its own: the mark's path now
+    // leads to that other entry, which the plan must never offer.
+    let other = root.join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("b.bin"), vec![9u8; 1024]).unwrap();
+    fs::rename(root.join("dir"), root.join("dir.old")).unwrap();
+    std::os::unix::fs::symlink(&other, root.join("dir")).unwrap();
+    let mut pane = Pane::open(&marks, &index, &Sources::of(&index));
+    let State::Unplanned(why) = &pane.state else {
+        panic!("a plan of what the mark's path leads to: {:?}", pane.state);
+    };
+    assert_eq!(
+        why,
+        &format!(
+            "the folder of a mark leads elsewhere now: {} leads to {}",
+            root.join("dir").display(),
+            other.display()
+        )
+    );
+    // No question, so no `yes` reaches `clean_execute`.
+    assert!(!pane.asks());
+    assert!("yes".chars().all(|c| !pane.typed(c)));
+    assert_eq!(pane.answer(&iec), Answer::Unasked);
+    let mocha = Pack::named("mocha").unwrap();
+    let mut canvas = Canvas::new(120, 40, &mocha, duscope_treemap::paint::Glyphs::Unicode);
+    pane.draw(&mut canvas, Rect::new(0, 2, 120, 37), &iec);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 120, 40));
+    crate::app::copy(&canvas.cells, Depth::TrueColor, buf.area, &mut buf);
+    let text = snapshot(&buf);
+    assert!(
+        text.contains("the folder of a mark leads elsewhere now: "),
+        "{text}"
+    );
+    assert!(text.contains("nothing was moved"), "{text}");
+    assert!(!text.contains("Type yes"), "{text}");
+    assert!(other.join("b.bin").exists());
+    assert!(root.join("dir.old/b.bin").exists());
 }
 
 #[test]

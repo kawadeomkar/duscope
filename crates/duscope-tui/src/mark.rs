@@ -4,8 +4,9 @@
 //! mark covers what is under it, so marking a folder drops the marks inside
 //! it and an entry inside a marked folder is not marked again. `D` opens the
 //! mark pane: the plan [`clean_plan`] makes of the marked paths, each
-//! planned as `clean` plans a path it is given (every symbolic link above
-//! its last component resolved), printed as `clean` prints it: the same
+//! planned at its own path while its folder still resolves to itself (a
+//! folder that leads elsewhere now fails the plan, so it never holds an
+//! entry but the one marked), printed as `clean` prints it: the same
 //! table, the same line under it and the same question, asked once. Only
 //! `yes` typed in full (and `⏎`) moves anything, through [`clean_execute`],
 //! to the Trash and nowhere else; any other answer closes the pane and
@@ -674,12 +675,10 @@ fn fit_row(canvas: &Canvas<'_>, row: &PlanRow, room: u16) -> String {
 impl Pane {
     /// The pane of the marks in `view`, planned against the saved scan in
     /// `sources`, or saying why it cannot be planned. Each mark is planned
-    /// as `clean` plans the path it is given: with every symbolic link above
-    /// its last component resolved, so a folder replaced by a link since the
-    /// scan is planned where the link leads, and refused there when that is
-    /// outside the scan's root. The saved scan holds no entry's inode, so
-    /// the plan checks what is at the path when the pane opens, as `clean`
-    /// does for a path.
+    /// at its own path ([`marked_item`]), and a mark whose folder leads
+    /// elsewhere now fails the plan, as a changed item from a handle fails
+    /// `clean`'s. The saved scan holds no entry's inode, so the plan checks
+    /// what is at the path when the pane opens, as `clean` does for a path.
     pub fn open(marks: &Marks, view: &dyn TreeView, sources: &Sources<'_>) -> Pane {
         let ids = marks.ids();
         let state = match sources.index {
@@ -689,22 +688,19 @@ impl Pane {
                 view.root_path().display()
             )),
             Some((index, _)) => {
-                let items: Vec<CleanItem> = ids
-                    .iter()
-                    .map(|&id| CleanItem {
-                        path: unresolved_last(PathBuf::from(OsStr::from_bytes(&abs_path(
-                            view, id,
-                        )))),
-                        handle: None,
-                    })
-                    .collect();
                 let query = ExplainQuery {
                     caches: &sources.caches,
                     env: &*sources.env,
                 };
-                match clean_plan(&items, index, &query, Method::Trash) {
+                let items: Result<Vec<CleanItem>, String> = ids
+                    .iter()
+                    .map(|&id| marked_item(&abs_path(view, id)))
+                    .collect();
+                match items.and_then(|items| {
+                    clean_plan(&items, index, &query, Method::Trash).map_err(|e| e.to_string())
+                }) {
                     Ok(plan) => State::Planned(Box::new(plan)),
-                    Err(e) => State::Unplanned(e.to_string()),
+                    Err(why) => State::Unplanned(why),
                 }
             }
         };
@@ -786,14 +782,29 @@ impl Pane {
     }
 }
 
-/// `path`, absolute, with every symbolic link above its last component
-/// resolved and the last one kept: the path `clean` plans for a path it is
-/// given (`explain`'s reading of a path), a link itself never followed.
-fn unresolved_last(path: PathBuf) -> PathBuf {
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => resolve_path(Path::new("/"), parent).real.join(name),
-        _ => path,
+/// The item to plan for the mark at `path`, absolute as the scan names it,
+/// or why there is none. `clean` plans a path it is given with every
+/// symbolic link above its last component resolved; a mark names an entry
+/// of the scan, not a path to follow, so it is planned at its own path, and
+/// only while its folder still resolves to itself. A folder that leads
+/// elsewhere (replaced by a link since the scan, or a link the scan
+/// followed) would put another entry in the plan, `other/b.bin` for a mark
+/// on `dir/b.bin` once `dir` is a link to `other`, and the freed tile on the
+/// mark: the mark fails the plan instead, as a changed item from a handle
+/// fails `clean`'s (`path_changed`).
+fn marked_item(path: &[u8]) -> Result<CleanItem, String> {
+    let path = PathBuf::from(OsStr::from_bytes(path));
+    if let Some(parent) = path.parent() {
+        let real = resolve_path(Path::new("/"), parent).real;
+        if real != parent {
+            return Err(format!(
+                "the folder of a mark leads elsewhere now: {} leads to {}",
+                parent.display(),
+                real.display()
+            ));
+        }
     }
+    Ok(CleanItem { path, handle: None })
 }
 
 #[cfg(test)]
