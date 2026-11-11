@@ -13,12 +13,12 @@
 //!
 //! Each file is read through [`duscope_walk::read_regular`]: only a regular
 //! file, and only up to a cap of its kind (64 KiB for a `.git` file and
-//! `commondir`, 1 MiB per configuration file, 16 MiB per ignore file, 1 GiB
-//! for the index and a shared index), so a FIFO or a device in a repository
-//! cannot block `explain` or fill its memory. Links are followed (a
-//! `~/.gitconfig` is often one), except to an in-tree `.gitignore`, which
-//! git has not followed since 2.32: a `.gitignore` that is a link reads as
-//! absent.
+//! `commondir`, 1 MiB per configuration file, 1 GiB for the index and a
+//! shared index), and the ignore files of one lookup only up to 1 MiB
+//! together, so a FIFO or a device in a repository cannot block `explain`
+//! or fill its memory. Links are followed (a `~/.gitconfig` is often one),
+//! except to an in-tree `.gitignore`, which git has not followed since
+//! 2.32: a `.gitignore` that is a link reads as absent.
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -35,9 +35,18 @@ const DOT_GIT_CAP: u64 = 64 << 10;
 /// The most read of each configuration file.
 const CONFIG_CAP: u64 = 1 << 20;
 
-/// The most read of each ignore file: a `.gitignore`, `info/exclude` and the
-/// excludes file.
-const IGNORE_CAP: u64 = 16 << 20;
+/// The most read of the ignore files of one lookup, together: the excludes
+/// file, `info/exclude` and each `.gitignore` from the repository's root
+/// down to the path. One budget for the lookup, not a cap for each file:
+/// parsed, short patterns take over 40 times their text, and a path can
+/// have a `.gitignore` at every level, so at 16 MiB a file a lookup three
+/// levels deep took 2 GB of memory. At this budget it takes about 45 MB at
+/// most. Real ignore files are far smaller: most are under a kilobyte, and
+/// a long one, Homebrew's `.gitignore`, is 7 KB, so a megabyte is over a
+/// hundred times what a path's ignore files hold together. Git's own bound,
+/// which skips a pattern file of 100 MiB or more, guards against abuse; it
+/// is not a size a repository needs.
+const IGNORE_BUDGET: u64 = 1 << 20;
 
 /// The most read of the repository's index and of a split index's shared
 /// index.
@@ -47,6 +56,27 @@ const INDEX_CAP: u64 = 1 << 30;
 fn read_text(path: &Path, cap: u64) -> std::io::Result<String> {
     String::from_utf8(duscope_walk::read_regular(path, cap, true)?)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// The ignore file at `file`, read within what is `left` of its lookup's
+/// [`IGNORE_BUDGET`], which loses what was read. A file longer than what is
+/// left is refused by its length, unopened, as `FileTooLarge`.
+fn read_ignore(file: &Path, left: &mut u64, follow: bool) -> std::io::Result<Vec<u8>> {
+    let text = duscope_walk::read_regular(file, *left, follow).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::FileTooLarge {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "with this file, the ignore files hold more than {IGNORE_BUDGET} bytes, \
+                     the most read of them in one lookup"
+                ),
+            )
+        } else {
+            e
+        }
+    })?;
+    *left = left.saturating_sub(u64::try_from(text.len()).unwrap_or(u64::MAX));
+    Ok(text)
 }
 
 /// What git says of a path.
@@ -216,23 +246,28 @@ fn ignored(
     let parse = Ignore {
         support_precious: true,
     };
+    // What is left of the lookup's budget for its ignore files.
+    let mut left = IGNORE_BUDGET;
     // The excludes file, then `info/exclude`, as gix-ignore's
     // `Search::from_git_dir` adds them (it reads them unbounded); as there,
-    // a file that is absent or a directory adds nothing.
+    // a file that is absent, a directory, or below a file that is not a
+    // directory (a `~/.config/git` file) adds nothing.
     let mut search = gix_ignore::Search::default();
     let global = [
         config.excludes_file.clone(),
         Some(common.join("info").join("exclude")),
     ];
     for file in global.into_iter().flatten() {
-        match duscope_walk::read_regular(&file, IGNORE_CAP, true) {
+        match read_ignore(&file, &mut left, true) {
             Ok(text) => search
                 .add_patterns_buffer(&text, file, None, parse)
                 .map_err(|e| e.to_string())?,
             Err(e)
                 if matches!(
                     e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::IsADirectory
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::IsADirectory
+                        | std::io::ErrorKind::NotADirectory
                 ) => {}
             Err(e) => return Err(format!("{}: {e}", file.display())),
         }
@@ -251,7 +286,7 @@ fn ignored(
         }
         // Not followed through a link, which reads as absent.
         let file = dir.join(".gitignore");
-        match duscope_walk::read_regular(&file, IGNORE_CAP, false) {
+        match read_ignore(&file, &mut left, false) {
             Ok(text) => search
                 .add_patterns_buffer(&text, file, Some(root), parse)
                 .map_err(|e| e.to_string())?,
@@ -444,7 +479,7 @@ fn varint(bytes: &[u8]) -> Option<(u64, usize)> {
 mod tests {
     use std::ffi::OsString;
     use std::fs;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::thread;
@@ -452,7 +487,7 @@ mod tests {
 
     use duscope_testkit::TestEnv;
 
-    use super::{Config, GitFacts, INDEX_CAP, Index, core_value, facts, read_index};
+    use super::{Config, GitFacts, IGNORE_BUDGET, INDEX_CAP, Index, core_value, facts, read_index};
 
     /// An entry's fixed fields: zeros, then its flags.
     fn fixed(hash_len: usize, flags: u16) -> Vec<u8> {
@@ -817,6 +852,71 @@ mod tests {
             error.starts_with(&format!("{}: more than", shared.display())),
             "{error}"
         );
+    }
+
+    #[test]
+    fn p5_sec_03_ignore_files_past_one_lookups_budget_fail_it_unread() {
+        // Five ignore files of a quarter of the budget each, far under what
+        // one file could hold: the excludes file, `info/exclude` and a
+        // `.gitignore` at each of the three levels above `a/b/f`.
+        let env = TestEnv::new();
+        let repo = repo(&env, "budget");
+        let below = repo.join("a").join("b");
+        fs::create_dir_all(&below).unwrap();
+        fs::write(below.join("f"), b"f").unwrap();
+        let quarter = usize::try_from(IGNORE_BUDGET / 4).unwrap();
+        // `f`, then a comment to the quarter's length.
+        let patterns = format!("f\n#{}\n", "-".repeat(quarter - 4));
+        for file in [
+            ignore_file(&repo, "core.excludesFile"),
+            ignore_file(&repo, "info/exclude"),
+            repo.join(".gitignore"),
+            repo.join("a").join(".gitignore"),
+        ] {
+            fs::write(file, &patterns).unwrap();
+        }
+        // Four quarters meet the budget: all are read.
+        assert!(facts_within(&below, &env.home()).unwrap().unwrap().ignored);
+        // The fifth passes it and is refused by its length. Unreadable to
+        // all but root, it shows it was never opened.
+        let last = below.join(".gitignore");
+        fs::write(&last, &patterns).unwrap();
+        if duscope_walk::effective_uid() != 0 {
+            fs::set_permissions(&last, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        let error = facts_within(&below, &env.home()).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "{}: with this file, the ignore files hold more than {IGNORE_BUDGET} bytes, \
+                 the most read of them in one lookup",
+                last.display()
+            )
+        );
+    }
+
+    #[test]
+    fn p5_sec_03_an_ignore_file_below_a_regular_file_is_absent() {
+        // `.git/info`, then `~/.config/git` in the test's own home, as a
+        // regular file: `info/exclude` and the default excludes file lie
+        // below a file and add nothing, as gix-ignore read them, and the
+        // `.gitignore` still answers.
+        for file in [".git/info", "home/.config/git"] {
+            let env = TestEnv::new();
+            let repo = repo(&env, "below_a_file");
+            fs::write(repo.join(".gitignore"), "f\n").unwrap();
+            let file = match file.strip_prefix("home/") {
+                Some(rest) => env.home().join(rest),
+                None => repo.join(file),
+            };
+            if file.is_dir() {
+                fs::remove_dir(&file).unwrap();
+            }
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, b"").unwrap();
+            let found = facts_within(&repo, &env.home());
+            assert!(found.unwrap().unwrap().ignored, "{}", file.display());
+        }
     }
 
     #[test]
