@@ -310,16 +310,17 @@ fn open_with(dir: Option<BorrowedFd<'_>>, path: &CStr, flags: libc::c_int) -> io
     parked(|| unsafe { libc::openat(dir, path.as_ptr(), flags) })
 }
 
-/// Opens `dir` to read it: relative to its parent's descriptor while the
-/// walk keeps that, and by path otherwise (the root, a directory reached
-/// through a link, a subdirectory of one opened beyond the limit). The
-/// descriptor is kept in the handle while fewer than [`KEEP_LIMIT`] are.
+/// Opens `dir` to read it: by its name relative to its parent's descriptor
+/// while the walk keeps that, and by path otherwise (the root, a directory
+/// reached through a link, a subdirectory of one opened beyond the limit),
+/// which only then is built. The descriptor is kept in the handle while
+/// fewer than [`KEEP_LIMIT`] are.
 pub(crate) fn open_handle(dir: &DirHandle) -> io::Result<Arc<DirFd>> {
-    let fd = match (dir.take_parent_fd(), dir.path().file_name()) {
-        (Some(parent), Some(name)) => {
-            with_c_name(name.as_bytes(), |name| open_at(Some(parent.as_fd()), name))?
-        }
-        _ => open_dir(dir.path())?,
+    let fd = match dir.take_parent_fd() {
+        Some(parent) => with_c_name(dir.name().as_bytes(), |name| {
+            open_at(Some(parent.as_fd()), name)
+        })?,
+        None => open_dir(&dir.path())?,
     };
     let limit = KEEP_LIMIT.load(Ordering::Relaxed);
     let kept = KEPT
@@ -347,7 +348,7 @@ pub(crate) fn open_handle(dir: &DirHandle) -> io::Result<Arc<DirFd>> {
 pub(crate) fn reopen(dir: &DirHandle) -> io::Result<OwnedFd> {
     match dir.kept_fd() {
         Some(fd) => open_at(Some(fd.as_fd()), c"."),
-        None => open_dir(dir.path()),
+        None => open_dir(&dir.path()),
     }
 }
 

@@ -300,7 +300,7 @@ impl Provider for MemProvider {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
-        let path = normal(dir.path());
+        let path = normal(&dir.path());
         let node = self
             .nodes
             .get(key(&path))

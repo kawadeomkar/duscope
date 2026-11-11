@@ -51,10 +51,7 @@ impl Provider for Counting<'_> {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
-        self.reads
-            .lock()
-            .unwrap()
-            .push((dir.id(), dir.path().to_owned()));
+        self.reads.lock().unwrap().push((dir.id(), dir.path()));
         self.inner.read_dir(dir, opts, out, errs)
     }
 
@@ -1067,18 +1064,12 @@ fn p1_walk_06_firmlinks_are_no_crossing_for_one_file_system() {
 #[test]
 fn p1_walk_06_a_handle_walks_back_to_the_root() {
     let root = Arc::new(DirHandle::detached("/r", 0));
-    let entry = MemProvider::new("/r")
+    let mut entry = MemProvider::new("/r")
         .root(Path::new("/r"), &WalkOptions::default())
         .unwrap();
-    let child = DirHandle::new(
-        DirId::new(1),
-        PathBuf::from("/r/a"),
-        b"a".to_vec(),
-        &entry,
-        Some(Arc::clone(&root)),
-        None,
-    );
-    let paths: Vec<&Path> = child.ancestors().map(DirHandle::path).collect();
+    entry.name = NameRef::from("a");
+    let child = DirHandle::new(DirId::new(1), None, &entry, Some(Arc::clone(&root)), None);
+    let paths: Vec<PathBuf> = child.ancestors().map(DirHandle::path).collect();
     assert_eq!(paths, [Path::new("/r/a"), Path::new("/r")]);
     assert_eq!(
         (child.depth(), child.parent().map(DirHandle::depth)),
@@ -1473,4 +1464,111 @@ fn p5_walk_04_busy_time_leaves_out_the_walks_flushes() {
     thread::sleep(Duration::from_millis(5));
     assert!(timer.elapsed() >= Duration::from_millis(5));
     counters::take();
+}
+
+/// Records, for each directory read, the bytes its handle holds and the
+/// bytes of every handle from it up to the root, all alive while it is read.
+struct Footprint<'a> {
+    inner: &'a MemProvider,
+    /// By depth: the handle's bytes, and its chain's.
+    held: Mutex<HashMap<u32, (usize, usize)>>,
+}
+
+impl Provider for Footprint<'_> {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        let chain = dir.ancestors().map(DirHandle::footprint).sum();
+        self.held
+            .lock()
+            .unwrap()
+            .insert(dir.depth(), (dir.footprint(), chain));
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+}
+
+#[test]
+fn p5_walk_05_handle_bytes_grow_linearly_with_depth() {
+    // A chain of one-byte names, as the audit's 20,000-deep tree, 3,000
+    // deep: a handle keeps its parent, so the whole chain is alive while
+    // the bottom is read. Each level must add the same bytes.
+    const DEPTH: u32 = 3_000;
+    let mut tree = MemProvider::new("/mem");
+    tree.dir(std::iter::repeat_n("d", DEPTH as usize).collect::<PathBuf>());
+    let provider = Footprint {
+        inner: &tree,
+        held: Mutex::default(),
+    };
+    let summary = walk_with(&provider, tree.root_path(), &WalkOptions::default(), |_| {}).unwrap();
+    assert_eq!(summary.dirs, u64::from(DEPTH) + 1);
+    assert_eq!(summary.unreadable_dirs, 0, "every level read by its path");
+    let held = provider.held.into_inner().unwrap();
+    let (root, _) = held[&0];
+    let (one, _) = held[&1];
+    let (bottom, chain) = held[&DEPTH];
+    assert_eq!(
+        bottom, one,
+        "a handle {DEPTH} levels down holds {bottom} bytes, one a level down {one}"
+    );
+    assert_eq!(
+        chain,
+        root + one * DEPTH as usize,
+        "the chain {DEPTH} levels down holds {chain} bytes"
+    );
+    // Its fields and a name held in place: no path.
+    assert!(one <= 256, "a handle holds {one} bytes");
+}
+
+#[test]
+fn p5_walk_05_globs_below_a_followed_link_match_the_path_it_was_reached_by() {
+    // A directory reached through a followed link is read from where the
+    // link leads, and matched by the link's own path: two levels down,
+    // `via/sub/drop` is left out and `real/sub/drop` is not.
+    let mut tree = MemProvider::new("/t");
+    tree.file("real/sub/drop/a", 10)
+        .file("real/sub/keep/b", 10)
+        .link("via", "real");
+    let mut excludes = globset::GlobSetBuilder::new();
+    excludes.add(
+        globset::GlobBuilder::new("via/sub/drop")
+            .literal_separator(true)
+            .build()
+            .unwrap(),
+    );
+    let opts = WalkOptions {
+        follow_symlinks: true,
+        excludes: excludes.build().unwrap(),
+        ..WalkOptions::default()
+    };
+    let (result, events) = walk_events(&tree, tree.root_path(), &opts);
+    result.unwrap();
+    let (paths, dirs) = replay(tree.root_path(), &events);
+    let skipped: Vec<(&Path, Skip)> = events
+        .iter()
+        .filter_map(|event| match event {
+            ScanEvent::Skipped { dir, reason } => Some((dirs[dir].as_path(), *reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        skipped,
+        [(Path::new("/t/via/sub/drop"), Skip::Excluded)],
+        "{paths:?}"
+    );
+    for read in ["/t/via/sub/keep/b", "/t/real/sub/drop/a"] {
+        assert!(paths.contains(&PathBuf::from(read)), "{read}: {paths:?}");
+    }
+    assert!(!paths.contains(&PathBuf::from("/t/via/sub/drop/a")));
 }
