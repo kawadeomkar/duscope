@@ -832,6 +832,65 @@ fn p5_sec_04_a_directory_naming_itself_its_parent_is_not_its_own_subdirectory() 
     );
 }
 
+/// A view of a folder ([`Subtree`]), which `render`, `tree` and the viewer
+/// read a path below the root through, keeps every id it gives inside the
+/// folder, however the rows lie: `b`'s subtree ending past `a`'s, its last
+/// id read as the view's past the view's end, was a class looked up past
+/// the end of the treemap's list, a panic. Such a row is the index's
+/// failed read.
+#[test]
+fn p5_sec_04_a_view_of_a_folder_keeps_its_ids_inside_it() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    let index = Index::open(&layout(
+        &dir.join("past"),
+        "UPDATE dirs SET files_end = 5, last_id = 5 WHERE id = 3",
+    ))
+    .unwrap();
+    let a = Subtree::new(&index, 2);
+    assert_eq!(a.len(), 3);
+    for id in 0..a.len() {
+        let node = a.node(id);
+        assert!(
+            node.files_end < a.len() && node.last_id < a.len(),
+            "{id}: {node:?}"
+        );
+    }
+    assert!(
+        index.failure().is_some_and(|f| f.starts_with(
+            "dirs row 3: its parent_id 2 and last_id 5 put it outside the subtree of the entry 2, \
+             which ends at 4"
+        )),
+        "{:?}",
+        index.failure()
+    );
+    // A file whose parent lies before the folder.
+    let index = Index::open(&layout(
+        &dir.join("outside"),
+        "UPDATE files SET parent_id = 0 WHERE id = 4",
+    ))
+    .unwrap();
+    let a = Subtree::new(&index, 2);
+    a.node(2);
+    assert!(
+        index.failure().is_some_and(|f| f.starts_with(
+            "files row 4: its parent_id 0 and last_id 4 put it outside the subtree of the entry 2"
+        )),
+        "{:?}",
+        index.failure()
+    );
+    // The unbroken index reads as it did.
+    let index = Index::open(&layout(&dir.join("sound"), "")).unwrap();
+    let a = Subtree::new(&index, 2);
+    assert_eq!(
+        (0..a.len())
+            .map(|id| a.node(id).last_id)
+            .collect::<Vec<_>>(),
+        [2, 2, 2]
+    );
+    assert!(index.failure().is_none());
+}
+
 /// The rows an import writes keep the layout: the reference fixture tree
 /// exported as ncdu's JSON, as gdu's and as a `.gpscan`, imported again and
 /// saved as the `import` verb saves it, reads whole with no failed read.
@@ -884,7 +943,12 @@ fn p5_sec_04_imported_indexes_keep_the_layout() {
         for id in 0..index.len() {
             index.path(id);
             index.child_dirs(id);
+            // As a walk down the tree holds a directory's children.
+            let _ = query::children(&index, &index.node(id)).count();
         }
         assert!(index.failure().is_none(), "{name}: {:?}", index.failure());
+        // As `scans --check` holds every row: dense ids, each nested where
+        // its parent's ids place it.
+        crate::check::rows_keep_the_layout(&index).unwrap();
     }
 }

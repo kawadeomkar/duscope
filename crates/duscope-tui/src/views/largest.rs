@@ -9,7 +9,7 @@
 
 use std::rc::Rc;
 
-use duscope_core::query::{SizeKind, SortKey, ranked, ranked_files};
+use duscope_core::query::{SizeKind, SortKey, ids, ranked, ranked_files};
 use duscope_treemap::paint::compact;
 use ratatui_core::layout::Rect;
 
@@ -70,7 +70,7 @@ fn found(ctx: &Context<'_>, viewing: &Viewing<'_>, root: u32) -> Found {
             Some(_) => node.last_id.min(root.saturating_add(budget - 1)),
             None => node.last_id,
         };
-        let candidates = (root..=last).filter(|&id| {
+        let candidates = ids(view, root, last).filter(|&id| {
             let n = view.node(id);
             !n.is_dir() && viewing.mask.is_none_or(|mask| mask.keeps(ctx, &n))
         });

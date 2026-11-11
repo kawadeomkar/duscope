@@ -7,7 +7,7 @@ use crate::envelope::{StaleEntry, name_fields};
 
 use super::{
     After, Cut, Filters, Page, SizeKind, SortKey, TreeView, abs_path, attrs_not_collected,
-    flag_names, kind_name, next_after, page_of, ranked_after, ranked_files, remain,
+    flag_names, ids, kind_name, next_after, page_of, ranked_after, ranked_files, remain,
     timegrammar::iso8601,
 };
 
@@ -82,7 +82,7 @@ pub fn stale(
             let first = usize::try_from(seen).ok()?.checked_add(limit)?;
             page_of(ranked_files(view, 0, first, Some(cut))?, after)
         });
-    let candidates = (0..=root.last_id).filter(|&id| {
+    let candidates = ids(view, 0, root.last_id).filter(|&id| {
         let node = view.node(id);
         !node.is_dir()
             && node.mtime_ns < cutoff

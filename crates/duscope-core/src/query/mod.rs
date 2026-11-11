@@ -531,7 +531,31 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
     fn node(&self, id: u32) -> Node {
         // Saturating: an entry an index could not read is empty, at depth 0
         // under the root, and the verb reports the failed read.
-        let mut node = self.view.node(id + self.base);
+        let at = id + self.base;
+        let mut node = self.view.node(at);
+        // An entry below the base lies inside its subtree: its parent at or
+        // after the base, its own files and subtree ending by the
+        // subtree's end. A saved scan's row that does not is a failed read,
+        // and its ids are kept inside the subtree, so that no walk of the
+        // view reads past its last id.
+        let end = self.last.max(at);
+        if (id != 0 && node.parent < self.base) || node.last_id > end || node.files_end > end {
+            let table = if node.is_dir() { "dirs" } else { "files" };
+            let (parent, last_id) = (node.parent, node.last_id);
+            out_of_layout(self, table, id, |base| {
+                // `base` is this view's root in the scan; the node's ids are
+                // those of the view below, whose root lies `self.base`
+                // before it.
+                let shift = base.saturating_sub(self.base);
+                format!(
+                    "its parent_id {} and last_id {} put it outside the subtree of the entry \
+                     {base}, which ends at {}",
+                    parent.saturating_add(shift),
+                    last_id.saturating_add(shift),
+                    self.last.saturating_add(shift)
+                )
+            });
+        }
         node.id = id;
         node.parent = if id == 0 {
             0
@@ -539,8 +563,8 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
             node.parent.saturating_sub(self.base)
         };
         node.depth = node.depth.saturating_sub(self.depth);
-        node.files_end = node.files_end.saturating_sub(self.base);
-        node.last_id = node.last_id.saturating_sub(self.base);
+        node.files_end = node.files_end.clamp(at, end) - self.base;
+        node.last_id = node.last_id.clamp(at, end) - self.base;
         node
     }
 
@@ -660,17 +684,128 @@ impl SizeKind {
 
 /// The ids of `dir`'s children: its files, then the root of each
 /// subdirectory's subtree ([`TreeView::child_dirs`]).
+///
+/// A saved scan's rows are held to the layout as they are listed, so that
+/// a walk down the tree reads each entry once, however its rows lie: each
+/// id up to `files_end` must be a file whose parent is `dir`, and the
+/// subdirectories' subtrees must fill the ids after the files, to
+/// `last_id`, in order. The first that does not is the index's failed read
+/// (`index_corrupt`), and the list ends there, as it does once any read has
+/// failed ([`failed`]). The arena keeps the layout, and is not checked.
 pub fn children<'v>(
     view: &'v (impl TreeView + ?Sized),
     dir: &Node,
 ) -> impl Iterator<Item = u32> + 'v {
-    let files = (dir.id + 1)..=dir.files_end;
+    let (id, files_end, last) = (dir.id, dir.files_end, dir.last_id);
     let dirs = if dir.is_dir() {
-        view.child_dirs(dir.id)
+        view.child_dirs(id)
     } else {
         Vec::new()
     };
-    files.chain(dirs.into_iter().map(|(id, _)| id))
+    let saved = view.as_index().is_some();
+    // Checked once the files are listed, so that a damaged row met on the
+    // way is the one reported.
+    let mut filled = (saved && dir.is_dir()).then(|| fills(&dirs, files_end, last));
+    let files = ((id + 1)..=files_end).take_while(move |&file| own_child(view, id, file, false));
+    let settle = std::iter::from_fn(move || {
+        if filled.take() == Some(false) {
+            unfilled(view, id, files_end, last);
+        }
+        None
+    });
+    files
+        .chain(settle)
+        .chain(dirs.into_iter().map(|(id, _)| id))
+        .take_while(move |_| !failed(view))
+}
+
+/// Whether entry `id` of `view`, which directory `dir`'s ids place among
+/// its files (or its subdirectories, when `is_dir`), is one: of that kind,
+/// and `dir` its parent. One that is not breaks `dir`'s row, which is
+/// recorded; so is a read that failed. The arena keeps the layout.
+pub(crate) fn own_child(view: &(impl TreeView + ?Sized), dir: u32, id: u32, is_dir: bool) -> bool {
+    if view.as_index().is_none() {
+        return true;
+    }
+    let node = view.node(id);
+    if failed(view) {
+        return false;
+    }
+    let own = node.parent == dir && node.is_dir() == is_dir;
+    if !own {
+        out_of_layout(view, "dirs", dir, |base| {
+            let (column, kind) = if is_dir {
+                ("last_id", "directory")
+            } else {
+                ("files_end", "file")
+            };
+            format!(
+                "its {column} takes in id {} as a {kind}, which is not a {kind} whose parent_id \
+                 is {}",
+                id.saturating_add(base),
+                dir.saturating_add(base)
+            )
+        });
+    }
+    own
+}
+
+/// Records that the subdirectories of directory `dir` of `view`, whose own
+/// files end at `files_end` and subtree at `last`, do not fill the ids
+/// after its files ([`fills`]).
+pub(crate) fn unfilled(view: &(impl TreeView + ?Sized), dir: u32, files_end: u32, last: u32) {
+    out_of_layout(view, "dirs", dir, |base| {
+        format!(
+            "the subtrees of its subdirectories do not fill its ids from files_end + 1 to \
+             last_id (files_end {}, last_id {})",
+            files_end.saturating_add(base),
+            last.saturating_add(base)
+        )
+    });
+}
+
+/// Whether the subtrees `dirs` (each one's first and last id) fill the ids
+/// from `files_end + 1` to `last` in order, with no gap and no overlap.
+fn fills(dirs: &[(u32, u32)], files_end: u32, last: u32) -> bool {
+    let mut next = u64::from(files_end) + 1;
+    for &(first, end) in dirs {
+        if u64::from(first) != next || end < first {
+            return false;
+        }
+        next = u64::from(end) + 1;
+    }
+    next == u64::from(last) + 1
+}
+
+/// Records on the saved scan `view` reads, as its first failed read when it
+/// is, that the row of entry `id` (an id of `view`) in `table` breaks the
+/// layout: `what`, given the id in the scan of the view's root, which the
+/// view's ids are counted from. The arena keeps the layout.
+pub(crate) fn out_of_layout(
+    view: &(impl TreeView + ?Sized),
+    table: &str,
+    id: u32,
+    what: impl FnOnce(u32) -> String,
+) {
+    if let Some((index, base)) = view.as_index() {
+        index.out_of_layout(table, id.saturating_add(base), &what(base));
+    }
+}
+
+/// Whether a read of the saved scan `view` reads has failed
+/// ([`Index::failed`]): the verb then fails `index_corrupt`, whatever else
+/// it reads. Never for the arena.
+pub fn failed(view: &(impl TreeView + ?Sized)) -> bool {
+    view.as_index().is_some_and(|(index, _)| index.failed())
+}
+
+/// The ids `first ..= last` of `view`, in order, until a read of the saved
+/// scan it reads has failed ([`failed`]): a walk over the ids stops at the
+/// first id that no row holds, rather than ask for each of the billions a
+/// crafted `n_entries` may leave.
+pub fn ids(view: &(impl TreeView + ?Sized), first: u32, last: u32) -> impl Iterator<Item = u32> {
+    let index = view.as_index().map(|(index, _)| index);
+    (first..=last).take_while(move |_| !index.is_some_and(Index::failed))
 }
 
 /// The path of `id` relative to the root, `/`-separated; empty for the

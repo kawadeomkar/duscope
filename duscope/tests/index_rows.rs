@@ -6,6 +6,12 @@
 //! index directory, changed in a second index directory of the test's: an
 //! index is never edited in place.
 //!
+//! A walk down the tree holds each directory's children to the layout as
+//! it lists them, so `tree`, `render` and `diff` read each entry once and
+//! fail where a row's ids do not nest, however its rows lie; and an
+//! `n_entries` past the rows, or an id that no row holds, fails at once
+//! rather than read each missing id.
+//!
 //! A verb checks the rows it reads, so one that never reaches a damaged row
 //! may answer from the rows it did read; `scans --check` reads them all.
 //!
@@ -19,7 +25,6 @@
 use std::fs::{self, DirBuilder, File};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use duscope_testkit::TestEnv;
@@ -49,6 +54,11 @@ fn saved_with(env: &TestEnv, root_file: bool) -> String {
         fs::write(root.join("root.txt"), [7; 100]).unwrap();
     }
     fs::write(root.join("a/b/f"), [7; 8192]).unwrap();
+    scan_saved(env, &root)
+}
+
+/// Scans `root` and saves the scan in the test's index directory: its id.
+fn scan_saved(env: &TestEnv, root: &Path) -> String {
     let out = env
         .cmd()
         .args(["scan", root.to_str().unwrap(), "--save", "--json"])
@@ -79,15 +89,7 @@ fn broken(env: &TestEnv, id: &str, case: &str, sql: &str) -> PathBuf {
 /// ids `sql` names.
 fn broken_ids(env: &TestEnv, id: &str, case: &str, sql: &str, dirs: &[(u32, &str)]) -> PathBuf {
     let dir = env.tmp_dir().join(case);
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir.join("scans"))
-        .unwrap();
-    let name = format!("{id}.db");
-    let file = dir.join("scans").join(&name);
-    fs::copy(env.index_dir().join("scans").join(&name), &file).unwrap();
-    let db = Connection::open(&file).unwrap();
+    let db = copy(env, id, &dir);
     // The ids the cases name.
     let names: Vec<(u32, Vec<u8>)> = db
         .prepare("SELECT id, name FROM dirs WHERE id > 0 ORDER BY id")
@@ -106,18 +108,44 @@ fn broken_ids(env: &TestEnv, id: &str, case: &str, sql: &str, dirs: &[(u32, &str
     dir
 }
 
+/// A copy of saved scan `id` in index directory `dir`, made if need be,
+/// open to be changed.
+fn copy(env: &TestEnv, id: &str, dir: &Path) -> Connection {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir.join("scans"))
+        .unwrap();
+    let name = format!("{id}.db");
+    let file = dir.join("scans").join(&name);
+    fs::copy(env.index_dir().join("scans").join(&name), &file).unwrap();
+    Connection::open(&file).unwrap()
+}
+
 /// duscope's exit code and envelope for `args`, failing the test if it has
 /// not answered within [`DEADLINE`].
 fn answer(env: &TestEnv, index_dir: &Path, args: &[&str]) -> (Option<i32>, Value) {
-    let stdout = index_dir.with_extension(format!("{}.json", args[0]));
+    let mut json = args.to_vec();
+    json.push("--json");
+    let (code, text, _) = run(env, index_dir, &json);
+    let envelope = serde_json::from_slice(&text)
+        .unwrap_or_else(|e| panic!("{args:?}: {e}: {}", String::from_utf8_lossy(&text)));
+    (code, envelope)
+}
+
+/// duscope's exit code, stdout and stderr for `args` with `--index-dir
+/// index_dir`, failing the test if it has not answered within
+/// [`DEADLINE`].
+fn run(env: &TestEnv, index_dir: &Path, args: &[&str]) -> (Option<i32>, Vec<u8>, Vec<u8>) {
+    let stdout = index_dir.with_extension(format!("{}.out", args[0]));
+    let stderr = index_dir.with_extension(format!("{}.err", args[0]));
     let mut child = env
         .cmd()
         .args(args)
         .arg("--index-dir")
         .arg(index_dir)
-        .arg("--json")
         .stdout(File::create(&stdout).unwrap())
-        .stderr(Stdio::null())
+        .stderr(File::create(&stderr).unwrap())
         .spawn()
         .unwrap();
     let began = Instant::now();
@@ -132,10 +160,37 @@ fn answer(env: &TestEnv, index_dir: &Path, args: &[&str]) -> (Option<i32>, Value
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let text = fs::read(&stdout).unwrap();
-    let envelope = serde_json::from_slice(&text)
-        .unwrap_or_else(|e| panic!("{args:?}: {e}: {}", String::from_utf8_lossy(&text)));
-    (status.code(), envelope)
+    (
+        status.code(),
+        fs::read(&stdout).unwrap(),
+        fs::read(&stderr).unwrap(),
+    )
+}
+
+/// Checks that `render` of the saved scan `id` with `args` fails with
+/// `index_corrupt`, exit 5, which it says on stderr with `reported`, in SVG
+/// and in PNG, and writes no picture.
+fn render_is_index_corrupt(env: &TestEnv, dir: &Path, case: &str, args: &[&str], reported: &str) {
+    for format in ["svg", "png"] {
+        let picture = dir.with_extension(format);
+        let mut render = vec![
+            "render",
+            "--format",
+            format,
+            "-o",
+            picture.to_str().unwrap(),
+        ];
+        render.extend_from_slice(args);
+        let (code, _, stderr) = run(env, dir, &render);
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert_eq!(code, Some(5), "{case} {render:?}: {stderr}");
+        let said = format!("cannot read the index {}", dir.display());
+        assert!(
+            stderr.contains(&said) && stderr.contains(reported),
+            "{case} {render:?}: {stderr}"
+        );
+        assert!(!picture.exists(), "{case} {render:?}");
+    }
 }
 
 /// Checks that `args` answers `index_corrupt`, exit 5, its message ending
@@ -308,8 +363,8 @@ fn p5_sec_04_scans_check_reads_the_rows_and_not_an_index_over_them() {
 /// The promise of `SECURITY.md` ("Index files"): a verb that never reads a
 /// damaged row answers from the rows it did read, and says nothing of the
 /// damage. `a` and `b` name each other as parent, so no row names the root
-/// as `a`'s parent, and the walk down from the root (a root with no file of
-/// its own) reads neither.
+/// as `a`'s parent, and the walk down the root's subdirectories (a root with
+/// no file of its own) that `top` takes reads neither.
 #[test]
 fn p5_sec_04_a_verb_that_does_not_read_the_damaged_rows_answers_from_those_it_read() {
     let env = TestEnv::new();
@@ -321,7 +376,7 @@ fn p5_sec_04_a_verb_that_does_not_read_the_damaged_rows_answers_from_those_it_re
         "UPDATE dirs SET parent_id = 2 WHERE id = 1; UPDATE dirs SET parent_id = 1 WHERE id = 2",
         &[(1, "a"), (2, "b"), (4, "c")],
     );
-    let (code, envelope) = answer(&env, &dir, &["tree", "--scan", &id, "--depth", "9"]);
+    let (code, envelope) = answer(&env, &dir, &["top", "--scan", &id]);
     assert_eq!(code, Some(0), "{envelope}");
     assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["warnings"], Value::Array(Vec::new()));
@@ -332,10 +387,7 @@ fn p5_sec_04_a_verb_that_does_not_read_the_damaged_rows_answers_from_those_it_re
         .iter()
         .map(|entry| entry["path"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        paths,
-        [root.to_str().unwrap(), root.join("c").to_str().unwrap()]
-    );
+    assert_eq!(paths, [root.join("c").to_str().unwrap()]);
     // A verb that reads the rows reports them; `scans --check` reads them
     // all.
     let reported = "dirs row 1: its parent_id 2 is not below its id";
@@ -347,4 +399,146 @@ fn p5_sec_04_a_verb_that_does_not_read_the_damaged_rows_answers_from_those_it_re
         reported,
     );
     is_index_corrupt(&env, &dir, "cut-off", &["scans", "--check", &id], reported);
+    // `tree` lists the root's children whole, and finds that its
+    // subdirectories leave out ids its subtree holds.
+    is_index_corrupt(
+        &env,
+        &dir,
+        "cut-off",
+        &["tree", "--scan", &id, "--depth", "9"],
+        "dirs row 0: the subtrees of its subdirectories do not fill its ids from files_end + 1 \
+         to last_id (files_end 0, last_id 4)",
+    );
+}
+
+/// A chain of directories, `chain/d01/d02/…/d19` with `f` in the last, so
+/// that its ids are 0 for `chain`, 1 to 19 for `d01` to `d19` and 20 for
+/// `f`, saved twice, `f` grown in between: the two scans' ids.
+fn chain(env: &TestEnv) -> (String, String) {
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("chain");
+    let last = (1..20).fold(root.clone(), |dir, n| dir.join(format!("d{n:02}")));
+    fs::create_dir_all(&last).unwrap();
+    fs::write(last.join("f"), [7; 100]).unwrap();
+    let old = scan_saved(env, &root);
+    fs::write(last.join("f"), vec![7; 1 << 20]).unwrap();
+    let new = scan_saved(env, &root);
+    (old, new)
+}
+
+/// Every directory of a chain takes in every id after it as a file of its
+/// own: rows that each keep `id <= files_end <= last_id < n_entries`, so
+/// the reader takes each one, but that do not nest. A walk that took them
+/// as written listed each directory again under every directory above it,
+/// 2^19 times for `f`: `tree` and `diff` (whose rows were `f`, 2^19 times)
+/// took time exponential in the rows, and `scans --check` passed the file.
+#[test]
+fn p5_sec_04_directories_whose_files_take_in_their_subdirectories_are_index_corrupt() {
+    let env = TestEnv::new();
+    let (old, new) = chain(&env);
+    let dir = env.tmp_dir().join("overlap");
+    for id in [&old, &new] {
+        let db = copy(&env, id, &dir);
+        let last: u32 = db
+            .query_row("SELECT max(id) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(last, 20, "the ids the case names");
+        db.execute("UPDATE dirs SET files_end = 20, last_id = 20", [])
+            .unwrap();
+    }
+    let reported = "dirs row 0: its files_end takes in id 1 as a file, which is not a file whose \
+                    parent_id is 0";
+    let corrupt = |args: &[&str], reported: &str| {
+        is_index_corrupt(&env, &dir, "overlap", args, reported);
+    };
+    corrupt(&["tree", "--scan", &old, "--depth", "30"], reported);
+    corrupt(&["diff", &old, &new, "--limit", "5"], reported);
+    render_is_index_corrupt(&env, &dir, "overlap", &["--scan", &old], reported);
+    corrupt(
+        &["scans", "--check", &old],
+        "dirs row 1: it is a directory that its parent's files_end, 20, takes in as a file",
+    );
+}
+
+/// `b` takes in `c`, the directory beside its parent `a`, as a file of its
+/// own, and its subtree ends past `a`'s: rows that each keep `id <=
+/// files_end <= last_id < n_entries`. A view of `a` read past its last id,
+/// so `tree t/a` listed `c` as `b`'s file, and `render t/a` looked up a
+/// class past the end of its list: a panic, an abort in a release build.
+#[test]
+fn p5_sec_04_a_subtree_that_ends_past_its_parents_is_index_corrupt() {
+    let env = TestEnv::new();
+    let id = saved(&env);
+    let case = "past-the-parent";
+    let dir = broken(
+        &env,
+        &id,
+        case,
+        "UPDATE dirs SET files_end = 5, last_id = 5 WHERE id = 3",
+    );
+    let a = tree_root(&env).join("a");
+    let a = a.to_str().unwrap();
+    render_is_index_corrupt(
+        &env,
+        &dir,
+        case,
+        &[a, "--scan", &id],
+        "dirs row 3: its parent_id 2 and last_id 5 put it outside the subtree of the entry 2, \
+         which ends at 4",
+    );
+    is_index_corrupt(
+        &env,
+        &dir,
+        case,
+        &["tree", a, "--scan", &id, "--depth", "5"],
+        "dirs row 2: the subtrees of its subdirectories do not fill its ids from files_end + 1 \
+         to last_id (files_end 2, last_id 4)",
+    );
+    is_index_corrupt(
+        &env,
+        &dir,
+        case,
+        &["scans", "--check", &id],
+        "dirs row 3: its last_id 5 is past its parent's, 4",
+    );
+}
+
+/// `n_entries` past the rows. A walk over the ids read each missing one
+/// with a query of its own, about 160 hours for `top --files --sort mtime`
+/// and as long for `render`, and `scans --check` passed the file. A count
+/// past the highest id + 1 is refused at open; a count that a row at its
+/// last id keeps leaves ids out below it, and a walk stops at the first.
+#[test]
+fn p5_sec_04_an_entry_count_past_the_rows_is_index_corrupt() {
+    let env = TestEnv::new();
+    let id = saved(&env);
+    let count = "UPDATE scan_meta SET value = 4294967295 WHERE key = 'n_entries'; \
+                 UPDATE dirs SET last_id = 4294967294 WHERE id = 0;";
+    // A copy of `c`'s row at the last id the count leaves, which nests
+    // where the root's ids place it.
+    let row_at_the_end = "CREATE TEMP TABLE moved AS SELECT * FROM dirs WHERE id = 5; \
+                          UPDATE moved SET id = 4294967294, files_end = 4294967294, \
+                          last_id = 4294967294; \
+                          INSERT INTO dirs SELECT * FROM moved;";
+    for (case, sql, reported) in [
+        (
+            "count",
+            count.to_owned(),
+            "scan_meta.n_entries 4294967295 is more than the highest id + 1 (6)",
+        ),
+        (
+            "gap",
+            format!("{count} {row_at_the_end}"),
+            "no row of dirs or files has id 6, below n_entries 4294967295",
+        ),
+    ] {
+        let dir = broken(&env, &id, case, &sql);
+        for args in [
+            &["top", "--files", "--sort", "mtime", "--scan", &id][..],
+            &["by-type", "--scan", &id],
+            &["scans", "--check", &id],
+        ] {
+            is_index_corrupt(&env, &dir, case, args, reported);
+        }
+        render_is_index_corrupt(&env, &dir, case, &["--scan", &id], reported);
+    }
 }

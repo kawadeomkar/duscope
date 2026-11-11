@@ -948,8 +948,13 @@ fn p5_sec_04_a_merged_index_keeps_the_layout() {
     for id in 0..merged.len() {
         merged.path(id);
         merged.child_dirs(id);
+        // As a walk down the tree holds a directory's children.
+        let _ = crate::query::children(&merged, &merged.node(id)).count();
     }
     assert!(merged.failure().is_none(), "{:?}", merged.failure());
+    // As `scans --check` holds every row: dense ids, each nested where its
+    // parent's ids place it.
+    crate::check::rows_keep_the_layout(&merged).unwrap();
     let saved = super::Saved::load(&merged).unwrap();
     assert_eq!(saved.dirs.len() as u64, merged.node(0).dir_count);
 }

@@ -150,20 +150,32 @@ fn entries(node: &Node) -> u64 {
 type Named = Vec<(u32, Vec<u8>)>;
 
 /// A directory's children, its files and then its subdirectories, as
-/// (id, name), in the order both scans number them.
+/// (id, name), in the order both scans number them. Held to the layout as
+/// [`super::children`] holds them, so that the walk reads each entry once:
+/// a child that is not `dir`'s, or a last subtree that ends past `dir`'s,
+/// is the index's failed read, and the lists end there.
 fn children(view: &(impl TreeView + ?Sized), dir: u32) -> (Named, Named) {
     let node = view.node(dir);
-    let files = (dir + 1..=node.files_end)
-        .filter(|_| node.files_end > dir)
-        .map(|id| (id, view.name(id).into_owned()))
-        .collect();
+    let mut files = Vec::new();
+    for id in super::ids(view, dir + 1, node.files_end) {
+        if !super::own_child(view, dir, id, false) {
+            return (files, Vec::new());
+        }
+        files.push((id, view.name(id).into_owned()));
+    }
     // From sibling to sibling through the nodes, whose blocks a walk of the
     // whole tree has read, rather than the index's query per directory.
     let mut dirs = Vec::new();
     let mut next = node.files_end.checked_add(1);
     while let Some(id) = next.filter(|&id| id <= node.last_id) {
+        if !super::own_child(view, dir, id, true) {
+            return (files, dirs);
+        }
         dirs.push((id, view.name(id).into_owned()));
         next = view.node(id).last_id.checked_add(1);
+    }
+    if node.is_dir() && next != node.last_id.checked_add(1) {
+        super::unfilled(view, dir, node.files_end, node.last_id);
     }
     (files, dirs)
 }
