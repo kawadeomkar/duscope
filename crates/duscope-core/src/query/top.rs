@@ -59,15 +59,76 @@ impl TopQuery {
     }
 }
 
-/// The largest entries under the root of `view`.
-pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
-    if view.is_empty() {
-        return Page {
-            entries: Vec::new(),
+/// `top`'s rows, ranked and not yet built: their ids in order, what the
+/// page says of them, and what each row needs besides its entry. Rows are
+/// built one at a time from it ([`TopRows::rows`]), for a writer that
+/// streams them, or all at once ([`TopRows::page`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopRows {
+    /// The rows' ids, in order.
+    pub ids: Vec<u32>,
+    /// Rows matched before `--limit`, those of earlier pages included.
+    pub total_count: u64,
+    /// Where the next page starts, when rows remain and the verb pages.
+    pub next: Option<After>,
+    /// Whether rows remain after this page.
+    pub truncated: bool,
+    /// The ids each row was cut through, for the rows that were.
+    vias: HashMap<u32, Vec<u32>>,
+    /// The root's size, which each row's share is of.
+    root_total: u64,
+    /// The size rows are shown by.
+    size: SizeKind,
+}
+
+impl TopRows {
+    /// No rows.
+    fn none(size: SizeKind) -> TopRows {
+        TopRows {
+            ids: Vec::new(),
             total_count: 0,
             next: None,
             truncated: false,
-        };
+            vias: HashMap::new(),
+            root_total: 0,
+            size,
+        }
+    }
+
+    /// The row of `id`, one of [`TopRows::ids`].
+    pub fn row(&self, view: &(impl TreeView + ?Sized), id: u32) -> TopEntry {
+        let via = self.vias.get(&id).map(Vec::as_slice).unwrap_or_default();
+        entry(view, &view.node(id), via, self.root_total, self.size)
+    }
+
+    /// The rows in order, each built as it is read.
+    pub fn rows<'a, V: TreeView + ?Sized>(
+        &'a self,
+        view: &'a V,
+    ) -> impl Iterator<Item = TopEntry> + 'a {
+        self.ids.iter().map(move |&id| self.row(view, id))
+    }
+
+    /// The page: every row built.
+    pub fn page(self, view: &(impl TreeView + ?Sized)) -> Page<TopEntry> {
+        Page {
+            entries: self.rows(view).collect(),
+            total_count: self.total_count,
+            next: self.next,
+            truncated: self.truncated,
+        }
+    }
+}
+
+/// The largest entries under the root of `view`.
+pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
+    top_rows(view, q).page(view)
+}
+
+/// [`top`]'s rows, ranked and not yet built.
+pub fn top_rows(view: &(impl TreeView + ?Sized), q: &TopQuery) -> TopRows {
+    if view.is_empty() {
+        return TopRows::none(q.size);
     }
     let root = view.node(0);
     let after = q.after.as_ref();
@@ -130,19 +191,14 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
         (Vec::new(), 0)
     };
     let next = next_after(view, &ids, q.sort, q.size, seen, total_count);
-    let root_total = root.size(q.size);
-    let entries: Vec<_> = ids
-        .into_iter()
-        .map(|id| {
-            let via = vias.get(&id).map(Vec::as_slice).unwrap_or_default();
-            entry(view, &view.node(id), via, root_total, q.size)
-        })
-        .collect();
-    Page {
-        truncated: remain(seen, entries.len(), total_count),
-        entries,
+    TopRows {
+        truncated: remain(seen, ids.len(), total_count),
+        ids,
         total_count,
         next,
+        vias,
+        root_total: root.size(q.size),
+        size: q.size,
     }
 }
 

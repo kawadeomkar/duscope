@@ -52,11 +52,73 @@ impl StaleQuery {
     }
 }
 
+/// `stale`'s rows, ranked and not yet built: their ids in order and what
+/// the page says of them. Rows are built one at a time from it
+/// ([`StaleRows::rows`]), for a writer that streams them, or all at once
+/// ([`StaleRows::page`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StaleRows {
+    /// The rows' ids, in order.
+    pub ids: Vec<u32>,
+    /// Rows matched before `--limit`, those of earlier pages included.
+    pub total_count: u64,
+    /// Where the next page starts, when rows remain.
+    pub next: Option<After>,
+    /// Whether rows remain after this page.
+    pub truncated: bool,
+}
+
+impl StaleRows {
+    /// The row of `id`, one of [`StaleRows::ids`].
+    pub fn row(&self, view: &(impl TreeView + ?Sized), id: u32) -> StaleEntry {
+        let node = view.node(id);
+        let path_bytes = abs_path(view, id);
+        let (name, name_raw) = name_fields(&view.name(id));
+        StaleEntry {
+            path: String::from_utf8_lossy(&path_bytes).into_owned(),
+            path_bytes,
+            name,
+            name_raw,
+            kind: kind_name(node.kind),
+            allocated_bytes: node.allocated,
+            apparent_bytes: node.apparent,
+            mtime: iso8601(node.mtime_ns),
+            ctime: iso8601(node.ctime_ns),
+            atime: node.atime_ns.map(iso8601),
+            nlink: node.nlink,
+            flags: flag_names(&node),
+        }
+    }
+
+    /// The rows in order, each built as it is read.
+    pub fn rows<'a, V: TreeView + ?Sized>(
+        &'a self,
+        view: &'a V,
+    ) -> impl Iterator<Item = StaleEntry> + 'a {
+        self.ids.iter().map(move |&id| self.row(view, id))
+    }
+
+    /// The page: every row built.
+    pub fn page(self, view: &(impl TreeView + ?Sized)) -> Page<StaleEntry> {
+        Page {
+            entries: self.rows(view).collect(),
+            total_count: self.total_count,
+            next: self.next,
+            truncated: self.truncated,
+        }
+    }
+}
+
 /// The stale files under the root of `view`.
 pub fn stale(
     view: &(impl TreeView + ?Sized),
     q: &StaleQuery,
 ) -> Result<Page<StaleEntry>, CoreError> {
+    Ok(stale_rows(view, q)?.page(view))
+}
+
+/// [`stale`]'s rows, ranked and not yet built.
+pub fn stale_rows(view: &(impl TreeView + ?Sized), q: &StaleQuery) -> Result<StaleRows, CoreError> {
     if !view.full_attrs() {
         if q.atime {
             return Err(attrs_not_collected("stale --atime"));
@@ -66,12 +128,7 @@ pub fn stale(
         }
     }
     if view.is_empty() {
-        return Ok(Page {
-            entries: Vec::new(),
-            total_count: 0,
-            next: None,
-            truncated: false,
-        });
+        return Ok(StaleRows::default());
     }
     let cutoff = q.now.saturating_sub(q.older_than);
     let root = view.node(0);
@@ -109,31 +166,9 @@ pub fn stale(
         ),
     };
     let next = next_after(view, &ids, q.sort, q.size, seen, total_count);
-    let entries: Vec<_> = ids
-        .into_iter()
-        .map(|id| {
-            let node = view.node(id);
-            let path_bytes = abs_path(view, id);
-            let (name, name_raw) = name_fields(&view.name(id));
-            StaleEntry {
-                path: String::from_utf8_lossy(&path_bytes).into_owned(),
-                path_bytes,
-                name,
-                name_raw,
-                kind: kind_name(node.kind),
-                allocated_bytes: node.allocated,
-                apparent_bytes: node.apparent,
-                mtime: iso8601(node.mtime_ns),
-                ctime: iso8601(node.ctime_ns),
-                atime: node.atime_ns.map(iso8601),
-                nlink: node.nlink,
-                flags: flag_names(&node),
-            }
-        })
-        .collect();
-    Ok(Page {
-        truncated: remain(seen, entries.len(), total_count),
-        entries,
+    Ok(StaleRows {
+        truncated: remain(seen, ids.len(), total_count),
+        ids,
         total_count,
         next,
     })

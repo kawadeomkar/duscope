@@ -12,7 +12,8 @@ use duscope_core::envelope::{
 };
 use duscope_core::query::{
     self, After, ByTypeQuery, CachesQuery, Cursor, DEFAULT_MIN_SIZE, Filters, Page, Regex,
-    SizeKind, StaleQuery, TimeField, TopQuery, TreeQuery, query_hash, timegrammar,
+    SizeKind, StaleQuery, StaleRows, TimeField, TopQuery, TopRows, TreeQuery, TreeView, query_hash,
+    timegrammar,
 };
 use duscope_core::rules::Classes;
 use duscope_walk::VolumeInfo;
@@ -149,13 +150,23 @@ fn reused(saved: Source, args: &ScanArgs, output: &Output) -> Result<(), Failure
 
 /// `top`.
 pub fn top(args: &TopArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    top_written(args, index_dir, output, output.streams())
+}
+
+/// `top`, its rows streamed when `stream` ([`write_ranked`]).
+fn top_written(
+    args: &TopArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+    stream: bool,
+) -> Result<(), Failure> {
     if output.fields_first::<TopEntry>("top")? {
         return Ok(());
     }
     limit(Some(&args.query), output)?;
     let (cursor, index) = cursor_of(&args.query, &args.index)?;
     let source = source::source(&args.walk, &index, index_dir)?;
-    let (envelope, footer, source) = top_envelope(
+    let asked = top_asked(
         source,
         &args.walk,
         Some(&args.query),
@@ -165,9 +176,28 @@ pub fn top(args: &TopArgs, index_dir: Option<&Path>, output: &Output) -> Result<
         cursor.as_ref(),
         output,
     )?;
-    source.check()?;
-    output.list(&envelope, &footer)?;
+    let rows = query::top_rows(&*asked.prepared.source.view(), &asked.q);
+    let source = write_ranked(
+        asked.prepared,
+        &args.walk,
+        "top",
+        asked.listed,
+        &rows,
+        Vec::new(),
+        asked.hash.as_deref(),
+        output,
+        stream,
+    )?;
     source.finish(&args.walk, output)
+}
+
+/// What `top` (or `scan`) asks of a source: the preparation, the query,
+/// the depth the rows are listed at, and the hash a cursor carries.
+struct TopAsked {
+    prepared: Prepared,
+    q: TopQuery,
+    listed: Option<u32>,
+    hash: Option<String>,
 }
 
 /// The envelope and footer of `top` (or `scan`, whose `query` is `None`:
@@ -185,6 +215,42 @@ pub(super) fn top_envelope(
     cursor: Option<&Cursor>,
     output: &Output,
 ) -> Result<(Envelope<TopEntry>, String, Source), Failure> {
+    let asked = top_asked(
+        source,
+        walk,
+        query,
+        verb,
+        files,
+        cut_through,
+        cursor,
+        output,
+    )?;
+    let page = query::top(&*asked.prepared.source.view(), &asked.q);
+    Ok(envelope(
+        asked.prepared,
+        walk,
+        verb,
+        asked.listed,
+        page,
+        Vec::new(),
+        asked.hash.as_deref(),
+        output,
+    ))
+}
+
+/// [`TopAsked`] of `top` (or `scan`) on a source, from `cursor`'s page.
+// The verb's switches, each a flag of its own.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn top_asked(
+    source: Source,
+    walk: &WalkArgs,
+    query: Option<&QueryArgs>,
+    verb: &'static str,
+    files: bool,
+    cut_through: bool,
+    cursor: Option<&Cursor>,
+    output: &Output,
+) -> Result<TopAsked, Failure> {
     let prepared = prepare(
         source,
         walk,
@@ -224,17 +290,106 @@ pub(super) fn top_envelope(
         size: prepared.size,
         after,
     };
-    let page = query::top(&*prepared.source.view(), &q);
-    Ok(envelope(
+    Ok(TopAsked {
         prepared,
-        walk,
-        verb,
+        q,
         listed,
-        page,
-        Vec::new(),
-        hash.as_deref(),
-        output,
-    ))
+        hash,
+    })
+}
+
+/// A verb's rows, ranked, and built one at a time from their ids.
+trait Ranked {
+    /// The row a list writes.
+    type Row: Row + Hinted;
+    /// The rows' ids, in order.
+    fn ids(&self) -> &[u32];
+    /// The row of `id`.
+    fn row(&self, view: &dyn TreeView, id: u32) -> Self::Row;
+    /// The page with no row built: its count, cursor and truncation.
+    fn head(&self) -> Page<Self::Row>;
+}
+
+impl Ranked for TopRows {
+    type Row = TopEntry;
+
+    fn ids(&self) -> &[u32] {
+        &self.ids
+    }
+
+    fn row(&self, view: &dyn TreeView, id: u32) -> TopEntry {
+        TopRows::row(self, view, id)
+    }
+
+    fn head(&self) -> Page<TopEntry> {
+        Page {
+            entries: Vec::new(),
+            total_count: self.total_count,
+            next: self.next,
+            truncated: self.truncated,
+        }
+    }
+}
+
+impl Ranked for StaleRows {
+    type Row = StaleEntry;
+
+    fn ids(&self) -> &[u32] {
+        &self.ids
+    }
+
+    fn row(&self, view: &dyn TreeView, id: u32) -> StaleEntry {
+        StaleRows::row(self, view, id)
+    }
+
+    fn head(&self) -> Page<StaleEntry> {
+        Page {
+            entries: Vec::new(),
+            total_count: self.total_count,
+            next: self.next,
+            truncated: self.truncated,
+        }
+    }
+}
+
+/// Writes a verb's ranked `rows` and gives the source back. With `stream`
+/// (a format that [`Output::streams`]), each row is built as it is written
+/// and none is held, the saved scan checked before the first and after the
+/// last; otherwise every row is built first, as the envelope's entries
+/// (which the hints read), and the scan checked before they are written.
+// The parts of an envelope, each from where the verb has it.
+#[allow(clippy::too_many_arguments)]
+fn write_ranked<R: Ranked>(
+    prepared: Prepared,
+    walk: &WalkArgs,
+    verb: &'static str,
+    depth: Option<u32>,
+    rows: &R,
+    extra: Vec<Warning>,
+    hash: Option<&str>,
+    output: &Output,
+    stream: bool,
+) -> Result<Source, Failure> {
+    let mut page = rows.head();
+    if !stream {
+        let view = prepared.source.view();
+        page.entries = rows.ids().iter().map(|&id| rows.row(&*view, id)).collect();
+        drop(view);
+        let (envelope, footer, source) =
+            envelope(prepared, walk, verb, depth, page, extra, hash, output);
+        source.check()?;
+        output.list(&envelope, &footer)?;
+        return Ok(source);
+    }
+    let (mut envelope, footer, source) =
+        envelope(prepared, walk, verb, depth, page, extra, hash, output);
+    envelope.returned_count = rows.ids().len() as u64;
+    source.check()?;
+    let view = source.view();
+    let built = rows.ids().iter().map(|&id| rows.row(&*view, id));
+    output.list_rows(&envelope, built, || source.check(), &footer)?;
+    drop(view);
+    Ok(source)
 }
 
 /// `tree`.
@@ -351,6 +506,16 @@ pub fn by_type(
 
 /// `stale`.
 pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    stale_written(args, index_dir, output, output.streams())
+}
+
+/// `stale`, its rows streamed when `stream` ([`write_ranked`]).
+fn stale_written(
+    args: &StaleArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+    stream: bool,
+) -> Result<(), Failure> {
     if output.fields_first::<StaleEntry>("stale")? {
         return Ok(());
     }
@@ -404,8 +569,7 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
         size: prepared.size,
         after,
     };
-    let page: Page<StaleEntry> =
-        query::stale(&*prepared.source.view(), &q).map_err(core_failure)?;
+    let rows = query::stale_rows(&*prepared.source.view(), &q).map_err(core_failure)?;
     let mut warnings = Vec::new();
     warnings.extend(scan_age(
         prepared.now,
@@ -416,18 +580,17 @@ pub fn stale(args: &StaleArgs, index_dir: Option<&Path>, output: &Output) -> Res
     if args.atime {
         warnings.extend(prepared.source.atime_unreliable());
     }
-    let (envelope, footer, source) = envelope(
+    let source = write_ranked(
         prepared,
         &args.walk,
         "stale",
         args.query.depth,
-        page,
+        &rows,
         warnings,
         Some(&hash),
         output,
-    );
-    source.check()?;
-    output.list(&envelope, &footer)?;
+        stream,
+    )?;
     source.finish(&args.walk, output)
 }
 
@@ -958,12 +1121,138 @@ pub(super) fn lagging_atime(
 mod tests {
     use std::path::PathBuf;
 
+    use clap::Parser;
     use duscope_core::query::timegrammar;
     use duscope_walk::{Normalization, Skip, VolumeClass, VolumeInfo};
 
-    use super::{atime_unreliable, scan_age};
+    use super::{atime_unreliable, scan_age, stale_written, top_written};
+    use crate::cli::{Cli, Verb};
+    use crate::out::{Capture, Fields, Format, Output, Units};
 
     const HOUR: i64 = 3_600_000_000_000;
+
+    /// A tree of 9 directories and 90 files of assorted sizes (one
+    /// directory holding most of its parent's bytes, for cut-through),
+    /// saved in `env`'s index directory: its root and the scan's id.
+    fn saved_tree(env: &duscope_testkit::TestEnv) -> (PathBuf, String) {
+        let root = env.work_dir().canonicalize().unwrap().join("tree");
+        let dirs = [
+            "a",
+            "a/big",
+            "a/big/deeper",
+            "b",
+            "b/c",
+            "b/c/d",
+            "e e",
+            "f-g",
+            "f",
+        ];
+        for dir in dirs {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        for i in 0..90usize {
+            let dir = dirs[i % dirs.len()];
+            let size = if dir == "a/big/deeper" {
+                1 << 20
+            } else {
+                (i * 997) % 20_000
+            };
+            std::fs::write(root.join(dir).join(format!("{i:02}.txt")), vec![b'x'; size]).unwrap();
+        }
+        let mut argv: Vec<std::ffi::OsString> = ["duscope", "scan", "--save", "--json"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        argv.extend([root.clone().into(), "--index-dir".into()]);
+        argv.extend([env.index_dir().into(), "--config".into(), "none".into()]);
+        let (code, written) = crate::run_captured(argv);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&written));
+        let envelope: serde_json::Value = serde_json::from_slice(&written).unwrap();
+        (root, envelope["scan"]["id"].as_str().unwrap().to_owned())
+    }
+
+    /// An output in `format` with `fields`, `--header` and `-0` as given,
+    /// that writes to the buffer returned beside it.
+    fn captured(format: Format, fields: Option<&Fields>, header_null: bool) -> (Output, Capture) {
+        let capture = Capture::default();
+        let output = Output {
+            format,
+            color: false,
+            units: Units::default(),
+            null: header_null,
+            header: header_null,
+            quiet: true,
+            fields: fields.cloned(),
+            file: None,
+            max_chars: 0,
+            spill_dir: None,
+            capture: Some(capture.clone()),
+        };
+        (output, capture)
+    }
+
+    /// `top` and `stale`, each written collected and streamed to the same
+    /// output, give the same bytes: `ndjson` (every row, the trailer's
+    /// counts), with `--fields` and `--detail`, and `--plain` with `--all`,
+    /// with `--fields`, `--header` and `-0`, and with a limit.
+    #[test]
+    fn p2_qry_13_streamed_rows_are_the_collected_rows_byte_for_byte() {
+        let env = duscope_testkit::TestEnv::new();
+        let (root, id) = saved_tree(&env);
+        let dir = env.index_dir();
+        let named = |names: &[&str]| Fields::Named(names.iter().map(|&n| n.to_owned()).collect());
+        let verbs: [(&str, &[&str], Fields); 3] = [
+            (
+                "top",
+                &["--files"],
+                named(&["path", "allocated_bytes", "kind"]),
+            ),
+            (
+                "top",
+                &["--depth", "2"],
+                named(&["via", "file_count", "path"]),
+            ),
+            (
+                "stale",
+                &["--older-than", "0h", "--min-size", "0"],
+                named(&["mtime", "nlink", "path"]),
+            ),
+        ];
+        for (verb, flags, fields) in &verbs {
+            let shapes: [(Format, Option<&Fields>, bool, &[&str]); 6] = [
+                (Format::Ndjson, None, false, &[]),
+                (Format::Ndjson, Some(fields), false, &[]),
+                (Format::Ndjson, Some(&Fields::Detail), false, &[]),
+                (Format::Plain, None, false, &["--all"]),
+                (Format::Plain, Some(fields), true, &["--all"]),
+                (Format::Plain, None, false, &["--limit", "3"]),
+            ];
+            for (format, chosen, header_null, extra) in shapes {
+                let mut line = vec!["duscope", verb, root.to_str().unwrap(), "--scan", &id];
+                line.extend_from_slice(flags);
+                line.extend_from_slice(extra);
+                let cli = Cli::try_parse_from(&line).unwrap();
+                let written = |stream: bool| {
+                    let (output, capture) = captured(format, chosen, header_null);
+                    match &cli.verb {
+                        Some(Verb::Top(args)) => top_written(args, Some(&dir), &output, stream),
+                        Some(Verb::Stale(args)) => stale_written(args, Some(&dir), &output, stream),
+                        _ => unreachable!(),
+                    }
+                    .unwrap();
+                    capture.take()
+                };
+                let (collected, streamed) = (written(false), written(true));
+                let rows = collected.iter().filter(|&&b| b == b'\n' || b == 0).count();
+                assert!(rows >= 3, "{line:?} {format:?}: {rows} lines");
+                assert_eq!(
+                    String::from_utf8_lossy(&streamed),
+                    String::from_utf8_lossy(&collected),
+                    "{line:?} {format:?} {chosen:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn p1_cli_03_stale_warns_scan_age_past_a_tenth_of_its_window() {

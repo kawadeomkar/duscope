@@ -55,12 +55,12 @@ pub use resolve::{
     Resolved, ScanQuery, ScanSelector, index_files, resolve_scan, short_id, shortest_prefix, under,
 };
 pub use sql::{SqlQuery, human_size, sql};
-pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, stale};
+pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, StaleRows, stale, stale_rows};
 pub use summary::{
     SubvolumeBytes, SummaryBytes, VolumeBytes, VolumeRoot, VolumeUse, referenced, shares,
     subvolume_shares, summary, unaccounted,
 };
-pub use top::{TopQuery, top};
+pub use top::{TopQuery, TopRows, top, top_rows};
 pub use tree::{TreeQuery, tree};
 
 /// One entry of a scan, as the queries read it.

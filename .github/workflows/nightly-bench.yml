@@ -7,9 +7,10 @@
 # of the competitors. The result files go to the `bench-results` branch as
 # <date>-<platform>.json, never to main, and bench/compare.py reads baselines from
 # there. Each bench job then checks the binary's du parity on a system tree
-# (/Applications, /usr) and its peak RSS on the trees (P1-TEST-01), and holds the
-# fixture tree to P0-TEST-01's 30-second build budget, which these quiet machines
-# can assert and shared CI runners cannot.
+# (/Applications, /usr), its peak RSS on the trees (P1-TEST-01) and that of
+# `top` and `stale` with --all on T2 (P2-QRY-13), and holds the fixture tree to
+# P0-TEST-01's 30-second build budget, which these quiet machines can assert and
+# shared CI runners cannot.
 #
 # bench-macos is paused: it is the author's laptop, and a full run would take
 # about three hours of it. Scheduled runs measure bench-linux alone until a dedicated
@@ -378,6 +379,15 @@ jobs:
           DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
             caffeinate -is cargo test --release --locked -p duscope --test suite \
             -- --ignored --exact --nocapture p1_test_01_peak_rss_per_entry_on_the_bench_trees
+      # P2-QRY-13: `top --files --all` and `stale --all` write their rows as
+      # they build them, so their peak RSS per entry of T2 stays within budget.
+      - name: Streamed --all within budget
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
+            caffeinate -is cargo test --release --locked -p duscope --test suite \
+            -- --ignored --exact --nocapture p2_qry_13_all_streams_its_rows_within_a_peak_rss_budget_on_t2
       # P0-TEST-01's acceptance check, here because a quiet machine can hold the
       # fixture tree to its budget and shared CI runners cannot (they report the
       # time only): the debug build `just fixtures` runs, in under 30 s.
@@ -548,6 +558,15 @@ jobs:
           DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
             cargo test --release --locked -p duscope --test suite \
             -- --ignored --exact --nocapture p1_test_01_peak_rss_per_entry_on_the_bench_trees
+      # P2-QRY-13: `top --files --all` and `stale --all` write their rows as
+      # they build them, so their peak RSS per entry of T2 stays within budget.
+      - name: Streamed --all within budget
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
+            cargo test --release --locked -p duscope --test suite \
+            -- --ignored --exact --nocapture p2_qry_13_all_streams_its_rows_within_a_peak_rss_budget_on_t2
       # P0-TEST-01's acceptance check, here because a quiet machine can hold the
       # fixture tree to its budget and shared CI runners cannot (they report the
       # time only): the debug build `just fixtures` runs, in under 30 s.
