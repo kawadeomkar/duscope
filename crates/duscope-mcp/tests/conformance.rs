@@ -1915,6 +1915,85 @@ fn p5_mcp_01_a_real_call_past_its_deadline_before_it_acts_moves_nothing() {
     }
 }
 
+#[test]
+fn p5_mcp_01_a_real_call_queued_when_the_input_ends_moves_nothing() {
+    // The client writes a statement that keeps the worker busy until the
+    // sandbox's 5-second deadline, a real delete behind it, and closes the
+    // binary's input: the delete starts after the input has ended, when the
+    // client may have gone, so it moves nothing. Both are still answered.
+    // The lines are written here rather than through rmcp's client, which
+    // cannot close its output and go on reading.
+    let env = TestEnv::new();
+    let root = delete_tree(&env);
+    let (one, one_frees) = explained(&env, &root.join("one.bin"));
+    let (two, two_frees) = explained(&env, &root.join("dir"));
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let call = |id: u64, name: &str, arguments: Value| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"_meta": meta, "name": name, "arguments": arguments},
+        })
+    };
+    let input = format!(
+        "{}\n{}\n",
+        call(1, "duscope_query", json!({"sql": ENDLESS})),
+        call(
+            2,
+            "duscope_delete",
+            json!({
+                "items": [item(&one, one_frees), item(&two, two_frees)],
+                "dry_run": false,
+            })
+        ),
+    );
+    let stderr = env.root().join("server.log");
+    let mut child = env
+        .cmd()
+        .arg("mcp")
+        .args(roots(&root, &["--allow-delete", "--log-level", "debug"]))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(File::create(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    // Written and closed at once: the reader meets the end of the input long
+    // before the statement's 5 seconds are up.
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(input.as_bytes()).unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let log = fs::read_to_string(&stderr).unwrap();
+    assert!(out.status.success(), "{log}");
+    let answers: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(answers.len(), 2, "{answers:?}\n{log}");
+    assert_eq!(answers[0]["id"], 1);
+    assert_eq!(
+        answers[0]["result"]["structuredContent"]["error"]["code"], "sql_timeout",
+        "{}",
+        answers[0]
+    );
+    let deleted = &answers[1];
+    assert_eq!(deleted["id"], 2);
+    assert_eq!(deleted["result"]["isError"], true, "{deleted}");
+    let value = &deleted["result"]["structuredContent"];
+    assert_eq!(value["error"]["code"], "interrupted", "{deleted}\n{log}");
+    assert_eq!(value["result"]["trashed_count"], 0, "{value}");
+    assert!(
+        log.contains("the tool call was stopped before clean acted"),
+        "{log}"
+    );
+    assert_untouched(&env, &root);
+}
+
 /// Has rmcp's client, speaking `lifecycle`, move a file and a directory of a
 /// fresh tree to the test's own Trash, and checks what moved.
 #[cfg(target_os = "linux")]

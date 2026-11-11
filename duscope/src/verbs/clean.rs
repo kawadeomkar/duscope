@@ -26,8 +26,9 @@
 //! `--yes` hint, since a client asks for it as a plan, not a confirmation.
 //! Under a tool call, acting claims the call's point of no return
 //! (`CallSignals::commit`) just before anything moves: a call cancelled,
-//! past its deadline or whose client has gone by then moves nothing
-//! (`interrupted`), and one committed runs to its end.
+//! past its deadline or whose client has gone by then (its input ended, or
+//! a write to it failed) moves nothing (`interrupted`), and one committed
+//! runs to its end.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;

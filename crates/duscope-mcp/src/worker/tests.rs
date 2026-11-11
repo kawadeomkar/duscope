@@ -179,6 +179,8 @@ struct TestRunner {
     /// once a verb has claimed its call's point of no return.
     log: Arc<Mutex<Vec<String>>>,
     latch: Arc<Latch>,
+    /// The signals of each call a verb ran for, in order.
+    calls: Arc<Mutex<Vec<CallSignals>>>,
 }
 
 impl TestRunner {
@@ -186,6 +188,7 @@ impl TestRunner {
         TestRunner {
             log: Arc::default(),
             latch: Arc::default(),
+            calls: Arc::default(),
         }
     }
 
@@ -218,6 +221,7 @@ impl Runner for TestRunner {
 
     fn run_call(&self, invocation: &Invocation, call: &CallSignals) -> Outcome {
         let label = invocation.args[0].to_string_lossy().into_owned();
+        self.calls.lock().unwrap().push(call.clone());
         self.note(format!("start {label}"));
         let stopped = call.cancel.load(Ordering::Relaxed);
         let waited = match invocation.verb {
@@ -1038,5 +1042,55 @@ fn p5_mcp_01_a_gone_client_stops_a_call_before_its_point_of_no_return_not_after(
     assert_eq!(
         runner.log(),
         ["start first", "committed first", "end first"]
+    );
+}
+
+#[test]
+fn p5_mcp_01_the_input_ending_stops_every_call_before_its_point_of_no_return() {
+    // The input ends while a call that would move things waits before its
+    // point of no return, a second waits in the queue behind it, and a read
+    // behind that: the client may have gone, so neither of the first two may
+    // commit. All three still run and are answered in order; the read, which
+    // has no point of no return, as before.
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_commit_late", "first"));
+    client.send(&call(2, "test_commit_late", "second"));
+    client.send(&call(3, "test_echo", "third"));
+    runner.wait_for("start first");
+    drop(client.input.take());
+    // The latch opens only once the reader has met the end of the input.
+    let first = runner.calls.lock().unwrap()[0].clone();
+    let started = Instant::now();
+    while first.stage.load(Ordering::Acquire) != STOPPED {
+        assert!(
+            started.elapsed() < PATIENCE,
+            "the end of the input left the running call free to commit: {:?}",
+            runner.log()
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    // Its point of no return is gone, not the call: nothing tells a verb
+    // that reads to stop.
+    assert!(!first.cancel.load(Ordering::Relaxed));
+    runner.latch.open();
+    let answers = client.close();
+    let ids: Vec<&Value> = answers.iter().map(|answer| &answer["id"]).collect();
+    assert_eq!(ids, [1, 2, 3], "{answers:?}");
+    for answer in &answers[..2] {
+        assert_eq!(answer["result"]["isError"], true, "{answer}");
+    }
+    assert_eq!(answers[2]["result"]["isError"], false, "{}", answers[2]);
+    assert_eq!(
+        runner.log(),
+        [
+            "start first",
+            "stopped first",
+            "start second",
+            "stopped second",
+            "start third",
+            "end third"
+        ]
     );
 }

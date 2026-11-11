@@ -48,8 +48,15 @@
 //! can no longer be cancelled.
 //!
 //! When the input ends, the worker answers the calls already received, then
-//! stops. Once a write to the client has failed, from any thread, nothing
-//! more can reach it: the worker starts no request still queued, dropping
+//! stops. A client whose input has ended may have gone, so from then on
+//! none of those calls may pass its point of no return: the running call,
+//! unless it is past it already, and each call still queued find their
+//! call stopped when they reach it, act on nothing, and are answered with
+//! what their verbs did; a call that never reaches one, a dry run or a
+//! read, is answered as before.
+//!
+//! Once a write to the client has failed, from any thread, nothing more
+//! can reach it: the worker starts no request still queued, dropping
 //! each unanswered, and a running call whose progress cannot be sent is
 //! cancelled, as is the running call when the reader stops on the failure
 //! (or meets the end of the input after it), unless it is past its point of
@@ -158,6 +165,16 @@ impl CallSignals {
             self.cancel.store(true, Ordering::Relaxed);
         }
         stopped
+    }
+
+    /// Stops the call's point of no return, not the call: its verb runs on,
+    /// and the call is answered with its result, but a [`commit`] now fails
+    /// and the verb changes nothing. True when it is stopped, now or before;
+    /// false when the call is committed, and runs to its end.
+    ///
+    /// [`commit`]: CallSignals::commit
+    fn forbid_commit(&self) -> bool {
+        self.claim(STOPPED)
     }
 
     /// Moves a running call to `stage`, by one compare-and-swap: whether
@@ -390,7 +407,27 @@ impl Worker {
     }
 
     /// Answers the requests already queued, then stops the worker thread.
+    /// The client's input has ended, so it may have gone: neither the
+    /// running call nor a queued one may pass its point of no return from
+    /// now on, and a verb that tries acts on nothing. Each is still run and
+    /// answered; the running call past its point of no return runs to its
+    /// end.
     pub(crate) fn finish(mut self) {
+        let state = self.shared.state();
+        let queued = state.queue.iter().filter_map(|job| match job {
+            Job::Call(call) => Some(call),
+            Job::Answer(..) => None,
+        });
+        for call in state.running.iter().chain(queued) {
+            if !call.signals.forbid_commit() {
+                debug!(
+                    "request {} is past its point of no return: it runs to its end",
+                    call.id
+                );
+            }
+        }
+        drop(state);
+        debug!("the input ended: no call left may pass its point of no return");
         self.stop();
     }
 
