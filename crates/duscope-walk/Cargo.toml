@@ -20,9 +20,11 @@ libc.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
-# The macOS Trash (NSFileManager); Linux's is in-tree (platform/linux/trash.rs).
+# The macOS Trash, NSFileManager's trashItemAtURL (platform/macos/trash.rs);
+# Linux's is in-tree (platform/linux/trash.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
-trash.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
 
 [dev-dependencies]
 duscope-testkit.workspace = true

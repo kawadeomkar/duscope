@@ -1,11 +1,13 @@
 //! `clean`'s platform facts on macOS: the Trash, through `NSFileManager`'s
-//! `trashItemAtURL` (the `trash` crate), which moves an item into its
-//! volume's Trash (the user's for the startup volume, `.Trashes` on another)
-//! and never removes anything; and whether an entry is a firmlink.
+//! `trashItemAtURL:resultingItemURL:error:` (bound by `objc2-foundation`),
+//! which moves an item into its volume's Trash (the user's for the startup
+//! volume, `.Trashes` on another) and never removes anything; and whether an
+//! entry is a firmlink.
 
 use std::path::Path;
 
-use trash::macos::{DeleteMethod, TrashContextExtMacos};
+use objc2::rc::autoreleasepool;
+use objc2_foundation::{NSFeatureUnsupportedError, NSFileManager, NSInteger, NSString, NSURL};
 
 use super::volume;
 use crate::TrashError;
@@ -37,8 +39,8 @@ pub(in crate::platform) fn trash(
             )));
         }
     }
-    // The crate percent-encodes a path that is not UTF-8 into another path,
-    // which could name another entry: such a path is never handed to it.
+    // An `NSString` holds text: a path that is not UTF-8 would reach
+    // `NSFileManager` changed, naming another entry or none, so it is refused.
     if path.to_str().is_none() {
         return Err(TrashError::Failed(format!(
             "cannot move {}: the Trash takes only UTF-8 paths",
@@ -66,21 +68,65 @@ pub(in crate::platform) fn trash(
             }
         }
     }
-    let mut context = trash::TrashContext::default();
-    // Not the crate's default, Finder through osascript, which needs a
-    // session with Finder running and plays its sound.
-    context.set_delete_method(DeleteMethod::NsFileManager);
-    context.delete(path).map_err(|e| {
-        // The crate passes on NSFileManager's localized description only, not
-        // its code: one about permission (a protected folder, in English) is a
-        // failure to move, any other that the volume's Trash took nothing.
-        let message = e.to_string();
-        if message.to_lowercase().contains("permission") {
-            TrashError::Failed(message)
-        } else {
-            TrashError::Unavailable(message)
-        }
+    move_item(path)
+}
+
+/// The value of Foundation's `NSCocoaErrorDomain`, the domain of
+/// `NSFileManager`'s own errors.
+const COCOA_ERROR_DOMAIN: &str = "NSCocoaErrorDomain";
+
+/// Moves `path` with `trashItemAtURL:resultingItemURL:error:`. A refusal is
+/// told apart by its error's domain and code ([`classify`]), never by its
+/// message, which Foundation words, and translates, as it sees fit.
+fn move_item(path: &Path) -> Result<(), TrashError> {
+    let Some(text) = url_text(path) else {
+        return Err(TrashError::Failed(format!(
+            "cannot move {}: it names no entry",
+            path.display()
+        )));
+    };
+    // What Foundation autoreleases during the call is released when it
+    // returns, on whichever thread it runs.
+    autoreleasepool(|_| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(text));
+        NSFileManager::defaultManager()
+            .trashItemAtURL_resultingItemURL_error(&url, None)
+            .map_err(|error| {
+                let domain = error.domain().to_string();
+                let code = error.code();
+                let description = error.localizedDescription().to_string();
+                let message = format!(
+                    "cannot move {}: {} ({domain} {code})",
+                    path.display(),
+                    description.strip_suffix('.').unwrap_or(&description)
+                );
+                classify(&domain, code, message)
+            })
     })
+}
+
+/// `path` as the text an `NSURL` is made from, when it is UTF-8 and ends in
+/// a name. "", "/" and a path ending in ".." end in none: they are refused
+/// rather than handed to `NSFileManager` as whatever folder they lead to.
+fn url_text(path: &Path) -> Option<&str> {
+    path.file_name()?;
+    path.to_str()
+}
+
+/// What a refused move is, by its `NSError`'s domain and code.
+/// `NSFeatureUnsupportedError` (3328) of the Cocoa domain says the volume has
+/// no Trash (Apple's `FoundationErrors.h`: "some volumes may not support a
+/// Trash folder"; a read-only volume answers it): [`TrashError::Unavailable`],
+/// whose hint names `--permanent`. Anything else is [`TrashError::Failed`]:
+/// no permission (513, a locked file's too; 257), no such file (4), a Trash
+/// that cannot be made (512), and any code not known here, so that no error
+/// unforeseen suggests deleting for good.
+fn classify(domain: &str, code: NSInteger, message: String) -> TrashError {
+    if domain == COCOA_ERROR_DOMAIN && code == NSFeatureUnsupportedError {
+        TrashError::Unavailable(message)
+    } else {
+        TrashError::Failed(message)
+    }
 }
 
 /// Whether `path` is a firmlink of the System volume, by the system's table
@@ -89,3 +135,6 @@ pub(in crate::platform) fn trash(
 pub(in crate::platform) fn firmlink(path: &Path) -> bool {
     super::firmlinks().iter().any(|link| link.source == path)
 }
+
+#[cfg(test)]
+mod tests;
