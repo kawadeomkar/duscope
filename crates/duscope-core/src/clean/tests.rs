@@ -20,9 +20,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use duscope_testkit::TestEnv;
-use duscope_walk::{Attrs, RemoveError, WalkOptions, walk};
+use duscope_walk::{Attrs, RemoveError, TrashError, WalkOptions, walk};
 
-use super::{CleanItem, Method, clean_execute, clean_plan, removal_error, within_one_percent};
+use super::{
+    CleanItem, Method, clean_execute, clean_plan, removal_error, trash_error, within_one_percent,
+};
 use crate::CoreError;
 use crate::arena::Arena;
 use crate::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
@@ -460,6 +462,40 @@ fn p5_core_03_a_directory_whose_mount_cannot_be_told_is_refused() {
                 .ends_with("so it and the directories above it in /home/u/chroot were left"),
         "{}",
         error.message
+    );
+}
+
+#[test]
+fn p5_core_05_a_move_to_the_trash_that_finds_the_item_changed_is_path_changed() {
+    // `duscope-walk` checks the item as it moves it, and names the item or
+    // the directory on the way to it that was replaced: either way the item
+    // is not what the plan saw, and a new plan is the answer.
+    let item = "/home/u/proj/target";
+    for path in [PathBuf::from(item), PathBuf::from("/home/u/proj")] {
+        let error = trash_error(item, TrashError::Changed { path });
+        assert_eq!(
+            (error.code, error.retryable, error.fixable_by),
+            ("path_changed", true, "agent")
+        );
+        assert_eq!(
+            error.message,
+            format!("{item} is not what the plan saw: it has gone or been replaced")
+        );
+        assert_eq!(
+            error.hint.as_deref(),
+            Some("Run duscope clean again to plan what is there now")
+        );
+    }
+    let error = trash_error(item, TrashError::Unavailable("no Trash here".to_owned()));
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        ("trash_unavailable", "no Trash here")
+    );
+    assert!(error.hint.unwrap().contains("--permanent"));
+    let error = trash_error(item, TrashError::Failed("cannot move it".to_owned()));
+    assert_eq!(
+        (error.code, error.message.as_str(), error.hint),
+        ("io_error", "cannot move it", None)
     );
 }
 

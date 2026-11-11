@@ -296,6 +296,8 @@ pub(crate) fn rename_checked(
         }
         Err(e) => return Err(RenameError::Io(e)),
     }
+    #[cfg(test)]
+    hook::moved();
     let moved = super::with_c_name(to.1, |c_name| stat_at(to.0, c_name));
     if moved.is_ok_and(|stat| stat.ident() == expect) {
         return Ok(());
@@ -342,6 +344,10 @@ fn renameat2_noreplace(
     to: BorrowedFd<'_>,
     new: &CStr,
 ) -> io::Result<()> {
+    #[cfg(test)]
+    if hook::no_noreplace() {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
     super::retry(|| {
         // The system call itself, as for statx: the musl that release
         // builds link statically may have no wrapper.
@@ -946,9 +952,9 @@ fn mount_point_under(dir: &Path) -> io::Result<Option<PathBuf>> {
 }
 
 /// A test's hook into a removal or a move to the Trash, called with each
-/// path just before it is opened, unlinked or renamed, so a test can change
-/// the tree at that moment: the race they guard against, made to happen
-/// every time.
+/// path just before it is opened, unlinked or renamed (and, on Linux, just
+/// after a rename), so a test can change the tree at that moment: the race
+/// they guard against, made to happen every time.
 #[cfg(test)]
 pub(crate) mod hook {
     use std::cell::RefCell;
@@ -982,6 +988,69 @@ pub(crate) mod hook {
                 step(path);
             }
         });
+    }
+
+    #[cfg(target_os = "linux")]
+    type Moved = Box<dyn FnMut()>;
+
+    #[cfg(target_os = "linux")]
+    thread_local! {
+        static MOVED: RefCell<Option<Moved>> = const { RefCell::new(None) };
+        static NO_NOREPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Calls `moved` on this thread just after a rename into the Trash has
+    /// moved an entry, before what moved is read again, until the returned
+    /// guard drops.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn on_moved(moved: impl FnMut() + 'static) -> MovedGuard {
+        MOVED.with(|m| *m.borrow_mut() = Some(Box::new(moved)));
+        MovedGuard
+    }
+
+    /// Takes the hook away when dropped.
+    #[cfg(target_os = "linux")]
+    pub(crate) struct MovedGuard;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for MovedGuard {
+        fn drop(&mut self) {
+            MOVED.with(|m| *m.borrow_mut() = None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn moved() {
+        MOVED.with(|m| {
+            if let Some(moved) = m.borrow_mut().as_mut() {
+                moved();
+            }
+        });
+    }
+
+    /// Makes `renameat2` refuse `RENAME_NOREPLACE` with `EINVAL` on this
+    /// thread, as NFS, or FUSE without `RENAME2`, does, until the returned
+    /// guard drops.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn without_noreplace() -> NoreplaceGuard {
+        NO_NOREPLACE.with(|n| n.set(true));
+        NoreplaceGuard
+    }
+
+    /// Gives `renameat2` its flag back when dropped.
+    #[cfg(target_os = "linux")]
+    pub(crate) struct NoreplaceGuard;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for NoreplaceGuard {
+        fn drop(&mut self) {
+            NO_NOREPLACE.with(|n| n.set(false));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn no_noreplace() -> bool {
+        NO_NOREPLACE.with(std::cell::Cell::get)
     }
 
     /// What the kernel answers a removal, as a test makes it: an older or
