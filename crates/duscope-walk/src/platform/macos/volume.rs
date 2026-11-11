@@ -45,6 +45,52 @@ pub(in crate::platform) fn mount_info(path: &Path, dev: u64) -> io::Result<Volum
     }
 }
 
+/// The mount point nearest `dir` at it or under it in the kernel's record
+/// of its mounts (`getfsstat(2)` with `MNT_NOWAIT`, as `getmntinfo(3)` reads
+/// it), read now, without asking any volume. `dir` is absolute and resolved.
+///
+/// # Errors
+///
+/// When the record cannot be read, or holds no mount holding `dir`.
+pub(in crate::platform) fn mount_point_under(dir: &Path) -> io::Result<Option<PathBuf>> {
+    let points: Vec<PathBuf> = ffi::mounted_volumes()?
+        .iter()
+        .map(|fs| PathBuf::from(OsStr::from_bytes(&c_chars(&fs.f_mntonname))))
+        .collect();
+    nearest_under(firmlinks(), &points, dir)
+}
+
+/// The mount point of `points` nearest `dir` at it or under it, comparing
+/// whole components. A directory of the Data volume has two paths, by the
+/// firmlinks of `table` and under the volume's mount point, and a mount
+/// point is recorded by the one it was mounted at (`/private/tmp/a/m`, or
+/// `/System/Volumes/Data/private/tmp/a/m`): `dir` is compared in both.
+fn nearest_under(
+    table: &[Firmlink],
+    points: &[PathBuf],
+    dir: &Path,
+) -> io::Result<Option<PathBuf>> {
+    let mut spellings = vec![dir.to_owned()];
+    if let Some((through, data)) = data_paths(table, dir) {
+        spellings.extend(through);
+        spellings.push(data);
+    }
+    if !points
+        .iter()
+        .any(|point| spellings.iter().any(|path| path.starts_with(point)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the mount table lists no mount holding the directory",
+        ));
+    }
+    Ok(points
+        .iter()
+        .filter(|point| spellings.iter().any(|path| point.starts_with(path)))
+        .min_by_key(|point| point.components().count())
+        .cloned())
+}
+
 /// A volume record from its `statfs`, case sensitivity not read.
 fn describe(fs: &libc::statfs, dev: u64) -> VolumeInfo {
     let block = u64::from(fs.f_bsize);
@@ -265,10 +311,72 @@ fn app_name(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{app_name, full_disk_access_missing, host_app, reaches_by, refused};
+    use super::{app_name, full_disk_access_missing, host_app, nearest_under, reaches_by, refused};
     use crate::WalkOptions;
+
+    #[test]
+    fn p5_core_04_a_mount_point_is_found_under_a_folder_by_either_of_its_paths() {
+        let table: Vec<super::Firmlink> = [b"/Users\tUsers".as_slice(), b"/private\tprivate"]
+            .into_iter()
+            .filter_map(super::Firmlink::parse)
+            .collect();
+        let points: Vec<PathBuf> = [
+            "/",
+            "/dev",
+            "/System/Volumes/Data",
+            "/System/Volumes/VM",
+            // Mounted at the firmlink's path, and at the Data volume's.
+            "/private/tmp/a/m",
+            "/System/Volumes/Data/Users/u/b/deep/m",
+            "/Volumes/USB",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        let under = |dir: &str| {
+            nearest_under(&table, &points, Path::new(dir))
+                .unwrap()
+                .map(|p| p.to_string_lossy().into_owned())
+        };
+        // A folder by either path finds the mount recorded by the other.
+        for dir in ["/private/tmp/a", "/System/Volumes/Data/private/tmp/a"] {
+            assert_eq!(under(dir).as_deref(), Some("/private/tmp/a/m"), "{dir}");
+        }
+        for dir in ["/Users/u/b", "/System/Volumes/Data/Users/u/b", "/Users/u"] {
+            assert_eq!(
+                under(dir).as_deref(),
+                Some("/System/Volumes/Data/Users/u/b/deep/m"),
+                "{dir}"
+            );
+        }
+        // The mount point itself, and the nearest of several under a folder.
+        assert_eq!(
+            under("/private/tmp/a/m").as_deref(),
+            Some("/private/tmp/a/m")
+        );
+        assert_eq!(
+            under("/System/Volumes").as_deref(),
+            Some("/System/Volumes/Data")
+        );
+        // Whole components, and folders that hold none.
+        for dir in ["/private/tmp/ab", "/private/tmp/a/n", "/Users/v", "/opt/x"] {
+            assert_eq!(under(dir), None, "{dir}");
+        }
+        // A table with no mount holding the folder is not trusted.
+        assert!(nearest_under(&table, &points[4..], Path::new("/opt/x")).is_err());
+        // The kernel's own record holds / and what is mounted under
+        // /System/Volumes, and nothing under a fresh folder.
+        let env = duscope_testkit::TestEnv::new();
+        let fresh = std::fs::canonicalize(env.tmp_dir()).unwrap();
+        assert_eq!(super::mount_point_under(&fresh).unwrap(), None);
+        assert!(
+            super::mount_point_under(Path::new("/System/Volumes"))
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn p5_walk_03_the_probe_needs_both_folders_refused() {

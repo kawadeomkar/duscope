@@ -2281,6 +2281,49 @@ fn p5_core_04_an_entry_changed_since_the_scan_is_path_changed() {
 }
 
 #[test]
+fn p5_core_04_a_call_past_its_deadline_stops_the_walk_its_plan_makes() {
+    // A deadline of 0 ms passes as the call starts: the walk that measures
+    // a folder of many folders stops with the call, rather than measuring on
+    // for no one while the server's one worker waits.
+    let [(lifecycle, version), _] = revisions();
+    let env = TestEnv::new();
+    let many = env
+        .work_dir()
+        .canonicalize()
+        .unwrap()
+        .join("trash-tree/dir/many");
+    for i in 0..2000 {
+        fs::create_dir_all(many.join(format!("{i:04}"))).unwrap();
+    }
+    let root = delete_tree(&env);
+    let (dir, dir_frees) = explained(&env, &root.join("dir"));
+    let arguments = json!({"items": [item(&dir, dir_frees)]});
+    let ((stopped, next), transcript) = session(
+        spawn(
+            &env,
+            &roots(&root, &["--allow-delete", "--log-level", "debug"]),
+            &[("DUSCOPE_TEST_MCP_DEADLINE_MS", "0")],
+        ),
+        lifecycle,
+        version,
+        |client, _| async move {
+            let (_, stopped) = call(&client, "duscope_delete", &arguments).await;
+            // The next call runs once the first call's verb has returned.
+            let (_, next) = call(&client, "duscope_scans", &json!({})).await;
+            ((stopped, next), client)
+        },
+    );
+    assert_eq!(error_code(&stopped), "deadline_exceeded", "{stopped:?}");
+    assert_eq!(error_code(&next), "deadline_exceeded", "{next:?}");
+    assert!(
+        transcript.stderr.contains("while it planned"),
+        "{}",
+        transcript.stderr
+    );
+    assert_untouched(&env, &root);
+}
+
+#[test]
 fn p5_mcp_01_an_item_whose_folder_became_a_link_out_of_the_roots_is_refused() {
     for (lifecycle, version) in revisions() {
         let env = TestEnv::new();

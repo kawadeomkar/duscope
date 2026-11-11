@@ -129,7 +129,8 @@ pub enum Ended {
 /// What the viewer keeps across a reload, the view it ran on gone: the
 /// view, the sort, the mask, the colours and the cursor as paths, the marks
 /// as absolute paths, each kept only where the new scan holds the same
-/// path. What is freed goes: the new scan measures it.
+/// path, and the count of the mark pane's plans. What is freed goes: the
+/// new scan measures it.
 #[derive(Debug)]
 pub struct Carried {
     tab: Tab,
@@ -148,6 +149,10 @@ pub struct Carried {
     /// The marks, absolute.
     marks: Vec<Vec<u8>>,
     session: Session,
+    /// How many panes have asked for a plan: a plan given up on before the
+    /// reload still answers, on the terminal session's channel, under its
+    /// number, which no pane of the new viewer may take for its own.
+    plans: u64,
 }
 
 /// What the viewer moved to the Trash this session, which the binary prints
@@ -299,7 +304,8 @@ pub struct App<'a> {
     freed: Freed,
     /// `D`: the mark pane, while it is open.
     pane: Option<mark::Pane>,
-    /// How many panes have asked for a plan, which numbers each one.
+    /// How many panes have asked for a plan, which numbers each one; kept
+    /// across a reload, as the plans' channel is.
     plans: u64,
     /// The last click, which a second one on its cell makes a double click.
     clicks: Clicks,
@@ -507,6 +513,7 @@ impl<'a> App<'a> {
             cursor: self.cursor.paths(self.view),
             marks: self.marks.paths(self.view),
             session: self.session,
+            plans: self.plans,
         }
     }
 
@@ -529,6 +536,7 @@ impl<'a> App<'a> {
             self.opts.pack = pack;
         }
         self.session = carried.session;
+        self.plans = carried.plans;
         self.cursor.set_labels(self.labels);
         self.cursor.restore(self.view, &carried.cursor);
         let dropped = self.marks.restore(self.view, &carried.marks);

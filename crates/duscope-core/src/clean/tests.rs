@@ -443,9 +443,10 @@ fn p5_core_03_a_directory_whose_mount_cannot_be_told_is_refused() {
         "{}",
         error.message
     );
+    // The Trash refuses a directory whose mounts cannot be told too.
     assert_eq!(
         error.hint.as_deref(),
-        Some("Rerun duscope clean without --permanent to move it to the Trash instead")
+        Some("Run duscope clean again where the system's mount table can be read")
     );
     // A directory under it: it stays with the directories above it.
     let error = removal_error(item, &unknown(&item.join("home/data")));
@@ -1105,4 +1106,117 @@ fn p5_core_04_a_plan_given_up_on_never_reads_as_made() {
     let stop = Arc::new(AtomicBool::new(true));
     let made = super::clean_plan_until(&[item(root.join("dir"))], &index, &q, Method::Trash, &stop);
     assert!(matches!(made, Err(CoreError::PlanStopped)), "{made:?}");
+}
+
+#[test]
+fn p5_core_04_a_walk_keeps_only_the_paths_that_can_still_match() {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("wide");
+    // One folder the scan did not enter, two deep, with folders in it, and
+    // many folders beside it that lead to none.
+    for i in 0..10 {
+        fs::create_dir_all(root.join(format!("x/excluded/in{i}"))).unwrap();
+    }
+    for i in 0..300 {
+        fs::create_dir_all(root.join(format!("s{i:03}/t"))).unwrap();
+    }
+    fs::write(root.join("x/excluded/in0/blob"), vec![1u8; 8192]).unwrap();
+    let unentered = HashSet::from([b"x/excluded".to_vec()]);
+    let walk = super::walked(&root, &unentered, &Arc::default());
+    assert!(!walk.failed);
+    // What lies under it is left out of the tally, and counted apart.
+    assert_eq!(walk.tally.dirs, 1 + 2 + 600);
+    assert_eq!(walk.tally.files, 0);
+    assert!(walk.unentered >= 8192, "{walk:?}");
+    // Kept at once: the paths that lead to it and the folders under it
+    // being read, not a path for every folder the walk met.
+    assert!(walk.kept_peak <= 16, "{walk:?}");
+}
+
+/// A disk image a test attached at its mount point, detached when dropped.
+#[cfg(target_os = "macos")]
+struct Attached<'a>(&'a TestEnv, PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Attached<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .command("hdiutil")
+            .args(["detach", "-force"])
+            .arg(&self.1)
+            .output();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_core_04_macos_a_change_under_a_future_change_time_is_seen() {
+    use std::time::SystemTime;
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    // FAT has no change time of its own: macOS gives its modification time,
+    // which a program sets, so an entry's change time can lie in the future.
+    let work = fs::canonicalize(env.tmp_dir()).unwrap().join("fat");
+    let mount = work.join("mnt");
+    fs::create_dir_all(&mount).unwrap();
+    let image = work.join("fat.dmg");
+    env.hdiutil(&[
+        &"create",
+        &"-ov",
+        &"-size",
+        &"8m",
+        &"-fs",
+        &"MS-DOS",
+        &"-volname",
+        &"DUSCOPE",
+        &image,
+    ]);
+    env.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &mount, &image]);
+    let attached = Attached(&env, mount.clone());
+    let dir = mount.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("future.bin"), vec![1u8; 100]).unwrap();
+    fs::write(dir.join("changed.bin"), vec![2u8; 100]).unwrap();
+    let future = SystemTime::UNIX_EPOCH + Duration::from_secs(4_070_908_800); // 2099
+    fs::File::options()
+        .write(true)
+        .open(dir.join("future.bin"))
+        .unwrap()
+        .set_modified(future)
+        .unwrap();
+    let ctime = fs::metadata(dir.join("future.bin")).unwrap().ctime();
+    assert!(
+        ctime > 4_000_000_000,
+        "the change time is not the future one: {ctime}"
+    );
+    let index = scan_of(&env, &mount);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let plan = clean_plan(&[item(dir.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    // Rewritten in place at its own length, past FAT's two seconds: its
+    // change time moves, and stays below the newest under the folder.
+    std::thread::sleep(Duration::from_millis(2200));
+    fs::File::options()
+        .write(true)
+        .open(dir.join("changed.bin"))
+        .unwrap()
+        .write_all(&[3u8; 100])
+        .unwrap();
+    let plan = clean_plan(&[item(dir.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(plan.plan.items[0].frees_kind, Some("upper_bound"));
+    drop(plan);
+    drop(index);
+    // Detached as the test environment retries it; the guard then finds
+    // nothing there.
+    env.hdiutil(&[&"detach", &mount]);
+    drop(attached);
 }

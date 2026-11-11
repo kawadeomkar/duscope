@@ -36,15 +36,20 @@
 //! (`CallSignals::commit`) just before anything moves: a call cancelled,
 //! past its deadline or whose client has gone by then (its input ended, or
 //! a write to it failed) moves nothing (`interrupted`), and one committed
-//! runs to its end.
+//! runs to its end. The plan's walks stop with the call, so a call given up
+//! on frees the server's one worker rather than measuring on for no one.
+//! Handles from different saved scans are a usage error: a plan is made
+//! against one.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use duscope_core::CoreError;
 use duscope_core::clean::{
-    CleanItem, CleanOutcome, Method, Plan, UNEXPECTED, clean_execute, clean_plan,
+    CleanItem, CleanOutcome, Method, Plan, UNEXPECTED, clean_execute, clean_plan_until,
 };
 use duscope_core::envelope::{
     CleanEnvelope, CleanQuery, CleanResult, ErrorObject, SCHEMA_VERSION, ScanBlock, Tool, Warning,
@@ -101,7 +106,7 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     } else {
         Method::Trash
     };
-    let mut plan = clean_plan(&items, &resolved.index, &q, method).map_err(core_failure)?;
+    let mut plan = planned(&items, &resolved.index, &q, method)?;
     plan.refuse_unexpected(&args.expect_item_bytes);
     let query = query(args, &plan);
 
@@ -177,6 +182,28 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     match failure {
         Some(failure) => Err(failure.reported()),
         None => Ok(()),
+    }
+}
+
+/// The plan of `items` against `index`. Under an MCP tool call it stops
+/// with the call (cancelled, past its deadline, its client gone), whose
+/// answer no longer waits for it, and nothing moves.
+fn planned(
+    items: &[CleanItem],
+    index: &Index,
+    q: &ExplainQuery<'_>,
+    method: Method,
+) -> Result<Plan, Failure> {
+    let stop = super::mcp::running_call().map_or_else(Arc::default, |call| call.cancel);
+    match clean_plan_until(items, index, q, method, &stop) {
+        Err(CoreError::PlanStopped) => {
+            log::info!(
+                "the tool call was stopped before clean acted, while it planned: nothing is \
+                 moved or deleted"
+            );
+            Err(stopped_failure(method))
+        }
+        plan => plan.map_err(core_failure),
     }
 }
 
@@ -452,7 +479,9 @@ fn unexpected(plan: &Plan, expected: &[u64], moved: &str) -> Option<Failure> {
 
 /// Verifies each `--from` handle with the key in the index directory and
 /// adds its path to `items`, with the device and inode it names; the scan
-/// the first handle answered from, when it names one.
+/// the handles answered from, when one names one. Handles from different
+/// saved scans are a usage error: the plan is made against one, and an item
+/// would be held to a scan that never saw it.
 fn handles(
     args: &CleanArgs,
     dir: Option<&Path>,
@@ -471,12 +500,26 @@ fn handles(
         .hint("Run duscope with --index-dir naming the directory explain used"));
     };
     let key = Key::open(dir).map_err(core_failure)?;
-    let mut scan = None;
+    let mut scan: Option<String> = None;
     for token in &args.from {
         // The clock, not --test-now: a handle holds fifteen minutes.
         let payload = Handle::verify(&key, token, clock::now()).map_err(core_failure)?;
-        if scan.is_none() && !payload.scan_id.is_empty() {
-            scan = Some(payload.scan_id.clone());
+        match &scan {
+            _ if payload.scan_id.is_empty() => {}
+            None => scan = Some(payload.scan_id.clone()),
+            Some(first) if *first != payload.scan_id => {
+                return Err(Failure::new(
+                    Exit::Usage,
+                    "usage",
+                    format!(
+                        "the --from handles come from two saved scans, {first} and {}: clean \
+                         plans against one",
+                        payload.scan_id
+                    ),
+                )
+                .hint("Run duscope clean once for each saved scan's handles"));
+            }
+            Some(_) => {}
         }
         items.push(CleanItem {
             path: PathBuf::from(OsStr::from_bytes(&payload.path)),

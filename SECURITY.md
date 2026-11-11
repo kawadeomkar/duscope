@@ -115,7 +115,9 @@ with one exception a person opts into: a server started with `--allow-delete` of
     root and its totals.
 - **Deletes.** `clean` acts on the paths a person names and on handles that verify (`--from`).
   - It is a dry run unless `--yes` is given or a person at a terminal types `yes` when it asks.
-  - It moves entries to the trash by default.
+  - It moves entries to the trash by default. It refuses a folder that holds a mount point, or
+    whose mounts the system cannot tell, since a move would take the mounted volume into the
+    trash with it; the mount table is read again just before each move.
   - `--permanent` deletes through `openat`, `O_NOFOLLOW` and `unlinkat`, after checking that the
     entry's device and inode are still what the plan saw (a handle's, for an item named by one).
 

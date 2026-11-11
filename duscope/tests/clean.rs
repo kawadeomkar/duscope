@@ -1675,3 +1675,206 @@ fn p5_core_04_a_tool_item_a_walk_cannot_read_is_refused() {
     mode(0o755);
     assert!(secret.join("blob").exists());
 }
+
+#[test]
+fn p5_core_04_handles_from_two_saved_scans_are_a_usage_error() {
+    let env = TestEnv::new();
+    let base = fs::canonicalize(env.tmp_dir()).unwrap();
+    let (one, two) = (base.join("one"), base.join("two"));
+    for root in [&one, &two] {
+        fs::create_dir_all(root).unwrap();
+        fs::write(root.join("a.bin"), vec![7u8; 3000]).unwrap();
+        save(&env, root);
+    }
+    let (first, _) = handle(&env, &one.join("a.bin"));
+    let (second, _) = handle(&env, &two.join("a.bin"));
+    // The plan is made against one saved scan, which never saw the other
+    // handle's entry: neither is planned, and nothing moves.
+    let out = run(
+        &env,
+        &[
+            "clean",
+            &format!("--from={first}"),
+            &format!("--from={second}"),
+            "--yes",
+            "--json",
+        ],
+    );
+    let value = failed(&out, 2, "usage");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("two saved scans"), "{value}");
+    assert!(one.join("a.bin").exists() && two.join("a.bin").exists());
+    // Handles from one scan plan as before.
+    let value = failed(
+        &run(&env, &["clean", &format!("--from={first}"), "--json"]),
+        1,
+        "confirmation_required",
+    );
+    assert_eq!(actions(&value), ["trash:"]);
+}
+
+/// A folder that holds a mount point and is not one, from the system's own
+/// mounts: on macOS `/System/Volumes`, where the Data volume and the
+/// others the system mounts are; on Linux the folder above one of the
+/// mount table's mount points that is not one itself (`/sys/fs` above
+/// `/sys/fs/cgroup`). `None` where the table has none.
+fn folder_holding_a_mount() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return Some(PathBuf::from("/System/Volumes"));
+    }
+    let table = fs::read("/proc/self/mountinfo").ok()?;
+    // The mount point is the fifth field; one with an escaped byte is left
+    // out rather than unescaped.
+    let points: Vec<PathBuf> = table
+        .split(|&b| b == b'\n')
+        .filter_map(|line| line.split(|&b| b == b' ').nth(4))
+        .filter(|point| !point.contains(&b'\\'))
+        .map(|point| PathBuf::from(String::from_utf8_lossy(point).into_owned()))
+        .collect();
+    points
+        .iter()
+        .filter_map(|point| point.parent())
+        .find(|folder| {
+            *folder != Path::new("/") && !points.iter().any(|p| p == folder) && folder.is_dir()
+        })
+        .map(Path::to_owned)
+}
+
+#[test]
+fn p5_core_04_a_folder_holding_a_mount_point_is_refused_for_the_trash() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let id = save(&env, &root);
+    let Some(folder) = folder_holding_a_mount() else {
+        duscope_testkit::skip("no folder here holds a mount point");
+        return;
+    };
+    // The Trash would take the volumes mounted in it along: refused for
+    // what it holds before it is outside the scan's root. Planned only.
+    let value = failed(
+        &run(&env, &["clean", s(&folder), "--scan", &id, "--json"]),
+        1,
+        "refused_path",
+    );
+    assert_eq!(
+        actions(&value),
+        ["refused:mount_point"],
+        "{}",
+        folder.display()
+    );
+    // A deletion stops at a mount instead, leaving it and the folders
+    // above it: what the folder holds does not refuse it.
+    let value = failed(
+        &run(
+            &env,
+            &["clean", s(&folder), "--scan", &id, "--permanent", "--json"],
+        ),
+        1,
+        "refused_path",
+    );
+    assert_ne!(
+        actions(&value),
+        ["refused:mount_point"],
+        "{}",
+        folder.display()
+    );
+}
+
+/// Unmounts what a test mounted, innermost first, however it ends.
+#[cfg(target_os = "linux")]
+struct Mounted<'a> {
+    env: &'a TestEnv,
+    points: Vec<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Mounted<'_> {
+    fn drop(&mut self) {
+        for point in self.points.iter().rev() {
+            let _ = self.env.command("umount").arg(point).output();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts a tmpfs and a bind mount; root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_core_04_linux_a_folder_holding_a_mount_stays_out_of_the_trash() {
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    if !is_root(&env) {
+        duscope_testkit::skip("mounting needs root");
+        return;
+    }
+    let root = tree(&env);
+    // A tmpfs two folders down, another device; and a bind mount of a
+    // folder of the same device, which no device number tells.
+    let (tmpfs, bound) = (root.join("t"), root.join("b"));
+    let outside = fs::canonicalize(env.tmp_dir()).unwrap().join("outside");
+    for dir in [tmpfs.join("deep/m"), bound.join("m"), outside.clone()] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(tmpfs.join("kept.bin"), vec![1u8; 2000]).unwrap();
+    fs::write(outside.join("target.bin"), vec![2u8; 3000]).unwrap();
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    for args in [
+        vec![
+            "-t".to_owned(),
+            "tmpfs".to_owned(),
+            "-o".to_owned(),
+            "size=1m".to_owned(),
+            "tmpfs".to_owned(),
+            s(&tmpfs.join("deep/m")).to_owned(),
+        ],
+        vec![
+            "--bind".to_owned(),
+            s(&outside).to_owned(),
+            s(&bound.join("m")).to_owned(),
+        ],
+    ] {
+        let point = PathBuf::from(args.last().unwrap());
+        let out = env.command("mount").args(&args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "mount {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        mounted.points.push(point);
+    }
+    fs::write(tmpfs.join("deep/m/on-tmpfs.bin"), vec![3u8; 1000]).unwrap();
+    let id = save(&env, &root);
+    for folder in [&tmpfs, &bound] {
+        let value = failed(
+            &run(&env, &["clean", s(folder), "--scan", &id, "--json"]),
+            1,
+            "refused_path",
+        );
+        assert_eq!(actions(&value), ["refused:mount_point"], "{value}");
+        let value = failed(
+            &run(
+                &env,
+                &["clean", s(folder), "--scan", &id, "--yes", "--json"],
+            ),
+            1,
+            "refused_path",
+        );
+        assert_eq!(actions(&value), ["refused:mount_point"], "{value}");
+        assert_eq!(value["result"]["trashed_count"], 0);
+    }
+    // Nothing moved: the folders, the mounts and what is on them.
+    assert_eq!(fs::read(tmpfs.join("kept.bin")).unwrap(), [1u8; 2000]);
+    assert_eq!(
+        fs::read(tmpfs.join("deep/m/on-tmpfs.bin")).unwrap(),
+        [3u8; 1000]
+    );
+    assert_eq!(fs::read(bound.join("m/target.bin")).unwrap(), [2u8; 3000]);
+    assert!(!env.xdg_data_home().join("Trash/files/t").exists());
+    assert!(!env.xdg_data_home().join("Trash/files/b").exists());
+    drop(mounted);
+}

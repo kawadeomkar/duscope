@@ -12,7 +12,9 @@ pub(in crate::platform) mod trash;
 mod volume;
 
 pub(super) use stat::from_stat;
-pub(super) use volume::{full_disk_access_missing, host_app, mount_info, of as volume, reaches};
+pub(super) use volume::{
+    full_disk_access_missing, host_app, mount_info, mount_point_under, of as volume, reaches,
+};
 
 use std::cell::RefCell;
 use std::collections::HashSet;

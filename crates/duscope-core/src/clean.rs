@@ -35,7 +35,15 @@
 //!
 //! An item is refused, with its `reason`, when it is a symbolic link, a
 //! firmlink, a mount point, the scan's root (or `/`), on a read-only volume,
-//! or outside the scan's root. A refusal is a fact of the plan; whether it
+//! or outside the scan's root. For the Trash a directory that holds a mount
+//! point, at any depth, is refused as one (`mount_point`), and so is one
+//! whose mounts the system cannot tell: a move renames the directory with
+//! every volume mounted in it, which stays mounted in the Trash and is
+//! emptied with it. The mount table says so, read for the plan and again
+//! just before each move, and so does the walk that compares a directory
+//! with its rows, which meets a mount it does not enter (a mount point
+//! spelled otherwise than the table has it). A deletion never crosses a
+//! mount, and stops at one. A refusal is a fact of the plan; whether it
 //! stops the run (`--skip-refused`) and whether the plan is acted on
 //! (`--yes`, the prompt) is the binary's to decide, which calls
 //! [`clean_execute`] only then.
@@ -69,7 +77,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use duscope_walk::{
-    CheckedDir, DirId, Flags, Kind, RemoveError, ScanEvent, TrashError, WalkOptions,
+    CheckedDir, DirId, Flags, Kind, RemoveError, ScanEvent, Skip, TrashError, WalkOptions,
 };
 
 use crate::CoreError;
@@ -332,18 +340,7 @@ pub fn clean_plan_until(
         let below = index.below_root(&item.path);
         let under_root = below.is_some();
         let id = below.and_then(|rel| index.lookup(rel));
-        let reason = refusal(&item.path, meta, index, id, under_root);
-        let (from, walk) = match id {
-            // Made since the scan: a directory with what is under it, not its
-            // inode alone.
-            None => (
-                Priced::Unscanned,
-                (under_root && meta.is_dir()).then(|| walked(&item.path, &HashSet::new(), stop)),
-            ),
-            // A refused item moves nothing: the scan's figures stand.
-            Some(_) if reason.is_some() => (Priced::Scan, None),
-            Some(id) => compared(index, id, &item.path, meta, stop)?,
-        };
+        let (reason, from, walk) = judged(item, meta, index, (id, under_root), method, stop)?;
         if from == Priced::Changed && item.handle.is_some() {
             return Err(CoreError::PathChanged(format!(
                 "{} has changed since the saved scan its handle was read from: it is not what \
@@ -359,7 +356,7 @@ pub fn clean_plan_until(
             _ => explain_unindexed(&item.path, q)?,
         };
         if let Some(walk) = &walk
-            && from != Priced::Partly
+            && matches!(from, Priced::Unscanned | Priced::Changed)
         {
             facts.allocated_bytes = walk.allocated;
             facts.freeable_now_bytes = Some(walk.allocated);
@@ -402,6 +399,41 @@ pub fn clean_plan_until(
         idents: metas.iter().map(|m| (m.dev(), m.ino())).collect(),
         priced,
     })
+}
+
+/// Why `item`, found with `meta`, is refused, if it is, where its figures
+/// come from, and the walk that measured it, if one did. `id` is its entry
+/// in `index`, and `under_root` whether the scan's root holds it.
+fn judged(
+    item: &CleanItem,
+    meta: &Metadata,
+    index: &Index,
+    (id, under_root): (Option<u32>, bool),
+    method: Method,
+    stop: &Arc<AtomicBool>,
+) -> Result<(Option<&'static str>, Priced, Option<Walked>), CoreError> {
+    let reason = refusal(&item.path, meta, index, id, under_root, method);
+    let (from, walk) = match id {
+        // Made since the scan: a directory with what is under it, not its
+        // inode alone.
+        None => (
+            Priced::Unscanned,
+            (under_root && meta.is_dir()).then(|| walked(&item.path, &HashSet::new(), stop)),
+        ),
+        // A refused item moves nothing: the scan's figures stand.
+        Some(_) if reason.is_some() => (Priced::Scan, None),
+        Some(id) => compared(index, id, &item.path, meta, stop)?,
+    };
+    // A mount the walk met under it, which the mount table missed: by
+    // another spelling of its path, say. Refused as one the table lists,
+    // its figures moving nothing.
+    if method == Method::Trash && reason.is_none() && walk.as_ref().is_some_and(|w| w.mount) {
+        return Ok(match id {
+            Some(_) => (Some("mount_point"), Priced::Scan, None),
+            None => (Some("mount_point"), from, walk),
+        });
+    }
+    Ok((reason, from, walk))
 }
 
 /// Adds to each item the bytes a walk found under the directories the scan
@@ -470,7 +502,8 @@ fn compared(
     } else if walk.failed || walk.unentered > 0 {
         Ok((Priced::Partly, Some(walk)))
     } else {
-        Ok((Priced::Scan, None))
+        // Priced from the scan: the walk is kept for the mounts it met.
+        Ok((Priced::Scan, Some(walk)))
     }
 }
 
@@ -496,10 +529,18 @@ fn kind_of(meta: &Metadata) -> &'static str {
 
 /// What a walk and a subtree's rows are compared by: how many files (every
 /// entry not a directory) and directories, the directory itself included,
-/// their apparent and allocated bytes and the newest modification and
-/// change times. Each entry counts in full: a later link and a clone
-/// member hold their bytes in their rows as they do in a walk, whichever
-/// member the scan charged them to.
+/// their apparent and allocated bytes, the newest modification and change
+/// times, and the sum of the change times. Each entry counts in full: a
+/// later link and a clone member hold their bytes in their rows as they do
+/// in a walk, whichever member the scan charged them to.
+///
+/// The sum sees a change the newest time hides: one under an entry whose
+/// change time lies in the future (a clock set back, a volume whose change
+/// time is its modification time). It is kept as whole seconds and the
+/// nanoseconds past them, summed apart in 64 bits, so neither overflows on
+/// a tree of up to a billion entries, whatever their times: a time held in
+/// 64 bits of nanoseconds is under 2^63 / 10^9 whole seconds either way of
+/// 1970, and its nanoseconds past the second are under 10^9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Tally {
     files: u64,
@@ -508,6 +549,8 @@ struct Tally {
     allocated: u64,
     max_mtime_ns: i64,
     max_ctime_ns: i64,
+    ctime_secs: i64,
+    ctime_nanos: i64,
 }
 
 impl Tally {
@@ -520,9 +563,22 @@ impl Tally {
             allocated: 0,
             max_mtime_ns: i64::MIN,
             max_ctime_ns: i64::MIN,
+            ctime_secs: 0,
+            ctime_nanos: 0,
         }
     }
+
+    /// Adds a change time, in Unix nanoseconds, to the sum: its whole
+    /// seconds and the nanoseconds past them, as the index's rows are summed
+    /// (integer `/` and `%` in SQL, truncating toward zero, as Rust's do).
+    fn add_ctime(&mut self, ctime_ns: i64) {
+        self.ctime_secs = self.ctime_secs.saturating_add(ctime_ns / NANOS);
+        self.ctime_nanos = self.ctime_nanos.saturating_add(ctime_ns % NANOS);
+    }
 }
+
+/// Nanoseconds in a second.
+const NANOS: i64 = 1_000_000_000;
 
 /// The tally of the rows `id..=last` of `index`, the directory `id` and
 /// everything the scan recorded under it, but for what lies under each of
@@ -553,16 +609,19 @@ fn rows(index: &Index, id: u32, last: u32, skipped: &[Unentered]) -> Result<Tall
             .db()
             .prepare(&format!(
                 "SELECT COUNT(*), COALESCE(SUM(apparent), 0), COALESCE(SUM(allocated), 0), \
-                 MAX(mtime), MAX(ctime) FROM {table} WHERE id BETWEEN ?1 AND ?2"
+                 MAX(mtime), MAX(ctime), COALESCE(SUM(ctime / {NANOS}), 0), \
+                 COALESCE(SUM(ctime % {NANOS}), 0) FROM {table} WHERE id BETWEEN ?1 AND ?2"
             ))
             .map_err(corrupt)?;
         for &(first, end) in &ranges {
-            let (n, apparent, allocated, newest, changed): (
+            let (n, apparent, allocated, newest, changed, secs, nanos): (
                 i64,
                 i64,
                 i64,
                 Option<i64>,
                 Option<i64>,
+                i64,
+                i64,
             ) = stmt
                 .query_row([first, end], |row| {
                     Ok((
@@ -571,6 +630,8 @@ fn rows(index: &Index, id: u32, last: u32, skipped: &[Unentered]) -> Result<Tall
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
                     ))
                 })
                 .map_err(corrupt)?;
@@ -588,6 +649,8 @@ fn rows(index: &Index, id: u32, last: u32, skipped: &[Unentered]) -> Result<Tall
                 .saturating_add(u64::try_from(allocated).unwrap_or(0));
             tally.max_mtime_ns = tally.max_mtime_ns.max(newest.unwrap_or(i64::MIN));
             tally.max_ctime_ns = tally.max_ctime_ns.max(changed.unwrap_or(i64::MIN));
+            tally.ctime_secs = tally.ctime_secs.saturating_add(secs);
+            tally.ctime_nanos = tally.ctime_nanos.saturating_add(nanos);
         }
     }
     Ok(tally)
@@ -704,6 +767,28 @@ struct Walked {
     /// Whether something could not be read: a directory, an entry, or the
     /// walk itself. Its bytes then say nothing of what was missed.
     failed: bool,
+    /// Whether it met a mount under the directory, which it does not enter:
+    /// another volume, or a bind mount where the system tells one.
+    mount: bool,
+    /// The most directories it kept at once, to find the unentered ones and
+    /// leave out what lies under them.
+    #[cfg(test)]
+    kept_peak: usize,
+}
+
+/// The paths below a walk's root that lead to one of the `unentered`
+/// directories (paths below it too), the root's own (empty) included: only
+/// a directory at one of them can.
+fn leading(unentered: &HashSet<Vec<u8>>) -> HashSet<&[u8]> {
+    unentered
+        .iter()
+        .flat_map(|below| {
+            let ends = below.iter().enumerate().filter(|&(_, &b)| b == b'/');
+            std::iter::once(0)
+                .chain(ends.map(|(at, _)| at))
+                .map(move |end| &below[..end])
+        })
+        .collect()
 }
 
 /// Walks the directory `path` and what is under it on its volume. The
@@ -722,16 +807,36 @@ fn walked(path: &Path, unentered: &HashSet<Vec<u8>>, stop: &Arc<AtomicBool>) -> 
     let mut allocated = 0u64;
     let mut under_unentered = 0u64;
     let mut failed = false;
+    let mut mount = false;
     let mut tally = Tally::new();
-    // Each directory's path below `path`, kept only while there are
-    // unentered directories to find, and the directories under one.
+    let leading = leading(unentered);
+    // The path below `path` of each directory that leads to an unentered
+    // one, and the directories under an unentered one, each kept while it
+    // is read: the walk delivers what a directory holds before it closes it.
     let mut paths: HashMap<DirId, Vec<u8>> = HashMap::new();
     let mut left_out: HashSet<DirId> = HashSet::new();
+    #[cfg(test)]
+    let mut kept_peak = 0;
     let walk = duscope_walk::walk(path, &opts, |event| {
         let entry = match event {
             ScanEvent::Entry(entry) => entry,
-            ScanEvent::Error(_) | ScanEvent::DirClosed { errno: Some(_), .. } => {
+            ScanEvent::DirClosed { dir, errno } => {
+                failed |= errno.is_some();
+                paths.remove(&dir);
+                left_out.remove(&dir);
+                return;
+            }
+            ScanEvent::Error(_) => {
                 failed = true;
+                return;
+            }
+            // A walk that stays on its volume lists a mount without entering
+            // it; nothing else here is skipped, but by a rule of a scan.
+            ScanEvent::Skipped { reason, .. } => {
+                mount |= !matches!(
+                    reason,
+                    Skip::Excluded | Skip::ExcludedCache | Skip::Containers
+                );
                 return;
             }
             _ => return,
@@ -759,23 +864,35 @@ fn walked(path: &Path, unentered: &HashSet<Vec<u8>>, stop: &Arc<AtomicBool>) -> 
         tally.allocated = tally.allocated.saturating_add(entry.allocated);
         tally.max_mtime_ns = tally.max_mtime_ns.max(entry.mtime_ns);
         tally.max_ctime_ns = tally.max_ctime_ns.max(entry.ctime_ns);
+        tally.add_ctime(entry.ctime_ns);
         if let Some(dir) = entry.dir.filter(|_| !unentered.is_empty()) {
-            // The walk's root is its own parent.
+            // The walk's root is its own parent; a directory whose parent
+            // leads to no unentered one leads to none either.
             let below = if dir == entry.parent {
-                Vec::new()
+                Some(Vec::new())
             } else {
-                let mut below = paths.get(&entry.parent).cloned().unwrap_or_default();
-                if !below.is_empty() {
-                    below.push(b'/');
-                }
-                below.extend_from_slice(entry.name.as_bytes());
-                below
+                paths.get(&entry.parent).map(|up| {
+                    let mut below = up.clone();
+                    if !below.is_empty() {
+                        below.push(b'/');
+                    }
+                    below.extend_from_slice(entry.name.as_bytes());
+                    below
+                })
             };
-            if unentered.contains(&below) {
-                left_out.insert(dir);
-            } else {
-                paths.insert(dir, below);
+            match below {
+                Some(below) if unentered.contains(&below) => {
+                    left_out.insert(dir);
+                }
+                Some(below) if leading.contains(below.as_slice()) => {
+                    paths.insert(dir, below);
+                }
+                _ => {}
             }
+        }
+        #[cfg(test)]
+        {
+            kept_peak = std::cmp::max(kept_peak, paths.len() + left_out.len());
         }
     });
     Walked {
@@ -783,18 +900,26 @@ fn walked(path: &Path, unentered: &HashSet<Vec<u8>>, stop: &Arc<AtomicBool>) -> 
         unentered: under_unentered,
         tally,
         failed: failed || walk.is_err(),
+        mount,
+        #[cfg(test)]
+        kept_peak,
     }
 }
 
 /// Why `path` is refused, the first that applies; `None` when it is not.
 /// `id` is its entry in `index`, and `under_root` whether the scan's root
-/// holds it.
+/// holds it. For the Trash, a directory that holds a mount point is refused
+/// as `mount_point` too, and so is one whose mounts the system cannot tell:
+/// a move renames it with every volume mounted in it, which then stays
+/// mounted in the Trash and goes when the Trash is emptied. A deletion
+/// never crosses a mount, and stops at one ([`clean_execute`]).
 fn refusal(
     path: &Path,
     meta: &Metadata,
     index: &Index,
     id: Option<u32>,
     under_root: bool,
+    method: Method,
 ) -> Option<&'static str> {
     if meta.file_type().is_symlink() {
         return Some("symlink");
@@ -822,6 +947,12 @@ fn refusal(
     }
     if path.parent().is_none() || id == Some(0) {
         return Some("root");
+    }
+    if method == Method::Trash
+        && meta.is_dir()
+        && !duscope_walk::mount_point_under(path).is_ok_and(|point| point.is_none())
+    {
+        return Some("mount_point");
     }
     if duscope_walk::read_only_volume(path).unwrap_or(false) {
         return Some("read_only_volume");
@@ -976,8 +1107,10 @@ fn plan_item(
 ///
 /// - **The Trash.** An item whose path no longer holds what the plan saw
 ///   (gone, or another device and inode) is `path_changed` and left alone;
-///   one whose volume has no Trash is `trash_unavailable` and left where it
-///   is: nothing is ever removed in its place.
+///   a directory the mount table, read again, lists a mount point in, or
+///   cannot be read for, is `refused_path` and left alone; one whose volume
+///   has no Trash is `trash_unavailable` and left where it is: nothing is
+///   ever removed in its place.
 /// - **`--permanent`.** The item is deleted through descriptors, by
 ///   `duscope-walk`'s [`unlink_checked`](duscope_walk::unlink_checked) and
 ///   [`remove_dir_checked`](duscope_walk::remove_dir_checked); a change on
@@ -1016,23 +1149,74 @@ pub fn clean_execute(plan: &mut Plan) -> CleanOutcome {
     outcome
 }
 
-/// Moves `item` to the Trash when its path still holds `ident`.
+/// Moves `item` to the Trash when its path still holds `ident` and, for a
+/// directory, the mount table, read again, lists no mount point in it: one
+/// mounted since the plan would go with it.
 fn trash(item: &PlanItem, ident: (u64, u64)) -> Result<(), ErrorObject> {
     let path = Path::new(OsStr::from_bytes(&item.path_bytes));
     match std::fs::symlink_metadata(path).map(|m| (m.dev(), m.ino())) {
-        Ok(now) if now == ident => duscope_walk::move_to_trash(path).map_err(|e| match e {
-            TrashError::Unavailable(message) => error_object(
-                "trash_unavailable",
-                message,
-                Some("Rerun duscope clean with --permanent to delete it: its volume has no Trash"),
-                false,
-                "user",
-            ),
-            TrashError::Failed(message) => error_object("io_error", message, None, false, "user"),
-        }),
+        Ok(now) if now == ident => {
+            if item.kind == "dir" {
+                no_mount_in(path)?;
+            }
+            duscope_walk::move_to_trash(path).map_err(|e| match e {
+                TrashError::Unavailable(message) => error_object(
+                    "trash_unavailable",
+                    message,
+                    Some(
+                        "Rerun duscope clean with --permanent to delete it: its volume has no \
+                         Trash",
+                    ),
+                    false,
+                    "user",
+                ),
+                TrashError::Failed(message) => {
+                    error_object("io_error", message, None, false, "user")
+                }
+            })
+        }
         _ => Err(changed(&item.path)),
     }
 }
+
+/// `refused_path` when the mount table lists a mount point at the
+/// directory `dir` or under it, or cannot be read: a move to the Trash
+/// would take the volume along, mounted in the Trash.
+fn no_mount_in(dir: &Path) -> Result<(), ErrorObject> {
+    match duscope_walk::mount_point_under(dir) {
+        Ok(None) => Ok(()),
+        Ok(Some(point)) => Err(error_object(
+            "refused_path",
+            format!(
+                "{} is a mount point in {}, and a move to the Trash would take its volume along, \
+                 so it was not moved",
+                point.display(),
+                dir.display()
+            ),
+            Some(&format!(
+                "Run umount {} first, then duscope clean again",
+                point.display()
+            )),
+            false,
+            "user",
+        )),
+        Err(e) => Err(error_object(
+            "refused_path",
+            format!(
+                "cannot tell whether a volume is mounted in {} ({e}), and a move to the Trash \
+                 would take one along, so it was not moved",
+                dir.display()
+            ),
+            Some(UNKNOWN_MOUNTS),
+            false,
+            "user",
+        )),
+    }
+}
+
+/// The hint for a directory whose mounts the system cannot tell, which
+/// neither the Trash nor a deletion acts on.
+const UNKNOWN_MOUNTS: &str = "Run duscope clean again where the system's mount table can be read";
 
 /// Deletes `item`, adding to `freed` the bytes on disk its deletion frees:
 /// its parent directory opened from `/` one component at a time without
@@ -1109,7 +1293,7 @@ fn removal_error(item: &Path, error: &RemoveError) -> ErrorObject {
                     item.display()
                 )
             },
-            Some("Rerun duscope clean without --permanent to move it to the Trash instead"),
+            Some(UNKNOWN_MOUNTS),
             false,
             "user",
         ),

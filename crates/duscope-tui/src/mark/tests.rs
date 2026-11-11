@@ -1142,6 +1142,52 @@ fn p5_core_04_a_plan_given_up_on_cannot_stand_for_marks_made_since() {
 }
 
 #[test]
+fn p5_core_04_a_plan_given_up_before_a_reload_is_not_the_reloaded_panes() {
+    let env = TestEnv::new();
+    let (_root, index) = on_disk(&env);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mut app, jobs, mut terminal) = marked(&index, &mocha, &classes);
+    // `D`, then `Esc`: the plan is given up on, and answers later, on the
+    // channel the terminal session keeps across a reload.
+    press(&mut app, &mut terminal, &char('D'));
+    press(&mut app, &mut terminal, &key(KeyCode::Esc));
+    let old = jobs.borrow_mut().remove(0);
+    // `r`'s scan lands: the reloaded viewer keeps the mark, and its `D`
+    // asks again.
+    let carried = app.carry();
+    drop(app);
+    let mut app = App::new(
+        &index,
+        opts(&mocha, &classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let new_jobs = planning(&mut app);
+    app.restore(carried);
+    let mut terminal = first_frame(&app, 120, 40);
+    assert_eq!(app.marked_ids(), [id_of(&index, "big.bin")]);
+    press(&mut app, &mut terminal, &char('D'));
+    assert_eq!(new_jobs.borrow().len(), 1);
+    // The old answer is not the new pane's: it goes on measuring.
+    assert_eq!(app.input(Input::Planned(old.run(&no_env))), Flow::Wait);
+    terminal
+        .draw(|f| app.draw(f.area(), f.buffer_mut()))
+        .unwrap();
+    let text = text_of(terminal.backend().buffer());
+    assert!(text.contains("measuring 1 item"), "{text}");
+    assert!(!text.contains("Type yes"), "{text}");
+    // Its own plan lands.
+    land(&mut app, &mut terminal, &new_jobs);
+    let text = text_of(terminal.backend().buffer());
+    assert!(
+        text.contains("Type yes to move them to the Trash: ▌"),
+        "{text}"
+    );
+}
+
+#[test]
 fn p5_core_04_a_plan_that_cannot_start_or_read_its_scan_says_why() {
     let env = TestEnv::new();
     let (_root, index) = on_disk(&env);
