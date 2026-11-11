@@ -1451,6 +1451,103 @@ fn p4_tui_05_y_copies_with_osc_52_and_falls_back_to_the_key_line() {
 }
 
 #[test]
+fn p4_tui_05_the_arrows_in_an_empty_legend_or_types_table_do_nothing() {
+    // A scan of an empty folder: no legend rows, no classes; the arrows
+    // there find nothing to move to, and nothing to subtract one from.
+    let json = r#"[1,2,{"progname":"ncdu"},[{"name":"/empty"}]]"#;
+    let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
+        .unwrap()
+        .arena;
+    let rollup = roll_up(&mut arena);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/empty"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = viewer(&view, &mocha, &classes);
+    let mut terminal = first_frame(&app, 120, 40);
+    press(&mut app, &mut terminal, &key(KeyCode::BackTab));
+    let keys = row(terminal.backend().buffer(), 39);
+    assert!(keys.contains("c color"), "the legend has the focus: {keys}");
+    for code in [KeyCode::Down, KeyCode::Up, KeyCode::End, KeyCode::PageDown] {
+        assert_eq!(press(&mut app, &mut terminal, &key(code)), Flow::Wait);
+    }
+    press(&mut app, &mut terminal, &key(KeyCode::Tab));
+    press(&mut app, &mut terminal, &char('4'));
+    for code in [KeyCode::Down, KeyCode::Up, KeyCode::End, KeyCode::PageDown] {
+        assert_eq!(press(&mut app, &mut terminal, &key(code)), Flow::Wait);
+    }
+    assert_eq!(
+        press(&mut app, &mut terminal, &key(KeyCode::Enter)),
+        Flow::Wait
+    );
+}
+
+#[test]
+fn p4_tui_05_y_says_path_not_copied_under_a_tmux_term_without_tmux_set() {
+    // A shell that dropped `TMUX` (`env -u TMUX`, `sudo`) keeps the
+    // `TERM` tmux set: the sequence would stop at tmux as it does with
+    // `TMUX` set, so the key line must not say it was copied.
+    let tree = mockup();
+    let view = mockup_view(&tree);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    for term in ["tmux", "tmux-256color", "tmux-direct"] {
+        let bytes = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let sink = Rc::clone(&bytes);
+        let mut app = viewer(&view, &mocha, &classes);
+        app.with_effects(Effects {
+            write: Box::new(move |b| {
+                sink.borrow_mut().extend_from_slice(b);
+                Ok(())
+            }),
+            env: Box::new(move |var| (var == "TERM").then(|| term.into())),
+            ..Effects::default()
+        });
+        let mut terminal = first_frame(&app, 120, 40);
+        press(&mut app, &mut terminal, &char('y'));
+        assert!(bytes.borrow().is_empty(), "TERM={term}");
+        let key_row = row(terminal.backend().buffer(), 39);
+        assert!(key_row.starts_with(" path "), "TERM={term}: {key_row}");
+    }
+}
+
+#[test]
+fn p4_tui_05_o_refuses_a_path_that_is_not_absolute() {
+    // A saved scan names its own root, and any file may claim to be one:
+    // a root that is not an absolute path would reach the file manager's
+    // command line as an option (`-a`) or a URL. It goes nowhere, and the
+    // key line says why.
+    let tree = mockup();
+    for root in ["-a/X.app", "https://host/x", "Library", "-R"] {
+        let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from(root));
+        let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+        let opened = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+        let log = Rc::clone(&opened);
+        let mut app = viewer(&view, &mocha, &classes);
+        app.with_effects(Effects {
+            open: Box::new(move |path| {
+                log.borrow_mut().push(path.to_owned());
+                Ok(())
+            }),
+            ..Effects::default()
+        });
+        let mut terminal = first_frame(&app, 120, 40);
+        assert_eq!(
+            press(&mut app, &mut terminal, &char('o')),
+            Flow::Redraw,
+            "{root:?}"
+        );
+        assert!(
+            opened.borrow().is_empty(),
+            "{root:?}: {:?}",
+            opened.borrow()
+        );
+        let key_row = row(terminal.backend().buffer(), 39);
+        assert!(
+            key_row.contains("could not show it: the scan's root is not an absolute path"),
+            "{root:?}: {key_row}"
+        );
+    }
+}
+
+#[test]
 fn p4_tui_05_o_shows_the_selection_through_the_effect_it_was_given() {
     let tree = mockup();
     let view = mockup_view(&tree);

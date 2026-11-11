@@ -556,7 +556,9 @@ pub fn process_alive(pid: u32) -> bool {
 /// arguments, to be tried in order, one that cannot start or exits with a
 /// failure giving way to the next. On macOS, Finder's reveal (`open -R`);
 /// elsewhere the freedesktop file manager interface's `ShowItems` through
-/// `dbus-send`, then `xdg-open` on the folder holding the entry.
+/// `dbus-send`, then `xdg-open` on the folder holding the entry. None for a
+/// path that is not absolute, which a command line could read as an option
+/// or a URL.
 #[must_use]
 pub fn reveal_commands(path: &Path) -> Vec<Vec<OsString>> {
     platform::reveal_commands(path)

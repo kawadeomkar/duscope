@@ -15,24 +15,37 @@
 //! Both are built on every platform, and `super::reveal_commands` picks one
 //! with `cfg!`, so the command lines of either are built and tested on the
 //! other too.
+//!
+//! A path that is not absolute gets no command line: the path comes from a
+//! scan's root, which a saved scan names for itself and any file may claim,
+//! and `open` would read `-a/X.app` as its `-a` option, `xdg-open` a
+//! `https://` path as a URL, and a relative one names whatever the working
+//! directory holds.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-/// Finder's reveal: `open -R <path>`.
+/// Finder's reveal: `open -R <path>`; none for a path that is not
+/// absolute.
 pub(super) fn finder(path: &Path) -> Vec<Vec<OsString>> {
+    if !path.is_absolute() {
+        return Vec::new();
+    }
     vec![vec!["open".into(), "-R".into(), path.into()]]
 }
 
 /// The freedesktop file manager interface's `ShowItems`, through
 /// `dbus-send`, then `xdg-open` on the folder holding `path` (`path` itself
-/// when nothing holds it: the root).
+/// when nothing holds it: the root); none for a path that is not absolute.
 ///
 /// `--print-reply` makes `dbus-send` wait for the answer, so a call that
 /// fails exits with a failure and the folder is opened instead. The startup
 /// id is empty: a terminal program has none to pass on.
 pub(super) fn freedesktop(path: &Path) -> Vec<Vec<OsString>> {
+    if !path.is_absolute() {
+        return Vec::new();
+    }
     let folder = path
         .parent()
         .filter(|folder| !folder.as_os_str().is_empty())
@@ -179,6 +192,19 @@ mod tests {
         );
         let shown = &freedesktop(Path::new(name))[0][7];
         assert!(shown.to_str().is_some_and(|arg| !arg[13..].contains(',')));
+    }
+
+    #[test]
+    fn p4_tui_05_a_path_that_is_not_absolute_gets_no_command_line() {
+        // An option to `open` (`-a` names the application to open with,
+        // `-R` would reveal its argument), a URL to `xdg-open`, or a name
+        // the working directory resolves: none reaches a command line.
+        for path in ["-a/X.app", "-R", "https://host/x", "Downloads/x", "x", ""] {
+            let path = Path::new(path);
+            assert_eq!(finder(path), Vec::<Vec<OsString>>::new(), "{path:?}");
+            assert_eq!(freedesktop(path), Vec::<Vec<OsString>>::new(), "{path:?}");
+            assert!(crate::reveal_commands(path).is_empty(), "{path:?}");
+        }
     }
 
     #[test]

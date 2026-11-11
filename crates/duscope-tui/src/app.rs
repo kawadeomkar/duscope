@@ -1161,10 +1161,21 @@ impl<'a> App<'a> {
         Flow::Redraw
     }
 
-    /// `o`: the selection shown in the file manager, detached.
+    /// `o`: the selection shown in the file manager, detached. A path that
+    /// is not absolute is refused: it can only come from the scan's root,
+    /// which a saved scan names for itself and any file may claim, and a
+    /// command line would read it as an option (`-a`) or a URL.
     fn open_selection(&mut self) -> Flow {
         let path = abs_path(self.view, self.selected());
-        let opened = (self.effects.open)(Path::new(OsStr::from_bytes(&path)));
+        let path = Path::new(OsStr::from_bytes(&path));
+        let opened = if path.is_absolute() {
+            (self.effects.open)(path)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the scan's root is not an absolute path",
+            ))
+        };
         if let Err(e) = opened {
             self.notice = Some(Message {
                 text: format!("could not show it: {e}"),
@@ -1233,7 +1244,7 @@ impl<'a> App<'a> {
             _ => match Step::of(nav, PAGE) {
                 Some(step) => {
                     let count = self.legend_shown();
-                    let at = (count > 0).then_some(self.legend_at.min(count - 1));
+                    let at = (count > 0).then(|| self.legend_at.min(count - 1));
                     match step.from(at, count) {
                         Some(row) if row != self.legend_at => {
                             self.legend_at = row;
@@ -1303,7 +1314,7 @@ impl<'a> App<'a> {
             }
             _ => {
                 if let Some(step) = Step::of(nav, PAGE) {
-                    let at = (!rows.is_empty()).then_some(self.types_at.min(rows.len() - 1));
+                    let at = (!rows.is_empty()).then(|| self.types_at.min(rows.len() - 1));
                     match step.from(at, rows.len()) {
                         Some(row) if row != self.types_at => {
                             self.types_at = row;
@@ -1333,8 +1344,10 @@ fn color_word(color_by: &ColorBy) -> &'static str {
 
 /// Whether the terminal takes OSC 52, as far as the variables `env` reads
 /// tell: not macOS's Terminal.app, the Linux console or a dumb terminal, and
-/// not tmux or screen, where an application's sequence stops by default.
-/// Anything else is taken to; the path is on the key line either way.
+/// not tmux or screen, where an application's sequence stops by default
+/// (tmux known by `TMUX` or by a `TERM` it sets, `tmux*`, which a shell
+/// that dropped `TMUX` keeps). Anything else is taken to; the path is on
+/// the key line either way.
 pub(crate) fn clipboard_allowed(env: &panes::facts::Env<'_>) -> bool {
     let set = |name: &str| env(name).is_some();
     let value = |name: &str| {
@@ -1348,7 +1361,8 @@ pub(crate) fn clipboard_allowed(env: &panes::facts::Env<'_>) -> bool {
         || value("TERM_PROGRAM") == "Apple_Terminal"
         || term == "linux"
         || term == "dumb"
-        || term.starts_with("screen"))
+        || term.starts_with("screen")
+        || term.starts_with("tmux"))
 }
 
 /// The OSC 52 sequence that sets the clipboard to `path`.
