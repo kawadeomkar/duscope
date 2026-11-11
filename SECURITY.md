@@ -149,6 +149,10 @@ with one exception a person opts into: a server started with `--allow-delete` of
   - It moves entries to the trash by default. It refuses a folder that holds a mount point, or
     whose mounts the system cannot tell, since a move would take the mounted volume into the
     trash with it; the mount table is read again just before each move.
+  - On Linux the move goes through descriptors, as `--permanent` does: the entry is renamed out
+    of a directory reached from `/` without following a link, only when its device and inode
+    are still what the plan saw, and never over an entry already in the trash. On macOS,
+    where `NSFileManager` moves by path, the same identity is checked by path just before.
   - `--permanent` deletes through `openat`, `O_NOFOLLOW` and `unlinkat`, after checking that the
     entry's device and inode are still what the plan saw (a handle's, for an item named by one).
 
