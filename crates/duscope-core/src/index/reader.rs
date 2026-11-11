@@ -15,7 +15,11 @@
 //! 32 blocks used last are kept: a query that walks the ids in
 //! order reads each block once, and one that climbs from an entry to the
 //! root finds the ancestors' blocks again. Paths and subdirectories come
-//! from the nodes, as the trait's defaults read them.
+//! from the nodes, as the trait's defaults read them. A pass over a subtree
+//! that needs only some of its rows (`caches`: every directory, and the
+//! files of a few names) reads them from each table apart instead, in id
+//! order, a page at a time (`Index::dirs_in`, `Index::files_named`), each
+//! row held to the layout as a block's is.
 //!
 //! The queries' views cannot return errors, so a read that fails after the
 //! file opened is kept and the entry reads as empty; the verb asks
@@ -38,7 +42,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
@@ -50,7 +54,7 @@ use duscope_walk::{Attrs, Flags, Kind};
 use rusqlite::config::DbConfig;
 use rusqlite::limits::Limit;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Statement};
 use unicode_normalization::UnicodeNormalization;
 
 use super::scanid::ScanId;
@@ -1025,6 +1029,309 @@ impl TreeView for Index {
             self.fail(&e);
             Vec::new()
         })
+    }
+}
+
+/// Rows a page of [`Paged`] holds.
+const PAGE: usize = 1024;
+
+/// The most names [`Index::files_named`] matches. Each is a parameter of
+/// its statement: 256 stays well inside the lowest limit on parameters
+/// `SQLite` has had (999 before 3.32) and the connection's limit on a
+/// statement's length ([`SQL_LENGTH`]).
+const NAMES: usize = 256;
+
+/// A directory's row as a pass over a subtree in id order reads it: its ids
+/// and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirRow {
+    /// Its id.
+    pub id: u32,
+    /// The id of its last own file; its own id when it has none.
+    pub files_end: u32,
+    /// The last id of its subtree.
+    pub last_id: u32,
+    /// Its name; the scan root's row holds the root's whole path.
+    pub name: Vec<u8>,
+}
+
+/// A non-directory's row as such a pass reads it: its id and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileRow {
+    /// Its id.
+    pub id: u32,
+    /// Its name.
+    pub name: Vec<u8>,
+}
+
+/// A row [`Paged`] reads.
+pub(crate) trait PagedRow: Sized {
+    /// Its id.
+    fn id(&self) -> u32;
+    /// The row from its statement's columns, held to the layout of the
+    /// subtree whose ids are `first ..= last` in a scan of `len` entries:
+    /// a row whose ids break it fails, as [`dir_ids`] and [`file_ids`]
+    /// refuse a row and [`crate::query::Subtree`] one outside its subtree.
+    fn read(row: &Row<'_>, first: u32, last: u32, len: u32) -> rusqlite::Result<Self>;
+}
+
+impl PagedRow for DirRow {
+    fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// From `id, files_end, last_id, parent_id, name`.
+    fn read(row: &Row<'_>, first: u32, last: u32, len: u32) -> rusqlite::Result<DirRow> {
+        let id: u32 = row.get(0)?;
+        let files_end: u32 = row.get(1)?;
+        let last_id: u32 = row.get(2)?;
+        let parent: Option<u32> = row.get(3)?;
+        dir_ids(id, parent, files_end, last_id, len)?;
+        let parent = parent.unwrap_or(0);
+        if (id != first && parent < first) || last_id > last {
+            return Err(outside("dirs", id, parent, last_id, first, last));
+        }
+        Ok(DirRow {
+            id,
+            files_end,
+            last_id,
+            name: row.get(4)?,
+        })
+    }
+}
+
+impl PagedRow for FileRow {
+    fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// From `id, parent_id, name`.
+    fn read(row: &Row<'_>, first: u32, last: u32, _len: u32) -> rusqlite::Result<FileRow> {
+        let id: u32 = row.get(0)?;
+        let parent: u32 = row.get(1)?;
+        file_ids(id, parent)?;
+        if id != first && parent < first {
+            return Err(outside("files", id, parent, id, first, last));
+        }
+        Ok(FileRow {
+            id,
+            name: row.get(2)?,
+        })
+    }
+}
+
+/// The error of a row whose parent or last id puts it outside the subtree
+/// whose ids are `first ..= last`, worded as [`crate::query::Subtree`]
+/// words one it reads.
+fn outside(
+    table: &str,
+    id: u32,
+    parent: u32,
+    last_id: u32,
+    first: u32,
+    last: u32,
+) -> rusqlite::Error {
+    misplaced(
+        table,
+        id,
+        &format!(
+            "its parent_id {parent} and last_id {last_id} put it outside the subtree of the \
+             entry {first}, which ends at {last}"
+        ),
+    )
+}
+
+/// The rows of one table with ids in a subtree's range, in id order, read
+/// a page of [`PAGE`] at a time: a statement's rows cannot be kept beside
+/// the statement, so each page is a query of its own that seeks the
+/// primary key from the id after the page before. A page reads no row past
+/// the id its caller says it needs ([`Paged::next_upto`]), and passing over
+/// a stretch of ids ([`Paged::skip_to`]) starts the next page past it, so
+/// that a stretch passed over is not read. A read that fails, or a row that
+/// breaks the subtree's layout ([`PagedRow::read`]), is the index's failed
+/// read ([`Index::failure`]) and ends the rows, as every read ends once one
+/// has failed.
+#[derive(Debug)]
+pub(crate) struct Paged<'a, T> {
+    index: &'a Index,
+    /// The statement, its range `?1 ..= ?2` still to bind and its other
+    /// parameters bound; `None` once the rows have ended.
+    stmt: Option<Statement<'a>>,
+    /// The subtree's first id.
+    first: u32,
+    /// The subtree's last id.
+    last: u32,
+    /// The id the next page starts at: every row before it has been read.
+    from: u32,
+    /// The rows read and not yet taken.
+    page: VecDeque<T>,
+}
+
+impl<'a, T: PagedRow> Paged<'a, T> {
+    /// The rows of `sql` over the subtree whose ids are `first ..= last`,
+    /// `names` bound from `?3`.
+    fn new(index: &'a Index, sql: &str, first: u32, last: u32, names: &[&[u8]]) -> Paged<'a, T> {
+        let prepare = || -> rusqlite::Result<Statement<'a>> {
+            let mut stmt = index.db.prepare(sql)?;
+            for (at, name) in names.iter().enumerate() {
+                stmt.raw_bind_parameter(at + 3, name)?;
+            }
+            Ok(stmt)
+        };
+        let stmt = if index.failed() {
+            None
+        } else {
+            prepare().map_err(|e| index.fail(&e)).ok()
+        };
+        Paged {
+            index,
+            stmt,
+            first,
+            last,
+            from: first,
+            page: VecDeque::new(),
+        }
+    }
+
+    /// The next row, when its id is at most `upto`: no row past `upto` is
+    /// read for it.
+    pub(crate) fn next_upto(&mut self, upto: u32) -> Option<T> {
+        if self.page.is_empty() {
+            self.fill(upto);
+        }
+        if self.page.front().is_some_and(|row| row.id() <= upto) {
+            self.page.pop_front()
+        } else {
+            None
+        }
+    }
+
+    /// The id of the last row read and not yet taken.
+    pub(crate) fn reach(&self) -> Option<u32> {
+        self.page.back().map(PagedRow::id)
+    }
+
+    /// Passes over the rows before id `id`: those of the page read, and,
+    /// unless the page still holds one at or after it, those the next page
+    /// would have started with.
+    pub(crate) fn skip_to(&mut self, id: u32) {
+        while self.page.front().is_some_and(|row| row.id() < id) {
+            self.page.pop_front();
+        }
+        if self.page.is_empty() {
+            self.from = self.from.max(id);
+        }
+    }
+
+    /// Reads the next page, up to id `upto`: a page short of [`PAGE`] has
+    /// read every row to there, and the last one every row.
+    fn fill(&mut self, upto: u32) {
+        let Some(stmt) = self.stmt.as_mut() else {
+            return;
+        };
+        if self.from > self.last || self.index.failed() {
+            self.stmt = None;
+            return;
+        }
+        let to = upto.min(self.last);
+        if self.from > to {
+            return;
+        }
+        let range = (self.first, self.last, self.index.len);
+        match read_page(stmt, self.from, to, range, &mut self.page) {
+            Ok(n) => {
+                let next = match self.page.back() {
+                    Some(row) if n == PAGE => row.id().checked_add(1),
+                    _ => to.checked_add(1),
+                };
+                match next.filter(|&next| next <= self.last) {
+                    Some(next) => self.from = next,
+                    None => self.stmt = None,
+                }
+            }
+            Err(e) => {
+                self.index.fail(&e);
+                self.page.clear();
+                self.stmt = None;
+            }
+        }
+    }
+}
+
+/// Reads into `page` the rows of `stmt` from id `from` to `to`, at most
+/// [`PAGE`] (its `LIMIT`), each held to the layout of the subtree `range`
+/// gives (its first and last ids, and the scan's entry count): how many.
+fn read_page<T: PagedRow>(
+    stmt: &mut Statement<'_>,
+    from: u32,
+    to: u32,
+    (first, last, len): (u32, u32, u32),
+    page: &mut VecDeque<T>,
+) -> rusqlite::Result<usize> {
+    stmt.raw_bind_parameter(1, from)?;
+    stmt.raw_bind_parameter(2, to)?;
+    let mut rows = stmt.raw_query();
+    let mut n = 0;
+    while let Some(row) = rows.next()? {
+        page.push_back(T::read(row, first, last, len)?);
+        n += 1;
+    }
+    Ok(n)
+}
+
+impl<T: PagedRow> Iterator for Paged<'_, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        self.next_upto(u32::MAX)
+    }
+}
+
+impl Index {
+    /// The directories of the subtree whose ids are `first ..= last` (the
+    /// subtree of directory `first`), in id order: each one's ids and name.
+    pub(crate) fn dirs_in(&self, first: u32, last: u32) -> Paged<'_, DirRow> {
+        Paged::new(
+            self,
+            &format!(
+                "SELECT id, files_end, last_id, parent_id, name FROM dirs \
+                 WHERE id BETWEEN ?1 AND ?2 ORDER BY id LIMIT {PAGE}"
+            ),
+            first,
+            last,
+            &[],
+        )
+    }
+
+    /// The non-directories of that subtree whose name is one of `names`,
+    /// byte for byte, in id order: each one's id and name. No index holds
+    /// the names, so a page reads every row of the ids it covers and keeps
+    /// those of the names. `None` for more than [`NAMES`] names, which a
+    /// statement does not take.
+    pub(crate) fn files_named(
+        &self,
+        first: u32,
+        last: u32,
+        names: &[&[u8]],
+    ) -> Option<Paged<'_, FileRow>> {
+        if names.len() > NAMES {
+            return None;
+        }
+        let mut params = String::new();
+        for at in 0..names.len() {
+            let sep = if at == 0 { "" } else { ", " };
+            let _ = write!(params, "{sep}?{}", at + 3);
+        }
+        Some(Paged::new(
+            self,
+            &format!(
+                "SELECT id, parent_id, name FROM files \
+                 WHERE id BETWEEN ?1 AND ?2 AND name IN ({params}) ORDER BY id LIMIT {PAGE}"
+            ),
+            first,
+            last,
+            names,
+        ))
     }
 }
 
