@@ -16,6 +16,7 @@ cargo-fuzz = true
 [dependencies]
 duscope-core = { path = "../crates/duscope-core" }
 duscope-mcp = { path = "../crates/duscope-mcp" }
+duscope-treemap = { path = "../crates/duscope-treemap" }
 duscope-walk = { path = "../crates/duscope-walk" }
 libfuzzer-sys = "=0.4.13"
 rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled"] }
