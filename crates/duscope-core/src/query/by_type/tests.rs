@@ -188,7 +188,8 @@ fn p2_qry_09_every_subtree_answers_from_the_tables_as_the_walk() {
     let index = index_of(&tree, &env.tmp_dir());
     every_subtree_answers_as_the_walk(&index, &[0, 1, 3, 10]).unwrap();
     // What the tables cannot answer walks, in a subtree as in the whole
-    // scan: a filter, the newest file, apparent sizes, a scan with modes.
+    // scan: a filter, the newest file, apparent sizes. A scan with modes
+    // answers from them too since P2-QRY-12.
     let classes = Classes::vendored();
     let sub = Subtree::new(&index, index.child_dirs(0)[0].0);
     let filtered = ByTypeQuery {
@@ -211,7 +212,8 @@ fn p2_qry_09_every_subtree_answers_from_the_tables_as_the_walk() {
     }
     let full = index_with(&tree, &env.tmp_dir().join("full"), Attrs::Full);
     let sub = Subtree::new(&full, full.child_dirs(0)[0].0);
-    assert!(from_index(&sub, &query(&classes, 3)).is_none());
+    let q = query(&classes, 3);
+    assert_eq!(from_index(&sub, &q), Some(walked(&sub, &q)));
 }
 
 /// The reference tree holds what a `MemProvider` cannot: hard links, whose
