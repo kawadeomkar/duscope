@@ -616,7 +616,7 @@ fn p4_tui_02_the_mockups_tree_renders_with_its_pane_contents() {
     // The key line.
     assert_eq!(
         rows[44].trim_end(),
-        " ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit"
+        " ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit"
     );
 }
 

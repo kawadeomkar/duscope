@@ -1,17 +1,22 @@
-//! The siblings pane: the selection's parent's children, largest first, in
-//! the order `g`, `G` and the pages walk them ([`crate::path::siblings`]):
-//! the first nine with 6-cell bars, then `… n more`; titled with the
-//! parent's name, size and file count. A selection past the first nine,
-//! reached through the list where its tile is too small to draw (or the
-//! map has none), shows the nine it falls among, under a `… n more` row
-//! for the larger ones above. Reading the list is O(children).
+//! The siblings pane: the selection's parent's children, largest first or
+//! in the sort `s` chose ([`crate::views::Viewing::children`]), the order
+//! `g`, `G` and the pages walk them: the first nine with 6-cell bars, then
+//! `… n more`; titled with the parent's name, size and file count, and the
+//! sort where it is not by size. A selection past the first nine, reached
+//! through the list where its tile is too small to draw (or the map has
+//! none), shows the nine it falls among, under a `… n more` row for the
+//! larger ones above. `⇥` focuses it: the arrows then move along it, and
+//! its border takes the accent colour. The list is read once for a folder
+//! and sort ([`Viewing::listed`]: O(children), in id order), with the
+//! running total of its sizes, so a frame reads the rows it draws and adds
+//! up a `… n more` row from two of those totals.
 
 use duscope_treemap::paint::compact;
 use ratatui_core::layout::Rect;
 
 use super::Context;
 use crate::layout::inner;
-use crate::path::siblings as ranked;
+use crate::views::{Sort, Viewing};
 use crate::widgets::{Canvas, ListRow, border, full_size, thousands};
 
 /// The siblings listed before `… n more`: a page of `PgUp` and `PgDn`.
@@ -20,35 +25,56 @@ const SIBLINGS: usize = 9;
 const SIBLING_BAR: u16 = 6;
 
 /// The siblings pane in `pane`, border included: the selection's parent's
-/// children, largest first, the selection marked.
-pub fn siblings(canvas: &mut Canvas<'_>, pane: Rect, ctx: &Context<'_>, id: u32) {
+/// children in the sort of `viewing`, the selection marked; the accent
+/// border when it is `focused`.
+pub fn siblings(
+    canvas: &mut Canvas<'_>,
+    pane: Rect,
+    ctx: &Context<'_>,
+    id: u32,
+    viewing: &Viewing<'_>,
+    focused: bool,
+) {
     let roles = canvas.pack.roles;
     let node = ctx.view.node(id);
     let parent = ctx.parent(&node);
-    let title = format!(
+    let mut title = format!(
         "in {} · {} · {} files",
         ctx.name(parent.id, false),
         full_size(ctx.size(&parent)),
         thousands(parent.file_count)
     );
-    canvas.pane(pane, &title, border(canvas.pack, false));
-    let area = inner(pane);
-    let mut kids = ranked(ctx.view, parent.id, ctx.opts.size);
-    if kids.is_empty() {
-        kids.push(parent.id);
+    // Ahead of the rest, which a narrow pane cuts.
+    if viewing.sort != Sort::Size {
+        title = format!("by {} · {title}", viewing.sort.word());
     }
-    let size = |id: u32| ctx.size(&ctx.view.node(id));
+    let frame = if focused {
+        roles.accent
+    } else {
+        border(canvas.pack, false)
+    };
+    canvas.pane(pane, &title, frame);
+    let area = inner(pane);
+    let listed = viewing.listed(ctx, parent.id);
+    let lonely = [parent.id];
+    let kids: &[u32] = if listed.ids.is_empty() {
+        &lonely
+    } else {
+        &listed.ids
+    };
     let whole = ctx.size(&parent);
     let name_width = area.width.saturating_sub(23).min(16);
     let at = kids.iter().position(|&k| k == id).unwrap_or(0);
     let (start, shown) = window(kids.len(), at, SIBLINGS, usize::from(area.height));
     let mut y = area.y;
     let bottom = area.bottom();
-    let more = |canvas: &mut Canvas<'_>, y: u16, left: &[u32]| {
+    // The rows in `left`, of the list read: never the lonely parent's, a
+    // list of one, which needs no `… n more`.
+    let more = |canvas: &mut Canvas<'_>, y: u16, left: std::ops::Range<usize>| {
         if y >= bottom {
             return;
         }
-        let bytes: u64 = left.iter().map(|&k| size(k)).sum();
+        let bytes = listed.bytes(left.clone());
         let (label, size) = (format!("… {} more", left.len()), compact(bytes));
         canvas.list_row(
             area.x,
@@ -67,7 +93,7 @@ pub fn siblings(canvas: &mut Canvas<'_>, pane: Rect, ctx: &Context<'_>, id: u32)
         );
     };
     if start > 0 {
-        more(canvas, y, &kids[..start]);
+        more(canvas, y, 0..start);
         y += 1;
     }
     for &kid in &kids[start..start + shown] {
@@ -95,7 +121,7 @@ pub fn siblings(canvas: &mut Canvas<'_>, pane: Rect, ctx: &Context<'_>, id: u32)
         y += 1;
     }
     if start + shown < kids.len() {
-        more(canvas, y, &kids[start + shown..]);
+        more(canvas, y, start + shown..kids.len());
     }
 }
 

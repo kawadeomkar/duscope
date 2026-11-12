@@ -38,7 +38,7 @@
 ││└────────────┘                          ││                     ││        │       │ │                                 │
 │└────────────────────────────────────────┘└─────────────────────┘└────────┘       │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 16 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 12 #f9e2af #1e1e2e b | 65 - #1e1e2e
@@ -79,7 +79,7 @@
 36: 1 #b4befe #1e1e2e | 1 #7f849c #1e1e2e | 14 #585b70 #1e1e2e | 2 - #11111b | 10 - #6c7086 | 2 - #5c6074 | 1 - #11111b | 9 - #6c7086 | 2 - #5c6074 | 2 #7f849c #1e1e2e | 1 - #11111b | 20 - #6c7086 | 2 #7f849c #1e1e2e | 8 - #6c7086 | 1 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 75 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === →: Redraw, Caches/com.apple.Safari/Cache.db
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches › com.apple.Safari › Cache.db                                                                     
@@ -120,7 +120,7 @@
 ││└────────────┘                          ││                     ││        │       │ │                                 │
 │└────────────────────────────────────────┘└─────────────────────┘└────────┘       │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 16 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 8 #f9e2af #1e1e2e b | 69 - #1e1e2e
@@ -161,7 +161,7 @@
 36: 1 #b4befe #1e1e2e | 1 #7f849c #1e1e2e | 14 #585b70 #1e1e2e | 2 - #11111b | 10 - #6c7086 | 2 - #5c6074 | 1 - #11111b | 9 - #6c7086 | 2 - #5c6074 | 2 #7f849c #1e1e2e | 1 - #11111b | 20 - #6c7086 | 2 #7f849c #1e1e2e | 8 - #6c7086 | 1 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 75 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === ⌫: Redraw, Caches/com.apple.Safari
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches › com.apple.Safari                                                                                
@@ -202,7 +202,7 @@
 ││└────────────┘                          ││                     ││        │       │ │                                 │
 │└────────────────────────────────────────┘└─────────────────────┘└────────┘       │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 16 #f9e2af #1e1e2e b | 80 - #1e1e2e
@@ -243,7 +243,7 @@
 36: 1 #b4befe #1e1e2e | 1 #7f849c #1e1e2e | 14 #585b70 #1e1e2e | 2 - #11111b | 10 - #6c7086 | 2 - #5c6074 | 1 - #11111b | 9 - #6c7086 | 2 - #5c6074 | 2 #7f849c #1e1e2e | 1 - #11111b | 20 - #6c7086 | 2 #7f849c #1e1e2e | 8 - #6c7086 | 1 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 75 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === ↓: Redraw, Caches/Homebrew
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches › Homebrew                                                                                        
@@ -284,7 +284,7 @@
 ││└────────────┘                          ││                     ││        │       │ │                                 │
 │└────────────────────────────────────────┘└─────────────────────┘└────────┘       │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 8 #f9e2af #1e1e2e b | 88 - #1e1e2e
@@ -325,7 +325,7 @@
 36: 1 #b4befe #1e1e2e | 1 #7f849c #1e1e2e | 14 #585b70 #1e1e2e | 2 - #11111b | 10 - #6c7086 | 2 - #5c6074 | 1 - #11111b | 9 - #6c7086 | 2 - #5c6074 | 2 #7f849c #1e1e2e | 1 - #11111b | 20 - #6c7086 | 2 #7f849c #1e1e2e | 8 - #6c7086 | 1 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 75 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === ⏎: Redraw, Caches/Homebrew/downloads
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches › Homebrew › downloads                                                                            
@@ -366,7 +366,7 @@
 ││└────────────┘                          ││                     ││        │       │ │                                 │
 │└────────────────────────────────────────┘└─────────────────────┘└────────┘       │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 8 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 9 #f9e2af #1e1e2e b | 76 - #1e1e2e
@@ -407,7 +407,7 @@
 36: 1 #b4befe #1e1e2e | 1 #7f849c #1e1e2e | 14 #585b70 #1e1e2e | 2 - #11111b | 10 - #6c7086 | 2 - #5c6074 | 1 - #11111b | 9 - #6c7086 | 2 - #5c6074 | 2 #7f849c #1e1e2e | 1 - #11111b | 20 - #6c7086 | 2 #7f849c #1e1e2e | 8 - #6c7086 | 1 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 75 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === z: Redraw, Caches/Homebrew/downloads/llvm@19--19.1.2.arm64_sequoia.bottle.tar.gz (zoomed to Caches/Homebrew/downloads)
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches › Homebrew › downloads › llvm@19--19.1.2.arm64_sequoia.bottle.tar.gz                              
@@ -448,7 +448,7 @@
 │                                                                                  │ │                                 │
 │                                                                                  │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 8 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 9 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 43 #f9e2af #1e1e2e b | 30 - #1e1e2e
@@ -489,7 +489,7 @@
 36: 1 #b4befe #1e1e2e | 39 - #ce9575 | 32 - #fab387 | 11 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 39 - #ce9575 | 32 - #fab387 | 11 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === G: Redraw, Caches/Homebrew/downloads/… +37 more (zoomed to Caches/Homebrew/downloads)
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches › Homebrew › downloads › … +37 more                                                               
@@ -530,7 +530,7 @@
 │                                                                       ┃         ┃│ │                                 │
 │                                                                       ┗━━━━━━━━━┛│ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 8 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 9 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 10 #f9e2af #1e1e2e b | 63 - #1e1e2e
@@ -571,7 +571,7 @@
 36: 1 #b4befe #1e1e2e | 39 - #ce9575 | 32 - #fab387 | 1 #f9e2af #1e1e2e | 9 - #5c6074 | 1 #f9e2af #1e1e2e | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 39 - #ce9575 | 32 - #fab387 | 11 #f9e2af #1e1e2e | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === Z: Redraw, Caches/Homebrew/downloads
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches › Homebrew › downloads                                                                            
@@ -612,7 +612,7 @@
 ││└────────────┘                          ││                     ││        │       │ │                                 │
 │└────────────────────────────────────────┘└─────────────────────┘└────────┘       │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 8 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 9 #f9e2af #1e1e2e b | 76 - #1e1e2e
@@ -653,7 +653,7 @@
 36: 1 #b4befe #1e1e2e | 1 #7f849c #1e1e2e | 14 #585b70 #1e1e2e | 2 - #11111b | 10 - #6c7086 | 2 - #5c6074 | 1 - #11111b | 9 - #6c7086 | 2 - #5c6074 | 2 #7f849c #1e1e2e | 1 - #11111b | 20 - #6c7086 | 2 #7f849c #1e1e2e | 8 - #6c7086 | 1 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 75 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === ⌫ at depth 1, then z: Redraw, Caches/Homebrew (zoomed to Caches)
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches › Homebrew                                                                                        
@@ -694,7 +694,7 @@
 │┃└─────────────────────────────┘└─────┘┃│└────────────────────┘││             │   │ │                                 │
 │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────┘└─────────────┘   │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 8 #f9e2af #1e1e2e b | 88 - #1e1e2e
@@ -735,7 +735,7 @@
 36: 1 #b4befe #1e1e2e | 1 #f9e2af #1e1e2e | 38 #585b70 #1e1e2e | 1 #f9e2af #1e1e2e | 1 #7f849c #1e1e2e | 22 #585b70 #1e1e2e | 2 #7f849c #1e1e2e | 1 - #11111b | 7 - #6c7086 | 5 - #5c6074 | 1 #7f849c #1e1e2e | 1 - #11111b | 2 - #6c7086 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 40 #f9e2af #1e1e2e | 39 #7f849c #1e1e2e | 1 - #11111b | 2 - #6c7086 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === 0: Redraw, Caches
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches                                                                                                   
@@ -776,7 +776,7 @@
 ││└────────────┘                          ││                     ││        │       │ │                                 │
 │└────────────────────────────────────────┘└─────────────────────┘└────────┘       │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #f9e2af #1e1e2e b | 99 - #1e1e2e
@@ -817,4 +817,4 @@
 36: 1 #b4befe #1e1e2e | 1 #7f849c #1e1e2e | 14 #585b70 #1e1e2e | 2 - #11111b | 10 - #6c7086 | 2 - #5c6074 | 1 - #11111b | 9 - #6c7086 | 2 - #5c6074 | 2 #7f849c #1e1e2e | 1 - #11111b | 20 - #6c7086 | 2 #7f849c #1e1e2e | 8 - #6c7086 | 1 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 75 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e

@@ -167,6 +167,24 @@ impl Style {
     pub(super) fn depth(&self) -> Depth {
         self.depth
     }
+
+    /// The packs `p` cycles through in the viewer: this style's, then the
+    /// built-in ones.
+    pub(super) fn packs(&self) -> Vec<Pack> {
+        let mut packs = vec![self.pack.clone()];
+        packs.extend(
+            duscope_treemap::packs::NAMES
+                .iter()
+                .filter(|name| **name != self.pack.name)
+                .filter_map(|name| Pack::named(name)),
+        );
+        packs
+    }
+
+    /// `LS_COLORS`, as the viewer's `lscolors` colour mode reads it.
+    pub(super) fn ls_colors(&self) -> LsColors {
+        self.ls_colors.clone()
+    }
 }
 
 /// The map's style for `args`: refuses `--treemap pixels` in a build

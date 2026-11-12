@@ -170,7 +170,7 @@ fn p4_tui_01_q_and_ctrl_c_quit_a_resize_redraws_the_rest_waits() {
         char('x'),
         char('Q'),
         key(KeyCode::Char('q'), KeyModifiers::ALT),
-        key(KeyCode::Char('c'), KeyModifiers::NONE),
+        key(KeyCode::Char('w'), KeyModifiers::NONE),
         key(KeyCode::Esc, KeyModifiers::ALT),
         Event::FocusGained,
     ] {

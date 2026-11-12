@@ -1,0 +1,49 @@
+ duscope  ~/Library   1 treemap  2 list  3 largest  4 types   48.66 GiB · 126 … 
+ ~ › Library › Caches › com.apple.Safari › Cache.db-wal                         
+╭─ types · ~/Library ──────────────────────────────────────────────────────────╮
+│type           │   size │ share         │     files │ largest file            │
+│═══════════════╪════════╪═══════════════╪═══════════╪═════════════════════════│
+│▸ ■ data       │    12G │ ██░░░░░░  25% │         8 │ Docker.raw              │
+│  ■ binaries   │   3.0G │ ░░░░░░░░   6% │         5 │ Intermediates.noindex   │
+│  ■ archives   │   2.7G │ ░░░░░░░░   6% │        10 │ llvm@19--19.1.2.arm64_s…│
+│  ■ other      │    31G │ █████░░░  64% │       103 │ Messages (.emlx)        │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ selected ───────────────────────────────────────────────────────────────────╮
+│Cache.db-wal  ~/Library/Caches/com.apple.Safari                               │
+│size      1.84 GiB                     files     1                            │
+│parent    ████████░░░░░░░░  51.7%      scan      █░░░░░░░░░░░░░░░   3.8%      │
+│type      ● data · db, cache, blobs, … modified  2026-10-21 23:14             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ↑↓ move   ⏎ filter   1 2 3 4 views   c color type   ? help   q quit            
+--- styles: count fg bg [b]
+0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 30 #7f849c #1e1e2e | 9 #cdd6f4 #45475a b | 1 - #1e1e2e | 19 #a6adc8 #1e1e2e
+1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 16 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 12 #f9e2af #1e1e2e b | 25 - #1e1e2e
+2: 2 #b4befe #1e1e2e | 19 #b4befe #1e1e2e b | 59 #b4befe #1e1e2e
+3: 1 #b4befe #1e1e2e | 4 #b4befe #1e1e2e b | 10 - #1e1e2e | 3 #585b70 #1e1e2e | 2 - #1e1e2e | 4 #b4befe #1e1e2e b | 3 #585b70 #1e1e2e | 5 #b4befe #1e1e2e b | 8 - #1e1e2e | 3 #585b70 #1e1e2e | 4 - #1e1e2e | 5 #b4befe #1e1e2e b | 3 #585b70 #1e1e2e | 12 #b4befe #1e1e2e b | 12 - #1e1e2e | 1 #b4befe #1e1e2e
+4: 1 #b4befe #1e1e2e | 78 #585b70 #1e1e2e | 1 #b4befe #1e1e2e
+5: 1 #b4befe #1e1e2e | 2 #f9e2af #1e1e2e | 2 #94e2d5 #1e1e2e | 4 #cdd6f4 #1e1e2e b | 6 - #1e1e2e | 3 #585b70 #1e1e2e | 3 - #1e1e2e | 3 #cdd6f4 #1e1e2e | 3 #585b70 #1e1e2e | 2 #94e2d5 #1e1e2e | 6 #585b70 #1e1e2e | 5 #a6adc8 #1e1e2e | 3 #585b70 #1e1e2e | 8 - #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #585b70 #1e1e2e | 10 #a6adc8 #1e1e2e | 14 - #1e1e2e | 1 #b4befe #1e1e2e
+6: 1 #b4befe #1e1e2e | 2 #f9e2af #1e1e2e | 2 #cba6f7 #1e1e2e | 8 #a6adc8 #1e1e2e | 2 - #1e1e2e | 3 #585b70 #1e1e2e | 2 - #1e1e2e | 4 #cdd6f4 #1e1e2e | 11 #585b70 #1e1e2e | 5 #a6adc8 #1e1e2e | 3 #585b70 #1e1e2e | 8 - #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #585b70 #1e1e2e | 21 #a6adc8 #1e1e2e | 3 - #1e1e2e | 1 #b4befe #1e1e2e
+7: 1 #b4befe #1e1e2e | 2 #f9e2af #1e1e2e | 2 #fab387 #1e1e2e | 8 #a6adc8 #1e1e2e | 2 - #1e1e2e | 3 #585b70 #1e1e2e | 2 - #1e1e2e | 4 #cdd6f4 #1e1e2e | 11 #585b70 #1e1e2e | 5 #a6adc8 #1e1e2e | 3 #585b70 #1e1e2e | 7 - #1e1e2e | 2 #a6adc8 #1e1e2e | 3 #585b70 #1e1e2e | 24 #a6adc8 #1e1e2e | 1 #b4befe #1e1e2e
+8: 1 #b4befe #1e1e2e | 2 #f9e2af #1e1e2e | 2 #6c7086 #1e1e2e | 5 #a6adc8 #1e1e2e | 5 - #1e1e2e | 3 #585b70 #1e1e2e | 3 - #1e1e2e | 3 #cdd6f4 #1e1e2e | 3 #585b70 #1e1e2e | 5 #6c7086 #1e1e2e | 3 #585b70 #1e1e2e | 5 #a6adc8 #1e1e2e | 3 #585b70 #1e1e2e | 6 - #1e1e2e | 3 #a6adc8 #1e1e2e | 3 #585b70 #1e1e2e | 16 #a6adc8 #1e1e2e | 8 - #1e1e2e | 1 #b4befe #1e1e2e
+9: 1 #b4befe #1e1e2e | 78 - #1e1e2e | 1 #b4befe #1e1e2e
+10: 1 #b4befe #1e1e2e | 78 - #1e1e2e | 1 #b4befe #1e1e2e
+11: 1 #b4befe #1e1e2e | 78 - #1e1e2e | 1 #b4befe #1e1e2e
+12: 1 #b4befe #1e1e2e | 78 - #1e1e2e | 1 #b4befe #1e1e2e
+13: 1 #b4befe #1e1e2e | 78 - #1e1e2e | 1 #b4befe #1e1e2e
+14: 1 #b4befe #1e1e2e | 78 - #1e1e2e | 1 #b4befe #1e1e2e
+15: 1 #b4befe #1e1e2e | 78 - #1e1e2e | 1 #b4befe #1e1e2e
+16: 80 #b4befe #1e1e2e
+17: 2 #585b70 #1e1e2e | 10 #b4befe #1e1e2e b | 68 #585b70 #1e1e2e
+18: 1 #585b70 #1e1e2e | 12 #cdd6f4 #1e1e2e b | 2 - #1e1e2e | 33 #7f849c #1e1e2e | 31 - #1e1e2e | 1 #585b70 #1e1e2e
+19: 1 #585b70 #1e1e2e | 10 #7f849c #1e1e2e | 8 #cdd6f4 #1e1e2e | 21 - #1e1e2e | 10 #7f849c #1e1e2e | 1 #cdd6f4 #1e1e2e | 28 - #1e1e2e | 1 #585b70 #1e1e2e
+20: 1 #585b70 #1e1e2e | 10 #7f849c #1e1e2e | 8 #94e2d5 #1e1e2e | 8 #585b70 #1e1e2e | 7 #a6adc8 #1e1e2e | 6 - #1e1e2e | 10 #7f849c #1e1e2e | 1 #94e2d5 #1e1e2e | 15 #585b70 #1e1e2e | 7 #a6adc8 #1e1e2e | 6 - #1e1e2e | 1 #585b70 #1e1e2e
+21: 1 #585b70 #1e1e2e | 10 #7f849c #1e1e2e | 2 #94e2d5 #1e1e2e | 26 #cdd6f4 #1e1e2e | 1 - #1e1e2e | 10 #7f849c #1e1e2e | 16 #cdd6f4 #1e1e2e | 13 - #1e1e2e | 1 #585b70 #1e1e2e
+22: 80 #585b70 #1e1e2e
+23: 1 - #1e1e2e | 2 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 7 #7f849c #1e1e2e | 3 - #1e1e2e | 7 #f9e2af #1e1e2e b | 6 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 6 #7f849c #1e1e2e | 5 #cdd6f4 #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 12 - #1e1e2e

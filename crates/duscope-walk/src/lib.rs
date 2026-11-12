@@ -28,7 +28,7 @@ mod scheduler;
 mod tests;
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic;
@@ -548,6 +548,20 @@ pub fn cachedir_tag(dir: &Path) -> bool {
 /// temporary file of a write still in progress).
 pub fn process_alive(pid: u32) -> bool {
     platform::process_alive(pid)
+}
+
+/// The command lines that show `path` in the desktop's file manager, the
+/// entry selected in the folder that holds it where the file manager can,
+/// never opened with its default handler: each a program and its
+/// arguments, to be tried in order, one that cannot start or exits with a
+/// failure giving way to the next. On macOS, Finder's reveal (`open -R`);
+/// elsewhere the freedesktop file manager interface's `ShowItems` through
+/// `dbus-send`, then `xdg-open` on the folder holding the entry. None for a
+/// path that is not absolute, which a command line could read as an option
+/// or a URL.
+#[must_use]
+pub fn reveal_commands(path: &Path) -> Vec<Vec<OsString>> {
+    platform::reveal_commands(path)
 }
 
 /// The user's cache directory under `home` when `XDG_CACHE_HOME` is unset:

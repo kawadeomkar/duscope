@@ -38,7 +38,7 @@
 ││└────────────┘                          ││                     ││        │       │ │                                 │
 │└────────────────────────────────────────┘└─────────────────────┘└────────┘       │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 16 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 12 #f9e2af #1e1e2e b | 65 - #1e1e2e
@@ -79,7 +79,7 @@
 36: 1 #b4befe #1e1e2e | 1 #7f849c #1e1e2e | 14 #585b70 #1e1e2e | 2 - #11111b | 10 - #6c7086 | 2 - #5c6074 | 1 - #11111b | 9 - #6c7086 | 2 - #5c6074 | 2 #7f849c #1e1e2e | 1 - #11111b | 20 - #6c7086 | 2 #7f849c #1e1e2e | 8 - #6c7086 | 1 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 75 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e
 === ⌫ to com.apple.Safari
  duscope  ~/Library   1 treemap  2 list  3 largest  4 types       48.66 GiB · 126 files · 105 dirs · scanned in 1.92s ✓ 
  ~ › Library › Caches › com.apple.Safari                                                                                
@@ -120,7 +120,7 @@
 ││└────────────┘                          ││                     ││        │       │ │                                 │
 │└────────────────────────────────────────┘└─────────────────────┘└────────┘       │ │                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯ ╰─────────────────────────────────╯
- ←↓↑→ move   ⏎ open   ⌫ up   z zoom   Z out   q quit                                                                    
+ ←↓↑→ move   ⏎ open   ⌫ up   z zoom   ? help   q quit                                                                   
 --- styles: count fg bg [b]
 0: 9 #11111b #f9e2af b | 12 #a6adc8 #1e1e2e | 11 #cdd6f4 #45475a b | 28 #7f849c #1e1e2e | 5 - #1e1e2e | 55 #a6adc8 #1e1e2e
 1: 1 #7f849c #1e1e2e | 1 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 7 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 6 #a6adc8 #1e1e2e | 3 #7f849c #1e1e2e | 16 #f9e2af #1e1e2e b | 80 - #1e1e2e
@@ -161,4 +161,4 @@
 36: 1 #b4befe #1e1e2e | 1 #7f849c #1e1e2e | 14 #585b70 #1e1e2e | 2 - #11111b | 10 - #6c7086 | 2 - #5c6074 | 1 - #11111b | 9 - #6c7086 | 2 - #5c6074 | 2 #7f849c #1e1e2e | 1 - #11111b | 20 - #6c7086 | 2 #7f849c #1e1e2e | 8 - #6c7086 | 1 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 37: 1 #b4befe #1e1e2e | 75 #7f849c #1e1e2e | 7 - #5c6074 | 1 #b4befe #1e1e2e | 1 - #1e1e2e | 1 #585b70 #1e1e2e | 33 - #1e1e2e | 1 #585b70 #1e1e2e
 38: 84 #b4befe #1e1e2e | 1 - #1e1e2e | 35 #585b70 #1e1e2e
-39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 4 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 68 - #1e1e2e
+39: 1 - #1e1e2e | 4 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 3 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 3 - #1e1e2e | 1 #f9e2af #1e1e2e b | 5 #7f849c #1e1e2e | 67 - #1e1e2e

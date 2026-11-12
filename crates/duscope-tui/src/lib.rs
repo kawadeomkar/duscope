@@ -10,24 +10,29 @@
 //! header, the panes and the key line, [`widgets`] draws the design
 //! system's components, and the panes' contents come from `panes`. The
 //! cursor (`cursor`) moves over the map on the selected path (`path`),
-//! whose visible root the zoom (`zoom`) sets.
+//! whose visible root the zoom (`zoom`) sets. The key map (`keys`) routes
+//! every key and is what `?` lists; `views` holds the list, largest and
+//! types tables and the help, `mask` the map's filter.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod app;
 mod cursor;
+mod keys;
 pub mod layout;
+mod mask;
 mod panes;
 mod path;
 mod term;
+mod views;
 pub mod widgets;
 mod zoom;
 
-pub use app::{App, Flow, run, snapshot};
+pub use app::{App, Effects, Flow, Opener, TermWrite, run, snapshot};
 pub use crossterm::event::Event;
 pub use panes::{ScanFacts, Sources};
-pub use term::{Background, MIN_SIZE, Tui, next_event, restore, size};
+pub use term::{Background, MIN_SIZE, Tui, next_event, open_detached, restore, size};
 
 #[cfg(test)]
 mod tests;

@@ -7,3 +7,4 @@ mod facts;
 mod output;
 mod pixels;
 mod view;
+mod views;
