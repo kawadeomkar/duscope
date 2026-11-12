@@ -55,35 +55,58 @@ fn read(relative: &str) -> String {
     fs::read_to_string(root().join(relative)).unwrap()
 }
 
+/// The text with every run of whitespace made one space, so a restatement
+/// is found however its file wraps it.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// P0-CI-03: the size ceiling is 10 MB (`size_budget` in the justfile) and the
+/// cold build's 120 s (`BUILD_TIME_BUDGET_SECS` in ci.yml), each one figure
+/// with no ratchet below it, and every file that restates them says the same.
 #[test]
-fn p1_rel_01_the_build_time_budgets_are_the_measured_ones() {
-    let ci = read(".github/workflows/ci.yml");
-    let head = "  BUILD_TIME_BUDGETS: |";
-    let budgets: Vec<u32> = ci
-        .lines()
-        .skip_while(|l| l.trim_end() != head)
-        .skip(1)
-        .take_while(|l| l.starts_with("    "))
-        .map(|l| l.trim().rsplit_once('=').unwrap().1.parse().unwrap())
-        .collect();
-    assert!(!budgets.is_empty(), "ci.yml has no BUILD_TIME_BUDGETS");
-    for secs in &budgets {
-        assert!(*secs < 90, "a build-time budget is still the 90 s ceiling");
-    }
-    // Their comment names the CI run that measured them, as size_budget's does.
-    let before: Vec<&str> = ci.lines().take_while(|l| l.trim_end() != head).collect();
-    let mut comment: Vec<&str> = before
-        .iter()
-        .rev()
-        .take_while(|l| l.trim_start().starts_with('#'))
-        .map(|l| l.trim_start().trim_start_matches('#').trim())
-        .collect();
-    comment.reverse();
-    let comment = comment.join(" ");
-    assert!(
-        comment.contains("(run ") && comment.contains(" s"),
-        "BUILD_TIME_BUDGETS's comment cites no measured run: {comment}"
+fn p0_ci_03_the_ceilings_are_10_mb_and_120_s_wherever_they_are_stated() {
+    let value = |text: &str, prefix: &str| -> u64 {
+        let line = text
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("no `{prefix}`"));
+        line.trim().trim_matches('"').parse().unwrap()
+    };
+    let bytes = value(&read("justfile"), "size_budget := ");
+    let secs = value(
+        &read(".github/workflows/ci.yml"),
+        "  BUILD_TIME_BUDGET_SECS: ",
     );
+    assert_eq!(bytes, 10_000_000, "the size ceiling is 10 MB");
+    assert_eq!(secs, 120, "the build ceiling is 120 s");
+    let (mb, s) = (format!("{} MB", bytes / 1_000_000), format!("{secs} s"));
+    for (file, statements) in [
+        (
+            "CLAUDE.md",
+            vec![format!("(<= {mb} stripped)"), format!("(<= {s})")],
+        ),
+        ("CONTRIBUTING.md", vec![format!("(`size_budget`, {mb})")]),
+        (
+            "DEPENDENCIES.md",
+            vec![format!("at {mb} or less"), format!("at {s} or less")],
+        ),
+        (
+            "docs/RELEASING.md",
+            vec![
+                "against size_budget in the justfile".to_owned(),
+                "`BUILD_TIME_BUDGET_SECS` in `ci.yml`".to_owned(),
+            ],
+        ),
+    ] {
+        let text = one_line(&read(file));
+        for statement in statements {
+            assert!(
+                text.contains(&statement),
+                "{file} does not say `{statement}`"
+            );
+        }
+    }
 }
 
 #[test]

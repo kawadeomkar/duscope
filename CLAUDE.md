@@ -25,7 +25,7 @@ The design is fixed by two documents; read the parts a task cites before writing
 - One binary, one package: no component feature flags. The only Cargo features are
   `system-sqlite` and `pixels`.
 - A new dependency needs a row in DEPENDENCIES.md, a cargo deny pass, and the size budget
-  (<= 8 MB stripped) and build budget (<= 90 s) to hold. Never add: rmcp or tokio to the
+  (<= 10 MB stripped) and build budget (<= 120 s) to hold. Never add: rmcp or tokio to the
   binary, resvg, jaq-core, objc2-core-services, catppuccin, supports-color, terminal_size.
 
 ## Commands
