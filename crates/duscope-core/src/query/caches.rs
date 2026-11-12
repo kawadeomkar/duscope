@@ -38,7 +38,7 @@ use super::{
     After, Filters, Page, SizeKind, SortKey, TreeView, failed, next_after, pct, ranked_after,
     remain, timegrammar::iso8601,
 };
-use crate::envelope::{CacheEntry, ProjectEntry, name_fields};
+use crate::envelope::{CacheEntry, ProjectEntry, name_fields, path_fields};
 use crate::index::reader::{DirRow, FileRow, Paged};
 use crate::rules::{Caches, Confirm};
 
@@ -141,16 +141,19 @@ pub fn caches(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Cach
             let node = view.node(f.id);
             let (name, name_raw) = name_fields(&view.name(f.id));
             let project = f.project.as_ref().map(|p| p.path.clone());
+            let (path, path_raw) = path_fields(&f.path);
+            let (project_root, project_root_raw) = project
+                .as_deref()
+                .map(path_fields)
+                .map_or((None, None), |(p, raw)| (Some(p), raw));
             CacheEntry {
-                path: String::from_utf8_lossy(&f.path).into_owned(),
+                path,
                 path_bytes: f.path.clone(),
                 name,
                 name_raw,
                 rule: f.rule.clone(),
                 regenerable_by: f.regenerable_by,
-                project_root: project
-                    .as_ref()
-                    .map(|p| String::from_utf8_lossy(p).into_owned()),
+                project_root,
                 project_bytes: project.unwrap_or_default(),
                 confirmed: f.confirmed,
                 cachedir_tag: f.cachedir_tag,
@@ -159,6 +162,8 @@ pub fn caches(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Cach
                 pct_of_root: pct(node.size(q.size), root_total),
                 file_count: node.file_count,
                 max_mtime: iso8601(node.max_mtime_ns),
+                path_raw,
+                project_root_raw,
             }
         })
         .collect();
@@ -235,21 +240,26 @@ pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Pr
     }
     let entries: Vec<_> = rows
         .into_iter()
-        .map(|(project, group)| ProjectEntry {
-            project_root: project
-                .as_ref()
-                .map(|p| String::from_utf8_lossy(p).into_owned()),
-            path_bytes: project.unwrap_or_default(),
-            allocated_bytes: group.allocated,
-            apparent_bytes: group.apparent,
-            cache_count: group.caches.len() as u64,
-            max_mtime: iso8601(group.newest_ns),
-            caches: group
-                .caches
-                .into_iter()
-                .take(PROJECT_CACHES)
-                .map(|(_, p)| String::from_utf8_lossy(&p).into_owned())
-                .collect(),
+        .map(|(project, group)| {
+            let (project_root, project_root_raw) = project
+                .as_deref()
+                .map(path_fields)
+                .map_or((None, None), |(p, raw)| (Some(p), raw));
+            ProjectEntry {
+                project_root,
+                path_bytes: project.unwrap_or_default(),
+                allocated_bytes: group.allocated,
+                apparent_bytes: group.apparent,
+                cache_count: group.caches.len() as u64,
+                max_mtime: iso8601(group.newest_ns),
+                caches: group
+                    .caches
+                    .into_iter()
+                    .take(PROJECT_CACHES)
+                    .map(|(_, p)| String::from_utf8_lossy(&p).into_owned())
+                    .collect(),
+                project_root_raw,
+            }
         })
         .collect();
     Page {

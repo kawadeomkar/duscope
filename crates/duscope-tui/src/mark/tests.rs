@@ -99,6 +99,7 @@ fn plan_with_refusal() -> CleanPlan {
             reason,
             outcome: None,
             error: None,
+            path_raw: None,
         };
     CleanPlan {
         items: vec![

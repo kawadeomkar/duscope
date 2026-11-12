@@ -27,7 +27,7 @@ use duscope_walk::Flags;
 
 use super::{TreeView, abs_path, flag_names, kind_name, timegrammar::iso8601};
 use crate::CoreError;
-use crate::envelope::{Explain, ExplainGit, name_fields};
+use crate::envelope::{Explain, ExplainGit, name_fields, path_fields};
 use crate::git;
 use crate::index::{Index, LATER_LINK};
 use crate::rules::Caches;
@@ -113,16 +113,16 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
                 .to_owned(),
         );
     }
-    let index_failed = index.failure().is_some();
-    let confidence = if git_failed || index_failed || !entered {
+    let confidence = if git_failed || index.failure().is_some() || !entered {
         "low"
     } else if freeable_kind != "exact" || cache_medium {
         "medium"
     } else {
         "high"
     };
+    let (path_text, path_raw) = path_fields(&path_bytes);
     Ok(Explain {
-        path: String::from_utf8_lossy(&path_bytes).into_owned(),
+        path: path_text,
         path_bytes,
         name,
         name_raw,
@@ -152,6 +152,7 @@ pub fn explain(index: &Index, id: u32, q: &ExplainQuery<'_>) -> Result<Explain, 
         confidence,
         evidence,
         handle: None,
+        path_raw,
     })
 }
 
@@ -265,8 +266,9 @@ pub fn explain_unindexed(path: &Path, q: &ExplainQuery<'_>) -> Result<Explain, C
         i64::try_from(since.as_nanos()).ok()
     });
     let path_bytes = path.as_os_str().as_bytes().to_vec();
+    let (path_text, path_raw) = path_fields(&path_bytes);
     Ok(Explain {
-        path: String::from_utf8_lossy(&path_bytes).into_owned(),
+        path: path_text,
         path_bytes,
         name,
         name_raw,
@@ -296,6 +298,7 @@ pub fn explain_unindexed(path: &Path, q: &ExplainQuery<'_>) -> Result<Explain, C
         confidence: "low",
         evidence,
         handle: None,
+        path_raw,
     })
 }
 

@@ -7,7 +7,7 @@
 
 use std::collections::BinaryHeap;
 
-use crate::envelope::{TreeEntry, name_fields};
+use crate::envelope::{TreeEntry, name_fields, path_fields};
 
 use super::{
     Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, children, flag_names, kind_name,
@@ -109,9 +109,10 @@ fn entry(
     size: SizeKind,
 ) -> TreeEntry {
     let path_bytes = abs_path(view, node.id);
+    let (path, path_raw) = path_fields(&path_bytes);
     let (name, name_raw) = name_fields(&view.name(node.id));
     TreeEntry {
-        path: String::from_utf8_lossy(&path_bytes).into_owned(),
+        path,
         path_bytes,
         name,
         name_raw,
@@ -125,5 +126,6 @@ fn entry(
         dir_count: node.dir_count,
         max_mtime: iso8601(node.max_mtime_ns),
         flags: flag_names(node),
+        path_raw,
     }
 }

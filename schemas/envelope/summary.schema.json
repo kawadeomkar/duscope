@@ -326,6 +326,14 @@
           "description": "The path, absolute.",
           "type": "string"
         },
+        "path_raw": {
+          "description": "The path's bytes in base64, only when they are not valid UTF-8 (its\nown name's, or an ancestor's): the path to pass back.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
+        },
         "started_at": {
           "description": "When the scan started.",
           "format": "date-time",
@@ -422,6 +430,14 @@
         "path": {
           "description": "Where it starts, absolute.",
           "type": "string"
+        },
+        "path_raw": {
+          "description": "The path's bytes in base64, only when they are not valid UTF-8 (its\nown name's, or an ancestor's): the path to pass back.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
         },
         "referenced_bytes": {
           "description": "What the filesystem says the subvolume itself holds, at the scan's\nstart: a ZFS dataset's referenced bytes, its size less its free space\nas it reports them; null for a btrfs subvolume, whose size and free\nspace are the whole filesystem's.",

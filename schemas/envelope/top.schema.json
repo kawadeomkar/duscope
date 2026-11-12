@@ -389,6 +389,14 @@
           "description": "The entry's absolute path, as lossy UTF-8.",
           "type": "string"
         },
+        "path_raw": {
+          "description": "The path's bytes in base64, only when they are not valid UTF-8 (its\nown name's, or an ancestor's): the path to pass back.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
+        },
         "pct_of_root": {
           "description": "The share of the root's total in the scan's size kind, in percent\nwith one decimal.",
           "format": "double",

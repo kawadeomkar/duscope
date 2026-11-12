@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use duscope_core::envelope::{
     Envelope, Explain, ObjectEnvelope, ObjectQuery, QueryBlock, SCHEMA_VERSION, ScanBlock,
-    ScanErrorEntry, Tool,
+    ScanErrorEntry, Tool, path_fields,
 };
 use duscope_core::handle::{Handle, HandlePayload, Key, LIFETIME_NS};
 use duscope_core::index::Index;
@@ -320,12 +320,14 @@ fn errors(index: &Index, output: &Output) -> Result<(), Failure> {
                 }
                 None => "directory",
             };
+            let (text, path_raw) = path_fields(&path);
             ScanErrorEntry {
-                path: String::from_utf8_lossy(&path).into_owned(),
+                path: text,
                 path_bytes: path,
                 kind,
                 errno,
                 message: std::io::Error::from_raw_os_error(errno).to_string(),
+                path_raw,
             }
         })
         .collect();

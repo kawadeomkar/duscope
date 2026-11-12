@@ -18,7 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::CoreError;
-use crate::envelope::{ByTypeEntry, Example, name_fields};
+use crate::envelope::{ByTypeEntry, Example, name_fields, path_fields};
 use crate::index::writer::LATER_LINK;
 use crate::rules::{Class, Classes, ext};
 
@@ -119,12 +119,14 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
                     .map(|&(_, id)| {
                         let node = view.node(id);
                         let (name, name_raw) = name_fields(&view.name(id));
+                        let (path, path_raw) = path_fields(&abs_path(view, id));
                         Example {
-                            path: String::from_utf8_lossy(&abs_path(view, id)).into_owned(),
+                            path,
                             name,
                             name_raw,
                             allocated_bytes: node.allocated,
                             apparent_bytes: node.apparent,
+                            path_raw,
                         }
                     })
                     .collect(),

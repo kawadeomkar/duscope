@@ -3,7 +3,7 @@
 //! `--atime` the access time too, which needs `--attrs full`.
 
 use crate::CoreError;
-use crate::envelope::{StaleEntry, name_fields};
+use crate::envelope::{StaleEntry, name_fields, path_fields};
 
 use super::{
     After, Cut, Filters, Page, SizeKind, SortKey, TreeView, abs_path, attrs_not_collected,
@@ -73,9 +73,10 @@ impl StaleRows {
     pub fn row(&self, view: &(impl TreeView + ?Sized), id: u32) -> StaleEntry {
         let node = view.node(id);
         let path_bytes = abs_path(view, id);
+        let (path, path_raw) = path_fields(&path_bytes);
         let (name, name_raw) = name_fields(&view.name(id));
         StaleEntry {
-            path: String::from_utf8_lossy(&path_bytes).into_owned(),
+            path,
             path_bytes,
             name,
             name_raw,
@@ -87,6 +88,7 @@ impl StaleRows {
             atime: node.atime_ns.map(iso8601),
             nlink: node.nlink,
             flags: flag_names(&node),
+            path_raw,
         }
     }
 

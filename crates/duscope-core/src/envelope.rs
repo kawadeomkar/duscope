@@ -444,6 +444,10 @@ pub struct TopEntry {
     /// `uncharged`, …).
     #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 /// A row of `tree`: the entries down to `--depth`, largest first under
@@ -484,6 +488,10 @@ pub struct TreeEntry {
     /// What else is true of it.
     #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 /// A row of `by-type`: one file class.
@@ -520,6 +528,10 @@ pub struct Example {
     pub allocated_bytes: u64,
     /// Its apparent bytes.
     pub apparent_bytes: u64,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 /// A row of `stale`: a large file nobody has changed (or read) since the
@@ -558,6 +570,10 @@ pub struct StaleEntry {
     /// What else is true of it.
     #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 /// A line of `--format ndjson`: the scan first, then each row, then the
@@ -609,6 +625,14 @@ pub fn name_fields(bytes: &[u8]) -> (String, Option<String>) {
             Some(base64(bytes)),
         ),
     }
+}
+
+/// A path as the envelope carries it, as [`name_fields`] carries a name:
+/// `path` is the bytes as UTF-8, with invalid sequences replaced;
+/// `path_raw` is the bytes in base64, present only when they are not valid
+/// UTF-8, so that a path with a non-UTF-8 ancestor can be passed back.
+pub fn path_fields(bytes: &[u8]) -> (String, Option<String>) {
+    name_fields(bytes)
 }
 
 /// Standard base64 (RFC 4648, with padding), encoded in-tree: a name's
@@ -685,6 +709,14 @@ pub struct CacheEntry {
     /// The newest modification time under it.
     #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub max_mtime: String,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
+    /// The project root's bytes in base64, only when they are not valid
+    /// UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_root_raw: Option<String>,
 }
 
 /// A project's caches, as `caches --by-project` lists them.
@@ -709,6 +741,10 @@ pub struct ProjectEntry {
     /// Its largest caches' paths, largest first, at most ten;
     /// `cache_count` counts them all.
     pub caches: Vec<String>,
+    /// The project root's bytes in base64, only when they are not valid
+    /// UTF-8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_root_raw: Option<String>,
 }
 
 /// What a verb that answers with one object (`explain`, `summary`,
@@ -830,6 +866,10 @@ pub struct Explain {
     /// expiry fifteen minutes on) and their HMAC; null where none could be
     /// issued (the path is gone, or the key cannot be read).
     pub handle: Option<String>,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 /// What git says of a path.
@@ -864,6 +904,10 @@ pub struct ScanErrorEntry {
     pub errno: i32,
     /// What the system calls it.
     pub message: String,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 /// What `scans` prints under `--json`: the fields of a list, without a scan
@@ -1036,6 +1080,10 @@ pub struct Summary {
     pub duration_ms: u64,
     /// The worker threads it ran.
     pub thread_count: u64,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 /// A volume's share in `summary`.
@@ -1083,6 +1131,10 @@ pub struct SummarySubvolume {
     /// as it reports them; null for a btrfs subvolume, whose size and free
     /// space are the whole filesystem's.
     pub referenced_bytes: Option<u64>,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 /// A change `diff` found.
@@ -1115,6 +1167,10 @@ pub struct DiffEntry {
     /// For a directory added or removed whole, the entries in it, itself
     /// included; null otherwise.
     pub collapsed_count: Option<u64>,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 /// What `diff` adds up: bytes and entries come and gone, whatever
@@ -1407,6 +1463,10 @@ pub struct PlanItem {
     pub outcome: Option<&'static str>,
     /// Why moving or deleting it failed; null otherwise.
     pub error: Option<ErrorObject>,
+    /// The path's bytes in base64, only when they are not valid UTF-8 (its
+    /// own name's, or an ancestor's): the path to pass back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_raw: Option<String>,
 }
 
 // The schema of a value as `Serialize` above writes it. A `$bytes` object
@@ -1436,10 +1496,13 @@ impl schemars::JsonSchema for SqlValue {
 }
 
 /// The fields of a row as `--fields` names them, in the order the row
-/// writes them.
+/// writes them. A field added after a release goes last (`path_raw`,
+/// `project_root_raw`), so that `--plain --detail`'s columns keep their
+/// places.
 pub trait Fields {
-    /// Every field the row writes; `name_raw` is among them, though a row
-    /// carries it only for a name that is not UTF-8.
+    /// Every field the row writes; `name_raw`, `path_raw` and
+    /// `project_root_raw` are among them, though a row carries each only for
+    /// bytes that are not UTF-8.
     const NAMES: &'static [&'static str];
 }
 
@@ -1458,6 +1521,7 @@ impl Fields for TopEntry {
         "max_mtime",
         "via",
         "flags",
+        "path_raw",
     ];
 }
 
@@ -1476,6 +1540,7 @@ impl Fields for TreeEntry {
         "dir_count",
         "max_mtime",
         "flags",
+        "path_raw",
     ];
 }
 
@@ -1503,6 +1568,7 @@ impl Fields for StaleEntry {
         "atime",
         "nlink",
         "flags",
+        "path_raw",
     ];
 }
 
@@ -1521,6 +1587,8 @@ impl Fields for CacheEntry {
         "pct_of_root",
         "file_count",
         "max_mtime",
+        "path_raw",
+        "project_root_raw",
     ];
 }
 
@@ -1532,6 +1600,7 @@ impl Fields for ProjectEntry {
         "cache_count",
         "max_mtime",
         "caches",
+        "project_root_raw",
     ];
 }
 
@@ -1575,11 +1644,12 @@ impl Fields for DiffEntry {
         "new_bytes",
         "delta_bytes",
         "collapsed_count",
+        "path_raw",
     ];
 }
 
 impl Fields for ScanErrorEntry {
-    const NAMES: &'static [&'static str] = &["path", "kind", "errno", "message"];
+    const NAMES: &'static [&'static str] = &["path", "kind", "errno", "message", "path_raw"];
 }
 
 /// What stdout gets in place of an envelope longer than `--max-chars`: the
@@ -1682,6 +1752,7 @@ mod tests {
             max_mtime: "t".into(),
             via: Vec::new(),
             flags: Vec::new(),
+            path_raw: raw(),
         });
         assert_names(&TreeEntry {
             path: "/a".into(),
@@ -1698,6 +1769,7 @@ mod tests {
             dir_count: 1,
             max_mtime: "t".into(),
             flags: Vec::new(),
+            path_raw: raw(),
         });
         assert_names(&ByTypeEntry {
             class: "code",
@@ -1720,6 +1792,7 @@ mod tests {
             atime: Some("t".into()),
             nlink: 1,
             flags: Vec::new(),
+            path_raw: raw(),
         });
         assert_names(&CacheEntry {
             path: "/a".into(),
@@ -1737,6 +1810,8 @@ mod tests {
             pct_of_root: 1.0,
             file_count: 1,
             max_mtime: "t".into(),
+            path_raw: raw(),
+            project_root_raw: raw(),
         });
         assert_names(&ProjectEntry {
             project_root: Some("/".into()),
@@ -1746,6 +1821,7 @@ mod tests {
             cache_count: 1,
             max_mtime: "t".into(),
             caches: Vec::new(),
+            project_root_raw: raw(),
         });
         assert_names(&SavedScanEntry {
             id: "i".into(),
@@ -1783,6 +1859,7 @@ mod tests {
             kind: "directory",
             errno: 13,
             message: "denied".into(),
+            path_raw: raw(),
         });
     }
 

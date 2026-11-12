@@ -8,7 +8,7 @@ use std::path::Path;
 
 use duscope_core::envelope::{
     ObjectEnvelope, ObjectQuery, SCHEMA_VERSION, Summary, SummarySubvolume, SummaryVolume, Tool,
-    VolumeEntry,
+    VolumeEntry, path_fields,
 };
 use duscope_core::query::{self, SizeKind, TreeView};
 
@@ -39,7 +39,7 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
     let subvolumes = sidebar(&*view, &bytes.subvolumes, &block.volumes);
     drop(view);
     let path_bytes = root_path.as_os_str().as_bytes().to_vec();
-    let path = root_path.to_string_lossy().into_owned();
+    let (path, path_raw) = path_fields(&path_bytes);
     // Each volume's share, by its device; a device met twice (a bind
     // mount) has its bytes at the first.
     let mut shared: Vec<u64> = Vec::new();
@@ -105,6 +105,7 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
         )
         .unwrap_or(0),
         thread_count: block.thread_count,
+        path_raw,
     };
     let warnings = source.warnings(&args.walk);
     let file = source.index_file();
@@ -176,7 +177,7 @@ fn subvolume(
     path: &[u8],
     share: &query::SubvolumeBytes,
 ) -> SummarySubvolume {
-    let path = String::from_utf8_lossy(path).into_owned();
+    let (path, path_raw) = path_fields(path);
     let own = volumes.iter().find(|v| v.mount_point == path);
     let around = || {
         volumes
@@ -196,6 +197,7 @@ fn subvolume(
         allocated_bytes: share.allocated,
         apparent_bytes: share.apparent,
         du_compatible_bytes: share.du_compatible,
+        path_raw,
     }
 }
 

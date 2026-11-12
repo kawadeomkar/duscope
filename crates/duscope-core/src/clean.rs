@@ -81,7 +81,7 @@ use duscope_walk::{
 };
 
 use crate::CoreError;
-use crate::envelope::{CleanPlan, ErrorObject, Explain, PlanItem, name_fields};
+use crate::envelope::{CleanPlan, ErrorObject, Explain, PlanItem, name_fields, path_fields};
 use crate::index::Index;
 use crate::index::writer::{EXCLUDED, EXCLUDED_CACHE, FIRMLINK};
 use crate::query::{ExplainQuery, TreeView, explain, explain_unindexed, kind_name};
@@ -1079,8 +1079,9 @@ fn plan_item(
     let path_bytes = path.as_os_str().as_bytes().to_vec();
     let name = path.file_name().unwrap_or(OsStr::new("/")).as_bytes();
     let (name, name_raw) = name_fields(name);
+    let (path_text, path_raw) = path_fields(&path_bytes);
     PlanItem {
-        path: String::from_utf8_lossy(&path_bytes).into_owned(),
+        path: path_text,
         path_bytes,
         name,
         name_raw,
@@ -1099,6 +1100,7 @@ fn plan_item(
         reason,
         outcome: None,
         error: None,
+        path_raw,
     }
 }
 

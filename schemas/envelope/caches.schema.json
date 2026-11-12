@@ -49,6 +49,14 @@
           "description": "Its path, absolute, as lossy UTF-8.",
           "type": "string"
         },
+        "path_raw": {
+          "description": "The path's bytes in base64, only when they are not valid UTF-8 (its\nown name's, or an ancestor's): the path to pass back.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
+        },
         "pct_of_root": {
           "description": "Its share of the root's total, in percent.",
           "format": "double",
@@ -60,6 +68,14 @@
             "string",
             "null"
           ]
+        },
+        "project_root_raw": {
+          "description": "The project root's bytes in base64, only when they are not valid\nUTF-8.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
         },
         "regenerable_by": {
           "anyOf": [
@@ -183,6 +199,14 @@
             "string",
             "null"
           ]
+        },
+        "project_root_raw": {
+          "description": "The project root's bytes in base64, only when they are not valid\nUTF-8.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
         }
       },
       "required": [

@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::envelope::{TopEntry, name_fields};
+use crate::envelope::{TopEntry, name_fields, path_fields};
 
 use super::{
     After, Cut, Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, ids,
@@ -240,9 +240,10 @@ fn entry(
     size: SizeKind,
 ) -> TopEntry {
     let path_bytes = abs_path(view, node.id);
+    let (path, path_raw) = path_fields(&path_bytes);
     let (name, name_raw) = name_fields(&view.name(node.id));
     TopEntry {
-        path: String::from_utf8_lossy(&path_bytes).into_owned(),
+        path,
         path_bytes,
         name,
         name_raw,
@@ -259,5 +260,6 @@ fn entry(
             .map(|&id| String::from_utf8_lossy(&abs_path(view, id)).into_owned())
             .collect(),
         flags: flag_names(node),
+        path_raw,
     }
 }
