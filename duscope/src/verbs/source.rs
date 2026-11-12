@@ -674,12 +674,7 @@ pub(super) fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
     let mut excluded: Vec<(Vec<u8>, &'static str)> = index
         .excluded()
         .into_iter()
-        .map(|(id, reason)| {
-            let mut path = root_path.as_os_str().as_bytes().to_vec();
-            path.push(b'/');
-            path.extend_from_slice(&index.path(id));
-            (path, reason)
-        })
+        .map(|(id, reason)| (query::abs_path(index, id), reason))
         .collect();
     excluded.sort();
     ScanBlock {

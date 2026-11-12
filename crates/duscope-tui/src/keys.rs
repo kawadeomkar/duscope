@@ -50,6 +50,12 @@ pub enum Action {
     Copy,
     /// `o`: show the selection in the file manager, selected in its folder.
     Open,
+    /// `d`: mark or unmark the selection.
+    Mark,
+    /// `D`: the mark pane.
+    MarkPane,
+    /// `r`: rescan the view's root and reload.
+    Rescan,
 }
 
 /// A key and what it asks for.
@@ -271,6 +277,27 @@ pub static OPEN_OUT: Binding = Binding {
     ascii: "o",
     what: "show in the file manager",
 };
+/// `d`.
+pub static MARK: Binding = Binding {
+    strokes: &[key(KeyCode::Char('d'), Action::Mark)],
+    label: "d",
+    ascii: "d",
+    what: "mark or unmark for Trash",
+};
+/// `D`.
+pub static MARKS: Binding = Binding {
+    strokes: &[key(KeyCode::Char('D'), Action::MarkPane)],
+    label: "D",
+    ascii: "D",
+    what: "mark pane: review, confirm",
+};
+/// `r`.
+pub static RESCAN: Binding = Binding {
+    strokes: &[key(KeyCode::Char('r'), Action::Rescan)],
+    label: "r",
+    ascii: "r",
+    what: "rescan the root, reload",
+};
 /// `?`.
 pub static HELP: Binding = Binding {
     strokes: &[key(KeyCode::Char('?'), Action::Help)],
@@ -290,9 +317,10 @@ pub static QUIT: Binding = Binding {
 };
 
 /// Every binding, in the order the help lists them.
-pub static ALL: [&Binding; 23] = [
+pub static ALL: [&Binding; 26] = [
     &MOVE, &OPEN, &UP, &BACK, &ZOOM, &OUT, &RESET, &FIRST, &LAST, &PAGE, &VIEWS, &SORT, &LABELS,
-    &COLOR, &PACK, &FILTER, &NEXT_PANE, &PREV_PANE, &FACTS, &COPY, &OPEN_OUT, &HELP, &QUIT,
+    &COLOR, &PACK, &FILTER, &NEXT_PANE, &PREV_PANE, &FACTS, &COPY, &OPEN_OUT, &MARK, &MARKS,
+    &RESCAN, &HELP, &QUIT,
 ];
 
 /// What `event` asks for, by the key map: `None` for a key that is not
@@ -383,6 +411,15 @@ pub fn line<'a>(
         fourth,
         item(HELP.keys(ascii), "help"),
         item("q", "quit"),
+    ]
+}
+
+/// The keys the mark pane answers.
+#[must_use]
+pub fn pane_line(ascii: bool) -> [KeyItem<'static>; 2] {
+    [
+        item(OPEN.keys(ascii), "confirm"),
+        item(BACK.keys(ascii), "close"),
     ]
 }
 

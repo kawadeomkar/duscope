@@ -29,6 +29,16 @@
 //! either way; `o` shows the selection in the file manager, selected in
 //! the folder that holds it, never opened.
 //!
+//! `d` marks the selection and `D` opens the mark pane, the plan of the
+//! marks as `clean` prints it, which `yes` moves to the Trash
+//! ([`crate::mark`]). What moved stays on the map as a freed tile for the
+//! session. `r` rescans the view's root (not the zoom's, which a reload
+//! carries) with the saved scan's options; the binary runs it beside the
+//! viewer and the viewer reloads when the new index lands, keeping the
+//! view, the mask and the cursor's path. A click
+//! selects the deepest tile under the cell or a row, a double click zooms
+//! and the wheel walks the path ([`crate::mouse`]).
+//!
 //! With `--treemap pixels` the map pane shows a picture over its cells: of
 //! the zoom's root, in the whole map's colours, drawn once per root and
 //! size and kept ([`crate::zoom::Layouts`]), with the cursor's marks drawn
@@ -42,15 +52,18 @@ use std::num::NonZeroU16;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::rc::Rc;
+use std::time::Instant;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use duscope_core::envelope::base64;
-use duscope_core::query::{Subtree, TreeView, abs_path};
+use duscope_core::query::{Subtree, TreeView, abs_path, human_size};
 use duscope_core::rules::Class;
 use duscope_treemap::Rect as Px;
 use duscope_treemap::cells::{CellBuffer, Color, Depth};
 use duscope_treemap::packs::Pack;
-use duscope_treemap::paint::{ColorBy, Glyphs, LsColors, PaintOpts, classes_of};
+use duscope_treemap::paint::{ColorBy, Glyphs, LsColors, PaintOpts, classes_of, compact};
 use duscope_treemap::pixels::{Picture, PixelMap, Pixels};
 use ratatui_core::backend::Backend;
 use ratatui_core::buffer::{Buffer, CellDiffOption};
@@ -62,12 +75,14 @@ use unicode_width::UnicodeWidthChar;
 use crate::cursor::{Cursor, Dir, Nav, PAGE, Step};
 use crate::keys::{self, Action};
 use crate::layout::{Panes, inner, layout};
+use crate::mark::{self, Answer, Freed, Toggled};
 use crate::mask::Mask;
+use crate::mouse::{Clicks, Press};
 use crate::panes::{self, Context, Facts, LegendRow, Ranks, Sources};
 use crate::path::Path as Selection;
 use crate::term::MIN_SIZE;
 use crate::views::{self, Focus, Rows, Sort, Tab, Viewing};
-use crate::widgets::{Canvas, Message, Notice, Span, border};
+use crate::widgets::{Canvas, Message, Notice, Span, border, thousands};
 use crate::zoom::{self, KEPT_PICTURES, Layouts, Map};
 
 /// The entries whose facts are kept: moving back and forth with the facts
@@ -83,12 +98,72 @@ pub enum Flow {
     Redraw,
     /// Give the terminal back.
     Quit,
+    /// The new index has landed: [`run_session`] returns to the binary,
+    /// which reloads the viewer on it.
+    Reload,
+}
+
+/// What [`run_session`] waits for: the next terminal event, or what the
+/// binary's rescan has to say.
+#[derive(Debug)]
+pub enum Input {
+    /// A key, a mouse event or a resize.
+    Event(Event),
+    /// The rescan `r` started has saved its index.
+    Landed,
+    /// The rescan `r` started failed: why.
+    RescanFailed(String),
+}
+
+/// Why [`run_session`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// `q` or `Ctrl-C`: give the terminal back.
+    Quit,
+    /// The new index has landed: reload the viewer on it.
+    Reload,
+}
+
+/// What the viewer keeps across a reload, the view it ran on gone: the
+/// view, the sort, the mask, the colours and the cursor as paths, the marks
+/// as absolute paths, each kept only where the new scan holds the same
+/// path. What is freed goes: the new scan measures it.
+#[derive(Debug)]
+pub struct Carried {
+    tab: Tab,
+    focus: Focus,
+    sort: Sort,
+    labels: bool,
+    filter: Option<String>,
+    mask: Option<Mask>,
+    help: bool,
+    legend_at: usize,
+    types_at: usize,
+    facts_open: bool,
+    color_by: ColorBy,
+    pack: String,
+    cursor: crate::cursor::CursorPaths,
+    /// The marks, absolute.
+    marks: Vec<Vec<u8>>,
+    session: Session,
+}
+
+/// What the viewer moved to the Trash this session, which the binary prints
+/// once the terminal is back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Session {
+    /// The items moved.
+    pub moved_count: u64,
+    /// Their bytes on disk.
+    pub moved_bytes: u64,
 }
 
 /// Writes to the terminal, between frames.
 pub type TermWrite<'a> = Box<dyn FnMut(&[u8]) -> io::Result<()> + 'a>;
 /// Shows a path in the desktop's file manager.
 pub type Opener<'a> = Box<dyn FnMut(&Path) -> io::Result<()> + 'a>;
+/// Starts `r`'s rescan beside the viewer: `Ok` when it started, or why not.
+pub type Rescan<'a> = Box<dyn FnMut() -> Result<(), String> + 'a>;
 
 /// What the viewer does outside its cells: write to the terminal between
 /// frames, show a path in the file manager, read the variables that tell
@@ -102,6 +177,11 @@ pub struct Effects<'a> {
     pub open: Opener<'a>,
     /// Reads a variable: the terminal's name, and tmux's and screen's marks.
     pub env: panes::facts::Env<'a>,
+    /// How the mark pane prints a size: as `clean` does, by the output's
+    /// `--si` and `--bytes`.
+    pub size: Box<mark::SizeText<'a>>,
+    /// Starts `r`'s rescan; `None` where the viewer has none (a test's).
+    pub rescan: Option<Rescan<'a>>,
 }
 
 impl std::fmt::Debug for Effects<'_> {
@@ -117,6 +197,8 @@ impl Default for Effects<'_> {
             write: Box::new(|_| Ok(())),
             open: Box::new(|_| Ok(())),
             env: Box::new(|_| None),
+            size: Box::new(human_size),
+            rescan: None,
         }
     }
 }
@@ -205,6 +287,20 @@ pub struct App<'a> {
     answer: bool,
     /// `--treemap pixels`: the pictures, their encoder and what was sent.
     pixels: Option<InPixels>,
+    /// `d`: what is marked for the Trash.
+    marks: mark::Marks,
+    /// What `yes` moved this session: the map's freed tiles.
+    freed: Freed,
+    /// `D`: the mark pane, while it is open.
+    pane: Option<mark::Pane>,
+    /// The last click, which a second one on its cell makes a double click.
+    clicks: Clicks,
+    /// A rescan is running beside the viewer.
+    rescanning: bool,
+    /// The rescan's index has landed, and waits for the prompt to close.
+    landed: bool,
+    /// What this session moved.
+    session: Session,
 }
 
 /// The map in pixels: what encodes it, the pictures drawn and the cells
@@ -274,6 +370,8 @@ macro_rules! fields {
                 mask: $app.mask.as_ref(),
                 filter: $app.filter.as_deref(),
                 rows: &$app.rows,
+                marks: &$app.marks,
+                freed: &$app.freed,
             },
         )
     };
@@ -343,6 +441,13 @@ impl<'a> App<'a> {
             depth,
             answer: false,
             pixels: None,
+            marks: mark::Marks::default(),
+            freed: Freed::default(),
+            pane: None,
+            clicks: Clicks::default(),
+            rescanning: false,
+            landed: false,
+            session: Session::default(),
         }
     }
 
@@ -374,6 +479,69 @@ impl<'a> App<'a> {
         self.effects = effects;
     }
 
+    /// What a reload keeps of this viewer. A viewer built on the new index
+    /// takes it with [`App::restore`].
+    pub fn carry(&mut self) -> Carried {
+        Carried {
+            tab: self.tab,
+            focus: self.focus,
+            sort: self.sort,
+            labels: self.labels,
+            filter: self.filter.take(),
+            mask: self.mask.as_ref().map(Mask::fresh),
+            help: self.help,
+            legend_at: self.legend_at,
+            types_at: self.types_at,
+            facts_open: self.facts_open,
+            color_by: self.opts.color_by.clone(),
+            pack: self.opts.pack.name.clone(),
+            cursor: self.cursor.paths(self.view),
+            marks: self.marks.paths(self.view),
+            session: self.session,
+        }
+    }
+
+    /// Takes over what the previous viewer kept: the cursor goes to the
+    /// same paths where they still exist and the nearest folder where not,
+    /// each mark to the entry at its absolute path or nowhere (the notice
+    /// says how many were dropped), and the maps paint again.
+    pub fn restore(&mut self, carried: Carried) {
+        self.tab = carried.tab;
+        self.focus = carried.focus;
+        self.sort = carried.sort;
+        self.labels = carried.labels;
+        self.help = carried.help;
+        self.types_at = carried.types_at;
+        self.facts_open = carried.facts_open;
+        self.filter = carried.filter;
+        self.mask = carried.mask;
+        self.opts.color_by = carried.color_by;
+        if let Some(pack) = self.packs.iter().find(|pack| pack.name == carried.pack) {
+            self.opts.pack = pack;
+        }
+        self.session = carried.session;
+        self.cursor.set_labels(self.labels);
+        self.cursor.restore(self.view, &carried.cursor);
+        let dropped = self.marks.restore(self.view, &carried.marks);
+        self.repaint();
+        self.legend_at = carried.legend_at.min(self.legend.1.len().saturating_sub(1));
+        self.notice = Some(if dropped == 0 {
+            Message {
+                text: "rescanned".to_owned(),
+                kind: Notice::Success,
+            }
+        } else {
+            Message {
+                text: format!(
+                    "rescanned · {} mark{} dropped: not in the new scan",
+                    thousands(dropped as u64),
+                    if dropped == 1 { "" } else { "s" }
+                ),
+                kind: Notice::Warning,
+            }
+        });
+    }
+
     /// The facts of `id`: read once, then kept, as many as [`KEPT_FACTS`].
     fn facts_of(&self, id: u32) -> Rc<Facts> {
         if let Some(facts) = self.facts.borrow().get(&id) {
@@ -392,6 +560,53 @@ impl<'a> App<'a> {
     #[cfg(test)]
     pub(crate) fn facts_open(&self) -> bool {
         self.facts_open
+    }
+
+    /// The marked ids.
+    #[cfg(test)]
+    pub(crate) fn marked_ids(&self) -> Vec<u32> {
+        self.marks.ids()
+    }
+
+    /// Sets the marks, as `d` would have.
+    #[cfg(test)]
+    pub(crate) fn set_marks(&mut self, marks: mark::Marks) {
+        self.marks = marks;
+    }
+
+    /// Records `id` as moved to the Trash, as the mark pane's `yes` does.
+    #[cfg(test)]
+    pub(crate) fn free(&mut self, id: u32) {
+        self.freed.add(self.view, id);
+    }
+
+    /// Whether the mark pane is open.
+    #[cfg(test)]
+    pub(crate) fn pane_open(&self) -> bool {
+        self.pane.is_some()
+    }
+
+    /// The view's word, for a reload's test.
+    #[cfg(test)]
+    pub(crate) fn tab_label(&self) -> &'static str {
+        match self.tab {
+            Tab::Treemap => "treemap",
+            Tab::List => "list",
+            Tab::Largest => "largest",
+            Tab::Types => "types",
+        }
+    }
+
+    /// The zoom's root.
+    #[cfg(test)]
+    pub(crate) fn zoom_root(&self) -> u32 {
+        self.cursor.zoom().root()
+    }
+
+    /// The types table's row.
+    #[cfg(test)]
+    pub(crate) fn types_at(&self) -> usize {
+        self.types_at
     }
 
     /// Draws the map in pixels with `pixels` (`--treemap pixels`), over
@@ -490,6 +705,8 @@ impl<'a> App<'a> {
             mask: self.mask.as_ref(),
             filter: self.filter.as_deref(),
             rows: &self.rows,
+            marks: &self.marks,
+            freed: &self.freed,
         }
     }
 
@@ -540,12 +757,14 @@ impl<'a> App<'a> {
         copy(&cells, self.depth, area, buf);
         // The facts over the map, a table in its place, the help cover its
         // picture; a mask is drawn on the cells.
+        let in_cells = self.mask.is_some() || !self.marks.is_empty() || !self.freed.is_empty();
         let covered = self.help
+            || self.pane.is_some()
             || self.tab != Tab::Treemap
-            || self.mask.is_some()
+            || in_cells
             || (self.facts_open
                 && matches!(layout(area.width, area.height).panes, Panes::Folded { .. }));
-        if self.mask.is_some() {
+        if in_cells {
             self.cursor.show(None);
         }
         if area.width >= MIN_SIZE.0 && area.height >= MIN_SIZE.1 && !covered {
@@ -661,7 +880,7 @@ impl<'a> App<'a> {
             )],
         );
         x = canvas.tabs(x, y, end, self.tab.index());
-        canvas.status(x.saturating_add(1), y, end, &self.summary);
+        canvas.status(x.saturating_add(1), y, end, &self.status());
 
         // The breadcrumbs, from the root's path to the selection.
         canvas.crumbs(0, at.crumbs.y, at.crumbs.right(), &self.crumbs());
@@ -696,7 +915,7 @@ impl<'a> App<'a> {
                 siblings,
                 legend,
             } => {
-                canvas.pane(selected, "selected", border(pack, false));
+                canvas.pane(selected, self.selected_title(), border(pack, false));
                 panes::selected(&mut canvas, inner(selected), &ctx, self.selected());
                 panes::siblings(
                     &mut canvas,
@@ -717,7 +936,7 @@ impl<'a> App<'a> {
                 );
             }
             Panes::Folded { selected } => {
-                canvas.pane(selected, "selected", border(pack, false));
+                canvas.pane(selected, self.selected_title(), border(pack, false));
                 panes::folded(&mut canvas, inner(selected), &ctx, self.selected());
                 if self.facts_open {
                     let facts = self.facts_of(self.selected());
@@ -737,8 +956,34 @@ impl<'a> App<'a> {
             let pane = Rect::new(0, at.map_pane.y, w, h.saturating_sub(3));
             views::help::draw(&mut canvas, pane, self.opts.glyphs == Glyphs::Ascii);
         }
+        if let Some(pane) = &self.pane {
+            let area = Rect::new(0, at.map_pane.y, w, h.saturating_sub(3));
+            pane.draw(&mut canvas, area, &*self.effects.size);
+        }
         self.draw_key_row(&mut canvas, at.keys.y, at.keys.right(), focus);
         canvas.cells
+    }
+
+    /// The header's status: the scan's totals, the rescan's progress first.
+    fn status(&self) -> String {
+        if self.rescanning {
+            format!("rescanning… · {}", self.summary)
+        } else {
+            self.summary.clone()
+        }
+    }
+
+    /// The selected pane's title: it says when the selection is marked, or
+    /// has gone to the Trash.
+    fn selected_title(&self) -> &'static str {
+        let id = self.selected();
+        if self.freed.covers(id) {
+            "selected · freed"
+        } else if self.marks.holds(id) {
+            "selected · marked"
+        } else {
+            "selected"
+        }
     }
 
     /// The map in its pane with its title, or the tab's table in its
@@ -788,7 +1033,10 @@ impl<'a> App<'a> {
     /// is room.
     fn draw_key_row(&self, canvas: &mut Canvas<'_>, y: u16, end: u16, focus: Focus) {
         let roles = canvas.pack.roles;
-        if let Some(input) = &self.prompt {
+        if self.pane.is_some() {
+            let items = keys::pane_line(self.opts.glyphs == Glyphs::Ascii);
+            canvas.key_items(1, y, end, &items, None);
+        } else if let Some(input) = &self.prompt {
             canvas.prompt(0, y, end, input);
             if let Some(message) = &self.notice {
                 let text = canvas.cut(&message.text, end / 2);
@@ -818,7 +1066,15 @@ impl<'a> App<'a> {
                 &[Span::new(word, color), Span::new(text, roles.text)],
             );
         } else {
-            let message = self.notice.clone().or_else(|| {
+            let marked = (!self.marks.is_empty()).then(|| Message {
+                text: format!(
+                    "{} marked · {}",
+                    thousands(self.marks.len() as u64),
+                    compact(self.marks.total(self.view, self.opts.size))
+                ),
+                kind: Notice::Success,
+            });
+            let message = self.notice.clone().or(marked).or_else(|| {
                 self.warning.as_ref().map(|text| Message {
                     text: text.clone(),
                     kind: Notice::Warning,
@@ -865,11 +1121,61 @@ impl<'a> App<'a> {
     /// navigation key that moves the cursor or the zoom redraws, and the
     /// rest waits for the next event.
     pub fn on(&mut self, event: &Event) -> Flow {
-        match event {
+        let flow = match event {
             Event::Resize(..) => Flow::Redraw,
             Event::Key(key) if key.kind != KeyEventKind::Release => self.key(key),
+            Event::Mouse(mouse) => self.mouse(*mouse, Instant::now()),
+            // The terminal brackets pastes: one is text for the filter
+            // prompt, never keys.
+            Event::Paste(text) => self.paste(text),
             _ => Flow::Wait,
+        };
+        self.released(flow)
+    }
+
+    /// `flow`, or a reload when the rescan's index has been waiting and the
+    /// filter prompt it would disturb is closed.
+    fn released(&mut self, flow: Flow) -> Flow {
+        if flow != Flow::Quit && self.landed && self.prompt.is_none() {
+            self.landed = false;
+            Flow::Reload
+        } else {
+            flow
         }
+    }
+
+    /// What `input` does: an event as [`App::on`] answers it; the rescan's
+    /// landing reloads (or waits for the filter prompt to close, whose text
+    /// it would lose); its failure is said on the key line. The mark pane
+    /// cannot be open then: `D` waits for a running rescan, and `r` is a
+    /// letter of the answer in the pane.
+    pub fn input(&mut self, input: Input) -> Flow {
+        match input {
+            Input::Event(event) => self.on(&event),
+            Input::Landed => {
+                self.rescanning = false;
+                self.landed = true;
+                if self.prompt.is_some() {
+                    Flow::Redraw
+                } else {
+                    self.released(Flow::Wait)
+                }
+            }
+            Input::RescanFailed(why) => {
+                self.rescanning = false;
+                self.notice = Some(Message {
+                    text: format!("rescan failed: {why}"),
+                    kind: Notice::Warning,
+                });
+                Flow::Redraw
+            }
+        }
+    }
+
+    /// What this session moved to the Trash.
+    #[must_use]
+    pub fn session(&self) -> Session {
+        self.session
     }
 
     fn key(&mut self, key: &KeyEvent) -> Flow {
@@ -895,6 +1201,9 @@ impl<'a> App<'a> {
                 self.answer = true;
             }
             return Flow::Wait;
+        }
+        if self.pane.is_some() {
+            return self.pane_key(key.code, ctrl);
         }
         if self.prompt.is_some() {
             return self.prompt_key(key.code, ctrl);
@@ -978,7 +1287,309 @@ impl<'a> App<'a> {
             }
             Action::Copy => self.copy(),
             Action::Open => self.open_selection(),
+            Action::Mark => self.mark_selection(),
+            Action::MarkPane => self.open_pane(),
+            Action::Rescan => self.rescan(),
         }
+    }
+
+    /// `d`: marks the selection, or unmarks it; the map's root, an entry a
+    /// marked folder covers, what has gone to the Trash and a folder that
+    /// holds some of it stay as they are: the saved scan still counts what
+    /// moved, and its bytes would be counted again.
+    fn mark_selection(&mut self) -> Flow {
+        let id = self.selected();
+        if self.freed.covers(id) {
+            return self.warn("this is in the Trash already".to_owned());
+        }
+        if self.freed.below(id, self.view.node(id).last_id) {
+            return self
+                .warn("this holds what was moved to the Trash: r rescans it first".to_owned());
+        }
+        match self.marks.toggle(self.view, id) {
+            Toggled::Marked | Toggled::Unmarked => Flow::Redraw,
+            Toggled::Root => self.warn("the root of the scan cannot be marked".to_owned()),
+            Toggled::Inside(folder) => {
+                let name = String::from_utf8_lossy(&self.view.name(folder)).into_owned();
+                self.warn(format!("{name}/ is marked and holds this"))
+            }
+        }
+    }
+
+    /// A warning on the key line until the next key.
+    fn warn(&mut self, text: String) -> Flow {
+        self.notice = Some(Message {
+            text,
+            kind: Notice::Warning,
+        });
+        Flow::Redraw
+    }
+
+    /// `D`: the mark pane, planned now; with nothing marked or a rescan
+    /// running, a word on the key line.
+    fn open_pane(&mut self) -> Flow {
+        if self.marks.is_empty() {
+            return self.warn("nothing is marked: d marks the selection".to_owned());
+        }
+        // What this moved would be back on the map when the rescan, begun
+        // before the move, lands.
+        if self.rescanning {
+            return self.warn("a rescan is running: D opens when it lands".to_owned());
+        }
+        self.pane = Some(mark::Pane::open(&self.marks, self.view, &self.sources));
+        Flow::Redraw
+    }
+
+    /// The mark pane's keys: the answer, `⌫`, `⏎` to act on it, `Esc` to
+    /// leave without moving anything; `Ctrl-C` quits as everywhere.
+    fn pane_key(&mut self, code: KeyCode, ctrl: bool) -> Flow {
+        self.notice = None;
+        let Some(pane) = &mut self.pane else {
+            return Flow::Wait;
+        };
+        match (code, ctrl) {
+            (KeyCode::Char('c'), true) => Flow::Quit,
+            (KeyCode::Esc, _) => {
+                self.pane = None;
+                Flow::Redraw
+            }
+            (KeyCode::Enter, _) => self.answer_pane(),
+            (KeyCode::Backspace, _) => {
+                if pane.delete() {
+                    Flow::Redraw
+                } else {
+                    Flow::Wait
+                }
+            }
+            (KeyCode::Char(c), false) => {
+                if pane.typed(c) {
+                    Flow::Redraw
+                } else {
+                    Flow::Wait
+                }
+            }
+            _ => Flow::Wait,
+        }
+    }
+
+    /// `⏎` in the mark pane: acts on `yes`. What moved leaves the marks for
+    /// the freed tiles; the pane stays open when something failed, to show
+    /// what, and otherwise the key line says what moved. Any other answer
+    /// closes the pane, moving nothing: the question is asked once.
+    fn answer_pane(&mut self) -> Flow {
+        let Some(pane) = &mut self.pane else {
+            return Flow::Wait;
+        };
+        let moved = match pane.answer(&*self.effects.size) {
+            Answer::Unasked => return Flow::Redraw,
+            Answer::Declined => {
+                self.pane = None;
+                return self.warn(mark::DECLINED.to_owned());
+            }
+            Answer::Moved(moved) => moved,
+        };
+        let stays = pane.stays_open();
+        for &id in &moved.ids {
+            self.marks.remove(id);
+            self.freed.add(self.view, id);
+        }
+        self.session.moved_count += moved.ids.len() as u64;
+        self.session.moved_bytes += moved.bytes;
+        if !stays {
+            self.pane = None;
+        }
+        self.notice = Some(Message {
+            text: moved.line,
+            kind: if stays {
+                Notice::Warning
+            } else {
+                Notice::Success
+            },
+        });
+        Flow::Redraw
+    }
+
+    /// `r`: starts the rescan beside the viewer, unless one is running.
+    fn rescan(&mut self) -> Flow {
+        if self.rescanning {
+            return self.warn("a rescan is running".to_owned());
+        }
+        let Some(start) = &mut self.effects.rescan else {
+            return self.warn("rescan is not available here".to_owned());
+        };
+        match start() {
+            Ok(()) => {
+                self.rescanning = true;
+                Flow::Redraw
+            }
+            Err(why) => self.warn(format!("rescan failed: {why}")),
+        }
+    }
+
+    /// The mouse: a left click, or the wheel, at the time `now`. Nothing
+    /// while a prompt, the mark pane or the help is open, and no drag.
+    pub(crate) fn mouse(&mut self, event: MouseEvent, now: Instant) -> Flow {
+        if self.prompt.is_some() || self.pane.is_some() || self.help {
+            return Flow::Wait;
+        }
+        let answer: fn(&mut Self, MouseEvent, Instant) -> Flow = match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => |app, event, now| {
+                let press = app.clicks.press(event.column, event.row, now);
+                app.click(event.column, event.row, press)
+            },
+            // The wheel walks the path: up it, or down it.
+            MouseEventKind::ScrollUp => |app, _, _| app.nav_map(Nav::Up),
+            MouseEventKind::ScrollDown => |app, _, _| app.nav_map(Nav::Open),
+            _ => return Flow::Wait,
+        };
+        // As any key does, it clears what the last one left on the key line.
+        let cleared = self.notice.take().is_some() | self.path_line.take().is_some();
+        let flow = answer(self, event, now);
+        if cleared && flow == Flow::Wait {
+            Flow::Redraw
+        } else {
+            flow
+        }
+    }
+
+    /// A click of `press` at column `x`, row `y`: the map's or a table's
+    /// row, the siblings' or the legend's rows; the rest of the screen is
+    /// not the mouse's. A double click zooms where the click found an entry.
+    fn click(&mut self, x: u16, y: u16, press: Press) -> Flow {
+        let (w, h) = self.last.get();
+        if w < MIN_SIZE.0 || h < MIN_SIZE.1 {
+            return Flow::Wait;
+        }
+        let at = layout(w, h);
+        let hit = |rect: Rect| rect.contains((x, y).into());
+        if hit(at.map_pane) {
+            if self.facts_open && matches!(at.panes, Panes::Folded { .. }) {
+                return Flow::Wait;
+            }
+            let found = match self.tab {
+                Tab::Treemap => self.click_map(at.map, x, y),
+                Tab::List | Tab::Largest => self.click_row(at.map_pane, y),
+                Tab::Types => return self.click_types(at.map_pane, y),
+            };
+            return self.after_click(found, press);
+        }
+        if self.facts_open {
+            return Flow::Wait;
+        }
+        match at.panes {
+            Panes::Column {
+                siblings, legend, ..
+            } => {
+                if hit(siblings) {
+                    let found = self.click_sibling(siblings, y);
+                    self.after_click(found, press)
+                } else if hit(legend) {
+                    self.click_legend(legend, y)
+                } else {
+                    Flow::Wait
+                }
+            }
+            Panes::Folded { .. } => Flow::Wait,
+        }
+    }
+
+    /// What a click that found an entry (`Some`, true when the cursor moved)
+    /// comes to: a frame, a zoom on a double click, or nothing.
+    fn after_click(&mut self, found: Option<bool>, press: Press) -> Flow {
+        match (found, press) {
+            (Some(_), Press::Double) => {
+                self.nav_map(Nav::Zoom);
+                Flow::Redraw
+            }
+            (Some(true), Press::Single) => Flow::Redraw,
+            _ => Flow::Wait,
+        }
+    }
+
+    /// Selects the deepest tile under the cell, as the map shows it; `None`
+    /// where none is drawn there, else whether the cursor moved.
+    fn click_map(&mut self, map: Rect, x: u16, y: u16) -> Option<bool> {
+        if !map.contains((x, y).into()) {
+            return None;
+        }
+        let pixel_cell = self.pixels.as_ref().map(|pixels| pixels.cell);
+        let (ctx, viewing) = fields!(self);
+        self.cursor
+            .click(&ctx, &viewing, x - map.x, y - map.y, pixel_cell)
+    }
+
+    /// Selects the row of the list or the largest view at `y` of the map's
+    /// pane; `None` off the rows, else whether the cursor moved.
+    fn click_row(&mut self, pane: Rect, y: u16) -> Option<bool> {
+        let area = inner(pane);
+        let row = usize::from(y).checked_sub(usize::from(area.y) + 2)?;
+        let visible = usize::from(area.height.saturating_sub(2));
+        if row >= visible {
+            return None;
+        }
+        let ctx = self.context();
+        let viewing = self.viewing();
+        let selected = self.selected();
+        let root = self.cursor.zoom().root();
+        let ids = if self.tab == Tab::Largest {
+            views::largest::rows(&ctx, &viewing, root)
+        } else {
+            viewing.children(&ctx, views::list::folder(&ctx, selected, root))
+        };
+        let at = ids.iter().position(|&id| id == selected);
+        let start = views::table::window(ids.len(), at, visible);
+        let id = *ids.get(start + row)?;
+        Some(self.go_to(id))
+    }
+
+    /// Selects the types table's row at `y` of the map's pane.
+    fn click_types(&mut self, pane: Rect, y: u16) -> Flow {
+        let area = inner(pane);
+        let Some(row) = usize::from(y).checked_sub(usize::from(area.y) + 2) else {
+            return Flow::Wait;
+        };
+        let visible = usize::from(area.height.saturating_sub(2));
+        let root = self.cursor.zoom().root();
+        let ctx = self.context();
+        let viewing = self.viewing();
+        let rows = views::types::rows(&ctx, &viewing, root);
+        let start = views::table::window(
+            rows.len(),
+            Some(self.types_at.min(rows.len().saturating_sub(1))),
+            visible,
+        );
+        let to = start + row;
+        if row >= visible || to >= rows.len() {
+            return Flow::Wait;
+        }
+        if to == self.types_at {
+            Flow::Wait
+        } else {
+            self.types_at = to;
+            Flow::Redraw
+        }
+    }
+
+    /// Selects the sibling in the row at `y` of the siblings pane; `None`
+    /// off the rows, else whether the cursor moved.
+    fn click_sibling(&mut self, pane: Rect, y: u16) -> Option<bool> {
+        let (ctx, viewing) = fields!(self);
+        let id = panes::siblings_row(pane, &ctx, self.cursor.selected(), &viewing, y)?;
+        Some(self.go_to(id))
+    }
+
+    /// Filters by the legend's row at `y`, as `⏎` on it does.
+    fn click_legend(&mut self, pane: Rect, y: u16) -> Flow {
+        let area = inner(pane);
+        let Some(row) = y.checked_sub(area.y).map(usize::from) else {
+            return Flow::Wait;
+        };
+        let shown = panes::shown_rows(self.legend.1.len(), usize::from(area.height));
+        if row >= shown {
+            return Flow::Wait;
+        }
+        self.legend_at = row;
+        self.filter_legend()
     }
 
     /// The prompt's keys: text, `⌫` to delete, `⏎` to mask, `Esc` to leave
@@ -1005,6 +1616,31 @@ impl<'a> App<'a> {
                 Flow::Redraw
             }
             _ => Flow::Wait,
+        }
+    }
+
+    /// A paste: in the filter prompt, its text up to the first line break,
+    /// control characters left out, so that it never applies the filter
+    /// itself; anywhere else (the mark pane included) nothing, since a paste
+    /// is never keys.
+    fn paste(&mut self, pasted: &str) -> Flow {
+        if self.pane.is_some() {
+            return Flow::Wait;
+        }
+        let Some(text) = &mut self.prompt else {
+            return Flow::Wait;
+        };
+        let before = text.len();
+        text.extend(
+            pasted
+                .chars()
+                .take_while(|c| !matches!(c, '\n' | '\r'))
+                .filter(|c| !c.is_control()),
+        );
+        if text.len() == before {
+            Flow::Wait
+        } else {
+            Flow::Redraw
         }
     }
 
@@ -1401,10 +2037,26 @@ where
     B: Backend,
     E: From<B::Error>,
 {
+    run_session(terminal, app, || next().map(Input::Event)).map(|_| ())
+}
+
+/// Runs `app` on `terminal` until it quits or the rescan it asked for
+/// lands, the frames and events as in [`run`]; `next` also delivers what the
+/// rescan has to say ([`Input`]).
+pub fn run_session<B, E>(
+    terminal: &mut Terminal<B>,
+    app: &mut App<'_>,
+    mut next: impl FnMut() -> Result<Input, E>,
+) -> Result<Ended, E>
+where
+    B: Backend,
+    E: From<B::Error>,
+{
     terminal.draw(|f| app.draw(f.area(), f.buffer_mut()))?;
     loop {
-        match app.on(&next()?) {
-            Flow::Quit => return Ok(()),
+        match app.input(next()?) {
+            Flow::Quit => return Ok(Ended::Quit),
+            Flow::Reload => return Ok(Ended::Reload),
             Flow::Redraw => {
                 terminal.draw(|f| app.draw(f.area(), f.buffer_mut()))?;
             }

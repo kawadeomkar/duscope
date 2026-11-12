@@ -150,7 +150,8 @@ pub fn draw(
             let share = Context::share(bytes, whole);
             let color = ctx.color(&node);
             let current = id == selected;
-            let name = super::one_line(canvas, &ctx.name(id, false), name.saturating_sub(4));
+            let marked = viewing.marked_name(canvas, id, ctx.name(id, false));
+            let name = super::one_line(canvas, &marked, name.saturating_sub(4));
             // The nearest folders tell the most; the path's start is the
             // map's root, which the title names.
             let parent = canvas.cut_left(&ctx.path(node.parent), cols[3].width);

@@ -123,6 +123,7 @@ pub fn draw(
             row(
                 canvas,
                 ctx,
+                viewing,
                 id,
                 whole,
                 name_width,
@@ -135,9 +136,11 @@ pub fn draw(
 }
 
 /// The row of child `id` of a folder of `whole` bytes.
+#[allow(clippy::too_many_arguments)]
 fn row(
     canvas: &Canvas<'_>,
     ctx: &Context<'_>,
+    viewing: &Viewing<'_>,
     id: u32,
     whole: u64,
     name_width: u16,
@@ -148,7 +151,8 @@ fn row(
     let node = ctx.view.node(id);
     let bytes = ctx.size(&node);
     let share = Context::share(bytes, whole);
-    let name = super::one_line(canvas, &ctx.name(id, true), name_width);
+    let name = viewing.marked_name(canvas, id, ctx.name(id, true));
+    let name = super::one_line(canvas, &name, name_width);
     let color = ctx.color(&node);
     let mut bar = canvas.bar(share, 8, color);
     bar.push(Span::new(format!(" {:>3}%", percent(share)), roles.subtext));

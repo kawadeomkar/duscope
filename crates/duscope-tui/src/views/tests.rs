@@ -1196,7 +1196,7 @@ fn label_keys(label: &str) -> Vec<(KeyCode, bool)> {
 }
 
 /// Every action the viewer answers, each at its place in [`place`].
-const EVERY: [Action; 30] = [
+const EVERY: [Action; 33] = [
     Action::Quit,
     Action::Back,
     Action::Nav(Nav::Move(Dir::Left)),
@@ -1227,6 +1227,9 @@ const EVERY: [Action; 30] = [
     Action::Help,
     Action::Copy,
     Action::Open,
+    Action::Mark,
+    Action::MarkPane,
+    Action::Rescan,
 ];
 
 /// The place of `action` in [`EVERY`]. The match has no wildcard: an
@@ -1271,6 +1274,9 @@ fn place(action: Action) -> usize {
         Action::Help => 27,
         Action::Copy => 28,
         Action::Open => 29,
+        Action::Mark => 30,
+        Action::MarkPane => 31,
+        Action::Rescan => 32,
     }
 }
 

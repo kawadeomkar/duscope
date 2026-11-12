@@ -41,8 +41,8 @@ pub(crate) const WALK_BUDGET: usize = 256 * 1024;
 /// The maps whose hidden tiles are kept.
 const KEPT: usize = 32;
 /// A map's cell marked hidden in its top half, and in its bottom half.
-const TOP: u8 = 1;
-const BOTTOM: u8 = 2;
+pub(crate) const TOP: u8 = 1;
+pub(crate) const BOTTOM: u8 = 2;
 
 /// What decides an entry.
 #[derive(Debug, Clone)]
@@ -117,6 +117,13 @@ impl Mask {
     #[must_use]
     pub fn is_legend(&self) -> bool {
         matches!(self.rule, Rule::Legend(_))
+    }
+
+    /// The same mask, forgetting what it has hidden so far: a reload's ids
+    /// are new.
+    #[must_use]
+    pub fn fresh(&self) -> Mask {
+        Mask::new(self.rule.clone())
     }
 
     fn new(rule: Rule) -> Mask {
@@ -300,7 +307,7 @@ fn inset(rect: Rect) -> Rect {
 }
 
 /// Marks the cells of `rect` (half-cell units) hidden.
-fn mark(cells: &mut [u8], rect: Rect, w: u16, h: u16) {
+pub(crate) fn mark(cells: &mut [u8], rect: Rect, w: u16, h: u16) {
     let right = rect.x.saturating_add(rect.w).min(w);
     let bottom = u32::from(rect.y) + u32::from(rect.h);
     let units = u32::from(h) * 2;
@@ -317,7 +324,12 @@ fn mark(cells: &mut [u8], rect: Rect, w: u16, h: u16) {
 /// their place; a cell with both halves hidden is blank, and where the
 /// map's cells cannot be split in halves (`halves` false) a half keeps the
 /// cell.
-fn masked(cell: Cell, flags: u8, base: duscope_treemap::cells::Color, halves: bool) -> Cell {
+pub(crate) fn masked(
+    cell: Cell,
+    flags: u8,
+    base: duscope_treemap::cells::Color,
+    halves: bool,
+) -> Cell {
     if flags == TOP | BOTTOM {
         return Cell {
             ch: ' ',

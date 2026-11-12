@@ -73,6 +73,12 @@ impl Zoom {
         self.root
     }
 
+    /// What each `z` replaced, oldest first: the root and the cursor.
+    #[must_use]
+    pub fn stack(&self) -> &[(u32, u32)] {
+        &self.stack
+    }
+
     /// How many zooms deep the map is.
     #[cfg(test)]
     pub fn depth(&self) -> usize {

@@ -1,0 +1,9 @@
+### Added
+
+- `d` marks the selection, and `d` again unmarks it; `D` opens the mark pane, which shows the plan as `clean` prints it and moves the marks to the Trash when `yes` is typed in full. A plan with a refused item moves nothing, as `clean` without `--skip-refused`, and a mark whose folder leads elsewhere since the scan (replaced by a link) is not planned, so the pane never moves another entry in its place. What moved stays on the map as a freed tile until the next rescan, and the viewer says what moved when it closes.
+- `r` rescans what the viewer is rooted at, with the saved scan's options, beside the viewer, and reloads when the new index lands, keeping the view, the mask, the marks and the cursor's path. A viewer rooted below the saved scan's root (`view ~/proj` over a scan of `~`) scans that folder alone and saves it as a scan of its own; one at the saved scan's root rescans it as `rescan` does. So does a viewer below it when a saved exclude is anchored at the root or names more than one path component, which would leave out something else in a scan of the folder. So does one, on macOS, where the walk would reach the Data volume another way from the folder than from the saved root (`/System` over a scan of `/`), and one that holds a bind mount the saved scan did not enter as a cycle, which a scan of the folder alone would enter (on Linux, `/mnt` over a scan of `/` with `/mnt/x` bound to `/`).
+- The mouse: a click selects the deepest tile under the cell, a row in the siblings pane or a table, and filters by a legend row; a double click zooms, the wheel walks the path. There is no drag.
+
+### Fixed
+
+- A saved scan of `/` now tells which mounts it did not enter: `view` and the list verbs measure such a mount instead of showing it empty, and `explain` says the scan did not enter it and rates its figures `low`. The paths in `scan.excluded` and in `--debug`'s messages no longer start with `//` for a scan of `/`.

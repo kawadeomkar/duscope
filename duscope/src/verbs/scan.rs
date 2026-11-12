@@ -222,7 +222,9 @@ fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
         }
         let mut path = root.as_os_str().as_bytes().to_vec();
         for name in names.iter().rev() {
-            path.push(b'/');
+            if path.last() != Some(&b'/') {
+                path.push(b'/');
+            }
             path.extend_from_slice(name);
         }
         path
@@ -270,17 +272,39 @@ pub fn save(
     output: &Output,
     announce: bool,
 ) -> Result<(), Failure> {
-    let failed = |message: String| {
-        Failure::new(Exit::Runtime, "index_write_failed", message)
-            .hint("Run duscope scan --save again with --index-dir naming a writable directory")
+    let dir = match index_dir {
+        Some(dir) => dir.to_owned(),
+        None => {
+            duscope_core::index::default_dir(|name| std::env::var_os(name)).ok_or_else(|| {
+                save_failed("no index directory: neither HOME nor XDG_CACHE_HOME is set".to_owned())
+            })?
+        }
     };
-    let dir =
-        match index_dir {
-            Some(dir) => dir.to_owned(),
-            None => duscope_core::index::default_dir(|name| std::env::var_os(name)).ok_or_else(
-                || failed("no index directory: neither HOME nor XDG_CACHE_HOME is set".to_owned()),
-            )?,
-        };
+    write_index(scanned, walk, excludes, id, &dir)?;
+    if announce && !output.is_json() {
+        crate::out::stderr_line(&format!(
+            "saved as {id} ({})",
+            index_path(&dir, id).display()
+        ));
+    }
+    Ok(())
+}
+
+/// What a failed save says: `index_write_failed`, and how to get past it.
+fn save_failed(message: String) -> Failure {
+    Failure::new(Exit::Runtime, "index_write_failed", message)
+        .hint("Run duscope scan --save again with --index-dir naming a writable directory")
+}
+
+/// Writes the index of `scanned` under `dir`, silently: what `save` and a
+/// rescan the viewer runs beside its terminal share.
+pub(super) fn write_index(
+    scanned: &Scanned,
+    walk: &WalkArgs,
+    excludes: &[String],
+    id: &ScanId,
+    dir: &Path,
+) -> Result<(), Failure> {
     let root_volume = scanned.arena.volumes().first();
     let meta = ScanMeta {
         scan_id: id.clone(),
@@ -306,8 +330,8 @@ pub fn save(
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let started = Instant::now();
-    IndexWriter::write(&scanned.arena, &scanned.rollup, &meta, &dir)
-        .map_err(|e| failed(e.to_string()))?;
+    IndexWriter::write(&scanned.arena, &scanned.rollup, &meta, dir)
+        .map_err(|e| save_failed(e.to_string()))?;
     let secs = started.elapsed().as_secs_f64();
     let entries = scanned.rollup.len();
     #[allow(clippy::cast_precision_loss)]
@@ -316,12 +340,6 @@ pub fn save(
         "write: {} entries in {secs:.3} s: {per_entry:.2} µs/entry",
         thousands(entries as u64)
     );
-    if announce && !output.is_json() {
-        crate::out::stderr_line(&format!(
-            "saved as {id} ({})",
-            index_path(&dir, id).display()
-        ));
-    }
     Ok(())
 }
 
@@ -836,7 +854,9 @@ impl DirErrors {
         }
         let mut path = self.root.clone();
         for name in names.iter().rev() {
-            path.push(b'/');
+            if path.last() != Some(&b'/') {
+                path.push(b'/');
+            }
             path.extend_from_slice(name);
         }
         String::from_utf8_lossy(&path).into_owned()
@@ -1180,14 +1200,16 @@ mod tests {
 
     use clap::Parser;
     use duscope_core::arena::Arena;
+    use duscope_core::index::{Index, ScanId, index_path};
     use duscope_core::query::SizeKind;
     use duscope_core::rollup::roll_up;
-    use duscope_walk::{Attrs, MemProvider, ScanEvent, WalkOptions, walk_with};
+    use duscope_walk::{Attrs, DirId, MemProvider, ScanEvent, WalkOptions, walk_with};
 
-    use super::{Scanned, scan_block, warnings};
+    use super::{DirErrors, Scanned, excluded, scan_block, warnings, write_index};
     use crate::cli::{Cli, Verb};
     use crate::out::{Format, Output, Units};
     use crate::verbs::query::top_envelope;
+    use crate::verbs::source::saved_block;
 
     /// A scan of a small in-memory tree; without its volume when `volume`
     /// is false.
@@ -1218,6 +1240,75 @@ mod tests {
             source: "scan",
             full_disk_access_missing: false,
         }
+    }
+
+    #[test]
+    fn p4_tui_06_a_scan_of_slash_spells_the_paths_it_left_out_with_one_slash() {
+        let mut tree = MemProvider::new("/");
+        tree.file("skip/a", 10).file("keep/b", 10);
+        let mut globs = globset::GlobSetBuilder::new();
+        globs.add(globset::Glob::new("skip").unwrap());
+        let opts = WalkOptions {
+            excludes: globs.build().unwrap(),
+            ..WalkOptions::default()
+        };
+        let mut arena = Arena::new(Attrs::Basic);
+        let summary = walk_with(&tree, Path::new("/"), &opts, |event| {
+            arena.push(event).unwrap();
+        })
+        .unwrap();
+        let rollup = roll_up(&mut arena);
+        // What a scan run now says.
+        assert_eq!(
+            excluded(&arena, Path::new("/"))
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/skip"]
+        );
+        // What the same scan says once saved.
+        let dir = tempfile::tempdir().unwrap();
+        let scanned = Scanned {
+            arena,
+            rollup,
+            summary,
+            elapsed: Duration::ZERO,
+            root: "/".into(),
+            root_as_given: "/".into(),
+            clones_asked: false,
+            started_ns: 0,
+            finished_ns: 0,
+            parent: None,
+            incremental: None,
+            fallback: None,
+            source: "scan",
+            full_disk_access_missing: false,
+        };
+        let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/"]).unwrap().verb
+        else {
+            panic!("not scan");
+        };
+        let id = ScanId::new(b"/", 0, [0; 8]);
+        write_index(&scanned, &args.walk, &[], &id, dir.path()).unwrap();
+        let index = Index::open(&index_path(dir.path(), &id)).unwrap();
+        let block = saved_block(&index, SizeKind::Allocated);
+        assert_eq!(
+            block
+                .excluded
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/skip"]
+        );
+    }
+
+    #[test]
+    fn p4_tui_06_a_scan_of_slash_spells_a_logged_path_with_one_slash() {
+        let errors = DirErrors::new(Path::new("/"));
+        assert_eq!(errors.path(DirId::ROOT, Some(b"name")), "/name");
+        assert_eq!(errors.path(DirId::ROOT, None), "/");
+        let errors = DirErrors::new(Path::new("/tree"));
+        assert_eq!(errors.path(DirId::ROOT, Some(b"name")), "/tree/name");
     }
 
     #[test]

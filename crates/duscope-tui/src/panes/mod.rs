@@ -41,7 +41,7 @@ use selected::mode_text;
 pub use selected::{folded, selected};
 #[cfg(test)]
 use siblings::list_rows;
-pub use siblings::siblings;
+pub use siblings::{siblings, siblings_row};
 
 /// What the panes read: the scan, how it is painted, and what the viewer
 /// worked out once.

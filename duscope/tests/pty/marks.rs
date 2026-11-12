@@ -1,0 +1,802 @@
+//! P4-TUI-06: the mark pane and `r` in the binary. `d` and `D` show the plan
+//! as `clean` prints it; only `yes` typed in full moves anything, into the
+//! test's own Trash: on Linux the test's XDG Trash, on macOS a disk image's
+//! (a platform test), since the startup volume's items go to the account's
+//! Trash whatever `HOME` says, which the test environment refuses. Any
+//! other answer closes the pane, and a paste is never keys. Nothing here
+//! reaches the real Trash. `r` rescans and reloads.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use duscope_testkit::{TestEnv, duscope_bin};
+use termlens::{Key, Screen, Terminal};
+
+/// `duscope view <tree>` in a `cols`×`rows` pseudo-terminal, run by the
+/// shell, which prints its exit status after it.
+fn viewer(env: &TestEnv, tree: &Path, cols: u16, rows: u16) -> Terminal {
+    let script = format!(
+        "'{}' view '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        tree.display()
+    );
+    Terminal::builder()
+        .size(cols, rows)
+        .timeout(Duration::from_secs(60))
+        .env_clear()
+        .envs(env.vars())
+        .current_dir(env.work_dir())
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap()
+}
+
+fn wait(terminal: &mut Terminal, what: &str) {
+    terminal
+        .wait_until(|screen| screen.text().contains(what))
+        .unwrap_or_else(|e| panic!("{what}: {e}:\n{}", terminal.screen().text()));
+}
+
+/// Waits for `what` to leave the screen: `Esc` has been read, not joined to
+/// the next key as an Alt sequence.
+fn wait_gone(terminal: &mut Terminal, what: &str) {
+    terminal
+        .wait_until(|screen| !screen.text().contains(what))
+        .unwrap_or_else(|e| panic!("still {what}: {e}:\n{}", terminal.screen().text()));
+}
+
+fn send(terminal: &mut Terminal, text: &str) {
+    for c in text.chars() {
+        terminal.send(Key::Char(c)).unwrap();
+    }
+}
+
+/// A tree of three files at the root with the given sizes, saved, the
+/// largest first: `a.bin`, `b.bin`, `c.bin`.
+fn tree(env: &TestEnv, root: &Path) {
+    fs::create_dir_all(root).unwrap();
+    fs::write(root.join("a.bin"), vec![1u8; 512 * 1024]).unwrap();
+    fs::write(root.join("b.bin"), vec![2u8; 128 * 1024]).unwrap();
+    fs::write(root.join("c.bin"), vec![3u8; 32 * 1024]).unwrap();
+    saved(env, root);
+}
+
+fn saved(env: &TestEnv, root: &Path) {
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(root)
+        .args(["--save", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn work_tree(env: &TestEnv) -> PathBuf {
+    fs::canonicalize(env.work_dir()).unwrap().join("tree")
+}
+
+/// The viewer on `root`, with `a.bin` and `c.bin` marked: the largest, on
+/// which it starts, and the last sibling. Returns the terminal, the map and
+/// the key line up.
+fn marked_two(env: &TestEnv, root: &Path, cols: u16, rows: u16) -> Terminal {
+    let mut terminal = viewer(env, root, cols, rows);
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    terminal.send(Key::Char('G')).unwrap();
+    wait(&mut terminal, "c.bin");
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "2 marked");
+    terminal
+}
+
+/// The rows of the screen, each cut of the frame's border and trailing
+/// space.
+fn rows(screen: &str) -> Vec<String> {
+    screen
+        .lines()
+        .map(|line| {
+            line.trim_end()
+                .trim_start_matches('│')
+                .trim_end_matches('│')
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn p4_tui_06_the_pane_prints_the_plan_exactly_as_clean_does() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    tree(&env, &root);
+    let a = root.join("a.bin");
+    let c = root.join("c.bin");
+
+    // `clean a c`, on a wide terminal: its table, the line under it, and
+    // the question, answered with no.
+    let script = format!(
+        "'{}' clean '{}' '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        a.display(),
+        c.display()
+    );
+    let mut clean = Terminal::builder()
+        .size(180, 30)
+        .timeout(Duration::from_secs(60))
+        .env_clear()
+        .envs(env.vars())
+        .current_dir(env.work_dir())
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap();
+    clean
+        .wait_until(|screen| screen.full_text().contains("Type yes"))
+        .unwrap();
+    let printed = clean.screen().full_text();
+    send(&mut clean, "no");
+    clean.send(Key::Enter).unwrap();
+    clean.wait_exit().unwrap();
+    assert!(a.exists() && c.exists());
+    let cleaned = rows(&printed);
+    let table: Vec<&String> = cleaned
+        .iter()
+        .skip_while(|line| !line.contains("action"))
+        .take_while(|line| !line.starts_with("Type yes"))
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(table.len(), 4, "{printed}");
+
+    // The same two marked in the viewer: the pane shows those lines
+    // character for character, whatever order the rows are in.
+    let mut terminal = marked_two(&env, &root, 180, 30);
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "mark pane · 2 marked");
+    wait(&mut terminal, "Type yes to move them to the Trash");
+    let shown = terminal.screen().text();
+    let pane = rows(&shown);
+    let mut in_pane: Vec<&String> = pane
+        .iter()
+        .skip_while(|line| !line.contains("action"))
+        .take_while(|line| !line.starts_with("Type yes"))
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut wanted = table.clone();
+    in_pane.sort();
+    wanted.sort();
+    assert_eq!(in_pane, wanted, "{shown}\n---\n{printed}");
+    terminal.send(Key::Esc).unwrap();
+    wait_gone(&mut terminal, "mark pane");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    assert!(a.exists() && c.exists());
+}
+
+#[test]
+fn p4_tui_06_anything_but_yes_in_the_pane_moves_nothing() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    tree(&env, &root);
+    let mut terminal = marked_two(&env, &root, 120, 40);
+    // Each wrong answer closes the pane and moves nothing: the question is
+    // asked once, as `clean` asks it, and `D` asks it again.
+    for answer in ["no", "YES", "ye", "yes "] {
+        terminal.send(Key::Char('D')).unwrap();
+        wait(&mut terminal, "Type yes to move them");
+        send(&mut terminal, answer);
+        wait(&mut terminal, &format!("{answer}▌"));
+        terminal.send(Key::Enter).unwrap();
+        wait(
+            &mut terminal,
+            "the answer was not yes, so nothing was moved",
+        );
+        wait_gone(&mut terminal, "mark pane");
+    }
+    // Esc closes it too; the marks are still there.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "Type yes to move them");
+    terminal.send(Key::Esc).unwrap();
+    wait_gone(&mut terminal, "mark pane");
+    wait(&mut terminal, "2 marked");
+    assert!(root.join("a.bin").exists() && root.join("c.bin").exists());
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    let text = terminal.screen().full_text();
+    assert!(!text.contains("moved"), "{text}");
+}
+
+#[test]
+fn p4_tui_06_a_paste_holding_yes_moves_nothing() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    tree(&env, &root);
+    let mut terminal = viewer(&env, &root, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    // The viewer brackets pastes, so a paste is one event it ignores.
+    assert!(terminal.screen().bracketed_paste());
+    // The keys that would mark the selection, open the pane and answer
+    // it, pasted: nothing is marked. The `d` typed after them marks.
+    terminal.paste("dDyes\n").unwrap();
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    assert!(root.join("a.bin").exists());
+    // In the pane, a pasted `yes` and line break are not the answer: only
+    // the `n` typed after them is.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "Type yes to move them");
+    terminal.paste("yes\n").unwrap();
+    terminal.send(Key::Char('n')).unwrap();
+    wait(&mut terminal, "Type yes to move them to the Trash: n▌");
+    terminal.send(Key::Enter).unwrap();
+    wait(
+        &mut terminal,
+        "the answer was not yes, so nothing was moved",
+    );
+    wait_gone(&mut terminal, "mark pane");
+    assert!(root.join("a.bin").exists());
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    let text = terminal.screen().full_text();
+    assert!(!text.contains("moved"), "{text}");
+}
+
+#[test]
+fn p4_tui_06_a_refused_item_stops_the_plan_and_moves_nothing() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("a.bin"), vec![1u8; 512 * 1024]).unwrap();
+    std::os::unix::fs::symlink("a.bin", root.join("zz-link")).unwrap();
+    saved(&env, &root);
+    let mut terminal = viewer(&env, &root, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    // The last sibling: the link.
+    terminal.send(Key::Char('G')).unwrap();
+    wait(&mut terminal, "zz-link");
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "refused: symlink");
+    wait(&mut terminal, "1 of the 1 items cannot be moved");
+    assert!(
+        !terminal.screen().text().contains("Type yes"),
+        "{}",
+        terminal.screen().text()
+    );
+    send(&mut terminal, "yes");
+    terminal.send(Key::Enter).unwrap();
+    terminal.send(Key::Esc).unwrap();
+    wait_gone(&mut terminal, "mark pane");
+    wait(&mut terminal, "1 marked");
+    assert!(fs::symlink_metadata(root.join("zz-link")).is_ok());
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+}
+
+#[test]
+fn p4_tui_06_no_yes_moves_what_a_marks_folder_leads_to_now() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let (dir, other) = (root.join("dir"), root.join("other"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    fs::write(dir.join("b.bin"), vec![1u8; 512 * 1024]).unwrap();
+    fs::write(other.join("b.bin"), vec![2u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    // `view tree/dir` over the scan of the tree: `dir/b.bin`, where it
+    // starts, marked.
+    let mut terminal = viewer(&env, &dir, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    // `dir` replaced by a link to `other` once the plan asks: `yes` finds
+    // another entry at the path, and moves nothing.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "Type yes to move them");
+    fs::rename(&dir, root.join("dir.old")).unwrap();
+    std::os::unix::fs::symlink(&other, &dir).unwrap();
+    send(&mut terminal, "yes");
+    wait(&mut terminal, "yes▌");
+    terminal.send(Key::Enter).unwrap();
+    wait(&mut terminal, "1 not moved");
+    terminal.send(Key::Esc).unwrap();
+    wait_gone(&mut terminal, "mark pane");
+    // `D` again: no plan of what the link leads to, so no question, and
+    // `yes` moves nothing.
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "the folder of a mark leads elsewhere now");
+    assert!(
+        !terminal.screen().text().contains("Type yes"),
+        "{}",
+        terminal.screen().text()
+    );
+    send(&mut terminal, "yes");
+    terminal.send(Key::Enter).unwrap();
+    terminal.send(Key::Esc).unwrap();
+    wait_gone(&mut terminal, "mark pane");
+    wait(&mut terminal, "1 marked");
+    assert!(other.join("b.bin").exists());
+    assert!(root.join("dir.old/b.bin").exists());
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    let text = terminal.screen().full_text();
+    assert!(!text.contains("moved 1 item"), "{text}");
+}
+
+/// Whether `screen`, a 120×40 viewer, shows a freed tile's word on the map:
+/// ` freed ` whole inside the map's rectangle, where the selected pane's
+/// title (`selected · freed`) cannot be.
+fn freed_on_map(screen: &Screen) -> bool {
+    let map = duscope_tui::layout::layout(120, 40).map;
+    let word = " freed ".len();
+    screen.find_all(" freed ").iter().any(|&(row, col)| {
+        let col = usize::from(col);
+        row >= map.y
+            && row < map.y + map.height
+            && col >= usize::from(map.x)
+            && col + word <= usize::from(map.x + map.width)
+    })
+}
+
+/// Marks `a.bin` and `c.bin` under `root`, confirms with `yes`, and checks
+/// what the pane promised: both gone from the tree and whole in the
+/// `trashed` place, the map's freed tiles, and the summary on the way out.
+fn confirm_and_check(env: &TestEnv, root: &Path, trashed: &dyn Fn(&str) -> PathBuf) {
+    let a = root.join("a.bin");
+    let c = root.join("c.bin");
+    let mut terminal = marked_two(env, root, 120, 40);
+    terminal.send(Key::Char('D')).unwrap();
+    wait(&mut terminal, "2 items to move to the Trash");
+    wait(&mut terminal, "Type yes to move them");
+    send(&mut terminal, "yes");
+    wait(&mut terminal, "yes▌");
+    terminal.send(Key::Enter).unwrap();
+    wait(&mut terminal, "moved 2 items to the Trash");
+    terminal.wait_until(freed_on_map).unwrap_or_else(|e| {
+        panic!(
+            "no freed tile on the map: {e}:\n{}",
+            terminal.screen().text()
+        )
+    });
+    assert!(!a.exists() && !c.exists());
+    assert_eq!(fs::read(trashed("a.bin")).unwrap(), vec![1u8; 512 * 1024]);
+    assert_eq!(fs::read(trashed("c.bin")).unwrap(), vec![3u8; 32 * 1024]);
+    // `b.bin` is where it was; the viewer goes on.
+    assert!(root.join("b.bin").exists());
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    let text = terminal.screen().full_text();
+    assert!(
+        text.contains("moved 2 items to the Trash") && text.contains("(not yet freed)"),
+        "{text}"
+    );
+    assert!(text.contains("the saved scans still hold"), "{text}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn p4_tui_06_mark_two_items_confirm_and_both_are_in_the_trash() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    tree(&env, &root);
+    let trash = env.xdg_data_home().join("Trash/files");
+    confirm_and_check(&env, &root, &|name| trash.join(name));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
+fn p4_tui_06_macos_mark_two_items_confirm_and_both_are_in_the_images_trash() {
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    let work = fs::canonicalize(env.tmp_dir()).unwrap().join("image");
+    let mount = work.join("mnt");
+    fs::create_dir_all(&mount).unwrap();
+    let image = work.join("image.dmg");
+    env.hdiutil(&[
+        &"create",
+        &"-ov",
+        &"-size",
+        &"16m",
+        &"-fs",
+        &"APFS",
+        &"-volname",
+        &"DUSCOPE",
+        &image,
+    ]);
+    env.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &mount, &image]);
+    let detach = Detach(&env, mount.clone());
+    tree(&env, &mount);
+    // The volume's own Trash, this user's directory in it.
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .unwrap()
+        .stdout;
+    let uid = String::from_utf8(uid).unwrap().trim().to_owned();
+    let trash = mount.join(".Trashes").join(uid);
+    confirm_and_check(&env, &mount, &|name| trash.join(name));
+    drop(detach);
+}
+
+/// Detaches the disk image mounted at its path when dropped.
+#[cfg(target_os = "macos")]
+struct Detach<'a>(&'a TestEnv, PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Detach<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .command("hdiutil")
+            .args(["detach", "-force"])
+            .arg(&self.1)
+            .output();
+    }
+}
+
+#[test]
+fn p4_tui_06_r_rescans_the_fixture_tree_and_reloads() {
+    let env = TestEnv::new();
+    let root = env.fixtures().case_root("extensions");
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&root)
+        .args(["--save", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut terminal = viewer(&env, &root, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "rescanned");
+    // The viewer goes on: the map is back, the keys answer.
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('2')).unwrap();
+    wait(&mut terminal, "list · ");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+}
+
+#[test]
+fn p4_tui_06_r_shows_what_changed_keeping_the_view_and_the_selection() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    fs::create_dir_all(root.join("dir")).unwrap();
+    fs::write(root.join("dir/big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    fs::write(root.join("dir/small.bin"), vec![2u8; 8 * 1024]).unwrap();
+    let mut terminal = viewer(&env, &root, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    // The list view of `dir`, its files listed by name.
+    terminal.send(Key::Char('2')).unwrap();
+    wait(&mut terminal, "list · ");
+    wait(&mut terminal, "big.bin");
+    // What the rescan should find: a new large file.
+    fs::write(root.join("dir/fresh-new.bin"), vec![3u8; 2048 * 1024]).unwrap();
+    // FSEvents' history, which an incremental rescan reads on macOS, trails
+    // the filesystem by about a second.
+    std::thread::sleep(Duration::from_millis(1500));
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "rescanned");
+    // Still the list view, the new file in it; the cursor on `big.bin`.
+    wait(&mut terminal, "list · ");
+    wait(&mut terminal, "fresh-new.bin");
+    let text = terminal.screen().text();
+    assert!(text.contains("big.bin"), "{text}");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+}
+
+/// The saved scans, as `scans --json` lists them.
+fn scans(env: &TestEnv) -> Vec<serde_json::Value> {
+    let out = env.cmd().args(["scans", "--json"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    envelope["entries"].as_array().unwrap().clone()
+}
+
+/// The one saved scan whose root is `root`.
+fn scan_of(scans: &[serde_json::Value], root: &Path) -> serde_json::Value {
+    let of: Vec<&serde_json::Value> = scans
+        .iter()
+        .filter(|e| e["root"] == root.to_str().unwrap())
+        .collect();
+    assert_eq!(of.len(), 1, "one scan of {}: {scans:?}", root.display());
+    of[0].clone()
+}
+
+#[test]
+fn p4_tui_06_r_below_the_saved_root_scans_that_folder_alone() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::create_dir_all(root.join("other")).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    fs::write(proj.join("small.bin"), vec![2u8; 8 * 1024]).unwrap();
+    fs::write(root.join("other/old.bin"), vec![3u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    // `view proj` over the scan of the tree: the viewer is rooted below the
+    // saved scan's root.
+    let mut terminal = viewer(&env, &proj, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    // `big.bin`, where the viewer starts, marked: a mark is carried by its
+    // absolute path.
+    terminal.send(Key::Char('d')).unwrap();
+    wait(&mut terminal, "1 marked");
+    terminal.send(Key::Char('2')).unwrap();
+    wait(&mut terminal, "list · ");
+    wait(&mut terminal, "big.bin");
+    // A change inside the folder, and one outside it.
+    fs::write(proj.join("fresh-new.bin"), vec![4u8; 2048 * 1024]).unwrap();
+    fs::write(root.join("other/elsewhere-new.bin"), vec![5u8; 2048 * 1024]).unwrap();
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "rescanned");
+    // The reload: still the list view of `proj`, the new file in it, the
+    // mark kept on `big.bin` and none dropped.
+    wait(&mut terminal, "list · ");
+    wait(&mut terminal, "fresh-new.bin");
+    let text = terminal.screen().text();
+    assert!(text.contains("big.bin") && text.contains('✕'), "{text}");
+    assert!(!text.contains("dropped"), "{text}");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    // What was read: `proj` alone, saved as a scan of its own, a fresh one
+    // (no parent: its root is not the tree's) holding the new file; the
+    // tree's scan is still the only one of the tree, so nothing outside
+    // `proj` was read again.
+    let scans = scans(&env);
+    assert_eq!(scans.len(), 2, "{scans:?}");
+    assert_eq!(scan_of(&scans, &root)["id"], tree_scan);
+    let folder = scan_of(&scans, &proj);
+    assert!(folder["parent_scan_id"].is_null(), "{folder}");
+    assert_eq!(folder["file_count"], 3, "{folder}");
+    assert_eq!(folder["dir_count"], 1, "{folder}");
+}
+
+#[test]
+fn p4_tui_06_r_rescans_the_saved_root_where_an_exclude_is_anchored_at_it() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(proj.join("build")).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    fs::write(proj.join("build/left-out.bin"), vec![2u8; 2048 * 1024]).unwrap();
+    // `/proj/build` leaves out `proj/build` in a scan of the tree; in a scan
+    // of `proj` it would name `proj/proj/build`, and leave out nothing.
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&root)
+        .args(["--save", "--json", "--exclude", "/proj/build"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let script = format!(
+        "'{}' view --scan {} '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        tree_scan.as_str().unwrap(),
+        proj.display()
+    );
+    let mut terminal = Terminal::builder()
+        .size(120, 40)
+        .timeout(Duration::from_secs(60))
+        .env_clear()
+        .envs(env.vars())
+        .current_dir(env.work_dir())
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap();
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "rescanned");
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    // The tree was rescanned, as `rescan` does it: the new scan is its
+    // child, and `proj/build` is still left out of it. No scan of `proj`.
+    let scans = scans(&env);
+    assert_eq!(scans.len(), 2, "{scans:?}");
+    let child = scans.iter().find(|e| e["id"] != tree_scan).unwrap().clone();
+    assert_eq!(child["root"], root.to_str().unwrap(), "{child}");
+    assert_eq!(child["parent_scan_id"], tree_scan, "{child}");
+    assert_eq!(child["file_count"], 1, "{child}");
+}
+
+#[test]
+fn p4_tui_06_r_below_the_saved_root_says_when_the_folder_has_gone() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    fs::write(root.join("other.bin"), vec![2u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    let mut terminal = viewer(&env, &proj, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    fs::remove_dir_all(&proj).unwrap();
+    terminal.send(Key::Char('r')).unwrap();
+    // The failure is said on the key line, and the viewer goes on over the
+    // scan it was showing: nothing was written.
+    wait(&mut terminal, "rescan failed");
+    let text = terminal.screen().text();
+    assert!(text.contains("big.bin"), "{text}");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    assert_eq!(scans(&env).len(), 1);
+}
+
+/// `duscope view --scan <scan> <path>`, as `viewer` runs it.
+fn viewer_of_scan(env: &TestEnv, scan: &serde_json::Value, path: &Path) -> Terminal {
+    let script = format!(
+        "'{}' view --scan {} '{}'; echo \"exit=$?\"",
+        duscope_bin().display(),
+        scan.as_str().unwrap(),
+        path.display()
+    );
+    Terminal::builder()
+        .size(120, 40)
+        .timeout(Duration::from_secs(60))
+        .env_clear()
+        .envs(env.vars())
+        .current_dir(env.work_dir())
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap()
+}
+
+/// Presses `r` in `terminal`, waits for the reload, and quits.
+fn rescan_and_quit(mut terminal: Terminal) {
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "rescanned");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+}
+
+/// That `r` rescanned the saved scan `tree_scan` of `root`, as `rescan`
+/// does: two scans in all, the new one its child at its root.
+fn renewed_the_saved_scan(env: &TestEnv, root: &Path, tree_scan: &serde_json::Value) {
+    let scans = scans(env);
+    assert_eq!(scans.len(), 2, "{scans:?}");
+    let child = scans.iter().find(|e| e["id"] != *tree_scan).unwrap();
+    assert_eq!(child["root"], root.to_str().unwrap(), "{child}");
+    assert_eq!(child["parent_scan_id"], *tree_scan, "{child}");
+}
+
+#[test]
+fn p4_tui_06_r_rescans_the_saved_root_where_the_folder_has_become_a_link() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    let elsewhere = root.with_file_name("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("other.bin"), vec![2u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let mut terminal = viewer(&env, &proj, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    // Replaced by a link since the viewer opened: the walk would read the
+    // link's target, and the new scan would hold another path.
+    fs::remove_dir_all(&proj).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &proj).unwrap();
+    rescan_and_quit(terminal);
+    renewed_the_saved_scan(&env, &root, &tree_scan);
+}
+
+#[test]
+fn p4_tui_06_r_rescans_the_saved_root_where_the_viewer_is_on_what_the_scan_did_not_enter() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let skipped = root.join("skipped");
+    fs::create_dir_all(&skipped).unwrap();
+    fs::write(skipped.join("left-out.bin"), vec![1u8; 64 * 1024]).unwrap();
+    fs::write(root.join("kept.bin"), vec![2u8; 64 * 1024]).unwrap();
+    let out = env
+        .cmd()
+        .arg("scan")
+        .arg(&root)
+        .args(["--save", "--json", "--exclude", "skipped"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let mut terminal = viewer_of_scan(&env, &tree_scan, &skipped);
+    wait(&mut terminal, "treemap · ");
+    rescan_and_quit(terminal);
+    renewed_the_saved_scan(&env, &root, &tree_scan);
+}
+
+#[test]
+fn p4_tui_06_r_rescans_the_saved_root_where_the_viewer_is_on_a_file() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    fs::create_dir_all(&root).unwrap();
+    let file = root.join("only.bin");
+    fs::write(&file, vec![1u8; 64 * 1024]).unwrap();
+    fs::write(root.join("other.bin"), vec![2u8; 8 * 1024]).unwrap();
+    saved(&env, &root);
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let mut terminal = viewer_of_scan(&env, &tree_scan, &file);
+    wait(&mut terminal, "treemap · ");
+    rescan_and_quit(terminal);
+    renewed_the_saved_scan(&env, &root, &tree_scan);
+}
+
+#[test]
+fn p4_tui_06_a_second_r_rescans_the_folders_own_scan() {
+    let env = TestEnv::new();
+    let root = work_tree(&env);
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(proj.join("big.bin"), vec![1u8; 1024 * 1024]).unwrap();
+    fs::write(root.join("outside.bin"), vec![2u8; 64 * 1024]).unwrap();
+    saved(&env, &root);
+    let tree_scan = scan_of(&scans(&env), &root)["id"].clone();
+    let mut terminal = viewer(&env, &proj, 120, 40);
+    wait(&mut terminal, "treemap · ");
+    terminal.send(Key::Char('2')).unwrap();
+    wait(&mut terminal, "list · ");
+    fs::write(proj.join("first-new.bin"), vec![3u8; 2048 * 1024]).unwrap();
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "first-new.bin");
+    let first = scan_of(&scans(&env), &proj);
+    assert!(first["parent_scan_id"].is_null(), "{first}");
+    fs::write(proj.join("second-new.bin"), vec![4u8; 4096 * 1024]).unwrap();
+    terminal.send(Key::Char('r')).unwrap();
+    wait(&mut terminal, "second-new.bin");
+    terminal.send(Key::Char('q')).unwrap();
+    wait(&mut terminal, "exit=0");
+    // The folder's scan renewed, as `rescan` renews a scan: its child at
+    // the folder; the scan of the tree is not renewed.
+    let scans = scans(&env);
+    assert_eq!(scans.len(), 3, "{scans:?}");
+    assert_eq!(scan_of(&scans, &root)["id"], tree_scan);
+    let second = scans
+        .iter()
+        .find(|e| e["parent_scan_id"] == first["id"])
+        .unwrap_or_else(|| panic!("no child of the folder's scan: {scans:?}"));
+    assert_eq!(second["root"], proj.to_str().unwrap(), "{second}");
+    assert_eq!(second["file_count"], 3, "{second}");
+    // A second press reads only what changed where the platform keeps the
+    // history and the history's checks pass; never where it keeps none.
+    let top = env
+        .cmd()
+        .args(["top", "--scan", second["id"].as_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    let block: serde_json::Value = serde_json::from_slice(&top.stdout).unwrap();
+    assert_eq!(block["scan"]["parent_scan_id"], first["id"], "{block}");
+    if duscope_walk::fsevents::current_event_id().is_none() {
+        assert_eq!(block["scan"]["incremental"], false, "{block}");
+    }
+}

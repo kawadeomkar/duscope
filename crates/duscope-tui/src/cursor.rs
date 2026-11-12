@@ -41,6 +41,7 @@ use duscope_treemap::Rect;
 use duscope_treemap::paint::{DrawnKind, Glyphs, compact};
 use ratatui_core::layout::Rect as Area;
 
+use crate::mouse;
 use crate::panes::Context;
 use crate::path::{Path, siblings};
 use crate::views::Viewing;
@@ -192,6 +193,51 @@ pub fn beam(
     best.map(|(_, i)| i)
 }
 
+/// A cursor as paths, to carry across a reload: see [`Cursor::paths`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CursorPaths {
+    /// Each zoom's root and the cursor it replaced.
+    pub zooms: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The selection.
+    pub selected: Vec<u8>,
+}
+
+/// The entry of `view` at the relative path `rel` (`/`-separated), if there
+/// is one.
+#[must_use]
+pub fn lookup(view: &dyn duscope_core::query::TreeView, rel: &[u8]) -> Option<u32> {
+    let mut at = 0;
+    if rel.is_empty() {
+        return Some(0);
+    }
+    for name in rel.split(|&b| b == b'/') {
+        let node = view.node(at);
+        at = duscope_core::query::children(view, &node)
+            .find(|&child| view.name(child).as_ref() == name)?;
+    }
+    Some(at)
+}
+
+/// The deepest entry of `view` on the relative path `rel`: `rel` itself, or
+/// the nearest folder above it that is still there.
+#[must_use]
+pub fn nearest(view: &dyn duscope_core::query::TreeView, rel: &[u8]) -> u32 {
+    let mut at = 0;
+    if rel.is_empty() {
+        return at;
+    }
+    for name in rel.split(|&b| b == b'/') {
+        let node = view.node(at);
+        match duscope_core::query::children(view, &node)
+            .find(|&child| view.name(child).as_ref() == name)
+        {
+            Some(next) => at = next,
+            None => return at,
+        }
+    }
+    at
+}
+
 /// The cursor: the selected path, the zoom, and the maps painted for it.
 #[derive(Debug, Default)]
 pub struct Cursor {
@@ -294,6 +340,47 @@ impl Cursor {
         true
     }
 
+    /// The zoom stack and the selection, as paths relative to the view's
+    /// root, to carry across a reload: the roots each `z` made and the
+    /// cursors it replaced, in order, then the selection.
+    #[must_use]
+    pub fn paths(&self, view: &dyn duscope_core::query::TreeView) -> CursorPaths {
+        let mut zooms = Vec::new();
+        let stack = self.zoom.stack();
+        for (i, &(_, replaced)) in stack.iter().enumerate() {
+            let root = stack.get(i + 1).map_or(self.zoom.root(), |next| next.0);
+            zooms.push((view.path(root), view.path(replaced)));
+        }
+        CursorPaths {
+            zooms,
+            selected: view.path(self.path.cursor()),
+        }
+    }
+
+    /// Puts the cursor and the zoom where `paths` says on `view`: a zoom
+    /// whose root has gone or is no longer a folder, or whose cursor has
+    /// gone, ends the replay there; the selection
+    /// goes to the nearest folder still there, inside the zoom's root.
+    pub fn restore(&mut self, view: &dyn duscope_core::query::TreeView, paths: &CursorPaths) {
+        for (root, cursor) in &paths.zooms {
+            match (lookup(view, root), lookup(view, cursor)) {
+                (Some(root), Some(cursor)) if view.node(root).is_dir() => {
+                    self.zoom.push(root, cursor);
+                }
+                _ => break,
+            }
+        }
+        let root = self.zoom.root();
+        let last = view.node(root).last_id;
+        let id = nearest(view, &paths.selected);
+        let id = if (root..=last).contains(&id) {
+            id
+        } else {
+            root
+        };
+        self.path = Path::to(view, id);
+    }
+
     /// Does what `nav` asks; true when the cursor or the zoom changed.
     /// `viewing` sets the order of the list steps and what the mask hides.
     pub fn nav(&mut self, ctx: &Context<'_>, nav: Nav, viewing: &Viewing<'_>) -> bool {
@@ -391,21 +478,62 @@ impl Cursor {
         let Some(to) = beam(from, dir, candidates) else {
             return false;
         };
-        // A tile of its own is its entry's; a pool's is the largest entry
-        // marked on it.
-        let tile = map.tiles()[to];
-        let landing = match tile.kind {
-            DrawnKind::Leaf | DrawnKind::Box { .. } | DrawnKind::Gutter => Some(tile.id),
-            DrawnKind::Small | DrawnKind::Files => siblings(view, parent, ctx.opts.size)
-                .into_iter()
-                .find(|&id| map.mark(view, id) == Mark::Tile(to)),
-        };
-        match landing {
+        match Self::entry_on(ctx, &map, to) {
             Some(id) if id != cursor => {
                 self.path.select(id);
                 true
             }
             _ => false,
+        }
+    }
+
+    /// The entry a move or a click on tile `index` of `map` lands on: a
+    /// tile of its own is its entry's; a pool's is the largest entry
+    /// marked on it.
+    fn entry_on(ctx: &Context<'_>, map: &Map, index: usize) -> Option<u32> {
+        let view = ctx.view;
+        let tile = map.tiles()[index];
+        match tile.kind {
+            DrawnKind::Leaf | DrawnKind::Box { .. } | DrawnKind::Gutter => Some(tile.id),
+            DrawnKind::Small | DrawnKind::Files => siblings(view, tile.id, ctx.opts.size)
+                .into_iter()
+                .find(|&id| map.mark(view, id) == Mark::Tile(index)),
+        }
+    }
+
+    /// A click at column `x`, row `y` of the map: the deepest tile drawn
+    /// under the cell takes the cursor (a pool's largest entry for a
+    /// pool's tile); what the mask of `viewing` hides is not drawn. With
+    /// `--treemap pixels` and the picture shown, `pixel_cell` is the
+    /// terminal cell's size in pixels. `None` where nothing is drawn there;
+    /// otherwise whether the cursor moved.
+    pub fn click(
+        &mut self,
+        ctx: &Context<'_>,
+        viewing: &Viewing<'_>,
+        x: u16,
+        y: u16,
+        pixel_cell: Option<(u16, u16)>,
+    ) -> Option<bool> {
+        let view = ctx.view;
+        if view.is_empty() {
+            return None;
+        }
+        let map = self.moves_on(ctx);
+        let cell = pixel_cell.filter(|_| {
+            self.shown
+                .borrow()
+                .as_ref()
+                .is_some_and(|shown| Rc::ptr_eq(shown, &map))
+        });
+        let hidden = viewing.mask.map(|mask| mask.hidden_tiles(ctx, &map));
+        let index = mouse::tile_at(&map, hidden.as_deref(), x, y, cell)?;
+        match Self::entry_on(ctx, &map, index) {
+            Some(id) if id != self.path.cursor() => {
+                self.path.jump(view, id);
+                Some(true)
+            }
+            _ => Some(false),
         }
     }
 
@@ -434,6 +562,8 @@ impl Cursor {
         if let Some(mask) = viewing.mask {
             mask.paint(canvas, area, ctx, &map);
         }
+        viewing.freed.paint(canvas, area, &map);
+        viewing.marks.paint(canvas, area, &map);
         let view = ctx.view;
         for i in self.linked(&map) {
             let (x, y, w, h) = whole_cells(map.tiles()[i].rect);
@@ -528,11 +658,16 @@ fn link(canvas: &mut Canvas<'_>, area: Area, (x, y, w, h): (u16, u16, u16, u16))
     }
 }
 
-/// Marks the cursor on `rect` (half-cell units) of the map in `area`: an
-/// accent outline, and on a tile at least 8×2 cells the `tag` (a name and
-/// a size) on its top edge; on a tile under 2×2 cells, the accent filling
-/// the cells it touches.
-fn mark(canvas: &mut Canvas<'_>, area: Area, rect: Rect, tag: &(String, String)) {
+/// Outlines `rect` (half-cell units) of the map in `area` in `color`, a
+/// tile under 2×2 cells filled with the colour instead; where a tile got
+/// an outline, the column, row and width of its cells on the screen and
+/// its right edge.
+pub(crate) fn outline(
+    canvas: &mut Canvas<'_>,
+    area: Area,
+    rect: Rect,
+    color: duscope_treemap::cells::Color,
+) -> Option<(u16, u16, u16, u16)> {
     let (x, y, w, h) = cursor_cells(rect);
     let (x, y) = (x.min(area.width), y.min(area.height));
     let (w, h) = (
@@ -540,7 +675,7 @@ fn mark(canvas: &mut Canvas<'_>, area: Area, rect: Rect, tag: &(String, String))
         h.min(area.height.saturating_sub(y)),
     );
     if w == 0 || h == 0 {
-        return;
+        return None;
     }
     let roles = canvas.pack.roles;
     let ascii = canvas.glyphs == Glyphs::Ascii;
@@ -549,7 +684,7 @@ fn mark(canvas: &mut Canvas<'_>, area: Area, rect: Rect, tag: &(String, String))
         if let Some(cell) = canvas.cells.get_mut(cx, cy) {
             *cell = duscope_treemap::cells::Cell {
                 ch,
-                fg: roles.accent,
+                fg: color,
                 bg: roles.base,
                 ..duscope_treemap::cells::Cell::default()
             };
@@ -562,7 +697,7 @@ fn mark(canvas: &mut Canvas<'_>, area: Area, rect: Rect, tag: &(String, String))
                 put(canvas, cx, cy, block);
             }
         }
-        return;
+        return None;
     }
     let (hz, vt, corners) = if ascii {
         ('=', '#', ['#', '#', '#', '#'])
@@ -582,6 +717,20 @@ fn mark(canvas: &mut Canvas<'_>, area: Area, rect: Rect, tag: &(String, String))
     put(canvas, right, y, corners[1]);
     put(canvas, x, bottom, corners[2]);
     put(canvas, right, bottom, corners[3]);
+    Some((x, y, w, right))
+}
+
+/// Marks the cursor on `rect` (half-cell units) of the map in `area`: an
+/// accent outline, and on a tile at least 8×2 cells the `tag` (a name and
+/// a size) on its top edge; on a tile under 2×2 cells, the accent filling
+/// the cells it touches.
+fn mark(canvas: &mut Canvas<'_>, area: Area, rect: Rect, tag: &(String, String)) {
+    let accent = canvas.pack.roles.accent;
+    let Some((x, y, w, right)) = outline(canvas, area, rect, accent) else {
+        return;
+    };
+    let roles = canvas.pack.roles;
+    let ascii = canvas.glyphs == Glyphs::Ascii;
     if w < 8 {
         return;
     }
