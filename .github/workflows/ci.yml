@@ -1,8 +1,9 @@
 # duscope CI: the merge gate for every pull request (plan/SPEC.md "CI/CD", P0-CI-01).
 #
 # Budget: 20 minutes per job, enforced by `timeout-minutes: 20` on every job but
-# `checks (macos-26)`, which has 30 (DEV-141); the target is under 10 minutes of
-# wall time per job.
+# `checks (macos-26)`, which has 30 (DEV-141), and
+# `platform (macos-26)`, which has 30 (DEV-169); the target is under 10 minutes
+# of wall time per job.
 #
 # The jobs run the justfile recipes developers run (`just fmt`, `just clippy`,
 # `just test`, `just docs`, `just deny`, `just size`, `just repro`), so a green
@@ -247,7 +248,12 @@ jobs:
       matrix:
         os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # 30 minutes on macOS, 20 on Linux (DEV-169). On `main` at e479ae6 the macOS
+    # leg's tests took 19.6 minutes: the build 7, P5-CORE-01's incremental rescan
+    # of the fixture tree on an image 6, the scan of / 4.5; its tests passed and
+    # the job was cancelled at 20 minutes saving its cache. The Linux legs take 4
+    # to 6 minutes.
+    timeout-minutes: ${{ matrix.os == 'macos-26' && 30 || 20 }}
     # Optimised as release is, for the scan of /, without release's thin LTO
     # and single codegen unit: over the ~90 test binaries the recipe builds,
     # those took the macOS job to its 20-minute budget (a cold `cargo test
@@ -314,11 +320,12 @@ jobs:
     # runner is the scarce one, and as three jobs each waited for one, then
     # paid for its own checkout and cache, and the locale leg built the tests
     # again. Each step runs whatever failed before it, so one run reports
-    # every failure. The platform tests stay a job of their own: their release
-    # build and root runs take about 13 minutes. Clippy and the two legs took 17
-    # to 20 minutes by November 2026 and twice ran into the 20-minute budget, so
-    # the locale leg leaves out the fixture tree's timed rebuild, which reads no
-    # locale (`just test-locale`), and the job has 30 minutes (DEV-141).
+    # every failure. The platform tests stay a job of their own: on macOS their
+    # release build and root runs take about 20 minutes (DEV-169). Clippy and
+    # the two legs took 17 to 20 minutes by November 2026 and twice ran into the
+    # 20-minute budget, so the locale leg leaves out the fixture tree's timed
+    # rebuild, which reads no locale (`just test-locale`), and the job has 30
+    # minutes (DEV-141).
     name: checks (macos-26)
     if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: macos-26
