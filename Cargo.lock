@@ -729,6 +729,7 @@ dependencies = [
  "proptest",
  "ratatui-core",
  "ratatui-crossterm",
+ "signal-hook",
  "unicode-width",
 ]
 

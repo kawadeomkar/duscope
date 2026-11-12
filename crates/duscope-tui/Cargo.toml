@@ -17,6 +17,7 @@ crossterm.workspace = true
 ratatui-core.workspace = true
 ratatui-crossterm.workspace = true
 libc.workspace = true
+signal-hook.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]

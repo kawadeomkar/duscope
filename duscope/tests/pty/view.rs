@@ -3,9 +3,11 @@
 //! the terminal back as it found it after `q`, `Ctrl-C` and a panic, and
 //! across resizes; it refuses a terminal below 80×24 and a stdout that is not
 //! a terminal. The checks read the terminal's state, not the viewer's
-//! panes, which later packages draw.
+//! panes, which later packages draw. P4-TUI-08: `SIGTERM` and `SIGHUP` give
+//! the terminal back too, and end the viewer by the signal.
 
-use std::process::Output;
+use std::path::Path;
+use std::process::{Command, Output};
 use std::time::Duration;
 
 use duscope_core::rules::Class;
@@ -315,4 +317,58 @@ fn p4_tui_01_view_opens_a_saved_scan_by_its_id() {
         "{text}"
     );
     assert_restored(&terminal);
+}
+
+/// `duscope view` on the fixture case, run by the shell as [`viewer`] runs
+/// it, through a second shell that writes its process id to `pid` and then
+/// becomes duscope (`exec`): a signal sent to that id reaches the viewer.
+fn viewer_with_pid(env: &TestEnv, pid: &Path) -> Terminal {
+    let tree = env.fixtures().case_root(CASE);
+    let script = format!(
+        "sh -c 'echo $$ > \"$0\"; exec \"$1\" view \"$2\"' '{}' '{}' '{}'; echo \"exit=$?\"; stty -a",
+        pid.display(),
+        duscope_bin().display(),
+        tree.display()
+    );
+    Terminal::builder()
+        .size(100, 30)
+        .timeout(Duration::from_secs(60))
+        .env_clear()
+        .envs(env.vars())
+        .current_dir(env.work_dir())
+        .args(["-c", &script])
+        .spawn("/bin/sh")
+        .unwrap()
+}
+
+/// Sends `signal` (`TERM`, `HUP`) to the viewer once it is up, and asserts
+/// that it ended by that signal, numbered `number`, and gave the terminal
+/// back first: the main screen, the cursor shown, no mouse reporting, no
+/// bracketed paste, and the line discipline's canonical mode and echo.
+fn ended_by(signal: &str, number: i32) {
+    let env = TestEnv::new();
+    let pid = env.work_dir().join("viewer.pid");
+    let mut terminal = viewer_with_pid(&env, &pid);
+    terminal.wait_until(up).unwrap();
+    let id = std::fs::read_to_string(&pid).unwrap();
+    let sent = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(id.trim())
+        .status()
+        .unwrap();
+    assert!(sent.success(), "kill -{signal} {id}");
+    // The shell reports a process that a signal ended as 128 and the
+    // signal's number; duscope exits with none of these itself.
+    assert_eq!(exited(&mut terminal), 128 + number, "{signal}");
+    assert_restored(&terminal);
+}
+
+#[test]
+fn p4_tui_08_sigterm_restores_the_terminal_and_ends_the_viewer() {
+    ended_by("TERM", 15);
+}
+
+#[test]
+fn p4_tui_08_sighup_restores_the_terminal_and_ends_the_viewer() {
+    ended_by("HUP", 1);
 }

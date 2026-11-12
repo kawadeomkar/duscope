@@ -1,7 +1,8 @@
 //! The terminal the viewer draws on: raw mode, the alternate screen, mouse
 //! capture and bracketed paste (so that a paste arrives as one event, text
 //! for the filter prompt alone, never as keys), taken on entry and given back on every
-//! way out (a return, an error, a panic through the binary's hook); the
+//! way out (a return, an error, a panic through the binary's hook, and
+//! `SIGTERM` or `SIGHUP`, after which the process ends by that signal); the
 //! size the viewer checks before it starts; its events, a burst of resizes
 //! read as one; and the background probe.
 
@@ -12,7 +13,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError, mpsc};
+use std::sync::{Mutex, Once, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,8 @@ use crossterm::terminal::{
 use duscope_treemap::cells::Color;
 use ratatui_core::terminal::Terminal;
 use ratatui_crossterm::CrosstermBackend;
+use signal_hook::consts::{SIGHUP, SIGTERM};
+use signal_hook::low_level::{self, pipe};
 
 /// The smallest terminal the viewer starts in, columns and rows.
 pub const MIN_SIZE: (u16, u16) = (80, 24);
@@ -46,6 +49,15 @@ static REVEALING: AtomicBool = AtomicBool::new(false);
 /// The event read behind a burst of resizes, which [`next_event`] gives
 /// next.
 static HELD_BACK: Mutex<Option<Event>> = Mutex::new(None);
+
+/// The signals that end the viewer from outside it: `kill`'s default and
+/// a terminal that hung up. In raw mode `Ctrl-C` and `Ctrl-\` are keys, not
+/// `SIGINT` and `SIGQUIT`.
+const ENDING: [libc::c_int; 2] = [SIGTERM, SIGHUP];
+
+/// How long a signal's restore may wait for a terminal that takes no
+/// output before the process ends anyway.
+const RESTORE_WAIT: Duration = Duration::from_secs(1);
 
 /// The terminal's background, as its answer to OSC 11 tells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,8 +87,11 @@ impl Tui {
     /// question, which needs raw mode to read the answer and must come
     /// before the first event read, which would take the answer for keys;
     /// then the alternate screen, mouse capture and bracketed paste. A step
-    /// that fails gives back what the ones before it took.
+    /// that fails gives back what the ones before it took. The first call
+    /// in a process first has `SIGTERM` and `SIGHUP` answered
+    /// (`answer_signals`).
     pub fn enter(probe: bool) -> io::Result<Tui> {
+        answer_signals();
         enable_raw_mode()?;
         HELD.store(true, Ordering::SeqCst);
         let background = if probe { background(PROBE_WAIT) } else { None };
@@ -120,12 +135,18 @@ impl Drop for Tui {
 /// Gives the terminal back if the viewer holds it: bracketed paste and
 /// mouse reporting off, the main screen, the cursor shown, raw mode off. Does nothing otherwise,
 /// so a panic hook can call it whatever was running, and a second call
-/// (the hook, then the unwinding drop) writes nothing.
+/// (the hook, then the unwinding drop) writes nothing. Its callers (a
+/// drop, the panic hook, a signal's thread) take turns, holding stdout: a
+/// second one waits for the first to finish, then finds nothing to do.
 pub fn restore() {
+    if !HELD.load(Ordering::SeqCst) {
+        return;
+    }
+    let mut out = io::stdout().lock();
     if HELD.swap(false, Ordering::SeqCst) {
         // Nothing to do about a failure here: this is the way out.
         let _ = execute!(
-            io::stdout(),
+            out,
             DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen,
@@ -133,6 +154,68 @@ pub fn restore() {
         );
         let _ = disable_raw_mode();
     }
+}
+
+/// Answers `SIGTERM` and `SIGHUP` for the rest of the process, from the
+/// first call on: for each, a thread that waits on a pipe the signal's
+/// handler writes a byte to, then gives the terminal back if the viewer
+/// holds it ([`end_by`]) and ends the process by the signal, as its default
+/// action would. Once the viewer has given the terminal back the thread
+/// only ends the process, so a signal then has its default effect; the
+/// actions stay registered, since signal-hook would leave a signal whose
+/// last action is gone ignored rather than restore its default. Where a
+/// thread or its pipe cannot be had, nothing is registered for its signal,
+/// which keeps its default.
+fn answer_signals() {
+    static ANSWERING: Once = Once::new();
+    ANSWERING.call_once(|| {
+        for signal in ENDING {
+            let (registered, ready) = mpsc::channel();
+            let waiting = thread::Builder::new()
+                .name("duscope-signal".to_owned())
+                .spawn(move || {
+                    // A pipe, not signal-hook's iterator, whose self-pipe is
+                    // a pair of sockets: crossterm's pair is the only socket
+                    // the binary opens (SECURITY.md).
+                    let caught = io::pipe().and_then(|(reader, writer)| {
+                        pipe::register(signal, writer)?;
+                        Ok(reader)
+                    });
+                    let _ = registered.send(());
+                    let mut byte = [0u8];
+                    if let Ok(mut reader) = caught
+                        && reader.read_exact(&mut byte).is_ok()
+                    {
+                        end_by(signal);
+                    }
+                });
+            // Registered before the terminal is taken.
+            if waiting.is_ok() {
+                let _ = ready.recv();
+            }
+        }
+    });
+}
+
+/// Gives the terminal back if the viewer holds it, then ends the process by
+/// `signal`, its default action. Stdout is taken first and held to the
+/// end: a restore already under way (a drop, the panic hook) finishes
+/// before the process ends, and no frame the viewer was drawing reaches
+/// the main screen after it. A terminal that takes no output, whose writes
+/// block, holds that up: [`RESTORE_WAIT`] later the process ends all the
+/// same.
+fn end_by(signal: libc::c_int) {
+    let _ = thread::Builder::new()
+        .name("duscope-signal-wait".to_owned())
+        .spawn(move || {
+            thread::sleep(RESTORE_WAIT);
+            let _ = low_level::emulate_default_handler(signal);
+        });
+    let _held = io::stdout().lock();
+    restore();
+    // Puts the default action back, unblocks the signal and raises it; it
+    // returns only where that failed, after an abort.
+    let _ = low_level::emulate_default_handler(signal);
 }
 
 /// The terminal's size, columns and rows.
