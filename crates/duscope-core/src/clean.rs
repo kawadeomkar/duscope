@@ -263,10 +263,10 @@ fn walked(path: &Path) -> u64 {
     // A walk that fails part way leaves what it reached: the figure is the
     // plan's, never what is moved.
     let _ = duscope_walk::walk(path, &opts, |event| {
-        if let ScanEvent::Entry(entry) = event {
-            if entry.kind == Kind::Dir || entry.nlink <= 1 || seen.insert((entry.dev, entry.ino)) {
-                total = total.saturating_add(entry.allocated);
-            }
+        if let ScanEvent::Entry(entry) = event
+            && (entry.kind == Kind::Dir || entry.nlink <= 1 || seen.insert((entry.dev, entry.ino)))
+        {
+            total = total.saturating_add(entry.allocated);
         }
     });
     total

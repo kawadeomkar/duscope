@@ -72,7 +72,7 @@ jobs:
           rustup toolchain install "$nightly" --profile minimal
           rustup run "$nightly" rustc --version
           # Built with the nightly: cargo-fuzz's locked dependencies need a
-          # newer rustc than the pinned 1.88 (`just setup` builds it with stable).
+          # newer rustc than the pinned 1.89 (`just setup` builds it with stable).
           cargo +"$nightly" install --locked "cargo-fuzz@$(just --evaluate cargo_fuzz_version)"
       - name: Restore the corpus
         # The newest earlier corpus of the target.

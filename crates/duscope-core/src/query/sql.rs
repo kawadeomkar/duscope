@@ -202,7 +202,7 @@ pub fn sql(index: &Index, q: &SqlQuery<'_>) -> Result<SqlResult, CoreError> {
     let deadline = Instant::now() + q.timeout;
     let (body, limited) = statement(q.sql);
     let limit = limit(limited, q.max_rows);
-    let (db, reader) = sandbox(index)?;
+    let (mut db, reader) = sandbox(index)?;
     // Why the authorizer denied what it denied first: SQLite says only
     // "not authorized".
     let refused: Arc<Mutex<Option<String>>> = Arc::default();
@@ -228,15 +228,13 @@ pub fn sql(index: &Index, q: &SqlQuery<'_>) -> Result<SqlResult, CoreError> {
     }
     // The statement's own names: the wrapper's `*` would rename a second
     // `id` to `id:1`.
-    let columns: Vec<String> = alone
-        .column_names()
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let columns: Vec<String> = alone.column_names().map(str::to_owned).collect();
     drop(alone);
     // A line of its own each side, so that a comment at the statement's
     // end ends before the wrapper's parenthesis.
     let wrapped = format!("SELECT * FROM (\n{body}\n) LIMIT {}", limit + 1);
+    db.progress_handler(PROGRESS_OPS, Some(move || Instant::now() >= deadline))
+        .map_err(|e| setup(index, &e))?;
     let mut stmt = db.prepare(&wrapped).map_err(fail)?;
     let root_last = index.node(q.root_id).last_id;
     for (name, value) in [(":root_id", q.root_id), (":root_last", root_last)] {
@@ -244,8 +242,6 @@ pub fn sql(index: &Index, q: &SqlQuery<'_>) -> Result<SqlResult, CoreError> {
             stmt.raw_bind_parameter(at, value).map_err(fail)?;
         }
     }
-    db.progress_handler(PROGRESS_OPS, Some(move || Instant::now() >= deadline))
-        .map_err(|e| setup(index, &e))?;
     let mut rows: Vec<Vec<SqlValue>> = Vec::new();
     let mut held = 0;
     let mut truncated = false;

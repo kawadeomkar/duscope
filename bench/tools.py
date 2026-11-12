@@ -348,7 +348,7 @@ def _install_cargo(tool: Tool, cargo: Cargo, tools_dir: str, log) -> Tuple[str, 
     else:
         command += [f"{cargo.crate}@{cargo.version}"]
     # The stable toolchain, as `just setup` uses for its tools: the repository's
-    # rust-toolchain.toml pins 1.88, older than some competitors need. Which
+    # rust-toolchain.toml pins 1.89, older than some competitors need. Which
     # stable that is changes over time, so the result file records it.
     toolchain: List[str] = []
     if shutil.which("rustup"):

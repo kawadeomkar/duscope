@@ -793,26 +793,26 @@ impl Property {
         if self.choices.as_ref().is_some_and(|c| !c.contains(value)) {
             return false;
         }
-        if let Some(x) = value.as_f64() {
-            if self.minimum.is_some_and(|lo| x < lo) || self.maximum.is_some_and(|hi| x > hi) {
-                return false;
-            }
+        if let Some(x) = value.as_f64()
+            && (self.minimum.is_some_and(|lo| x < lo) || self.maximum.is_some_and(|hi| x > hi))
+        {
+            return false;
         }
         let length = match value {
             Value::String(s) => Some(s.chars().count() as u64),
             Value::Array(items) => Some(items.len() as u64),
             _ => None,
         };
-        if let Some(n) = length {
-            if self.min_length.is_some_and(|lo| n < lo) || self.max_length.is_some_and(|hi| n > hi)
-            {
-                return false;
-            }
+        if let Some(n) = length
+            && (self.min_length.is_some_and(|lo| n < lo)
+                || self.max_length.is_some_and(|hi| n > hi))
+        {
+            return false;
         }
-        if let (Some(pattern), Some(s)) = (&self.pattern, value.as_str()) {
-            if !pattern.is_match(s.as_bytes()) {
-                return false;
-            }
+        if let (Some(pattern), Some(s)) = (&self.pattern, value.as_str())
+            && !pattern.is_match(s.as_bytes())
+        {
+            return false;
         }
         match (value, &self.items) {
             (Value::Array(values), Some(items)) => values.iter().all(|v| items.accepts(v)),

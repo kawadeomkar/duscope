@@ -165,7 +165,7 @@ impl Index {
             file: file.clone(),
             message,
         };
-        let db = Connection::open_with_flags(
+        let mut db = Connection::open_with_flags(
             uri(path),
             OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_URI
@@ -173,7 +173,7 @@ impl Index {
         )
         .map_err(|e| corrupt(e.to_string()))?;
         harden(&db).map_err(|e| corrupt(e.to_string()))?;
-        check_schema(&db).map_err(corrupt)?;
+        check_schema(&mut db).map_err(corrupt)?;
         // The version first: a file of another major may lay out its other
         // tables differently.
         let version: String = db
@@ -1143,7 +1143,7 @@ fn harden(db: &Connection) -> rusqlite::Result<()> {
 /// Loads the schema, the connection's first statement, and refuses one no
 /// duscope writes: why, if it does. A progress handler stops a schema too
 /// large to be an index while it loads.
-fn check_schema(db: &Connection) -> Result<(), String> {
+fn check_schema(db: &mut Connection) -> Result<(), String> {
     let calls = Arc::new(AtomicU32::new(0));
     let counted = Arc::clone(&calls);
     db.progress_handler(

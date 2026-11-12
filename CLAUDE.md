@@ -43,7 +43,7 @@ The design is fixed by two documents; read the parts a task cites before writing
 - `cargo +nightly fuzz run <target>`   fuzzing needs the nightly toolchain
 
 ## Code conventions
-- Rust 1.88 (rust-toolchain.toml). Edition 2024. `cargo fmt` defaults; clippy config in
+- Rust 1.89 (rust-toolchain.toml). Edition 2024. `cargo fmt` defaults; clippy config in
   Cargo.toml [workspace.lints]; CI runs clippy::all as errors, pedantic as warnings.
 - `#![forbid(unsafe_code)]` in every crate except duscope-walk, whose `src/platform/` modules
   (macos/, linux/, posix/) hold the only `unsafe` blocks, each with a `// SAFETY:` comment.

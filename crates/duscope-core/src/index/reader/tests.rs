@@ -557,9 +557,10 @@ fn p2_sec_01_a_hostile_index_is_refused_or_neutralised() {
     );
 }
 
-/// RUSTSEC-2026-0459, waived in `deny.toml` on this test's strength: SQLite
-/// before 3.54 can return uninitialized memory for a database opened with a
-/// `-wal` of another page size, so a saved scan's `-wal` must never be read.
+/// An index file may come from anyone, and a `-wal` beside it is more of its
+/// input (RUSTSEC-2026-0459: SQLite before 3.54 returned uninitialized memory
+/// for a database opened with a `-wal` of another page size), so a saved
+/// scan's `-wal` must never be read.
 /// The pair is whoever made a hostile file's: an index in WAL mode with a
 /// change committed to its `-wal` alone, which a plain open does see.
 #[test]

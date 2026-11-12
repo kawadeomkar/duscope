@@ -273,7 +273,7 @@ mod macos {
         let stmt = db
             .prepare(&format!("SELECT * FROM {table} LIMIT 0"))
             .unwrap();
-        stmt.column_names().into_iter().map(str::to_owned).collect()
+        stmt.column_names().map(str::to_owned).collect()
     }
 
     /// A value for a failure's message, a blob as text.
