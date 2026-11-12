@@ -40,6 +40,7 @@ for release binaries, and rustup with the stable toolchain for the competitors b
 | `show FILE` | print a result file as a table |
 | `sweep` | measure duscope at each thread count and apply the defaults rule ([The thread sweep](#the-thread-sweep)) |
 | `index` | measure a saved scan's write, queries and size, and the D34 comparison ([Index measurements](#index-measurements)) |
+| `redraw` | measure the viewer's redraw at 120x40 on T2 ([The redraw budget](#the-redraw-budget)) |
 
 Options of `run` (most also apply to `build`, `install` and `verify`):
 
@@ -405,6 +406,72 @@ status 1 means something could not be measured, not that a gate failed.
 `nightly-bench.yml` runs it on each bench runner after the harness, and publishes the file to
 `bench-results` beside the harness's.
 
+## The redraw budget
+
+`bench/run.sh redraw --duscope target/release/duscope` measures the two numbers Gate 4 → 5 asks
+for (P4-TEST-01): how long the viewer takes to redraw at 120x40 on T2, from a saved scan. The viewer
+runs on a pseudo-terminal of that size, in a true-colour terminal's environment; what it writes is
+read and dropped, not parsed, so the terminal's own drawing is not in the time. One redraw is from
+the write of a key (or the change of the terminal's size) to the last byte of the frame it caused,
+the end of a frame being 50 ms of silence after its first byte. Bytes that only erase the screen
+are not a frame: on a change of size ratatui writes and flushes the erase by itself, then lays the
+frame out, and that silence is the work being timed. A key that changes nothing on the screen, a
+move at a block's edge, writes no frame and is counted, not timed; `--frame-wait` (default 5 s) is
+how long a press waits for a frame's first byte before it counts as one of those, longer than T2's
+slowest frame, so that a slow frame is not read by the next press.
+
+The kinds, each in a session of its own, `--rounds` cycles (default 30), and the class of their
+frames:
+
+| Kind | Keys | What it asks of the viewer | Class |
+| --- | --- | --- | --- |
+| `move` | `l j h k` on the map's top row | the cursor's outline and the panes | navigation |
+| `descend` | `⌫ ⏎` from the file the viewer opens on | the panes and the breadcrumbs | navigation |
+| `zoom` | `z Z l` from the map's top row | a folder's map the first time it is zoomed, kept after | recompute (first-time) the first time, then navigation |
+| `repaint` | `c p` | the legend and every cell of the map again, each time | recompute |
+| `focus` | `⇥` | the panes' borders | navigation |
+| `views` | `2 1 3 1 4 1` | each table's rows the first time, kept after, and the map again | recompute (first-time) the first time, then navigation |
+| `resize` | two sizes, 100x30 and 120x40 | every layout again, at another size | recompute |
+
+**Why two classes.** A frame the viewer can draw from what it has kept is a frame of navigation,
+and 16 ms is one frame at 60 Hz. A frame that works the whole map out, or builds a table, is a wait
+for a piece of work: on a million entries it cannot fit a frame, and it happens rarely, so a
+percentile over many presses would not see it (at 30 rounds, two first zooms among 61 frames lie
+above the 95th percentile of their kind). Frame-budget benchmarks read steady frames as percentiles
+and keep first and long frames apart, as a count or a maximum over a threshold: Android tracks
+initial and screen-change frames separately from slow rendering ("No frames in your app should
+ever take longer than 700ms to render"), the browser reports each long task, and Interaction to
+Next Paint reports nearly a page's worst interaction.
+
+**The two lines.** `gates`, read from T2 (a gate failing is no failure of the run):
+
+- `redraw_p95_ms_at_120x40 <= 16`: the largest p95 of the navigation rows.
+- `redraw_recompute_max_ms <= 1000`: the slowest frame of the recompute rows, the first-time
+  frames and both sizes of `resize` among them. 1 s is the published limit for a response that
+  keeps the user's flow of thought with no sign of progress (Nielsen's 0.1 s / 1 s / 10 s, after
+  Miller 1968 and Card, Robertson and Mackinlay 1991; RAIL has users losing focus beyond it), and
+  the viewer shows no sign of progress while it works. It is a design limit like the query budgets,
+  not a figure taken from a run; it can be tightened from the nightly's numbers as the size and
+  build budgets were.
+
+The result file (`<date>-<platform>-redraw.json` in `--results-dir`, or `--out`) holds the usual
+header, `trees` (each tree's two figures, the frames over each limit, and how many first-time frames
+there were and the slowest), `gates`, one row per tree, kind and class (`limit_ms`, `samples`,
+`no_frame`, `first`, `over_limit`, p50, p95, mean, min, max and the times in milliseconds, the key
+of each time, the mean bytes of a frame), and `sessions`, each press of each kind in order as `[key,
+ms, bytes, first]`, `ms` being null for one that drew nothing, so that a later classification can
+be worked out from the file. A part that cannot be measured is recorded in `failures` and exit
+status 1 means something could not be measured.
+
+`nightly-bench.yml` runs it on each bench runner after the index measurements and publishes the
+file to `bench-results` beside the others. `--note` keeps free text in the result file;
+`--tree-path` measures a tree that is already there, read-only and neither built nor verified.
+`results/redraw-macos-arm64-provisional.json` is one such run, on an Apple M5 Pro against a
+read-only `bench/.trees/T2`, kept until the first nightly number exists; it is provisional and
+macOS-local, and it is not the nightly result. It was measured before the frames were split and is
+reclassified from its own samples: its `zoom` and `resize` rows could not be, keep their old
+figures, marked `unclassified`, and are in neither line's value (its `reclassified` field says why).
+
 ## The allocator
 
 P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
@@ -431,6 +498,8 @@ defaults reached 168–244. On macOS
 | `drop-caches.sh` | the cold-run cache drop |
 | `test_bench.py` | unit tests, run by `duscope/tests/bench_harness.rs` |
 | `indexbench.py` | the index measurements (`index`) |
+| `redraw.py` | the viewer's redraw budget (`redraw`) |
+| `test_redraw.py` | its unit tests, run with `test_bench.py`; `duscope/tests/pty/nav_redraw.rs` runs it whole |
 | `test_indexbench.py` | its unit tests, run with `test_bench.py`; `duscope/tests/index_bench.rs` runs it whole |
 | `compare.py` | the regression check: a result file against the results before it on the same machine and tree |
 | `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |
@@ -438,4 +507,5 @@ defaults reached 168–244. On macOS
 | `gab_bench.c` | the per-entry cost of `getattrlistbulk` attribute sets on macOS |
 | `sweep.py` | the thread sweep and the rule that sets a platform's default thread count |
 | `results/clone-attributes-macos.json` | P1-BENCH-02's measurement and the `--clones` and `PRIVATESIZE` decisions |
+| `results/redraw-macos-arm64-provisional.json` | P4-TEST-01's provisional macOS-local redraw number, until the nightly measures it |
 | `results/allocator.json` | P1-BENCH-03's measurement: mimalloc on the musl builds, the system allocator on macOS |

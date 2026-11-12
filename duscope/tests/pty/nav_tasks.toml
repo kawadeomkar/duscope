@@ -1,0 +1,361 @@
+# The ten navigation tasks of the eval (P4-TEST-01), as scripted PTY sessions.
+#
+# duscope/tests/pty/nav_eval.rs reads this file and runs each task in a
+# pseudo-terminal through termlens: `duscope view` on the task's tree, each
+# step's keys, then what it waits for on the screen. A task must complete
+# without `?`: the harness refuses a script that presses or types it.
+#
+# Each [[task]] has an `id` (which names its test `p4_test_01_nav_task_<id>`),
+# the `title` from the row in plan/SPEC.md, a `tree` ("nav" is the small tree
+# nav_eval.rs builds, "fixture" a copy of the fixture tree's `extensions`
+# case), an optional `size` (columns, rows; default 120x40) and its steps. A
+# step has `press` (keys pressed in turn: one character, or a name such as
+# "enter", "esc", "tab", "up", "pgdn"), `text` (typed character by
+# character after the keys), or `resize` ([columns, rows]); it waits for every
+# `see` string to be on the screen, for every `gone` string to leave it, and
+# for `printed` / `unprinted` on the main screen after the viewer has quit.
+# `only = "trash"` keeps a step for where the Trash is the test's own (Linux's
+# XDG Trash, macOS's disk image); `only = "no-trash"` for where there is none.
+# Every step must check something: the harness waits for what the step
+# promises before pressing the next key, so an Esc is never read as the start
+# of an Alt chord. What a step that sends keys or a resize waits for must not
+# be on the screen before it sends them (the step would check nothing), and
+# must still be there once the screen has settled after them; a resize step
+# also waits for the key line on the new last row, the frame drawn at the new
+# size. A step that sends nothing (`printed`, `unprinted`) reads what the
+# steps before it left.
+
+[[task]]
+id = "reach_largest_file"
+title = "reach the largest file from the root"
+tree = "nav"
+
+  # The viewer opens with the cursor on the largest file; two steps up
+  # reach the root, and two opens come back down the largest entries.
+  [[task.step]]
+  press = ["backspace"]
+  see = ["› media"]
+  gone = ["› movie.mkv"]
+
+  [[task.step]]
+  press = ["backspace"]
+  gone = ["› media"]
+
+  [[task.step]]
+  press = ["enter"]
+  see = ["› media"]
+
+  [[task.step]]
+  press = ["enter"]
+  see = ["› media › movie.mkv"]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+[[task]]
+id = "open_typed_path"
+title = "open a path typed with /"
+tree = "nav"
+
+  [[task.step]]
+  press = ["/"]
+  see = [">  "]
+
+  [[task.step]]
+  text = "/projects/docs"
+  see = ["/projects/docs▌"]
+
+  [[task.step]]
+  press = ["enter"]
+  see = ["filter: /projects/docs"]
+
+  # The mask leaves `projects`; up from the largest file to the top row, then
+  # the arrow to the one tile left, and ⏎ opens it.
+  [[task.step]]
+  press = ["backspace"]
+  see = ["› media"]
+  gone = ["› movie.mkv"]
+
+  [[task.step]]
+  press = ["l"]
+  see = ["› projects"]
+
+  [[task.step]]
+  press = ["enter"]
+  see = ["› projects › docs"]
+
+  [[task.step]]
+  press = ["enter"]
+  see = ["› docs › guide.md"]
+
+  [[task.step]]
+  press = ["esc"]
+  gone = ["filter: /projects/docs"]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+[[task]]
+id = "filter_one_class"
+title = "filter to one class and back"
+tree = "nav"
+
+  # Focus the legend (⇥ twice), ⏎ filters by its first row, Esc clears.
+  [[task.step]]
+  press = ["tab", "tab"]
+  see = ["⏎ filter"]
+
+  [[task.step]]
+  press = ["enter"]
+  see = ["filter: type: media"]
+
+  [[task.step]]
+  press = ["esc"]
+  gone = ["filter:"]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+[[task]]
+id = "zoom_two_levels"
+title = "zoom two levels in and out"
+tree = "nav"
+
+  # Up to `media`, zoom in; to its last entry `photos`, zoom in; and out twice.
+  [[task.step]]
+  press = ["backspace"]
+  see = ["› media"]
+  gone = ["› movie.mkv"]
+
+  [[task.step]]
+  press = ["z"]
+  see = ["/media · color"]
+
+  [[task.step]]
+  press = ["G"]
+  see = ["› media › photos"]
+
+  [[task.step]]
+  press = ["z"]
+  see = ["/media/photos · color"]
+
+  [[task.step]]
+  press = ["Z"]
+  see = ["/media · color"]
+  gone = ["/photos · color"]
+
+  [[task.step]]
+  press = ["Z"]
+  see = ["/tree · color"]
+  gone = ["/media · color"]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+[[task]]
+id = "sort_by_count"
+title = "sort by count and return to size"
+tree = "nav"
+
+  [[task.step]]
+  press = ["s", "s", "s"]
+  see = ["by count · in"]
+
+  # Back to size: the siblings' title starts with the folder again, no sort
+  # ahead of it.
+  [[task.step]]
+  press = ["s"]
+  see = ["╭─ in media · "]
+  gone = ["by name", "by modified", "by count"]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+[[task]]
+id = "mark_three_total"
+title = "mark three items and read the mark pane total"
+tree = "nav"
+
+  # The list of the root's entries: up from the file the viewer opens on, then
+  # the list; the root's folders and archive.tar are marked.
+  [[task.step]]
+  press = ["backspace"]
+  see = ["› media"]
+  gone = ["› movie.mkv"]
+
+  [[task.step]]
+  press = ["2"]
+  see = ["list · "]
+
+  [[task.step]]
+  press = ["d"]
+  see = ["1 marked"]
+
+  [[task.step]]
+  press = ["j", "d"]
+  see = ["2 marked"]
+
+  [[task.step]]
+  press = ["j", "d"]
+  see = ["3 marked"]
+
+  # The pane's total: the three entries' allocated size, 1.9 MiB.
+  [[task.step]]
+  press = ["D"]
+  see = ["mark pane · 3 marked", "3 items to move to the Trash: 1.9 MiB on disk"]
+
+  [[task.step]]
+  press = ["esc"]
+  gone = ["mark pane"]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+[[task]]
+id = "trash_marked_file"
+title = "trash a marked file in the fixture tree"
+tree = "fixture"
+
+  [[task.step]]
+  press = ["d"]
+  see = ["1 marked"]
+
+  [[task.step]]
+  press = ["D"]
+  see = ["mark pane · 1 marked", "1 item to move to the Trash", "Type yes to move them to the Trash: "]
+
+  [[task.step]]
+  only = "trash"
+  text = "yes"
+  see = ["yes▌"]
+
+  [[task.step]]
+  only = "trash"
+  press = ["enter"]
+  see = ["moved 1 item to the Trash"]
+
+  [[task.step]]
+  only = "no-trash"
+  text = "no"
+  see = ["no▌"]
+
+  # A wrong answer closes the pane, moving nothing: it asks once.
+  [[task.step]]
+  only = "no-trash"
+  press = ["enter"]
+  see = ["the answer was not yes, so nothing was moved"]
+  gone = ["mark pane"]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+[[task]]
+id = "switch_layout_view"
+title = "switch layout and view"
+tree = "nav"
+
+  [[task.step]]
+  press = ["2"]
+  see = ["list · "]
+
+  [[task.step]]
+  press = ["3"]
+  see = ["largest · "]
+
+  [[task.step]]
+  press = ["4"]
+  see = ["types · "]
+
+  [[task.step]]
+  press = ["1"]
+  see = ["treemap · "]
+
+  # The shipped keys have no layout key (`--layout` is `render`'s); the one
+  # thing the keys change in how the map is drawn, beside the colours and the
+  # views above, is the labels on its tiles, `t`.
+  [[task.step]]
+  press = ["t"]
+  see = ["archive.tar"]
+
+  [[task.step]]
+  press = ["t"]
+  gone = ["archive.tar"]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+[[task]]
+id = "resize_and_back"
+title = "resize from 80x24 to 200x60 and back"
+tree = "nav"
+size = [80, 24]
+
+  [[task.step]]
+  resize = [200, 60]
+  see = ["treemap · "]
+
+  [[task.step]]
+  resize = [80, 24]
+  see = ["treemap · "]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+[[task]]
+id = "quit_with_summary"
+title = "quit with the session summary"
+tree = "nav"
+
+  # The last of the root's entries, `readme.txt`: up from the file the
+  # viewer opens on, then to the last sibling.
+  [[task.step]]
+  only = "trash"
+  press = ["backspace"]
+  see = ["› media"]
+  gone = ["› movie.mkv"]
+
+  [[task.step]]
+  only = "trash"
+  press = ["G"]
+  see = ["› readme.txt"]
+
+  [[task.step]]
+  only = "trash"
+  press = ["d"]
+  see = ["1 marked"]
+
+  [[task.step]]
+  only = "trash"
+  press = ["D"]
+  see = ["Type yes to move them to the Trash: "]
+
+  [[task.step]]
+  only = "trash"
+  text = "yes"
+  see = ["yes▌"]
+
+  [[task.step]]
+  only = "trash"
+  press = ["enter"]
+  see = ["moved 1 item to the Trash"]
+
+  [[task.step]]
+  press = ["q"]
+  see = ["exit=0"]
+
+  [[task.step]]
+  only = "trash"
+  printed = ["moved 1 item to the Trash", "(not yet freed)", "the saved scans still hold"]
+
+  [[task.step]]
+  only = "no-trash"
+  unprinted = ["moved 1 item", "(not yet freed)"]
