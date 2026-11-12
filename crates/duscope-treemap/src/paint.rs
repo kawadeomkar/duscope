@@ -37,8 +37,15 @@
 //! [`paint_viewer`], it also names the tiles it drew ([`Drawn`]), which
 //! the viewer's cursor moves between; [`paint_viewer_labelled`] is the same
 //! map with `t`'s labels on tiles of at least 8×2 cells.
+//!
+//! A folder drawn as one tile, and the `--pool-files` tile of a folder's
+//! files, take the colour of the class holding most of the bytes under it
+//! ([`dominant`]), a walk of its subtree for each. The viewer works every
+//! folder's out once, in the pass that classifies the scan
+//! ([`classify_scan`]), and paints with them ([`paint_viewer_worked`]).
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use duscope_core::query::{Node, SizeKind, TreeView, children, classify, ids};
 use duscope_core::rules::{Class, Classes};
@@ -151,6 +158,8 @@ struct Painter<'v, 'o, 'c, V: TreeView + ?Sized> {
     overlay: Vec<Option<Cell>>,
     /// Each entry's class, by pre-order id.
     class_of: Cow<'c, [Class]>,
+    /// The folders' dominant classes the viewer worked out, where it did.
+    known: Option<&'c dyn Fn(u32) -> Option<Dominant>>,
     /// Which tiles are labelled; the depth-1 titles are drawn either way.
     labels: Labels,
     /// The tiles drawn, when the viewer asks for them.
@@ -218,6 +227,45 @@ pub struct Base {
     pub folder: Option<usize>,
 }
 
+/// A folder's dominant classes, as [`dominant`] answers for it: the class
+/// holding most of the bytes of the files under it, and of its own files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dominant {
+    /// Of every file under the folder.
+    pub tree: Class,
+    /// Of the folder's own files (its ids up to `files_end`).
+    pub own: Class,
+}
+
+/// Each entry's class and each folder's dominant classes, worked out in
+/// one pass over the scan ([`classify_scan`]).
+#[derive(Debug, Clone, Default)]
+pub struct Classified {
+    /// Each entry's class by pre-order id, as [`classes_of`] gives it.
+    pub class_of: Vec<Class>,
+    /// Each folder's dominant classes, by id.
+    pub dominant: HashMap<u32, Dominant>,
+}
+
+/// What the viewer has worked out for its maps: each entry's class, and
+/// the dominant classes of the folders it knows them for, by the painted
+/// view's ids; `None` from `dominant` has the painter walk the folder.
+#[derive(Clone, Copy)]
+pub struct Worked<'c> {
+    /// Each entry's class, by id.
+    pub class_of: &'c [Class],
+    /// A folder's dominant classes, where they are known.
+    pub dominant: &'c dyn Fn(u32) -> Option<Dominant>,
+}
+
+impl std::fmt::Debug for Worked<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Worked")
+            .field("class_of", &self.class_of.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Paints the scan in `view` as a map of `w` columns and `h` rows, at most
 /// 32767 (twice that in half-cell units).
 #[must_use]
@@ -248,7 +296,7 @@ pub fn paint_unlabelled(
         opts,
         h,
         &mut buffer,
-        Some(class_of),
+        Some(unknown(class_of)),
         None,
         Labels::None,
     );
@@ -277,7 +325,7 @@ pub fn paint_viewer(
         opts,
         h,
         &mut buffer,
-        Some(class_of),
+        Some(unknown(class_of)),
         Some(base),
         Labels::None,
     );
@@ -302,15 +350,47 @@ pub fn paint_viewer_labelled(
         opts,
         h,
         &mut buffer,
-        Some(class_of),
+        Some(unknown(class_of)),
         Some(base),
         Labels::Tiles,
     );
     (buffer, drawn)
 }
 
+/// Paints the viewer's map as [`paint_viewer`] does, with `t`'s labels
+/// when `labelled` ([`paint_viewer_labelled`]), each folder's dominant
+/// classes read from `worked` where it knows them rather than walked.
+#[must_use]
+pub fn paint_viewer_worked(
+    view: &(impl TreeView + ?Sized),
+    opts: &PaintOpts<'_>,
+    w: u16,
+    h: u16,
+    worked: Worked<'_>,
+    base: Base,
+    labelled: bool,
+) -> (CellBuffer, Vec<Drawn>) {
+    let h = h.min(u16::MAX / 2);
+    let mut buffer = CellBuffer::new(w, h);
+    let labels = if labelled {
+        Labels::Tiles
+    } else {
+        Labels::None
+    };
+    let drawn = paint_into(view, opts, h, &mut buffer, Some(worked), Some(base), labels);
+    (buffer, drawn)
+}
+
+/// `class_of`, with no folder's dominant classes known.
+fn unknown(class_of: &[Class]) -> Worked<'_> {
+    Worked {
+        class_of,
+        dominant: &|_| None,
+    }
+}
+
 /// Paints the map into the top `h` rows of `buffer` (at most 32767), as
-/// wide as the buffer, each entry's class given (`class_of`) or worked out
+/// wide as the buffer, each entry's class given (`worked`) or worked out
 /// here, its tiles labelled as `labels` says; with a `base`, the viewer's
 /// map, whose tiles it returns.
 fn paint_into(
@@ -318,7 +398,7 @@ fn paint_into(
     opts: &PaintOpts<'_>,
     h: u16,
     buffer: &mut CellBuffer,
-    class_of: Option<&[Class]>,
+    worked: Option<Worked<'_>>,
     base: Option<Base>,
     labels: Labels,
 ) -> Vec<Drawn> {
@@ -337,8 +417,11 @@ fn paint_into(
             usize::from(w) * usize::from(h_units)
         ],
         overlay: vec![None; usize::from(w) * usize::from(h)],
-        class_of: class_of
-            .map_or_else(|| Cow::Owned(classes_of(view, opts.classes)), Cow::Borrowed),
+        class_of: worked.map_or_else(
+            || Cow::Owned(classes_of(view, opts.classes)),
+            |w| Cow::Borrowed(w.class_of),
+        ),
+        known: worked.map(|w| w.dominant),
         labels,
         drawn: base.map(|_| Vec::new()),
         depth_base: base.map_or(0, |b| b.depth),
@@ -374,6 +457,112 @@ pub fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Cla
         }
     });
     out
+}
+
+/// [`classes_of`], and in the same pass each folder's dominant classes
+/// ([`Dominant`]), tallied bottom-up by `size`: a file's bytes go to the
+/// tallies of the folder open above it, its own files' too when the file
+/// is one of them, and a folder's whole tally to its parent's when the
+/// pass leaves it. `each` sees every entry with its class, in id order,
+/// for what else the pass should count (the viewer's legend). A folder the
+/// pass does not read to its end, a saved scan's rows failing part way,
+/// is left out, and [`dominant`] answers for it.
+pub fn classify_scan(
+    view: &(impl TreeView + ?Sized),
+    classes: &Classes,
+    size: SizeKind,
+    mut each: impl FnMut(&Node, Class),
+) -> Classified {
+    let mut out = Classified::default();
+    let mut open: Vec<Open> = Vec::new();
+    let mut seen = None;
+    classify(view, classes, |node, class| {
+        if node.id as usize == out.class_of.len() {
+            out.class_of.push(class);
+        }
+        seen = Some(node.id);
+        close(&mut open, node.id, &mut out.dominant);
+        if node.is_dir() {
+            open.push(Open {
+                id: node.id,
+                files_end: node.files_end,
+                last_id: node.last_id,
+                tree: [0; 7],
+                own: [0; 7],
+            });
+        } else if let Some(dir) = open.last_mut() {
+            let i = class_index(class);
+            let bytes = node.counted(size);
+            dir.tree[i] = dir.tree[i].saturating_add(bytes);
+            if node.id <= dir.files_end {
+                dir.own[i] = dir.own[i].saturating_add(bytes);
+            }
+        }
+        each(node, class);
+    });
+    // The folders still open end with the scan: whole where the pass read
+    // to their last id.
+    while let Some(dir) = open.pop() {
+        if seen.is_some_and(|seen| dir.last_id <= seen) {
+            finish(&dir, &mut open, &mut out.dominant);
+        }
+    }
+    out
+}
+
+/// A folder the pass is inside: its ids, and its tallies of bytes by class
+/// ([`Class::ALL`]'s order), of its whole subtree read so far and of its
+/// own files.
+struct Open {
+    id: u32,
+    files_end: u32,
+    last_id: u32,
+    tree: [u64; 7],
+    own: [u64; 7],
+}
+
+/// Ends the folders in `open` that end before `id`.
+fn close(open: &mut Vec<Open>, id: u32, dominant: &mut HashMap<u32, Dominant>) {
+    while open.last().is_some_and(|dir| dir.last_id < id) {
+        if let Some(dir) = open.pop() {
+            finish(&dir, open, dominant);
+        }
+    }
+}
+
+/// Notes `dir`'s dominant classes and adds its tally to its parent's, the
+/// folder open above it.
+fn finish(dir: &Open, open: &mut [Open], dominant: &mut HashMap<u32, Dominant>) {
+    dominant.insert(
+        dir.id,
+        Dominant {
+            tree: most(&dir.tree),
+            own: most(&dir.own),
+        },
+    );
+    if let Some(parent) = open.last_mut() {
+        for (sum, bytes) in parent.tree.iter_mut().zip(dir.tree) {
+            *sum = sum.saturating_add(bytes);
+        }
+    }
+}
+
+/// `class`'s place in [`Class::ALL`], the tallies' order.
+fn class_index(class: Class) -> usize {
+    Class::ALL.iter().position(|&c| c == class).unwrap_or(6)
+}
+
+/// The class of the most bytes in `bytes` (by [`Class::ALL`]'s place), the
+/// first of equals; `other` when there are none.
+fn most(bytes: &[u64; 7]) -> Class {
+    let best = (0..7)
+        .max_by_key(|&i| (bytes[i], usize::MAX - i))
+        .unwrap_or(6);
+    if bytes[best] == 0 {
+        Class::Other
+    } else {
+        Class::ALL[best]
+    }
 }
 
 /// A tile to place: an entry, or the pooled files of a directory.
@@ -575,9 +764,13 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
     }
 
     /// The class holding most of the bytes under directory `id`; only its
-    /// own files with `own_files`.
+    /// own files with `own_files`: the viewer's, where it worked it out.
     fn dominant(&self, id: u32, own_files: bool) -> Class {
-        dominant(self.view, &self.class_of, self.opts.size, id, own_files)
+        match self.known.and_then(|known| known(id)) {
+            Some(found) if own_files => found.own,
+            Some(found) => found.tree,
+            None => dominant(self.view, &self.class_of, self.opts.size, id, own_files),
+        }
     }
 
     /// `color`, mixed 20% toward the base for every second sibling.
@@ -797,20 +990,38 @@ pub fn dominant(
     for child in ids(view, id + 1, last) {
         let node = view.node(child);
         if !node.is_dir() {
-            let i = class_of
-                .get(child as usize)
-                .and_then(|&class| Class::ALL.iter().position(|&c| c == class))
-                .unwrap_or(6);
-            bytes[i] += node.counted(size);
+            let i = class_of.get(child as usize).map_or(6, |&c| class_index(c));
+            bytes[i] = bytes[i].saturating_add(node.counted(size));
         }
     }
-    let best = (0..7)
-        .max_by_key(|&i| (bytes[i], usize::MAX - i))
-        .unwrap_or(6);
-    if bytes[best] == 0 {
-        Class::Other
-    } else {
-        Class::ALL[best]
+    most(&bytes)
+}
+
+/// [`dominant`]'s two answers for directory `id`, of its subtree and of its
+/// own files, from one walk of its subtree.
+#[must_use]
+pub fn dominants(
+    view: &(impl TreeView + ?Sized),
+    class_of: &[Class],
+    size: SizeKind,
+    id: u32,
+) -> Dominant {
+    let dir = view.node(id);
+    let (mut tree, mut own) = ([0u64; 7], [0u64; 7]);
+    for child in ids(view, id + 1, dir.last_id) {
+        let node = view.node(child);
+        if !node.is_dir() {
+            let i = class_of.get(child as usize).map_or(6, |&c| class_index(c));
+            let bytes = node.counted(size);
+            tree[i] = tree[i].saturating_add(bytes);
+            if child <= dir.files_end {
+                own[i] = own[i].saturating_add(bytes);
+            }
+        }
+    }
+    Dominant {
+        tree: most(&tree),
+        own: most(&own),
     }
 }
 

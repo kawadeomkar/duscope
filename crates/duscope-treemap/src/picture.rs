@@ -38,8 +38,8 @@ use duscope_core::rules::Class;
 use crate::cells::Color;
 use crate::gp::cut;
 use crate::paint::{
-    Base, Drawn, DrawnKind, Glyphs, PaintOpts, classes_of, compact, dominant, readable, rgb,
-    tile_color, truncate,
+    Base, Dominant, Drawn, DrawnKind, Glyphs, PaintOpts, classes_of, compact, dominant, readable,
+    rgb, tile_color, truncate,
 };
 use crate::width::glyphs;
 use crate::{Algorithm, Rect, layout};
@@ -130,7 +130,7 @@ impl Metrics {
 
 /// What a picture of part of a scan carries beside its options: the
 /// viewer's, of the folder it zooms to.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Within<'c> {
     /// Where the picture's root stands in the scan, so that its tiles keep
     /// the whole map's `--color-by folder` and `level` colours.
@@ -138,8 +138,22 @@ pub(crate) struct Within<'c> {
     /// Each of the picture's entries' class, by id, worked out already;
     /// `None` works them out.
     pub class_of: Option<&'c [Class]>,
+    /// A folder's dominant classes, by the picture's ids, where the viewer
+    /// worked them out already; `None` walks each folder drawn as one tile.
+    pub dominant: Option<&'c dyn Fn(u32) -> Option<Dominant>>,
     /// Whether the tiles drawn are noted.
     pub note: bool,
+}
+
+impl std::fmt::Debug for Within<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Within")
+            .field("base", &self.base)
+            .field("class_of", &self.class_of.map(<[Class]>::len))
+            .field("dominant", &self.dominant.is_some())
+            .field("note", &self.note)
+            .finish()
+    }
 }
 
 /// What [`draw`] drew.
@@ -182,6 +196,7 @@ pub(crate) fn draw(
             || Cow::Owned(classes_of(view, opts.paint.classes)),
             Cow::Borrowed,
         ),
+        known: within.dominant,
         base,
         labels: Vec::new(),
         tiles: 0,
@@ -239,6 +254,8 @@ struct Walk<'v, 'o, 'c> {
     canvas: &'c mut dyn Canvas,
     /// Each entry's class, by pre-order id.
     class_of: Cow<'o, [Class]>,
+    /// The folders' dominant classes the viewer worked out, where it did.
+    known: Option<&'o dyn Fn(u32) -> Option<Dominant>>,
     /// Where the picture's root stands in the scan.
     base: Base,
     labels: Vec<Label>,
@@ -256,6 +273,22 @@ enum Item {
 }
 
 impl Walk<'_, '_, '_> {
+    /// The class holding most of the bytes under directory `id`, only its
+    /// own files' with `own_files`: the viewer's, where it worked it out.
+    fn dominant(&self, id: u32, own_files: bool) -> Class {
+        match self.known.and_then(|known| known(id)) {
+            Some(found) if own_files => found.own,
+            Some(found) => found.tree,
+            None => dominant(
+                self.view,
+                &self.class_of,
+                self.opts.paint.size,
+                id,
+                own_files,
+            ),
+        }
+    }
+
     /// Lays out `dir`'s children in `area` and paints each; `depth` is
     /// `dir`'s, `folder` the rank of the top-level folder above.
     fn block(
@@ -359,7 +392,7 @@ impl Walk<'_, '_, '_> {
                         // and a class past it would be a damaged index's,
                         // which the verb reports.
                         let class = if node.is_dir() {
-                            dominant(self.view, &self.class_of, paint.size, id, false)
+                            self.dominant(id, false)
                         } else {
                             self.class_of
                                 .get(id as usize)
@@ -374,7 +407,7 @@ impl Walk<'_, '_, '_> {
                 }
                 Item::Files(dir, count) => {
                     self.note(dir, dir, tile.rect, DrawnKind::Files);
-                    let class = dominant(self.view, &self.class_of, paint.size, dir, true);
+                    let class = self.dominant(dir, true);
                     let color = paint.pack.class(class);
                     self.leaf(tile.rect, color, &format!("{count} files"), None)?;
                 }
