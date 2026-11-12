@@ -439,6 +439,11 @@ frames:
 | `views` | `2 1 3 1 4 1` | each table's rows the first time, kept after, and the map again | recompute (first-time) the first time, then navigation |
 | `resize` | two sizes, 100x30 and 120x40 | every layout again, at another size | recompute |
 
+On T3 (`--trees T3`), one folder of a million empty files, the map draws no tile and there is no
+folder under the root, so its kinds are `move` (`⇥`, then `j k` in the siblings pane, along the
+folder's whole list) and `page` (`⇥`, then `PgDn PgUp`), both navigation, and `resize`. The gates
+are read from T2 whatever else is measured.
+
 **Why two classes.** A frame the viewer can draw from what it has kept is a frame of navigation,
 and 16 ms is one frame at 60 Hz. A frame that works the whole map out, or builds a table, is a wait
 for a piece of work: on a million entries it cannot fit a frame, and it happens rarely, so a
