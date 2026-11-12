@@ -989,3 +989,121 @@ fn p1_cli_03_ranking_under_a_limit_matches_the_full_sort() {
         }
     }
 }
+
+#[test]
+fn p5_cli_01_rows_under_a_non_utf8_directory_carry_path_raw() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    use crate::envelope::base64;
+    // A directory whose name is not UTF-8 holding a file whose name is:
+    // the file's own name needs no raw form, its path does.
+    let mut tree = MemProvider::new("/p");
+    tree.file(Path::new(OsStr::from_bytes(b"d\xff/inside.txt")), 3 * MIB)
+        .file("ok/a.txt", 2 * MIB);
+    let (arena, rollup) = scan(&tree);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/p"));
+    let raw = base64(b"/p/d\xff/inside.txt");
+    let dir_raw = base64(b"/p/d\xff");
+    // (path, name_raw, path_raw) of each row.
+    let fields = |path: &str, name_raw: &Option<String>, path_raw: &Option<String>| {
+        (path.to_owned(), name_raw.clone(), path_raw.clone())
+    };
+    let files = TopQuery {
+        files: true,
+        ..TopQuery::default()
+    };
+    let rows: Vec<_> = top(&view, &files)
+        .entries
+        .iter()
+        .map(|e| fields(&e.path, &e.name_raw, &e.path_raw))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "/p/d\u{fffd}/inside.txt".to_owned(),
+                None,
+                Some(raw.clone())
+            ),
+            ("/p/ok/a.txt".to_owned(), None, None),
+        ]
+    );
+    let dirs: Vec<_> = top(&view, &TopQuery::default())
+        .entries
+        .iter()
+        .map(|e| fields(&e.path, &e.name_raw, &e.path_raw))
+        .collect();
+    assert_eq!(
+        dirs,
+        [
+            (
+                "/p/d\u{fffd}".to_owned(),
+                Some(base64(b"d\xff")),
+                Some(dir_raw.clone())
+            ),
+            ("/p/ok".to_owned(), None, None),
+        ]
+    );
+    let tree_rows: Vec<_> = super::tree(&view, &TreeQuery::default())
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), e.path_raw.clone()))
+        .collect();
+    assert!(
+        tree_rows.contains(&("/p".to_owned(), None)),
+        "{tree_rows:?}"
+    );
+    assert!(
+        tree_rows.contains(&("/p/d\u{fffd}/inside.txt".to_owned(), Some(raw.clone()))),
+        "{tree_rows:?}"
+    );
+    assert!(tree_rows.contains(&("/p/ok/a.txt".to_owned(), None)));
+    let old = StaleQuery {
+        now: i64::MAX / 2,
+        older_than: 0,
+        ..StaleQuery::default()
+    };
+    let stale_rows: Vec<_> = stale(&view, &old)
+        .unwrap()
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), e.path_raw.clone()))
+        .collect();
+    assert_eq!(
+        stale_rows,
+        [
+            ("/p/d\u{fffd}/inside.txt".to_owned(), Some(raw.clone())),
+            ("/p/ok/a.txt".to_owned(), None),
+        ]
+    );
+    let classes = Classes::vendored();
+    let page = by_type(
+        &view,
+        &ByTypeQuery {
+            classes: &classes,
+            examples: 2,
+            filters: Filters::default(),
+            limit: None,
+            size: SizeKind::Apparent,
+            sort: SortKey::Size,
+            reverse: false,
+        },
+    );
+    let examples: Vec<_> = page
+        .entries
+        .iter()
+        .flat_map(|e| &e.largest)
+        .map(|e| (e.path.clone(), e.path_raw.clone()))
+        .collect();
+    assert_eq!(
+        examples,
+        [
+            ("/p/d\u{fffd}/inside.txt".to_owned(), Some(raw)),
+            ("/p/ok/a.txt".to_owned(), None),
+        ]
+    );
+    // In the JSON a valid path carries no path_raw at all.
+    let json = serde_json::to_value(&page.entries[0].largest[1]).unwrap();
+    assert!(json.get("path_raw").is_none(), "{json}");
+}

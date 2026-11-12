@@ -1704,6 +1704,19 @@ mod tests {
     }
 
     #[test]
+    fn p5_cli_01_paths_carry_raw_bytes_only_when_needed() {
+        use super::path_fields;
+        assert_eq!(
+            path_fields(b"/home/a/notes.md"),
+            ("/home/a/notes.md".to_owned(), None)
+        );
+        // An ancestor that is not UTF-8 under a name that is.
+        let (path, raw) = path_fields(b"/home/caf\xe9/notes.md");
+        assert_eq!(path, "/home/caf\u{fffd}/notes.md");
+        assert_eq!(raw.as_deref(), Some("L2hvbWUvY2Fm6S9ub3Rlcy5tZA=="));
+    }
+
+    #[test]
     fn p1_cli_02_names_carry_raw_bytes_only_when_needed() {
         assert_eq!(name_fields(b"notes.md"), ("notes.md".to_owned(), None));
         let (name, raw) = name_fields(b"caf\xe9.txt");

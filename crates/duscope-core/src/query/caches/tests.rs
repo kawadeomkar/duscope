@@ -942,3 +942,60 @@ fn p2_qry_11_rows_out_of_layout_fail_the_read_and_the_pass_ends() {
         assert!(index.failure().is_some(), "{sql}");
     }
 }
+
+#[test]
+fn p5_cli_01_a_cache_under_a_non_utf8_directory_carries_path_raw() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    use crate::envelope::base64;
+    let mut tree = MemProvider::new("/p");
+    tree.file(Path::new(OsStr::from_bytes(b"caf\xe9/package.json")), 1)
+        .file(
+            Path::new(OsStr::from_bytes(b"caf\xe9/node_modules/big")),
+            30 * MIB,
+        )
+        .file("ok/package.json", 1)
+        .file("ok/node_modules/small", 2 * MIB);
+    let vendored = Caches::vendored();
+    let q = query(&vendored, &nothing_above);
+    let (arena, rollup) = scan(&tree);
+    let view = ArenaView::new(&arena, &rollup, PathBuf::from("/p"));
+    let got: Vec<_> = caches(&view, &q)
+        .entries
+        .into_iter()
+        .map(|e| (e.path, e.path_raw, e.project_root, e.project_root_raw))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "/p/caf\u{fffd}/node_modules".to_owned(),
+                Some(base64(b"/p/caf\xe9/node_modules")),
+                Some("/p/caf\u{fffd}".to_owned()),
+                Some(base64(b"/p/caf\xe9")),
+            ),
+            (
+                "/p/ok/node_modules".to_owned(),
+                None,
+                Some("/p/ok".to_owned()),
+                None
+            ),
+        ]
+    );
+    let got: Vec<_> = projects(&view, &q)
+        .entries
+        .into_iter()
+        .map(|p| (p.project_root, p.project_root_raw))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                Some("/p/caf\u{fffd}".to_owned()),
+                Some(base64(b"/p/caf\xe9"))
+            ),
+            (Some("/p/ok".to_owned()), None),
+        ]
+    );
+}
