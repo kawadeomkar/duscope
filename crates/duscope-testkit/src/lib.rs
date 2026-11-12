@@ -338,6 +338,10 @@ pub fn replace_values(text: &mut String, key: &str, end: char, placeholder: &str
     }
 }
 
+/// The waits, in seconds, between the tries of [`TestEnv::hdiutil`]'s `detach`:
+/// six tries over 30 seconds, for a disk still busy after the first few.
+const DETACH_WAITS: [u64; 5] = [1, 2, 4, 8, 15];
+
 /// A test's private environment. Dropping it removes its temporary
 /// directory (restoring permissions first) and releases the fixture tree.
 #[derive(Debug)]
@@ -527,17 +531,24 @@ impl TestEnv {
     /// next try names the image's whole disk, which stays valid, and an image
     /// still attached after the last try fails as before.
     ///
+    /// A disk can stay busy for longer than two tries' wait: on a runner every
+    /// try of a `detach -force` over four seconds has met "couldn't eject ... -
+    /// Resource busy". So a `detach` is tried six times over about half a
+    /// minute (`DETACH_WAITS`), and one that still fails says what `lsof`
+    /// finds holding the image's `/dev` nodes and mount points open.
+    ///
     /// # Panics
     ///
-    /// When every try fails, with each try's output.
+    /// When every try fails, with each try's output, and for a `detach` what
+    /// holds the image.
     pub fn hdiutil(&self, args: &[&dyn AsRef<OsStr>]) {
         let shown: Vec<String> = args
             .iter()
             .map(|a| a.as_ref().to_string_lossy().into_owned())
             .collect();
         // For a `detach`: the image its target belongs to and that image's
-        // whole disk, `Some(None)` when nothing is attached there, `None`
-        // when that cannot be told.
+        // `/dev` nodes and mount points, its whole disk first, `Some(None)`
+        // when nothing is attached there, `None` when that cannot be told.
         let detaching = match (shown.first().map(String::as_str), args.last()) {
             (Some("detach"), Some(target)) => {
                 let target = Path::new(target.as_ref());
@@ -546,14 +557,19 @@ impl TestEnv {
                     images
                         .into_iter()
                         .find(|(_, places)| places.contains(&target))
-                        .and_then(|(image, places)| Some((image, places.into_iter().next()?)))
+                        .filter(|(_, places)| !places.is_empty())
                 }))
             }
             _ => None,
         };
+        let waits: &[u64] = if detaching.is_some() {
+            &DETACH_WAITS
+        } else {
+            &[2, 2]
+        };
         let mut tried: Vec<&dyn AsRef<OsStr>> = args.to_vec();
         let mut failures = Vec::new();
-        for tries in 1..=3 {
+        for tries in 1..=waits.len() + 1 {
             let out = self
                 .command("hdiutil")
                 .args(&tried)
@@ -573,26 +589,54 @@ impl TestEnv {
             ));
             match &detaching {
                 Some(Some(None)) => return,
-                Some(Some(Some((image, disk)))) => {
+                Some(Some(Some((image, places)))) => {
                     let images = self.images();
                     if images.is_some_and(|images| images.iter().all(|(i, _)| i != image)) {
                         return;
                     }
-                    if let Some(last) = tried.last_mut() {
+                    if let (Some(last), Some(disk)) = (tried.last_mut(), places.first()) {
                         *last = disk;
                     }
                 }
                 _ => {}
             }
-            if tries < 3 {
-                std::thread::sleep(std::time::Duration::from_secs(2));
+            if let Some(wait) = waits.get(tries - 1) {
+                std::thread::sleep(std::time::Duration::from_secs(*wait));
             }
         }
+        let held = match &detaching {
+            Some(Some(Some((_, places)))) => self.holders(places),
+            _ => String::new(),
+        };
         panic!(
-            "hdiutil {} failed 3 times:\n{}",
+            "hdiutil {} failed {} times:\n{}{held}",
             shown.join(" "),
+            failures.len(),
             failures.join("\n")
         );
+    }
+
+    /// What `lsof` lists holding `places` open, an image's `/dev` nodes and
+    /// mount points (a mount point stands for every file open on its volume),
+    /// as the last lines of a failed `detach`'s message.
+    fn holders(&self, places: &[PathBuf]) -> String {
+        let shown: Vec<String> = places.iter().map(|p| p.display().to_string()).collect();
+        match self
+            .command("lsof")
+            .args(["-n", "-P", "-w"])
+            .args(places)
+            .output()
+        {
+            Err(e) => format!("\nlsof could not run: {e}"),
+            Ok(out) if out.stdout.iter().all(u8::is_ascii_whitespace) => {
+                format!("\nlsof lists nothing holding {} open", shown.join(" "))
+            }
+            Ok(out) => format!(
+                "\nheld open, as lsof lists {}:\n{}",
+                shown.join(" "),
+                String::from_utf8_lossy(&out.stdout).trim_end()
+            ),
+        }
     }
 
     /// The images `hdiutil info` lists: each one's `image-path`, with the
