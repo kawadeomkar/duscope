@@ -15,6 +15,15 @@ measures what
 .B du \-x /
 does.
 .PP
+On Linux, an automount point the kernel has not mounted yet (an NFS
+submount, debugfs's
+.IR tracing )
+is listed and not entered, since opening it would mount a filesystem:
+it is entered only with
+.B \-\-include\-network
+and without
+.BR \-x .
+.PP
 .B \-\-exclude\-caches
 looks for a cache rule's marker files only beside the directory, in its
 parent:
