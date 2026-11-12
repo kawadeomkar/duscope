@@ -4,9 +4,9 @@
 //! with the envelope's first five rows. `scans --prune` removes such files
 //! after a week.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use duscope_core::envelope::{SCHEMA_VERSION, Spill, SpilledEnvelope, Tool, Warning};
@@ -33,8 +33,14 @@ pub fn write(dir: &Path, scan: Option<&str>, verb: &str, json: &[u8]) -> Result<
         )
         .hint("Rerun the command with -o FILE, or a larger --max-chars")
     };
-    fs::create_dir_all(dir).map_err(failed)?;
-    // The directory holds what scans print: the owner's only.
+    // The directory holds what scans print: the owner's only, and so is each
+    // directory made on the way to it (the index directory itself, when a
+    // spill is the first thing written there).
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(failed)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(failed)?;
     let stamp = compact(&duscope_core::query::timegrammar::iso8601(clock::now()));
     let verb = verb.replace(' ', "-");
