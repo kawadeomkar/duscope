@@ -20,6 +20,14 @@ applies only to builds inside its repository. The prebuilt binaries on the
 [releases page](https://github.com/kawadeomkar/duscope/releases) are built with
 it, so they are smaller.
 
+## MCP
+
+`duscope mcp` is a stdio MCP server. The
+[documentation](https://github.com/kawadeomkar/duscope/blob/main/docs/mcp.md)
+gives the registration line for each client.
+
+MCP Registry name: `mcp-name: io.github.kawadeomkar/duscope`
+
 ## Licence
 
 Licensed under either of MIT (`LICENSE-MIT`) or Apache-2.0 (`LICENSE-APACHE`),

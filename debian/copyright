@@ -37,6 +37,15 @@ Comment: The colour values of the five built-in packs, from these colour
  Gruvbox Dark (morhetz/gruvbox, MIT); and the light pack's base, text and
  accent colours from terminal.css (Gioni06/terminal.css, MIT).
 
+Files: duscope/tests/mcp_registry/server.schema.json
+Copyright: The MCP Registry contributors (https://github.com/modelcontextprotocol/registry)
+License: MIT and Apache-2.0
+Comment: The MCP Registry's schema for server.json, which a test holds
+ server.json to; it is not compiled into anything. Copied from
+ modelcontextprotocol/registry at commit
+ 0fa80f62c825e8be2e1e1a2b3ba9045b32b3a81a (VENDOR.md). The upstream licence
+ is also in duscope/tests/mcp_registry/LICENSE.
+
 Files: crates/duscope-treemap/src/font/Inter-Regular-subset.ttf
 Copyright: 2016 The Inter Project Authors (https://github.com/rsms/inter)
 License: OFL-1.1

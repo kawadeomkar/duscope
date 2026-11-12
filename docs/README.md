@@ -15,6 +15,9 @@ ones at the top of the repository.
 - [manual-checks.md](manual-checks.md): the acceptance checks done by hand
   (GrandPerspective opening an export, browsers drawing `render`'s SVG), with
   the program's version and the last result.
+- [mcp.md](mcp.md): `duscope mcp` for AI clients: the `--roots` rule, the
+  registration line for each client, the tools, the Claude Code hook that asks
+  before `duscope clean`, and the registry manifest.
 - [RELEASING.md](RELEASING.md): the checklist every release tag follows, the
   patch-release subset, the security-release procedure, the secrets table and
   how to pull a release.
