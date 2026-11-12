@@ -192,6 +192,20 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
     }
 }
 
+/// Whether `entry`, read by [`entry`], is an automount point not yet
+/// triggered: a [`Boundary::Mount`] that is no mount root. `AT_NO_AUTOMOUNT`
+/// stops the read at the trigger, an inode its filesystem marks
+/// `S_AUTOMOUNT` (an NFS submount or referral, debugfs's `tracing`),
+/// which `statx` reports as `STATX_ATTR_AUTOMOUNT` with the
+/// mount around it; a triggered one reads as the root of what was mounted
+/// on it. A kernel before 5.8 reports no mount roots, so there the
+/// attribute alone decides. autofs marks its triggers on the dentry, not
+/// the inode, so they carry no attribute: a direct map's is the root of an
+/// `autofs` mount, classified as a network one.
+pub(super) fn untriggered_automount(entry: &Entry) -> bool {
+    entry.boundary == Boundary::Mount && !entry.flags.contains(Flags::MOUNT_ROOT)
+}
+
 /// The entry an `lstat` describes: what `statx` reports, less the mount id,
 /// the attribute flags and the creation time, which `stat` does not carry.
 pub(in crate::platform) fn from_stat(name: NameRef, stat: &libc::stat, attrs: Attrs) -> Entry {

@@ -1,6 +1,6 @@
 //! P1-WALK-06: mounts on real filesystems; P5-WALK-02: btrfs subvolumes
 //! and reflinks, XFS reflinks, overlayfs, exFAT, FAT, NTFS and squashfs on
-//! Linux.
+//! Linux; P5-WALK-06: automount points on Linux.
 //! These tests mount filesystems,
 //! so they are ignored by default and run with `DUSCOPE_TEST_PLATFORM=1`
 //! (`just check-full`; the CI platform job runs them under sudo). On Linux
@@ -421,6 +421,193 @@ fn p1_walk_06_linux_mount_ids_hold_for_same_device_binds_and_reused_ids() {
         (kernel.fs_type.as_str(), kernel.class),
         ("proc", VolumeClass::Kernel)
     );
+}
+
+/// The types of the filesystems mounted at `point`, in mount order (the one
+/// on top last), from `/proc/self/mountinfo`.
+#[cfg(target_os = "linux")]
+fn mounted_at(point: &Path) -> Vec<String> {
+    fs::read_to_string("/proc/self/mountinfo")
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let fs_type = fields.iter().skip_while(|&&f| f != "-").nth(1)?;
+            (fields.get(4).map(Path::new) == Some(point)).then(|| (*fs_type).to_owned())
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts debugfs as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_walk_06_linux_an_untriggered_automount_is_not_entered() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    // Every mount of debugfs shows the one tree, whose `tracing` is an
+    // automount point for tracefs (an S_AUTOMOUNT inode): untriggered in a
+    // fresh mount, mounted on as soon as something opens it.
+    let root = env.tmp_dir().join("debugfs");
+    let tracing = root.join("tracing");
+    fs::create_dir_all(&root).unwrap();
+    if let Err(why) = attempt(&env, "mount", &[&"-t", &"debugfs", &"debugfs", &root]) {
+        duscope_testkit::skip(&format!("debugfs cannot be mounted here ({why})"));
+        return;
+    }
+    // Unmounted innermost first: the tracefs a walk mounted, then debugfs.
+    let _mounted = Mounted {
+        env: &env,
+        points: vec![root.clone(), tracing.clone()],
+    };
+    // Listed, not read: the standard library's metadata calls statx without
+    // AT_NO_AUTOMOUNT, which would mount tracefs on it.
+    let listed = fs::read_dir(&root)
+        .unwrap()
+        .any(|e| e.is_ok_and(|e| e.file_name() == "tracing"));
+    if !listed {
+        duscope_testkit::skip("this kernel's debugfs has no tracing directory");
+        return;
+    }
+    assert!(mounted_at(&tracing).is_empty(), "triggered before the walk");
+    for (one_file_system, include_network, reason) in [
+        (false, false, Skip::Network),
+        (true, false, Skip::OneFileSystem),
+        (true, true, Skip::OneFileSystem),
+    ] {
+        let flags = format!("-x {one_file_system}, --include-network {include_network}");
+        let opts = WalkOptions {
+            one_file_system,
+            include_network,
+            ..WalkOptions::default()
+        };
+        let seen = walk_root(&root, &opts);
+        assert_eq!(seen.skipped.get(&tracing), Some(&reason), "{flags}");
+        assert!(
+            mounted_at(&tracing).is_empty(),
+            "{flags}: the walk mounted tracefs"
+        );
+        // No volume row: the mount it carries is the root's, reported once.
+        assert_eq!(seen.volumes.len(), 1, "{flags}: {:?}", seen.volumes);
+        assert_eq!(seen.summary.mounts_excluded, 0, "{flags}");
+    }
+    // Asked to, the walk enters it, which mounts tracefs on it.
+    let opts = WalkOptions {
+        include_network: true,
+        ..WalkOptions::default()
+    };
+    let seen = walk_root(&root, &opts);
+    assert_eq!(seen.skipped.get(&tracing), None);
+    assert_eq!(mounted_at(&tracing), ["tracefs"]);
+    assert!(
+        seen.paths.iter().any(|p| p.parent() == Some(&tracing)),
+        "tracefs's entries were read"
+    );
+}
+
+/// Stops a transient automount, and the mount under it, however the test
+/// ends.
+#[cfg(target_os = "linux")]
+struct Automount<'a> {
+    env: &'a TestEnv,
+    point: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Automount<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .env
+            .command("systemd-mount")
+            .arg("--umount")
+            .arg(&self.point)
+            .output();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "starts a transient systemd automount as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_walk_06_linux_a_systemd_automount_is_not_triggered() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let root = env.tmp_dir().join("autofs");
+    let point = root.join("auto");
+    fs::create_dir_all(root.join("plain")).unwrap();
+    fs::write(root.join("plain/file"), b"plain").unwrap();
+    // systemd mounts autofs at the point now, as a direct map, and the tmpfs
+    // on it when something opens it.
+    let started = attempt(
+        &env,
+        "systemd-mount",
+        &[
+            &"--automount=yes",
+            &"--collect",
+            &"-t",
+            &"tmpfs",
+            &"-o",
+            &"size=1m",
+            &"tmpfs",
+            &point,
+        ],
+    );
+    if let Err(why) = started {
+        duscope_testkit::skip(&format!("no transient automount here ({why})"));
+        return;
+    }
+    let _unit = Automount {
+        env: &env,
+        point: point.clone(),
+    };
+    assert_eq!(mounted_at(&point), ["autofs"]);
+    // A mount whose class is known: network before `-x`, as for any mount.
+    for (one_file_system, include_network, reason) in [
+        (false, false, Skip::Network),
+        (true, false, Skip::Network),
+        (true, true, Skip::OneFileSystem),
+    ] {
+        let flags = format!("-x {one_file_system}, --include-network {include_network}");
+        let opts = WalkOptions {
+            one_file_system,
+            include_network,
+            ..WalkOptions::default()
+        };
+        let seen = walk_root(&root, &opts);
+        assert_eq!(seen.skipped.get(&point), Some(&reason), "{flags}");
+        assert_eq!(
+            mounted_at(&point),
+            ["autofs"],
+            "{flags}: the walk triggered it"
+        );
+        // autofs marks the trigger on its dentry, which statx does not
+        // report: the point reads as the root of an autofs mount, a network
+        // volume of its own.
+        assert!(
+            seen.entries[&point]
+                .flags
+                .contains(duscope_walk::Flags::MOUNT_ROOT)
+        );
+        let volume = seen
+            .volumes
+            .iter()
+            .find(|v| v.mount_point == point)
+            .unwrap();
+        assert_eq!(
+            (volume.fs_type.as_str(), volume.class, volume.entered()),
+            ("autofs", VolumeClass::Network, false),
+            "{flags}"
+        );
+    }
+    let opts = WalkOptions {
+        include_network: true,
+        ..WalkOptions::default()
+    };
+    let seen = walk_root(&root, &opts);
+    assert_eq!(seen.skipped.get(&point), None);
+    assert_eq!(mounted_at(&point), ["autofs", "tmpfs"]);
 }
 
 /// Runs a command of the test environment; `Err` with its error output (or
