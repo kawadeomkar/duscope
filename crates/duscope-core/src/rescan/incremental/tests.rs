@@ -388,6 +388,45 @@ fn p5_core_01_a_merged_index_equals_a_full_scan_after_scripted_changes() {
     assert_eq!(marks[0][10], Value::Integer(200), "{marks:?}");
 }
 
+/// The subdirectories of `wide/` in [`p5_core_08_a_merge_of_many_grafts_equals_a_full_scan`].
+const WIDE: usize = 1_500;
+
+#[test]
+fn p5_core_08_a_merge_of_many_grafts_equals_a_full_scan() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    // A change in `wide/` reads it and its children, and takes each
+    // child's `sub/` from the saved scan: one graft apiece, each holding a
+    // directory and files, so each runs both of a subtree's reads.
+    for w in 0..WIDE {
+        file(&root.join(format!("wide/w{w}/f")), 10 + w);
+        file(&root.join(format!("wide/w{w}/sub/g")), 20);
+        file(&root.join(format!("wide/w{w}/sub/d/h")), 30 + w);
+    }
+    let (parent, _) = full(
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        now_ns(),
+        "{}",
+    );
+    file(&root.join("wide/new.txt"), 3000);
+    let replay = |under: &Path| Ok(reporting(under, &["wide"]));
+    let history = script(&replay);
+    let (merged, outcome) =
+        incremental(&parent, &root, &env.tmp_dir().join("merged"), &history).unwrap();
+    let (fresh, walked) = full(&root, &env.tmp_dir().join("fresh"), "fresh", now_ns(), "{}");
+    assert_same(&merged, &fresh);
+    assert_eq!(outcome.summary.entries, walked.entries);
+    assert_eq!(outcome.summary.dirs, walked.dirs);
+    // Read: the root, `wide/` and its children. Every other directory came
+    // from the saved scan: each child's `sub/` and `sub/d/`, and the
+    // root's other children with theirs.
+    assert_eq!(outcome.rescanned_dirs, 2 + WIDE as u64);
+    assert!(walked.dirs - outcome.rescanned_dirs > 2 * WIDE as u64);
+}
+
 /// A saved scan of the test tree, and what `incremental` gives with the
 /// history `replay`.
 fn fallback_of(env: &TestEnv, change: impl FnOnce(&Path), replay: Answer<'_>) -> Option<Fallback> {

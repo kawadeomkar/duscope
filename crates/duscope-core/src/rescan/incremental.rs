@@ -45,7 +45,7 @@ use duscope_walk::{
     Kind, NameRef, Provider, ScanError, ScanEvent, Share, Skip, VolumeClass, VolumeInfo, WalkError,
     WalkOptions, WalkSummary, stamp_dirs,
 };
-use rusqlite::{Connection, Row};
+use rusqlite::{Connection, Row, Statement};
 
 use super::ScanOptions;
 use crate::CoreError;
@@ -906,8 +906,9 @@ pub fn merge(
     );
     let grafted = Instant::now();
     let mut graft = Grafting::new(plan, index, provider, opts, &mut tap)?;
+    let mut rows = SubtreeRows::prepare(index).map_err(|e| graft.corrupt(&e))?;
     for one in &grafts {
-        graft.run(one)?;
+        graft.run(one, &mut rows)?;
     }
     let Grafting {
         counts, sampled, ..
@@ -1221,6 +1222,54 @@ struct Counts {
 /// A grafted directory: its new id, path, device and mount id.
 type Placed = (DirId, PathBuf, u64, u64);
 
+/// The two reads of a grafted subtree's rows, its directories' and its
+/// files', each by its id range: prepared once for the merge, which runs
+/// them for every subtree it takes from the saved scan. They are not
+/// fields of [`Grafting`], which delivers each row while the files' read
+/// is open.
+struct SubtreeRows<'a> {
+    dirs: Statement<'a>,
+    files: Statement<'a>,
+}
+
+impl<'a> SubtreeRows<'a> {
+    fn prepare(index: &'a Index) -> rusqlite::Result<SubtreeRows<'a>> {
+        let db = index.db();
+        Ok(SubtreeRows {
+            dirs: db.prepare(
+                "SELECT id, parent_id, name, apparent, allocated, mtime, ctime, dev, flags, \
+                 errors, atime, btime, mode, uid, gid FROM dirs WHERE id BETWEEN ?1 AND ?2 \
+                 ORDER BY id",
+            )?,
+            files: db.prepare(
+                "SELECT id, parent_id, name, apparent, allocated, mtime, ctime, atime, btime, \
+                 mode, uid, gid, nlink, kind, flags FROM files WHERE id BETWEEN ?1 AND ?2 \
+                 ORDER BY id",
+            )?,
+        })
+    }
+
+    /// The `dirs` rows with ids `first..=last`.
+    fn dirs(&mut self, first: u32, last: u32) -> rusqlite::Result<Vec<DirRow>> {
+        let rows = self.dirs.query_map([first, last], |row| {
+            Ok(DirRow {
+                id: row.get(0)?,
+                parent: row.get(1)?,
+                name: row.get(2)?,
+                apparent: unsigned(row.get(3)?),
+                allocated: unsigned(row.get(4)?),
+                mtime: row.get(5)?,
+                ctime: row.get(6)?,
+                dev: unsigned(row.get(7)?),
+                flags: row.get(8)?,
+                errors: row.get(9)?,
+                full: full_at(row, 10)?,
+            })
+        })?;
+        rows.collect()
+    }
+}
+
 /// Fills the directories the walk took from the saved scan with their
 /// saved subtrees, in id order: pre-order, so a directory comes before
 /// what it holds.
@@ -1341,9 +1390,10 @@ impl<'a, 's> Grafting<'a, 's> {
         })
     }
 
-    /// Delivers the saved subtree of one grafted directory.
-    fn run(&mut self, grafted: &Grafted) -> Result<(), Stop> {
-        let (plan, index): (&'a Plan, &'a Index) = (self.plan, self.index);
+    /// Delivers the saved subtree of one grafted directory, read through
+    /// `rows`.
+    fn run(&mut self, grafted: &Grafted, rows: &mut SubtreeRows<'_>) -> Result<(), Stop> {
+        let plan: &'a Plan = self.plan;
         let Some(top) = plan.saved.dir(grafted.saved) else {
             return Ok(());
         };
@@ -1355,22 +1405,13 @@ impl<'a, 's> Grafting<'a, 's> {
         if last == first {
             return Ok(());
         }
-        let dirs = self
-            .dir_rows(first + 1, last)
-            .map_err(|e| self.corrupt(&e))?;
-        let db = index.db();
-        let mut stmt = db
-            .prepare(
-                "SELECT id, parent_id, name, apparent, allocated, mtime, ctime, atime, btime, \
-                 mode, uid, gid, nlink, kind, flags FROM files WHERE id BETWEEN ?1 AND ?2 \
-                 ORDER BY id",
-            )
-            .map_err(|e| self.corrupt(&e))?;
-        let mut rows = stmt
+        let dirs = rows.dirs(first + 1, last).map_err(|e| self.corrupt(&e))?;
+        let mut files = rows
+            .files
             .query([first + 1, last])
             .map_err(|e| self.corrupt(&e))?;
         let mut dirs = dirs.into_iter().peekable();
-        while let Some(row) = rows.next().map_err(|e| self.corrupt(&e))? {
+        while let Some(row) = files.next().map_err(|e| self.corrupt(&e))? {
             let file = FileRow {
                 id: row.get(0).map_err(|e| self.corrupt(&e))?,
                 parent: row.get(1).map_err(|e| self.corrupt(&e))?,
@@ -1399,29 +1440,6 @@ impl<'a, 's> Grafting<'a, 's> {
             self.dir(&dir, &mut placed);
         }
         Ok(())
-    }
-
-    fn dir_rows(&self, first: u32, last: u32) -> rusqlite::Result<Vec<DirRow>> {
-        let mut stmt = self.index.db().prepare(
-            "SELECT id, parent_id, name, apparent, allocated, mtime, ctime, dev, flags, errors, \
-             atime, btime, mode, uid, gid FROM dirs WHERE id BETWEEN ?1 AND ?2 ORDER BY id",
-        )?;
-        let rows = stmt.query_map([first, last], |row| {
-            Ok(DirRow {
-                id: row.get(0)?,
-                parent: row.get(1)?,
-                name: row.get(2)?,
-                apparent: unsigned(row.get(3)?),
-                allocated: unsigned(row.get(4)?),
-                mtime: row.get(5)?,
-                ctime: row.get(6)?,
-                dev: unsigned(row.get(7)?),
-                flags: row.get(8)?,
-                errors: row.get(9)?,
-                full: full_at(row, 10)?,
-            })
-        })?;
-        rows.collect()
     }
 
     /// The mount id of the volume on `dev`: the saved scan's, else the
