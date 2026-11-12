@@ -10,6 +10,15 @@
 //! `core.ignoreCase` is set. A directory git ignores hides everything under
 //! it, as git does not look inside. The repository's index file is read
 //! only when a repository is found, so a path outside one reads none.
+//!
+//! Each file is read through [`duscope_walk::read_regular`]: only a regular
+//! file, and only up to a cap of its kind (64 KiB for a `.git` file and
+//! `commondir`, 1 MiB per configuration file, 1 GiB for the index and a
+//! shared index), and the ignore files of one lookup only up to 1 MiB
+//! together, so a FIFO or a device in a repository cannot block `explain`
+//! or fill its memory. Links are followed (a `~/.gitconfig` is often one),
+//! except to an in-tree `.gitignore`, which git has not followed since
+//! 2.32: a `.gitignore` that is a link reads as absent.
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -19,6 +28,56 @@ use std::path::{Component, Path, PathBuf};
 
 use gix_ignore::glob::pattern::Case;
 use gix_ignore::search::Ignore;
+
+/// The most read of a `.git` file and of `commondir`, each a path.
+const DOT_GIT_CAP: u64 = 64 << 10;
+
+/// The most read of each configuration file.
+const CONFIG_CAP: u64 = 1 << 20;
+
+/// The most read of the ignore files of one lookup, together: the excludes
+/// file, `info/exclude` and each `.gitignore` from the repository's root
+/// down to the path. One budget for the lookup, not a cap for each file:
+/// parsed, short patterns take over 40 times their text, and a path can
+/// have a `.gitignore` at every level, so at 16 MiB a file a lookup three
+/// levels deep took 2 GB of memory. At this budget it takes about 45 MB at
+/// most. Real ignore files are far smaller: most are under a kilobyte, and
+/// a long one, Homebrew's `.gitignore`, is 7 KB, so a megabyte is over a
+/// hundred times what a path's ignore files hold together. Git's own bound,
+/// which skips a pattern file of 100 MiB or more, guards against abuse; it
+/// is not a size a repository needs.
+const IGNORE_BUDGET: u64 = 1 << 20;
+
+/// The most read of the repository's index and of a split index's shared
+/// index.
+const INDEX_CAP: u64 = 1 << 30;
+
+/// `path` read whole as text, following links, at most `cap` bytes.
+fn read_text(path: &Path, cap: u64) -> std::io::Result<String> {
+    String::from_utf8(duscope_walk::read_regular(path, cap, true)?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// The ignore file at `file`, read within what is `left` of its lookup's
+/// [`IGNORE_BUDGET`], which loses what was read. A file longer than what is
+/// left is refused by its length, unopened, as `FileTooLarge`.
+fn read_ignore(file: &Path, left: &mut u64, follow: bool) -> std::io::Result<Vec<u8>> {
+    let text = duscope_walk::read_regular(file, *left, follow).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::FileTooLarge {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "with this file, the ignore files hold more than {IGNORE_BUDGET} bytes, \
+                     the most read of them in one lookup"
+                ),
+            )
+        } else {
+            e
+        }
+    })?;
+    *left = left.saturating_sub(u64::try_from(text.len()).unwrap_or(u64::MAX));
+    Ok(text)
+}
 
 /// What git says of a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,7 +125,7 @@ pub fn facts(
     let git_dir = git_dir(&root)?;
     // A linked worktree keeps its own index; the shared exclude file and
     // configuration are in the common directory.
-    let common = std::fs::read_to_string(git_dir.join("commondir"))
+    let common = read_text(&git_dir.join("commondir"), DOT_GIT_CAP)
         .map_or_else(|_| git_dir.clone(), |named| git_dir.join(named.trim()));
     let config = Config::read(&common, &env);
     let rel: Vec<&[u8]> = path
@@ -96,7 +155,7 @@ fn git_dir(root: &Path) -> Result<PathBuf, String> {
         return Ok(dot_git);
     }
     let text =
-        std::fs::read_to_string(&dot_git).map_err(|e| format!("{}: {e}", dot_git.display()))?;
+        read_text(&dot_git, DOT_GIT_CAP).map_err(|e| format!("{}: {e}", dot_git.display()))?;
     let named = text
         .lines()
         .find_map(|line| line.strip_prefix("gitdir:"))
@@ -126,7 +185,7 @@ impl Config {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| home.as_ref().map(|h| h.join(".config")));
-        let read = |file: Option<PathBuf>| file.and_then(|f| std::fs::read_to_string(f).ok());
+        let read = |file: Option<PathBuf>| file.and_then(|f| read_text(&f, CONFIG_CAP).ok());
         let repo = read(Some(common.join("config"))).unwrap_or_default();
         let user = [
             read(home.as_ref().map(|h| h.join(".gitconfig"))),
@@ -187,10 +246,32 @@ fn ignored(
     let parse = Ignore {
         support_precious: true,
     };
-    let mut buf = Vec::new();
-    let mut search =
-        gix_ignore::Search::from_git_dir(common, config.excludes_file.clone(), &mut buf, parse)
-            .map_err(|e| format!("{}: {e}", common.display()))?;
+    // What is left of the lookup's budget for its ignore files.
+    let mut left = IGNORE_BUDGET;
+    // The excludes file, then `info/exclude`, as gix-ignore's
+    // `Search::from_git_dir` adds them (it reads them unbounded); as there,
+    // a file that is absent, a directory, or below a file that is not a
+    // directory (a `~/.config/git` file) adds nothing.
+    let mut search = gix_ignore::Search::default();
+    let global = [
+        config.excludes_file.clone(),
+        Some(common.join("info").join("exclude")),
+    ];
+    for file in global.into_iter().flatten() {
+        match read_ignore(&file, &mut left, true) {
+            Ok(text) => search
+                .add_patterns_buffer(&text, file, None, parse)
+                .map_err(|e| e.to_string())?,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::IsADirectory
+                        | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => return Err(format!("{}: {e}", file.display())),
+        }
+    }
     let case = if config.ignore_case {
         Case::Fold
     } else {
@@ -203,8 +284,9 @@ fn ignored(
         if depth > 0 {
             dir.push(std::ffi::OsStr::from_bytes(rel[depth - 1]));
         }
+        // Not followed through a link, which reads as absent.
         let file = dir.join(".gitignore");
-        match std::fs::read(&file) {
+        match read_ignore(&file, &mut left, false) {
             Ok(text) => search
                 .add_patterns_buffer(&text, file, Some(root), parse)
                 .map_err(|e| e.to_string())?,
@@ -254,7 +336,8 @@ fn tracked_inside(git_dir: &Path, config: &Config, rel: &[&[u8]]) -> Result<bool
     };
     let read = |file: &Path| {
         INDEX_READS.set(INDEX_READS.get() + 1);
-        std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))
+        duscope_walk::read_regular(file, INDEX_CAP, true)
+            .map_err(|e| format!("{}: {e}", file.display()))
     };
     let bytes = read(&file)?;
     let index = read_index(&bytes, hash_len, &mut inside)
@@ -396,12 +479,15 @@ fn varint(bytes: &[u8]) -> Option<(u64, usize)> {
 mod tests {
     use std::ffi::OsString;
     use std::fs;
-
-    use std::path::Path;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     use duscope_testkit::TestEnv;
 
-    use super::{Config, Index, core_value, facts, read_index};
+    use super::{Config, GitFacts, IGNORE_BUDGET, INDEX_CAP, Index, core_value, facts, read_index};
 
     /// An entry's fixed fields: zeros, then its flags.
     fn fixed(hash_len: usize, flags: u16) -> Vec<u8> {
@@ -637,6 +723,255 @@ mod tests {
             assert!(tracked("src/b.rs", false), "{name}");
             assert!(!tracked("scratch", true), "{name}");
         }
+    }
+
+    /// How long `facts` may take before a test fails: a read blocked on a
+    /// FIFO would otherwise hang the suite.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// `facts` of the file `f` in `repo`, with `home` as `HOME`, on a
+    /// thread of its own; the test fails if it has not returned within
+    /// [`PATIENCE`]. A thread left blocked ends with the test process.
+    fn facts_within(repo: &Path, home: &Path) -> Result<Option<GitFacts>, String> {
+        let (path, home) = (repo.join("f"), home.to_owned());
+        let (tx, rx) = mpsc::channel();
+        let asked = path.clone();
+        thread::spawn(move || {
+            let vars = |name: &str| (name == "HOME").then(|| OsString::from(&home));
+            let _ = tx.send(facts(&path, false, vars));
+        });
+        rx.recv_timeout(PATIENCE)
+            .unwrap_or_else(|_| panic!("facts of {} blocked", asked.display()))
+    }
+
+    /// A repository whose git directory is made by hand (git is not
+    /// needed), holding the file `f`.
+    fn repo(env: &TestEnv, name: &str) -> PathBuf {
+        let repo = env.tmp_dir().join(name);
+        fs::create_dir_all(repo.join(".git").join("info")).unwrap();
+        fs::write(repo.join("f"), b"f").unwrap();
+        repo
+    }
+
+    fn mkfifo(env: &TestEnv, path: &Path) {
+        let made = env.command("mkfifo").arg(path).status().unwrap();
+        assert!(made.success(), "mkfifo {}", path.display());
+    }
+
+    /// The three ignore files a repository can hand `explain`: a
+    /// `.gitignore` in its tree, its `info/exclude`, and the excludes file
+    /// its own configuration names.
+    const IGNORE_FILES: [&str; 3] = [".gitignore", "info/exclude", "core.excludesFile"];
+
+    /// Where `repo` reads the ignore file `which` from, its configuration
+    /// written to name it.
+    fn ignore_file(repo: &Path, which: &str) -> PathBuf {
+        match which {
+            ".gitignore" => repo.join(".gitignore"),
+            "info/exclude" => repo.join(".git").join("info").join("exclude"),
+            _ => {
+                let file = repo.join("ignores");
+                let config = format!("[core]\n\texcludesFile = {}\n", file.display());
+                fs::write(repo.join(".git").join("config"), config).unwrap();
+                file
+            }
+        }
+    }
+
+    #[test]
+    fn p5_sec_03_a_fifo_as_an_ignore_file_fails_the_lookup_without_blocking() {
+        let env = TestEnv::new();
+        for which in IGNORE_FILES {
+            let repo = repo(&env, &which.replace(['/', '.'], "_"));
+            let fifo = ignore_file(&repo, which);
+            mkfifo(&env, &fifo);
+            let error = facts_within(&repo, &env.home()).unwrap_err();
+            assert!(
+                error.starts_with(&format!("{}: ", fifo.display()))
+                    && error.ends_with("not a regular file"),
+                "{which}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn p5_sec_03_a_link_to_dev_zero_as_an_ignore_file_is_never_read() {
+        let env = TestEnv::new();
+        for which in IGNORE_FILES {
+            let repo = repo(&env, &which.replace(['/', '.'], "_"));
+            let link = ignore_file(&repo, which);
+            symlink("/dev/zero", &link).unwrap();
+            let found = facts_within(&repo, &env.home());
+            if which == ".gitignore" {
+                // Not followed: the repository has no .gitignore.
+                assert!(!found.unwrap().unwrap().ignored, "{which}");
+            } else {
+                let error = found.unwrap_err();
+                assert!(
+                    error.starts_with(&format!("{}: ", link.display()))
+                        && error.ends_with("not a regular file"),
+                    "{which}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn p5_sec_03_an_index_over_its_cap_fails_the_lookup_unread() {
+        // Sparse files: they take no room on disk, and a read of either
+        // would take a gibibyte of memory.
+        let env = TestEnv::new();
+        let repo = repo(&env, "index");
+        let index = repo.join(".git").join("index");
+        fs::File::create(&index)
+            .unwrap()
+            .set_len(INDEX_CAP + 1)
+            .unwrap();
+        let error = facts_within(&repo, &env.home()).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "{}: more than {INDEX_CAP} bytes, the most read of this file",
+                index.display()
+            )
+        );
+        // A split index's shared index has the same cap.
+        let mut link = b"link".to_vec();
+        link.extend(20u32.to_be_bytes());
+        link.extend([0u8; 20]);
+        fs::write(&index, padded(2, &["other"], 20, &link)).unwrap();
+        let shared = repo
+            .join(".git")
+            .join(format!("sharedindex.{}", "00".repeat(20)));
+        fs::File::create(&shared)
+            .unwrap()
+            .set_len(INDEX_CAP + 1)
+            .unwrap();
+        let error = facts_within(&repo, &env.home()).unwrap_err();
+        assert!(
+            error.starts_with(&format!("{}: more than", shared.display())),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn p5_sec_03_ignore_files_past_one_lookups_budget_fail_it_unread() {
+        // Five ignore files of a quarter of the budget each, far under what
+        // one file could hold: the excludes file, `info/exclude` and a
+        // `.gitignore` at each of the three levels above `a/b/f`.
+        let env = TestEnv::new();
+        let repo = repo(&env, "budget");
+        let below = repo.join("a").join("b");
+        fs::create_dir_all(&below).unwrap();
+        fs::write(below.join("f"), b"f").unwrap();
+        let quarter = usize::try_from(IGNORE_BUDGET / 4).unwrap();
+        // `f`, then a comment to the quarter's length.
+        let patterns = format!("f\n#{}\n", "-".repeat(quarter - 4));
+        for file in [
+            ignore_file(&repo, "core.excludesFile"),
+            ignore_file(&repo, "info/exclude"),
+            repo.join(".gitignore"),
+            repo.join("a").join(".gitignore"),
+        ] {
+            fs::write(file, &patterns).unwrap();
+        }
+        // Four quarters meet the budget: all are read.
+        assert!(facts_within(&below, &env.home()).unwrap().unwrap().ignored);
+        // The fifth passes it and is refused by its length. Unreadable to
+        // all but root, it shows it was never opened.
+        let last = below.join(".gitignore");
+        fs::write(&last, &patterns).unwrap();
+        if duscope_walk::effective_uid() != 0 {
+            fs::set_permissions(&last, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        let error = facts_within(&below, &env.home()).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "{}: with this file, the ignore files hold more than {IGNORE_BUDGET} bytes, \
+                 the most read of them in one lookup",
+                last.display()
+            )
+        );
+    }
+
+    #[test]
+    fn p5_sec_03_an_ignore_file_below_a_regular_file_is_absent() {
+        // `.git/info`, then `~/.config/git` in the test's own home, as a
+        // regular file: `info/exclude` and the default excludes file lie
+        // below a file and add nothing, as gix-ignore read them, and the
+        // `.gitignore` still answers.
+        for file in [".git/info", "home/.config/git"] {
+            let env = TestEnv::new();
+            let repo = repo(&env, "below_a_file");
+            fs::write(repo.join(".gitignore"), "f\n").unwrap();
+            let file = match file.strip_prefix("home/") {
+                Some(rest) => env.home().join(rest),
+                None => repo.join(file),
+            };
+            if file.is_dir() {
+                fs::remove_dir(&file).unwrap();
+            }
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, b"").unwrap();
+            let found = facts_within(&repo, &env.home());
+            assert!(found.unwrap().unwrap().ignored, "{}", file.display());
+        }
+    }
+
+    #[test]
+    fn p5_sec_03_a_gitignore_that_is_a_link_is_absent() {
+        let env = TestEnv::new();
+        let repo = repo(&env, "linked");
+        fs::write(repo.join("patterns"), "f\n").unwrap();
+        symlink("patterns", repo.join(".gitignore")).unwrap();
+        let found = facts_within(&repo, &env.home()).unwrap().unwrap();
+        assert!(!found.ignored, "the link was followed");
+        // The same patterns in the file itself ignore `f`.
+        fs::remove_file(repo.join(".gitignore")).unwrap();
+        fs::rename(repo.join("patterns"), repo.join(".gitignore")).unwrap();
+        assert!(facts_within(&repo, &env.home()).unwrap().unwrap().ignored);
+    }
+
+    #[test]
+    fn p5_sec_03_a_gitconfig_that_is_a_link_is_still_read() {
+        // A configuration kept with the user's dotfiles and linked into the
+        // home, naming an excludes file that ignores `f`.
+        let env = TestEnv::new();
+        let repo = repo(&env, "repo");
+        let dotfiles = env.tmp_dir().join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::write(dotfiles.join("ignore"), "f\n").unwrap();
+        let config = format!(
+            "[core]\n\texcludesFile = {}\n",
+            dotfiles.join("ignore").display()
+        );
+        fs::write(dotfiles.join("gitconfig"), config).unwrap();
+        symlink(dotfiles.join("gitconfig"), env.home().join(".gitconfig")).unwrap();
+        let found = facts_within(&repo, &env.home()).unwrap().unwrap();
+        assert!(found.ignored, "the linked ~/.gitconfig was not read");
+    }
+
+    #[test]
+    fn p5_sec_03_a_fifo_as_dot_git_commondir_or_config_does_not_block() {
+        let env = TestEnv::new();
+        // A `.git` file names the git directory: unreadable, the lookup
+        // fails.
+        let dot_git = env.tmp_dir().join("dot_git");
+        fs::create_dir_all(&dot_git).unwrap();
+        fs::write(dot_git.join("f"), b"f").unwrap();
+        mkfifo(&env, &dot_git.join(".git"));
+        let error = facts_within(&dot_git, &env.home()).unwrap_err();
+        assert!(error.ends_with(".git: not a regular file"), "{error}");
+        // `commondir`, and the configuration of the repository and of the
+        // user: each is skipped as an unreadable one is, and the git
+        // directory's own `info/exclude` still ignores `f`.
+        let repo = repo(&env, "others");
+        mkfifo(&env, &repo.join(".git").join("commondir"));
+        mkfifo(&env, &repo.join(".git").join("config"));
+        mkfifo(&env, &env.home().join(".gitconfig"));
+        fs::write(repo.join(".git").join("info").join("exclude"), "f\n").unwrap();
+        assert!(facts_within(&repo, &env.home()).unwrap().unwrap().ignored);
     }
 
     #[test]

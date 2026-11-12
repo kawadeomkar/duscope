@@ -544,6 +544,22 @@ pub fn cachedir_tag(dir: &Path) -> bool {
     platform::cachedir_tag(dir)
 }
 
+/// The regular file at `path`, read whole: refused with
+/// [`io::ErrorKind::FileTooLarge`] when it holds more than `cap` bytes
+/// (never truncated), [`io::ErrorKind::IsADirectory`] for a directory and
+/// [`io::ErrorKind::InvalidInput`] for anything else that is not a regular
+/// file, so a FIFO cannot block the read and a device cannot fill memory.
+/// Without `follow`, a final symbolic link is not followed and reads as
+/// absent ([`io::ErrorKind::NotFound`]), as git reads an in-tree
+/// `.gitignore` since 2.32.
+///
+/// `explain` is its only caller, for git's files. The scanner reads no
+/// file's contents: the repository's invariant lists each exception, and
+/// this is one.
+pub fn read_regular(path: &Path, cap: u64, follow: bool) -> io::Result<Vec<u8>> {
+    platform::read_regular(path, cap, follow)
+}
+
 /// Whether the process with id `pid` is running (`scans --prune` keeps the
 /// temporary file of a write still in progress).
 pub fn process_alive(pid: u32) -> bool {
