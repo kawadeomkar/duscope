@@ -369,3 +369,71 @@ fn p3_mcp_05_a_cancelled_scan_returns_within_one_directory_per_worker() {
         );
     }
 }
+
+/// P5-CORE-07: a tool call's scan stopped once its write has begun (its
+/// temporary file is there; a thread watching for it sets the call's flag)
+/// saves nothing, and its verb's answer is the error envelope alone, never
+/// the scan's envelope with the error after it. A write that wins the race
+/// and finishes first is tried again, in a directory of its own.
+#[test]
+fn p5_core_07_a_tool_calls_scan_stopped_during_its_write_answers_interrupted_alone() {
+    let env = TestEnv::new();
+    let root = env.work_dir().canonicalize().unwrap().join("wide");
+    for n in 0..3_000 {
+        let dir = root.join(format!("d{}", n / 100));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("f{n}")), b"x").unwrap();
+    }
+    for attempt in 0..5 {
+        let index_dir = env.index_dir().join(format!("try{attempt}"));
+        let call = CallSignals::default();
+        let watching = {
+            let scans = index_dir.join("scans");
+            let cancel = Arc::clone(&call.cancel);
+            thread::spawn(move || {
+                let started = Instant::now();
+                while started.elapsed() < PATIENCE {
+                    let writing = std::fs::read_dir(&scans).is_ok_and(|mut names| {
+                        names.any(|e| {
+                            e.is_ok_and(|e| e.file_name().to_string_lossy().contains(".db.tmp-"))
+                        })
+                    });
+                    if writing {
+                        cancel.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            })
+        };
+        let runner = VerbRunner {
+            index_dir: index_dir.clone(),
+            ..runner(&env)
+        };
+        let outcome = runner.run_call(&scan(&root), &call);
+        watching.join().unwrap();
+        if outcome.ok {
+            eprintln!("the write finished before the flag was set; trying again");
+            continue;
+        }
+        let envelope: Value = serde_json::from_str(&outcome.json).unwrap_or_else(|e| {
+            let lines: Vec<String> = outcome
+                .json
+                .lines()
+                .map(|l| l.chars().take(80).collect())
+                .collect();
+            panic!("{e}: not one JSON value: {lines:#?}")
+        });
+        assert_eq!(envelope["ok"], false, "{envelope}");
+        assert!(envelope.get("scan").is_none(), "a scan id in {envelope}");
+        assert_eq!(envelope["error"]["code"], "interrupted", "{envelope}");
+        // The walk was whole: it read every entry before the write began.
+        assert_eq!(call.entries.load(Ordering::Relaxed), 3_031);
+        let left: Vec<_> = std::fs::read_dir(index_dir.join("scans"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "no .db, no .db.tmp-*: {left:?}");
+        return;
+    }
+    panic!("every write finished before its flag was set");
+}

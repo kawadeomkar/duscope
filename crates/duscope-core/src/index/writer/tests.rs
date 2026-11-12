@@ -2,12 +2,15 @@ use std::cell::{Cell, RefCell};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use duscope_walk::{Attrs, MemProvider, WalkOptions, walk_with};
-use rusqlite::Connection;
 use rusqlite::types::Value;
+use rusqlite::{Connection, ErrorCode};
 
-use super::{IndexWriter, ScanMeta, index_path, write_file_with};
+use super::{IndexWriter, ScanMeta, index_path, write_file_with, write_in};
+use crate::CoreError;
 use crate::arena::Arena;
 use crate::index::{SCAN_META_KEYS, ScanId};
 use crate::query::{ArenaView, TreeView};
@@ -418,4 +421,135 @@ fn p5_walk_01_scan_volumes_keep_each_volumes_fsevents_mark() {
             .unwrap();
         assert_eq!(row, columns, "{name}");
     }
+}
+
+/// A tree of `files` files in one directory: rows enough that each of
+/// `files`' statements, the inserts and the index over it, runs past
+/// [`super::PROGRESS_OPS`] steps.
+fn wide(files: usize) -> (Arena, RollUp) {
+    let mut tree = MemProvider::new("/t");
+    tree.dir("d");
+    for n in 0..files {
+        tree.file(format!("d/f{n}"), 4096);
+    }
+    let mut arena = Arena::new(Attrs::Basic);
+    walk_with(&tree, Path::new("/t"), &WalkOptions::default(), |event| {
+        arena.push(event).unwrap();
+    })
+    .unwrap();
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
+/// The names under `dir/scans`, none when it does not exist.
+fn left(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir.join("scans"))
+        .map(|entries| {
+            entries
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn p5_core_07_a_write_stopped_before_it_starts_leaves_nothing() {
+    let env = duscope_testkit::TestEnv::new();
+    let dir = env.index_dir();
+    let (arena, rollup) = scanned();
+    let stop = Arc::new(AtomicBool::new(true));
+    let error =
+        IndexWriter::write_until(&arena, &rollup, &meta("before"), &dir, &stop).unwrap_err();
+    assert!(matches!(error, CoreError::IndexWriteStopped), "{error:?}");
+    assert_eq!(left(&dir), Vec::<String>::new());
+}
+
+/// Stopped while the indexes are built, after the rows: the next statement
+/// past [`super::PROGRESS_OPS`] steps is interrupted by the progress
+/// handler, not run to its end, and the temporary file goes.
+#[test]
+fn p5_core_07_a_write_stopped_under_way_interrupts_its_statement_and_leaves_nothing() {
+    let env = duscope_testkit::TestEnv::new();
+    let dir = env.index_dir();
+    let (arena, rollup) = wide(2_000);
+    let stop = Arc::new(AtomicBool::new(false));
+    let seen = RefCell::new(None);
+    let create = |db: &Connection, ddl: &str| {
+        // The rows are in, under the name the write will rename.
+        *seen.borrow_mut() = Some(left(&dir));
+        stop.store(true, Ordering::Relaxed);
+        let built = db.execute_batch(ddl);
+        let code = built
+            .as_ref()
+            .err()
+            .and_then(rusqlite::Error::sqlite_error_code);
+        assert_eq!(code, Some(ErrorCode::OperationInterrupted), "{built:?}");
+        built
+    };
+    let meta = meta("under-way");
+    let error = write_in(&arena, &rollup, &meta, &dir, &stop, &create).unwrap_err();
+    assert!(matches!(error, CoreError::IndexWriteStopped), "{error:?}");
+    let pid = std::process::id();
+    assert_eq!(
+        seen.into_inner(),
+        Some(vec![format!("{}.db.tmp-{pid}", meta.scan_id)])
+    );
+    assert_eq!(left(&dir), Vec::<String>::new(), "no .db, no .db.tmp-*");
+}
+
+/// Stopped once the last statement has run: the look before the rename
+/// finds it, and the finished file is not given its name.
+#[test]
+fn p5_core_07_a_write_stopped_after_its_last_statement_is_not_renamed() {
+    let env = duscope_testkit::TestEnv::new();
+    let dir = env.index_dir();
+    let (arena, rollup) = scanned();
+    let stop = Arc::new(AtomicBool::new(false));
+    let create = |db: &Connection, ddl: &str| {
+        db.execute_batch(ddl)?;
+        stop.store(true, Ordering::Relaxed);
+        Ok(())
+    };
+    let error = write_in(&arena, &rollup, &meta("last"), &dir, &stop, &create).unwrap_err();
+    assert!(matches!(error, CoreError::IndexWriteStopped), "{error:?}");
+    assert_eq!(left(&dir), Vec::<String>::new());
+}
+
+/// A sort file that fails while the write is stopped does not start the
+/// build again in memory.
+#[test]
+fn p5_core_07_a_stopped_write_is_not_built_again() {
+    let env = duscope_testkit::TestEnv::new();
+    let dir = env.index_dir();
+    let (arena, rollup) = scanned();
+    let stop = Arc::new(AtomicBool::new(false));
+    let tries = Cell::new(0);
+    let create = |_: &Connection, _: &str| {
+        tries.set(tries.get() + 1);
+        stop.store(true, Ordering::Relaxed);
+        Err(disk_full())
+    };
+    let error = write_in(&arena, &rollup, &meta("again"), &dir, &stop, &create).unwrap_err();
+    assert!(matches!(error, CoreError::IndexWriteStopped), "{error:?}");
+    assert_eq!(tries.get(), 1, "no second build");
+    assert_eq!(left(&dir), Vec::<String>::new());
+}
+
+/// A flag never set changes nothing: the file is written whole, under its
+/// name, as `write` writes it.
+#[test]
+fn p5_core_07_a_write_never_stopped_is_whole() {
+    let env = duscope_testkit::TestEnv::new();
+    let dir = env.index_dir();
+    let (arena, rollup) = wide(2_000);
+    let stop = Arc::new(AtomicBool::new(false));
+    let meta = meta("whole");
+    let id = IndexWriter::write_until(&arena, &rollup, &meta, &dir, &stop).unwrap();
+    assert_eq!(left(&dir), [format!("{id}.db")]);
+    let db = Connection::open(index_path(&dir, &id)).unwrap();
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM files"), 2_000);
+    let ok: String = db
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ok, "ok");
 }
