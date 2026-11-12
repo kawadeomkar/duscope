@@ -219,3 +219,27 @@ fn p3_mcp_03_a_scan_id_no_saved_scan_has_is_not_found() {
         .unwrap_err();
     assert_eq!(refusal.code, "scan_not_found", "{refusal}");
 }
+
+#[test]
+fn p5_mcp_01_an_item_whose_folder_became_a_link_out_of_the_roots_is_refused() {
+    let tree = Tree::new();
+    let roots = tree.roots();
+    let item = tree.path("root/inside/file");
+    assert_eq!(roots.bound_item(&item), Ok(()));
+    // After a handle named it, its folder moved out of the roots and a
+    // link to it took its place: the same path, and the same entry, now
+    // outside them.
+    fs::rename(tree.path("root/inside"), tree.path("elsewhere/inside")).unwrap();
+    symlink(tree.path("elsewhere/inside"), tree.path("root/inside")).unwrap();
+    let refusal = roots.bound_item(&item).expect_err("the item lies outside");
+    assert_eq!(refusal.code, "refused_path", "{refusal}");
+    assert!(
+        refusal.message.contains(&format!(
+            "resolves to {}",
+            tree.path("elsewhere/inside/file").display()
+        )),
+        "{refusal}"
+    );
+    // The link itself lies inside, and is judged there.
+    assert_eq!(roots.bound_item(&tree.path("root/inside")), Ok(()));
+}

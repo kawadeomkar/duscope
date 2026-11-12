@@ -15,7 +15,8 @@
 //! with its annotations (`openWorldHint` always false) and
 //! `_meta["anthropic/maxResultSizeChars"]` equal to `--max-chars`, past
 //! which the verb puts its envelope in a file and returns the stub. A tool
-//! that deletes is listed only under `--allow-delete`.
+//! that deletes is listed only under `--allow-delete`, and refused as an
+//! unknown tool without it.
 //!
 //! A call runs on the server's worker ([`crate::worker`]), which gives it a
 //! deadline ([`Tool::deadline`]) and passes the runner the flag that a
@@ -24,9 +25,9 @@
 //!
 //! The input schemas are a subset of JSON Schema that `validate` checks in
 //! full: an object of named properties, each a string, integer, number,
-//! boolean or array of those, with `enum`, bounds, lengths and `pattern`.
-//! Registering a schema that uses any other keyword fails, so no part of a
-//! schema goes unchecked.
+//! boolean or array of those or of objects of those, with `enum`, bounds,
+//! lengths, item counts and `pattern`. Registering a schema that uses any
+//! other keyword fails, so no part of a schema goes unchecked.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -45,6 +46,7 @@ use crate::worker::{self, CallSignals};
 
 mod by_type;
 mod caches;
+mod delete;
 mod diff;
 mod explain;
 mod query;
@@ -69,6 +71,7 @@ pub fn shipped() -> Vec<Box<dyn Tool>> {
         Box::new(query::Query),
         Box::new(schema::Schema),
         Box::new(diff::Diff),
+        Box::new(delete::Delete),
     ]
 }
 
@@ -580,11 +583,15 @@ struct Schema {
 struct Property {
     kind: Kind,
     items: Option<Box<Property>>,
+    /// An object's properties (`Kind::Object`, as an array's items alone).
+    object: Option<Box<Schema>>,
     choices: Option<Vec<Value>>,
     minimum: Option<f64>,
     maximum: Option<f64>,
     min_length: Option<u64>,
     max_length: Option<u64>,
+    min_items: Option<u64>,
+    max_items: Option<u64>,
     pattern: Option<Regex>,
 }
 
@@ -595,6 +602,7 @@ enum Kind {
     Number,
     Boolean,
     Array,
+    Object,
 }
 
 /// Keywords that describe and check nothing.
@@ -629,6 +637,11 @@ impl Schema {
             let listed = listed.as_object().ok_or("properties is not an object")?;
             for (name, property) in listed {
                 let read = Property::read(property).map_err(|e| format!("{name}: {e}"))?;
+                if read.kind == Kind::Object {
+                    return Err(format!(
+                        "{name}: an object is allowed only as an array's items"
+                    ));
+                }
                 properties.insert(name.clone(), read);
             }
         }
@@ -654,6 +667,23 @@ impl Schema {
         })
     }
 
+    /// An object of this schema's properties, for a message.
+    fn described(&self) -> String {
+        let fields: Vec<String> = self
+            .properties
+            .iter()
+            .map(|(name, property)| {
+                let required = if self.required.contains(name) {
+                    ", required"
+                } else {
+                    ""
+                };
+                format!("{name} ({}{required})", property.described())
+            })
+            .collect();
+        format!("an object with {}", fields.join(" and "))
+    }
+
     /// Checks `arguments`: a refusal naming the first argument wrong.
     fn check(&self, tool: &str, arguments: &Map<String, Value>) -> Result<(), Refusal> {
         validate(self, arguments).map_err(|message| Refusal {
@@ -667,6 +697,11 @@ impl Schema {
 impl Property {
     fn read(schema: &Value) -> Result<Property, String> {
         let object = schema.as_object().ok_or("not an object")?;
+        // An array's items may be an object of plain properties, which a
+        // call's value is checked against as the arguments themselves are.
+        if object.get("type").and_then(Value::as_str) == Some("object") {
+            return Property::object(schema);
+        }
         let known = [
             "type",
             "items",
@@ -675,6 +710,8 @@ impl Property {
             "maximum",
             "minLength",
             "maxLength",
+            "minItems",
+            "maxItems",
             "pattern",
         ];
         for key in object.keys() {
@@ -688,7 +725,11 @@ impl Property {
             Some("number") => Kind::Number,
             Some("boolean") => Kind::Boolean,
             Some("array") => Kind::Array,
-            _ => return Err("type must be string, integer, number, boolean or array".to_owned()),
+            _ => {
+                return Err(
+                    "type must be string, integer, number, boolean, array or object".to_owned(),
+                );
+            }
         };
         let items = match (kind, object.get("items")) {
             (Kind::Array, Some(items)) => {
@@ -714,6 +755,11 @@ impl Property {
                 .map(|v| v.as_u64().ok_or(format!("{key} is not a count")))
                 .transpose()
         };
+        if kind != Kind::Array
+            && (object.contains_key("minItems") || object.contains_key("maxItems"))
+        {
+            return Err("minItems and maxItems are for arrays".to_owned());
+        }
         let pattern = object
             .get("pattern")
             .map(|p| {
@@ -728,12 +774,38 @@ impl Property {
         Ok(Property {
             kind,
             items,
+            object: None,
             choices,
             minimum: number("minimum")?,
             maximum: number("maximum")?,
             min_length: count("minLength")?,
             max_length: count("maxLength")?,
+            min_items: count("minItems")?,
+            max_items: count("maxItems")?,
             pattern,
+        })
+    }
+
+    /// An array's items as an object of plain properties.
+    fn object(schema: &Value) -> Result<Property, String> {
+        let shape = Schema::read(schema)?;
+        if let Some(name) = shape.properties.iter().find_map(|(name, property)| {
+            matches!(property.kind, Kind::Array | Kind::Object).then_some(name)
+        }) {
+            return Err(format!("{name}: an object's properties are plain values"));
+        }
+        Ok(Property {
+            kind: Kind::Object,
+            items: None,
+            object: Some(Box::new(shape)),
+            choices: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            min_items: None,
+            max_items: None,
+            pattern: None,
         })
     }
 
@@ -749,6 +821,7 @@ impl Property {
             Kind::Number => "a number",
             Kind::Boolean => "true or false",
             Kind::Array => "an array",
+            Kind::Object => "an object",
         };
         match (self.minimum, self.maximum) {
             (Some(lo), Some(hi)) => format!("{kind} from {lo} to {hi}"),
@@ -758,14 +831,28 @@ impl Property {
         }
     }
 
+    /// The bounds of the property's length: its characters, or an array's
+    /// items.
+    fn length_bounds(&self) -> (Option<u64>, Option<u64>) {
+        if self.kind == Kind::Array {
+            (
+                self.min_items.or(self.min_length),
+                self.max_items.or(self.max_length),
+            )
+        } else {
+            (self.min_length, self.max_length)
+        }
+    }
+
     /// Every check of the property, for a message: its kind and bounds,
     /// then its length and pattern; an array's items described in turn.
     fn described(&self) -> String {
-        let what = match &self.items {
-            Some(items) => format!("an array of ({})", items.described()),
-            None => self.wanted(),
+        let what = match (&self.items, &self.object) {
+            (Some(items), _) => format!("an array of ({})", items.described()),
+            (None, Some(object)) => object.described(),
+            (None, None) => self.wanted(),
         };
-        let length = match (self.min_length, self.max_length) {
+        let length = match self.length_bounds() {
             (Some(lo), Some(hi)) => format!(", {lo} to {hi} long"),
             (Some(lo), None) => format!(", at least {lo} long"),
             (None, Some(hi)) => format!(", at most {hi} long"),
@@ -786,9 +873,13 @@ impl Property {
             Kind::Number => value.is_number(),
             Kind::Boolean => value.is_boolean(),
             Kind::Array => value.is_array(),
+            Kind::Object => value.is_object(),
         };
         if !typed {
             return false;
+        }
+        if let (Value::Object(fields), Some(shape)) = (value, &self.object) {
+            return validate(shape, fields).is_ok();
         }
         if self.choices.as_ref().is_some_and(|c| !c.contains(value)) {
             return false;
@@ -803,11 +894,11 @@ impl Property {
             Value::Array(items) => Some(items.len() as u64),
             _ => None,
         };
-        if let Some(n) = length
-            && (self.min_length.is_some_and(|lo| n < lo)
-                || self.max_length.is_some_and(|hi| n > hi))
-        {
-            return false;
+        if let Some(n) = length {
+            let (lo, hi) = self.length_bounds();
+            if lo.is_some_and(|lo| n < lo) || hi.is_some_and(|hi| n > hi) {
+                return false;
+            }
         }
         if let (Some(pattern), Some(s)) = (&self.pattern, value.as_str())
             && !pattern.is_match(s.as_bytes())
@@ -1064,6 +1155,8 @@ fn rows_text(envelope: &Value) -> String {
 
 #[cfg(test)]
 mod analysis_group_tests;
+#[cfg(test)]
+mod delete_tests;
 #[cfg(test)]
 mod scan_group_tests;
 #[cfg(test)]

@@ -28,7 +28,11 @@
 //! the bytes on disk of each inode whose last link went.
 //!
 //! [`within_one_percent`] is `--expect-bytes`' test, made before anything is
-//! touched.
+//! touched. [`Plan::refuse_unexpected`] holds each item to it, for a caller
+//! that names what each item should free (the MCP tool): an item off by
+//! more than 1% is refused, a fact of the plan like any other refusal, and
+//! so is one whose bytes no saved scan knows (a directory made since the
+//! scan), whatever its figure.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -116,6 +120,40 @@ impl Plan {
     pub fn meets(&self, expected: u64) -> bool {
         within_one_percent(self.plan.total_frees_bytes, expected)
     }
+
+    /// Refuses, with [`UNEXPECTED`], each item not refused already whose
+    /// `frees_bytes` lies outside 1% of its figure in `expected`, given in
+    /// the plan's order, or is not known: an item no saved scan holds frees
+    /// what no figure can be checked against. The plan's totals then count
+    /// what is left.
+    pub fn refuse_unexpected(&mut self, expected: &[u64]) {
+        for (item, &expected) in self.plan.items.iter_mut().zip(expected) {
+            if item.action != "refused"
+                && !item
+                    .frees_bytes
+                    .is_some_and(|frees| within_one_percent(frees, expected))
+            {
+                item.action = "refused";
+                item.reason = Some(UNEXPECTED);
+            }
+        }
+        let (allocated, frees) = totals(&self.plan.items);
+        self.plan.total_allocated_bytes = allocated;
+        self.plan.total_frees_bytes = frees;
+    }
+}
+
+/// The `reason` of an item [`Plan::refuse_unexpected`] refuses.
+pub const UNEXPECTED: &str = "expectation_mismatch";
+
+/// The plan's totals over the items it acts on: their bytes on disk and
+/// what it frees (`frees_bytes`, 0 where it is not known).
+fn totals(items: &[PlanItem]) -> (u64, u64) {
+    let acting = items.iter().filter(|item| item.action != "refused");
+    (
+        acting.clone().map(|item| item.allocated_bytes).sum(),
+        acting.map(|item| item.frees_bytes.unwrap_or(0)).sum(),
+    )
 }
 
 /// Whether `bytes` lies within 1% of `expected`, either way, the bounds
@@ -191,9 +229,7 @@ pub fn clean_plan(
         ids.push(id);
     }
     plan_frees(index, &ids, &mut planned)?;
-    let acting = planned.iter().filter(|item| item.action != "refused");
-    let total_allocated_bytes = acting.clone().map(|item| item.allocated_bytes).sum();
-    let total_frees_bytes = acting.map(|item| item.frees_bytes.unwrap_or(0)).sum();
+    let (total_allocated_bytes, total_frees_bytes) = totals(&planned);
     Ok(Plan {
         plan: CleanPlan {
             items: planned,

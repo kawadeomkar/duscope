@@ -27,7 +27,9 @@ use duscope_core::query::{TreeView, index_files};
 /// with in place of running its verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
-    /// `refused_path`, or `scan_not_found` for a saved scan the roots hide.
+    /// `refused_path`, `scan_not_found` for a saved scan the roots hide, or
+    /// the verb's own code for a call refused for another reason
+    /// (`usage`, `handle_invalid`, `handle_expired`).
     pub code: &'static str,
     /// One sentence.
     pub message: String,
@@ -184,6 +186,41 @@ impl Roots {
             )));
         }
         Ok(resolved)
+    }
+
+    /// Checks `path`, the entry a handle names and a tool may remove: it must
+    /// be absolute and free of `..`, and lie under a root, its parent read
+    /// as the file system resolves it and its last component as written, so
+    /// a symbolic link is checked where it lies, never where it leads. A
+    /// root itself is refused: a client may remove what lies under a root,
+    /// not the root.
+    pub fn bound_item(&self, path: &Path) -> Result<(), Refusal> {
+        let shown = path.display();
+        if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+            return Err(Refusal::path(format!(
+                "{shown} is not an absolute path free of `..`"
+            )));
+        }
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(Refusal::path(format!("{shown} is not an entry")));
+        };
+        let resolved = resolve(parent).join(name);
+        if self.roots.contains(&resolved) {
+            return Err(Refusal::path(format!(
+                "{shown} is one of the roots: a client may remove only what lies under them"
+            )));
+        }
+        if self.root_of(&resolved).is_none() {
+            let through = if resolved == path {
+                String::new()
+            } else {
+                format!(" (it resolves to {})", resolved.display())
+            };
+            return Err(Refusal::path(format!(
+                "{shown} is outside the roots{through}"
+            )));
+        }
+        Ok(())
     }
 
     /// A scan selector a client sent: `latest`, or an id prefix of at least

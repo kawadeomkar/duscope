@@ -35,4 +35,15 @@ ask gemini --skip-trust --approval-mode=yolo --allowed-mcp-server-names duscope 
 # The JSON holds the final answer and the statistics, not the tools'
 # results: an answer naming the directory shows the client read them.
 ((DRY_RUN)) || cp "$CLIENT_OUT" "$ANSWER"
+
+# The delete phase: the server registered a second time with --allow-delete,
+# and the run without --approval-mode=yolo, so headless Gemini is expected
+# not to approve the destructive call and to say so in its output
+# (unobserved until the first real run).
+section "Delete registration"
+step gemini mcp add --scope user duscope-delete duscope mcp -- --roots "$TREE" --allow-delete ||
+    fail "gemini mcp add failed"
+ask_delete gemini --skip-trust --allowed-mcp-server-names duscope-delete \
+    --output-format json -p "$DELETE_PROMPT"
+verify_delete
 verify

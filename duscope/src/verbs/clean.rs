@@ -17,13 +17,27 @@
 //! changed: after a move or a deletion an `index_untouched` warning names
 //! the rescan that measures the tree again (for an import, a new scan), and
 //! `next` holds it.
+//!
+//! The MCP tool `duscope_delete` runs this verb through two flags of its
+//! own, never typed: `--expect-item-bytes`, one figure per `--from` in
+//! their order, which refuses an item off by more than 1%, and one whose
+//! bytes the saved scan does not know whatever its figure; and `--dry-run`,
+//! which answers the plan as a successful answer with no prompt and no
+//! `--yes` hint, since a client asks for it as a plan, not a confirmation.
+//! Under a tool call, acting claims the call's point of no return
+//! (`CallSignals::commit`) just before anything moves: a call cancelled,
+//! past its deadline or whose client has gone by then (its input ended, or
+//! a write to it failed) moves nothing (`interrupted`), and one committed
+//! runs to its end.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use duscope_core::clean::{CleanItem, CleanOutcome, Method, Plan, clean_execute, clean_plan};
+use duscope_core::clean::{
+    CleanItem, CleanOutcome, Method, Plan, UNEXPECTED, clean_execute, clean_plan,
+};
 use duscope_core::envelope::{
     CleanEnvelope, CleanQuery, CleanResult, ErrorObject, SCHEMA_VERSION, ScanBlock, Tool, Warning,
 };
@@ -56,6 +70,7 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         })
         .collect();
     let handle_scan = handles(args, lookup.dir.as_deref(), &mut items)?;
+    item_figures_given(args)?;
     let first = items[0].path.clone();
     let (selector, path) = match (&args.scan, handle_scan) {
         (Some(text), _) => (ScanSelector::parse(text).map_err(core_failure)?, None),
@@ -79,6 +94,7 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         Method::Trash
     };
     let mut plan = clean_plan(&items, &resolved.index, &q, method).map_err(core_failure)?;
+    plan.refuse_unexpected(&args.expect_item_bytes);
     let query = query(args, &plan);
 
     let refused = plan.refused_count();
@@ -99,6 +115,7 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     let mut act = args.yes && !blocked;
     let mut asked = false;
     if !args.yes
+        && !args.dry_run
         && !blocked
         && !args.no_input
         && moving > 0
@@ -115,8 +132,9 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         };
         act = out::ask(question).is_some_and(|a| a == "yes");
     }
+    let stopped = stopped_first(&mut act);
     let outcome = act.then(|| clean_execute(&mut plan));
-    plan.plan.confirmation_required = !act && !blocked && moving > 0;
+    plan.plan.confirmation_required = !act && !blocked && !stopped && moving > 0;
     // What moved or was deleted is still in the saved scan.
     let changed =
         outcome.is_some_and(|o| o.trashed_count + o.deleted_count > 0 || o.freed_bytes > 0);
@@ -124,22 +142,22 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         warnings.push(index_untouched(&resolved.index, method));
     }
 
-    let failure = failure(
-        &plan,
-        refused > 0 && !args.skip_refused,
-        mismatch,
-        outcome,
-        asked,
-    );
-    let error = failure.as_ref().map(|f| match outcome {
-        // An item's own error, as the plan holds it.
-        Some(_) if !blocked => first_error(&plan)
-            .cloned()
-            .unwrap_or_else(|| out::error_object(f)),
-        _ => out::error_object(f),
+    let failure = stopped.then(|| stopped_failure(method)).or_else(|| {
+        failure(
+            &plan,
+            refused > 0 && !args.skip_refused,
+            mismatch,
+            outcome,
+            asked,
+            args,
+        )
     });
+    let error = failure
+        .as_ref()
+        .map(|f| run_error(f, &plan, outcome.is_some() && !blocked));
     let next = match outcome {
         Some(_) => renew(changed, &resolved.index),
+        None if args.dry_run || stopped => Vec::new(),
         None => next(args, &plan, &scan_block),
     };
     let footer = footer(&plan, outcome, output);
@@ -150,6 +168,49 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         Some(failure) => Err(failure.reported()),
         None => Ok(()),
     }
+}
+
+/// Under an MCP tool call, acting (`act`) is the call's point of no return,
+/// claimed just before anything moves: whether the call was stopped first
+/// (cancelled, past its deadline, its client gone), when `act` is cleared
+/// and nothing moves. A call that commits is answered with what this run
+/// did, however long it takes.
+fn stopped_first(act: &mut bool) -> bool {
+    let stopped = *act && super::mcp::running_call().is_some_and(|call| !call.commit());
+    if stopped {
+        log::info!("the tool call was stopped before clean acted: nothing is moved or deleted");
+        *act = false;
+    }
+    stopped
+}
+
+/// The failure of a run whose MCP tool call was stopped (cancelled, past
+/// its deadline, its client gone) before it acted: nothing was moved or
+/// deleted. The call was answered already, or is owed no answer.
+fn stopped_failure(method: Method) -> Failure {
+    let moved = match method {
+        Method::Trash => "moved",
+        Method::Permanent => "deleted",
+    };
+    Failure::new(
+        Exit::Interrupted,
+        "interrupted",
+        format!("the tool call was stopped before anything was {moved}, so nothing was"),
+    )
+    .hint("Call the tool again for a new plan")
+}
+
+/// `--expect-item-bytes` gives one figure per `--from` handle, or none.
+fn item_figures_given(args: &CleanArgs) -> Result<(), Failure> {
+    if args.expect_item_bytes.is_empty() || args.expect_item_bytes.len() == args.from.len() {
+        return Ok(());
+    }
+    Err(Failure::new(
+        Exit::Usage,
+        "usage",
+        "--expect-item-bytes takes one figure per --from handle",
+    )
+    .hint("Give one --expect-item-bytes for each --from, in the same order"))
 }
 
 /// What `clean` was asked, with the items as `plan` names them.
@@ -209,12 +270,16 @@ fn failure(
     mismatch: Option<u64>,
     outcome: Option<CleanOutcome>,
     asked: bool,
+    args: &CleanArgs,
 ) -> Option<Failure> {
     let (moved, verb) = match plan.method() {
         Method::Trash => ("moved", "move"),
         Method::Permanent => ("deleted", "delete"),
     };
     if refused {
+        if let Some(failure) = unexpected(plan, &args.expect_item_bytes, moved) {
+            return Some(failure);
+        }
         let cannot = match plan.method() {
             Method::Trash => "cannot be moved to the Trash",
             Method::Permanent => "cannot be deleted",
@@ -243,10 +308,30 @@ fn failure(
     }
     if let Some(outcome) = outcome {
         return first_error(plan).map(|error| {
-            let message = if outcome.failed_count > 1 {
+            let done = match plan.method() {
+                Method::Trash => outcome.trashed_count,
+                Method::Permanent => outcome.deleted_count,
+            };
+            let failed = outcome.failed_count;
+            // Some went: a reader of this line alone, as an MCP client's
+            // text is, must not take it that nothing did.
+            let message = if done > 0 {
+                let rest = if failed > 1 {
+                    format!("{} were not, the first: ", thousands(failed))
+                } else {
+                    "one was not: ".to_owned()
+                };
+                format!(
+                    "{} of the {} items {} {moved}; {rest}{}",
+                    thousands(done),
+                    thousands(done + failed),
+                    if done == 1 { "was" } else { "were" },
+                    error.message
+                )
+            } else if failed > 1 {
                 format!(
                     "{} items were not {moved}; the first: {}",
-                    thousands(outcome.failed_count),
+                    thousands(failed),
                     error.message
                 )
             } else {
@@ -256,6 +341,10 @@ fn failure(
             failure.hint.clone_from(&error.hint);
             failure
         });
+    }
+    // The tool's dry run is a plan, not a question left open.
+    if args.dry_run {
+        return None;
     }
     (plan.acting_count() > 0).then(|| {
         let (message, hint) = match plan.method() {
@@ -275,6 +364,52 @@ fn failure(
         };
         Failure::new(Exit::Runtime, "confirmation_required", message).hint(hint)
     })
+}
+
+/// The failure of a run whose only refused items are the ones
+/// `--expect-item-bytes` refused: which figure the first one missed.
+fn unexpected(plan: &Plan, expected: &[u64], moved: &str) -> Option<Failure> {
+    let items = &plan.plan.items;
+    if !items
+        .iter()
+        .filter(|item| item.action == "refused")
+        .all(|item| item.reason == Some(UNEXPECTED))
+    {
+        return None;
+    }
+    let (at, item) = items
+        .iter()
+        .enumerate()
+        .find(|(_, item)| item.reason == Some(UNEXPECTED))?;
+    let count = format!(
+        "{} of the {} items free other than they were expected to, so nothing was {moved}",
+        thousands(plan.refused_count() as u64),
+        thousands(items.len() as u64),
+    );
+    // An item the saved scan does not hold: what it frees is not known, so
+    // no figure is met until a scan measures it.
+    let Some(frees) = item.frees_bytes else {
+        let message = format!(
+            "{count}: the saved scan does not hold {}, so what it frees is not known",
+            item.path
+        );
+        return Some(
+            Failure::new(Exit::Runtime, "expectation_mismatch", message).hint(
+                "Rescan the directory that holds it (duscope_scan, or duscope rescan), then \
+                 explain it again for a handle and its bytes",
+            ),
+        );
+    };
+    let message = format!(
+        "{count}: {} frees {} bytes, not within 1% of {}",
+        item.path,
+        thousands(frees),
+        thousands(expected.get(at).copied().unwrap_or(0)),
+    );
+    Some(
+        Failure::new(Exit::Runtime, "expectation_mismatch", message)
+            .hint("Review the plan's frees_bytes for each item and pass them as expect_bytes"),
+    )
 }
 
 /// Verifies each `--from` handle with the key in the index directory and
@@ -339,6 +474,19 @@ fn envelope(
         error,
         warnings: warnings.to_vec(),
         next: Vec::new(),
+    }
+}
+
+/// The run's error, for `failure`: once the plan was acted on (`acted`),
+/// the first failed item's own error, as the plan holds it, with the run's
+/// message, which says how many of the items went.
+fn run_error(failure: &Failure, plan: &Plan, acted: bool) -> ErrorObject {
+    match first_error(plan).filter(|_| acted) {
+        Some(error) => ErrorObject {
+            message: failure.message.clone(),
+            ..error.clone()
+        },
+        None => out::error_object(failure),
     }
 }
 

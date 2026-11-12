@@ -26,9 +26,20 @@
 #                   three calls the prompt asks for, and check them the same
 #                   way; the log is <client>.dry-run.log
 #
+# After the three calls, the delete phase (P5-MCP-01): the script registers the
+# server a second time as `duscope-delete` with --allow-delete and asks the
+# client to explain and delete one file. A non-interactive client is expected
+# not to be able to answer the confirmation duscope_delete demands
+# (`_meta["anthropic/requiresUserInteraction"]`, a destructive tool), so its
+# output should hold the prompt or a refusal to ask: what each client really
+# does is unobserved until the first real run, whose log a person reads. The
+# phase fails if the file moved. Each script runs it on the client's own
+# registration and command line (ask_delete, verify_delete).
+#
 # Exit status: 0 when the three calls were answered and the answer names the
-# largest directory; 1 when anything failed; 2 for a usage error or a
-# missing API key, which stops the script before it installs anything.
+# largest directory, and the delete phase left its file; 1 when anything
+# failed; 2 for a usage error or a missing API key, which stops the script
+# before it installs anything.
 
 set -o pipefail
 
@@ -91,6 +102,12 @@ smoke_init() {
     head -c 300000 /dev/zero >"$TREE/largest-dir/sub/blob"
     head -c 100000 /dev/zero >"$TREE/largest-dir/notes.txt"
     printf 'x\n' >"$TREE/small/file"
+    # The file the delete phase asks about, and nothing else touches. Every
+    # real run happens on the Linux runner, whose XDG Trash this temporary
+    # HOME holds: on macOS an approved move would reach the account's Trash.
+    DELETE_TARGET=$TREE/doomed/trash-me.bin
+    mkdir -p "$TREE/doomed"
+    head -c 4000 /dev/zero >"$DELETE_TARGET"
 
     SERVER_LOG=$WORK/server.log
     : >"$SERVER_LOG"
@@ -117,10 +134,18 @@ EOF
 three tool calls, one after another: first duscope_scan with root set to $TREE, then \
 duscope_top with limit set to 3, then duscope_summary with no arguments. Then answer in one \
 line with the path of the largest directory duscope_top listed."
+    # shellcheck disable=SC2034
+    DELETE_PROMPT="Use the tools of the MCP server named duscope-delete, and no other tools. \
+Call duscope_explain with path set to $DELETE_TARGET; it returns a handle and a \
+freeable_now_bytes. Then call duscope_delete with items set to one item, whose handle is \
+that handle and whose expect_bytes is that number, and with dry_run set to false. Then answer \
+in one line saying whether the duscope_delete call ran."
     ANSWER=$WORK/answer.txt
     CLIENT_OUT=$WORK/client.out
+    DELETE_OUT=$WORK/delete.out
     : >"$ANSWER"
     : >"$CLIENT_OUT"
+    : >"$DELETE_OUT"
     smoke_secrets=
     smoke_done=0
 
@@ -225,6 +250,58 @@ play_client() {
     printf '(the dry run sends the binary the three calls in place of the client)\n' >>"$LOG"
     cat "$out" >>"$LOG"
     grep -oF "$TREE/largest-dir" "$out" | head -n 1 >"$ANSWER"
+}
+
+# play_delete: in a dry run, what the client would do in the delete phase:
+# start the server as it was registered with --allow-delete, explain the file
+# for its handle and bytes, then call duscope_delete as asked but leaving
+# dry_run to its default, since a client that said yes would be asked for it
+# by name: nothing moves. The output is checked by verify_delete.
+play_delete() {
+    local meta='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
+    local explained=$WORK/delete-explain.jsonl handle bytes
+    printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{%s,"name":"duscope_explain","arguments":{"path":"%s"}}}\n' \
+        "$meta" "$DELETE_TARGET" | duscope mcp --roots "$TREE" --allow-delete >"$explained"
+    handle=$(grep -o '"handle":"[^"]*"' "$explained" | head -n 1 | sed 's/"handle":"//; s/"$//')
+    bytes=$(grep -o '"freeable_now_bytes":[0-9]*' "$explained" | head -n 1 | sed 's/.*://')
+    [[ -n $handle && -n $bytes ]] || fail "duscope_explain gave no handle or bytes for the delete phase"
+    printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{%s,"name":"duscope_delete","arguments":{"items":[{"handle":"%s","expect_bytes":%s}]}}}\n' \
+        "$meta" "$handle" "$bytes" | duscope mcp --roots "$TREE" --allow-delete >"$DELETE_OUT"
+    printf '(the dry run sends the binary the delete phase'"'"'s calls in place of the client, leaving dry_run at its default)\n' >>"$LOG"
+    cat "$explained" >>"$LOG"
+    cat "$DELETE_OUT" >>"$LOG"
+}
+
+# ask_delete ARGS...: the delete phase's prompt and the client's command
+# line ARGS, run with its output in DELETE_OUT and the log; a dry run plays
+# the client instead. Its exit status is not the phase's: a client that
+# refuses to run the tool may fail or not, and verify_delete reads what
+# happened.
+ask_delete() {
+    section "Delete prompt"
+    printf '%s\n' "$DELETE_PROMPT" >>"$LOG"
+    section "Delete client"
+    printf '$ %s\n' "$(shown "$@")" >>"$LOG"
+    if ((DRY_RUN)); then
+        play_delete
+        return 0
+    fi
+    "$@" >"$DELETE_OUT" 2>>"$LOG" || true
+    cat "$DELETE_OUT" >>"$LOG"
+}
+
+# verify_delete: the delete phase left its file where it was, and, in a dry
+# run, the played call was the plan. A real client's refusal or prompt is in
+# the log, for a person to read.
+verify_delete() {
+    [[ -e $DELETE_TARGET ]] ||
+        fail "the delete phase moved $DELETE_TARGET: duscope_delete must not run without a person"
+    if ((DRY_RUN)); then
+        grep -qF 'Dry run: 1 item would move to the Trash' "$DELETE_OUT" ||
+            fail "the played duscope_delete call did not answer the plan"
+    fi
+    printf '\nDelete phase: %s is still there; the client'"'"'s output above shows what it asked or refused\n' \
+        "$DELETE_TARGET" >>"$LOG"
 }
 
 # fail WHY: ends the script with WHY as its result.

@@ -127,13 +127,14 @@ pub mod values {
     /// The platforms a column of the index is filled on, macOS first.
     pub const PLATFORMS: [&str; 2] = ["macos", "linux"];
     /// Why `clean` refuses an item.
-    pub const REFUSALS: [&str; 6] = [
+    pub const REFUSALS: [&str; 7] = [
         "symlink",
         "mount_point",
         "firmlink",
         "root",
         "outside_root",
         "read_only_volume",
+        "expectation_mismatch",
     ];
     /// What `clean`'s plan does with an item.
     pub const ACTIONS: [&str; 3] = ["trash", "permanent", "refused"];

@@ -382,6 +382,7 @@
                 "root",
                 "outside_root",
                 "read_only_volume",
+                "expectation_mismatch",
                 null
               ]
             },

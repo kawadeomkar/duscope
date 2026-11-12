@@ -44,4 +44,17 @@ ask codex_exec codex exec --skip-git-repo-check --ephemeral --json --output-last
     -c 'mcp_servers.duscope.default_tools_approval_mode="approve"' \
     -c 'mcp_servers.duscope.required=true' \
     "$PROMPT" || fail "codex exec failed"
+
+# The delete phase: the server registered a second time with --allow-delete
+# and without the override that approves its tools, so `codex exec`, which
+# answers no prompt, is expected to refuse the destructive call and say so
+# in its output (unobserved until the first real run).
+section "Delete registration"
+step codex mcp add duscope-delete -- duscope mcp --roots "$TREE" --allow-delete ||
+    fail "codex mcp add failed"
+ask_delete codex_exec codex exec --skip-git-repo-check --ephemeral --json \
+    --output-last-message "$WORK/delete-answer.txt" \
+    -c 'mcp_servers.duscope-delete.required=true' \
+    "$DELETE_PROMPT"
+verify_delete
 verify

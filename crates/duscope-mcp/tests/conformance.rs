@@ -1493,3 +1493,796 @@ fn p3_mcp_06_the_tap_refuses_what_the_protocol_does_not_allow() {
         assert!(!check(lines), "case {n} passed the tap");
     }
 }
+
+// P5-MCP-01: `duscope_delete`, through rmcp's client.
+
+/// Both protocol revisions' sessions: the lifecycle and the version an
+/// `initialize` speaks.
+fn revisions() -> [(ClientLifecycleMode, ProtocolVersion); 2] {
+    [
+        (discover(), ProtocolVersion::LATEST),
+        (
+            ClientLifecycleMode::Initialize,
+            ProtocolVersion::V_2025_11_25,
+        ),
+    ]
+}
+
+/// A tree under the work directory, canonical, with a saved scan: two files
+/// and a directory, one file of which no call ever names.
+fn delete_tree(env: &TestEnv) -> PathBuf {
+    let root = env.work_dir().canonicalize().unwrap().join("trash-tree");
+    fs::create_dir_all(root.join("dir")).unwrap();
+    fs::write(root.join("keep.bin"), vec![1u8; 3_000]).unwrap();
+    fs::write(root.join("one.bin"), vec![2u8; 4_000]).unwrap();
+    fs::write(root.join("dir/two.bin"), vec![3u8; 5_000]).unwrap();
+    let out = env
+        .cmd()
+        .args(["scan", "--save", "--json"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    root
+}
+
+/// `explain --json` of `path`, through the binary: its handle and
+/// `freeable_now_bytes`.
+fn explained(env: &TestEnv, path: &Path) -> (String, u64) {
+    let out = env
+        .cmd()
+        .args(["explain", "--json"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    (
+        value["result"]["handle"].as_str().unwrap().to_owned(),
+        value["result"]["freeable_now_bytes"].as_u64().unwrap(),
+    )
+}
+
+/// The arguments of one item.
+fn item(handle: &str, expect_bytes: u64) -> Value {
+    json!({"handle": handle, "expect_bytes": expect_bytes})
+}
+
+/// What a test expects a dry or refused run to leave: the three files where
+/// they were and nothing in the Trash.
+fn assert_untouched(env: &TestEnv, root: &Path) {
+    for path in ["keep.bin", "one.bin", "dir/two.bin"] {
+        assert!(root.join(path).exists(), "{path} moved");
+    }
+    assert!(
+        !env.xdg_data_home().join("Trash/files").exists()
+            || fs::read_dir(env.xdg_data_home().join("Trash/files"))
+                .unwrap()
+                .next()
+                .is_none(),
+        "something reached the Trash"
+    );
+}
+
+#[test]
+fn p5_mcp_01_the_tool_is_offered_only_under_allow_delete() {
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (handle, frees) = explained(&env, &root.join("one.bin"));
+        // Without the flag: not listed, and a call is an unknown tool.
+        let ((names, refused), _) = session(
+            spawn(&env, &roots(&root, &[]), &[]),
+            lifecycle.clone(),
+            version.clone(),
+            |client, _| async move {
+                let names: Vec<String> = client
+                    .list_all_tools()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|tool| tool.name.into_owned())
+                    .collect();
+                let refused = client
+                    .send_cancellable_request(
+                        tool_call("duscope_delete", &json!({"items": [item(&handle, frees)]})),
+                        PeerRequestOptions::no_options(),
+                    )
+                    .await
+                    .unwrap()
+                    .await_response()
+                    .await;
+                ((names, refused), client)
+            },
+        );
+        assert_eq!(names, SHIPPED, "{version}");
+        let error = rpc_error(refused);
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS, "{error:?}");
+        assert!(error.message.contains("duscope_delete"), "{error:?}");
+        assert_untouched(&env, &root);
+        // With it: listed, sorted among the read-only tools, whose hints
+        // do not change, and marked for the client's prompt.
+        let (listed, _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle.clone(),
+            version.clone(),
+            |client, _| async move { (client.list_all_tools().await.unwrap(), client) },
+        );
+        let names: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
+        let mut expected: Vec<&str> = SHIPPED.to_vec();
+        expected.push("duscope_delete");
+        expected.sort_unstable();
+        assert_eq!(names, expected, "{version}");
+        for tool in &listed {
+            if tool.name == "duscope_delete" {
+                let hints = tool.annotations.as_ref().unwrap();
+                assert_eq!(hints.read_only_hint, Some(false));
+                assert_eq!(hints.destructive_hint, Some(true));
+                assert_eq!(hints.idempotent_hint, Some(false));
+                assert_eq!(hints.open_world_hint, Some(false));
+                let meta = &tool.meta.as_ref().unwrap().0;
+                assert_eq!(
+                    meta.get("anthropic/requiresUserInteraction"),
+                    Some(&json!(true))
+                );
+                let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../schemas/mcp/duscope_delete.input.json");
+                assert_eq!(
+                    Value::Object((*tool.input_schema).clone()),
+                    serde_json::from_str::<Value>(&fs::read_to_string(fixture).unwrap()).unwrap()
+                );
+            } else {
+                assert_tool(tool, 24_000);
+            }
+        }
+    }
+}
+
+#[test]
+fn p5_mcp_01_a_call_without_a_handle_is_refused() {
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (results, _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, no_items) = call(&client, "duscope_delete", &json!({"items": []})).await;
+                let (_, no_handle) = call(
+                    &client,
+                    "duscope_delete",
+                    &json!({"items": [{"expect_bytes": 4096}]}),
+                )
+                .await;
+                let (_, no_bytes) = call(
+                    &client,
+                    "duscope_delete",
+                    &json!({"items": [{"handle": "aGFuZGxl"}]}),
+                )
+                .await;
+                let (_, no_arguments) = call(&client, "duscope_delete", &json!({})).await;
+                ([no_items, no_handle, no_bytes, no_arguments], client)
+            },
+        );
+        for result in &results {
+            assert_eq!(error_code(result), "usage", "{result:?}");
+        }
+        assert_untouched(&env, &root);
+    }
+}
+
+#[test]
+fn p5_mcp_01_an_expired_or_forged_handle_is_refused() {
+    use duscope_core::handle::{Handle, HandlePayload, Key};
+    let env = TestEnv::new();
+    let root = delete_tree(&env);
+    let (good, frees) = explained(&env, &root.join("one.bin"));
+    let key = Key::open(&env.index_dir()).unwrap();
+    let payload = Handle::verify(&key, &good, duscope_core::query::clock::now()).unwrap();
+    let expired = Handle::issue(
+        &key,
+        &HandlePayload {
+            expires_at: 1,
+            ..payload
+        },
+    );
+    // The last character of the MAC, whose low bits may be padding, spared.
+    let mut forged = good.clone().into_bytes();
+    let at = forged.len() - 2;
+    forged[at] = if forged[at] == b'A' { b'B' } else { b'A' };
+    let forged = String::from_utf8(forged).unwrap();
+    for (lifecycle, version) in revisions() {
+        let (expired, forged) = (expired.clone(), forged.clone());
+        let ((late, wrong), _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, late) = call(
+                    &client,
+                    "duscope_delete",
+                    &json!({"items": [item(&expired, frees)], "dry_run": false}),
+                )
+                .await;
+                let (_, wrong) = call(
+                    &client,
+                    "duscope_delete",
+                    &json!({"items": [item(&forged, frees)], "dry_run": false}),
+                )
+                .await;
+                ((late, wrong), client)
+            },
+        );
+        assert_eq!(error_code(&late), "handle_expired", "{late:?}");
+        assert_eq!(error_code(&wrong), "handle_invalid", "{wrong:?}");
+    }
+    assert_untouched(&env, &root);
+}
+
+#[test]
+fn p5_mcp_01_a_path_outside_the_roots_is_refused() {
+    let env = TestEnv::new();
+    let base = env.work_dir().canonicalize().unwrap();
+    let root = base.join("served");
+    let inside = root.join("inside.bin");
+    let outside = base.join("outside.bin");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&inside, vec![4u8; 1_000]).unwrap();
+    fs::write(&outside, vec![5u8; 1_000]).unwrap();
+    let scanned = env
+        .cmd()
+        .args(["scan", "--save", "--json"])
+        .arg(&base)
+        .output()
+        .unwrap();
+    assert!(scanned.status.success(), "{scanned:?}");
+    // Handles the CLI issues with the same key: a path outside the server's
+    // roots, and one of the roots itself.
+    let (out_handle, _) = explained(&env, &outside);
+    let (root_handle, _) = explained(&env, &root);
+    for (lifecycle, version) in revisions() {
+        let (out_handle, root_handle) = (out_handle.clone(), root_handle.clone());
+        let ((out, top), _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, out) = call(
+                    &client,
+                    "duscope_delete",
+                    &json!({"items": [item(&out_handle, 1_000)], "dry_run": false}),
+                )
+                .await;
+                let (_, top) = call(
+                    &client,
+                    "duscope_delete",
+                    &json!({"items": [item(&root_handle, 1_000)], "dry_run": false}),
+                )
+                .await;
+                ((out, top), client)
+            },
+        );
+        assert_eq!(error_code(&out), "refused_path", "{out:?}");
+        assert_eq!(error_code(&top), "refused_path", "{top:?}");
+    }
+    assert!(inside.exists() && outside.exists() && root.is_dir());
+    assert!(
+        !env.xdg_data_home().join("Trash/files").exists(),
+        "something reached the Trash"
+    );
+}
+
+#[test]
+fn p5_mcp_01_dry_run_is_the_default_and_moves_nothing() {
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (handle, frees) = explained(&env, &root.join("one.bin"));
+        let items = json!([item(&handle, frees)]);
+        let args = |dry_run: Option<bool>| match dry_run {
+            None => json!({ "items": items }),
+            Some(flag) => json!({"items": items, "dry_run": flag}),
+        };
+        let (default_arguments, explicit_arguments) = (args(None), args(Some(true)));
+        let (results, transcript) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (first, default) = call(&client, "duscope_delete", &default_arguments).await;
+                let (second, explicit) = call(&client, "duscope_delete", &explicit_arguments).await;
+                ((first, second, default, explicit), client)
+            },
+        );
+        let (first, second, default, explicit) = results;
+        // Byte for byte, the verb's own `--json`, whichever way the
+        // default is reached.
+        let printed = cli_json(
+            &env,
+            &[
+                "clean".into(),
+                format!("--from={handle}").into(),
+                format!("--expect-item-bytes={frees}").into(),
+                "--dry-run".into(),
+            ],
+        );
+        for request in [&first, &second] {
+            let (_, line) = transcript.response(request).unwrap();
+            assert_eq!(structured_content(line), printed);
+        }
+        for result in [&default, &explicit] {
+            let value = envelope(result);
+            let plan = &value["result"]["plan"];
+            assert_eq!(plan["items"][0]["action"], "trash", "{value}");
+            assert_eq!(plan["items"][0]["outcome"], Value::Null, "{value}");
+            assert_eq!(plan["confirmation_required"], true, "{value}");
+            assert_eq!(value["result"]["trashed_count"], 0, "{value}");
+            assert_eq!(value["next"], json!([]), "{value}");
+            assert_eq!(value["query"]["yes"], false, "{value}");
+            assert!(
+                text(result).starts_with("Dry run: 1 item would"),
+                "{result:?}"
+            );
+        }
+        assert_untouched(&env, &root);
+    }
+}
+
+#[test]
+fn p5_mcp_01_an_expect_bytes_mismatch_refuses_the_item_and_moves_nothing() {
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (one, one_frees) = explained(&env, &root.join("one.bin"));
+        let (two, two_frees) = explained(&env, &root.join("dir"));
+        // The second off by far more than 1%, the first exact; a dry run
+        // and a real one alike.
+        let items = json!([item(&one, one_frees), item(&two, two_frees * 2 + 8192)]);
+        let (arguments, real) = (
+            json!({ "items": items }),
+            json!({"items": items, "dry_run": false}),
+        );
+        let ((dry, wet), _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, dry) = call(&client, "duscope_delete", &arguments).await;
+                let (_, wet) = call(&client, "duscope_delete", &real).await;
+                ((dry, wet), client)
+            },
+        );
+        for result in [&dry, &wet] {
+            assert_eq!(error_code(result), "expectation_mismatch", "{result:?}");
+            let value = result.structured_content.as_ref().unwrap();
+            let items = &value["result"]["plan"]["items"];
+            assert_eq!(items[0]["action"], "trash", "{value}");
+            assert_eq!(items[1]["action"], "refused", "{value}");
+            assert_eq!(items[1]["reason"], "expectation_mismatch", "{value}");
+            assert_eq!(value["result"]["trashed_count"], 0, "{value}");
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not within 1%"),
+                "{value}"
+            );
+        }
+        assert_untouched(&env, &root);
+    }
+}
+
+#[test]
+fn p5_mcp_01_a_real_call_past_its_deadline_before_it_acts_moves_nothing() {
+    // A deadline of 0 ms passes as the call starts, long before `clean` has
+    // made its plan: the call is answered `deadline_exceeded`, and `clean`,
+    // reaching its point of no return after that, moves nothing.
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (one, one_frees) = explained(&env, &root.join("one.bin"));
+        let (two, two_frees) = explained(&env, &root.join("dir"));
+        let arguments = json!({
+            "items": [item(&one, one_frees), item(&two, two_frees)],
+            "dry_run": false,
+        });
+        let ((stopped, next), transcript) = session(
+            spawn(
+                &env,
+                &roots(&root, &["--allow-delete", "--log-level", "debug"]),
+                &[("DUSCOPE_TEST_MCP_DEADLINE_MS", "0")],
+            ),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, stopped) = call(&client, "duscope_delete", &arguments).await;
+                // The next call runs once the first call's verb has returned.
+                let (_, next) = call(&client, "duscope_scans", &json!({})).await;
+                ((stopped, next), client)
+            },
+        );
+        assert_eq!(error_code(&stopped), "deadline_exceeded", "{stopped:?}");
+        assert_eq!(error_code(&next), "deadline_exceeded", "{next:?}");
+        assert!(
+            transcript
+                .stderr
+                .contains("the tool call was stopped before clean acted"),
+            "{}",
+            transcript.stderr
+        );
+        assert_untouched(&env, &root);
+    }
+}
+
+#[test]
+fn p5_mcp_01_a_real_call_queued_when_the_input_ends_moves_nothing() {
+    // The client writes a statement that keeps the worker busy until the
+    // sandbox's 5-second deadline, a real delete behind it, and closes the
+    // binary's input: the delete starts after the input has ended, when the
+    // client may have gone, so it moves nothing. Both are still answered.
+    // The lines are written here rather than through rmcp's client, which
+    // cannot close its output and go on reading.
+    let env = TestEnv::new();
+    let root = delete_tree(&env);
+    let (one, one_frees) = explained(&env, &root.join("one.bin"));
+    let (two, two_frees) = explained(&env, &root.join("dir"));
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let call = |id: u64, name: &str, arguments: Value| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"_meta": meta, "name": name, "arguments": arguments},
+        })
+    };
+    let input = format!(
+        "{}\n{}\n",
+        call(1, "duscope_query", json!({"sql": ENDLESS})),
+        call(
+            2,
+            "duscope_delete",
+            json!({
+                "items": [item(&one, one_frees), item(&two, two_frees)],
+                "dry_run": false,
+            })
+        ),
+    );
+    let stderr = env.root().join("server.log");
+    let mut child = env
+        .cmd()
+        .arg("mcp")
+        .args(roots(&root, &["--allow-delete", "--log-level", "debug"]))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(File::create(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    // Written and closed at once: the reader meets the end of the input long
+    // before the statement's 5 seconds are up.
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(input.as_bytes()).unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let log = fs::read_to_string(&stderr).unwrap();
+    assert!(out.status.success(), "{log}");
+    let answers: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(answers.len(), 2, "{answers:?}\n{log}");
+    assert_eq!(answers[0]["id"], 1);
+    assert_eq!(
+        answers[0]["result"]["structuredContent"]["error"]["code"], "sql_timeout",
+        "{}",
+        answers[0]
+    );
+    let deleted = &answers[1];
+    assert_eq!(deleted["id"], 2);
+    assert_eq!(deleted["result"]["isError"], true, "{deleted}");
+    let value = &deleted["result"]["structuredContent"];
+    assert_eq!(value["error"]["code"], "interrupted", "{deleted}\n{log}");
+    assert_eq!(value["result"]["trashed_count"], 0, "{value}");
+    assert!(
+        log.contains("the tool call was stopped before clean acted"),
+        "{log}"
+    );
+    assert_untouched(&env, &root);
+}
+
+/// Has rmcp's client, speaking `lifecycle`, move a file and a directory of a
+/// fresh tree to the test's own Trash, and checks what moved.
+#[cfg(target_os = "linux")]
+fn really_moves(lifecycle: ClientLifecycleMode, version: ProtocolVersion) {
+    let env = TestEnv::new();
+    let root = delete_tree(&env);
+    let file = root.join("one.bin");
+    let dir = root.join("dir");
+    let (file_handle, file_frees) = explained(&env, &file);
+    let (dir_handle, dir_frees) = explained(&env, &dir);
+    let arguments = json!({
+        "items": [item(&file_handle, file_frees), item(&dir_handle, dir_frees)],
+        "dry_run": false,
+    });
+    let (result, _) = session(
+        spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+        lifecycle,
+        version,
+        |client, _| async move {
+            let (_, result) = call(&client, "duscope_delete", &arguments).await;
+            (result, client)
+        },
+    );
+    let value = envelope(&result);
+    assert_eq!(value["query"]["permanent"], false, "{value}");
+    assert_eq!(value["result"]["plan"]["method"], "trash", "{value}");
+    assert_eq!(value["result"]["trashed_count"], 2, "{value}");
+    assert_eq!(value["result"]["freed_bytes"], 0, "{value}");
+    assert_eq!(value["result"]["deleted_count"], 0, "{value}");
+    let moved = text(&result);
+    assert!(moved.starts_with("Moved 2 items to the Trash"), "{moved}");
+    assert_eq!(value["warnings"][0]["code"], "index_untouched", "{value}");
+    // Only the two named items moved, each to the test's own Trash.
+    assert!(root.join("keep.bin").exists());
+    assert!(!file.exists() && !dir.exists());
+    let trash = env.xdg_data_home().join("Trash/files");
+    assert_eq!(fs::read(trash.join("one.bin")).unwrap(), vec![2u8; 4_000]);
+    assert_eq!(
+        fs::read(trash.join("dir/two.bin")).unwrap(),
+        vec![3u8; 5_000]
+    );
+    assert_eq!(
+        fs::read_dir(&trash).unwrap().count(),
+        2,
+        "only the two named"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn p5_mcp_01_linux_a_real_run_moves_only_the_named_items_to_the_trash() {
+    for (lifecycle, version) in revisions() {
+        really_moves(lifecycle, version);
+    }
+}
+
+// macOS: an item on the startup volume would reach the account's own
+// Trash, so the test environment refuses it (`DUSCOPE_TEST_TRASH`), and a
+// real run of the tool shows that refusal; a real move runs on a disk image,
+// as `clean`'s platform test does.
+
+#[cfg(target_os = "macos")]
+#[test]
+fn p5_mcp_01_macos_the_test_environment_moves_nothing_on_the_startup_volume() {
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (handle, frees) = explained(&env, &root.join("one.bin"));
+        let (result, _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, result) = call(
+                    &client,
+                    "duscope_delete",
+                    &json!({"items": [item(&handle, frees)], "dry_run": false}),
+                )
+                .await;
+                (result, client)
+            },
+        );
+        assert_eq!(error_code(&result), "trash_unavailable", "{result:?}");
+        let value = result.structured_content.as_ref().unwrap();
+        assert_eq!(
+            value["result"]["plan"]["items"][0]["outcome"], "failed",
+            "{value}"
+        );
+        assert_eq!(value["result"]["trashed_count"], 0, "{value}");
+        assert_untouched(&env, &root);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_mcp_01_macos_a_real_run_on_an_image_moves_only_the_named_items_to_the_trash() {
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    let work = env.tmp_dir().canonicalize().unwrap().join("image");
+    let mount = work.join("mnt");
+    fs::create_dir_all(&mount).unwrap();
+    let image = work.join("image.dmg");
+    env.hdiutil(&[
+        &"create",
+        &"-ov",
+        &"-size",
+        &"16m",
+        &"-fs",
+        &"APFS",
+        &"-volname",
+        &"DUSCOPEMCP",
+        &image,
+    ]);
+    env.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &mount, &image]);
+    let detach = Detach(&env, mount.clone());
+    let (file, dir) = (mount.join("a.bin"), mount.join("dir"));
+    let keep = mount.join("keep.bin");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(&file, vec![7u8; 3_000]).unwrap();
+    fs::write(&keep, vec![1u8; 3_000]).unwrap();
+    fs::write(dir.join("b.bin"), vec![9u8; 5_000]).unwrap();
+    let scanned = env
+        .cmd()
+        .args(["scan", "--save", "--json"])
+        .arg(&mount)
+        .output()
+        .unwrap();
+    assert!(scanned.status.success(), "{scanned:?}");
+    let (file_handle, file_frees) = explained(&env, &file);
+    let (dir_handle, dir_frees) = explained(&env, &dir);
+    let arguments = json!({
+        "items": [item(&file_handle, file_frees), item(&dir_handle, dir_frees)],
+        "dry_run": false,
+    });
+    let (result, _) = session(
+        spawn(&env, &roots(&mount, &["--allow-delete"]), &[]),
+        discover(),
+        ProtocolVersion::LATEST,
+        |client, _| async move {
+            let (_, result) = call(&client, "duscope_delete", &arguments).await;
+            (result, client)
+        },
+    );
+    let value = envelope(&result);
+    assert_eq!(value["result"]["trashed_count"], 2, "{value}");
+    assert!(!file.exists() && !dir.exists() && keep.exists());
+    // The volume's own Trash, this user's directory in it.
+    let uid = String::from_utf8(
+        std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let trash = mount.join(".Trashes").join(uid.trim());
+    assert_eq!(fs::read(trash.join("a.bin")).unwrap(), vec![7u8; 3_000]);
+    assert_eq!(fs::read(trash.join("dir/b.bin")).unwrap(), vec![9u8; 5_000]);
+    drop(detach);
+}
+
+/// Detaches the disk image mounted at its path when dropped.
+#[cfg(target_os = "macos")]
+struct Detach<'a>(&'a TestEnv, PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Detach<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .command("hdiutil")
+            .args(["detach", "-force"])
+            .arg(&self.1)
+            .output();
+    }
+}
+
+#[test]
+fn p5_mcp_01_an_entry_no_saved_scan_holds_is_refused_whatever_its_expect_bytes() {
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (one, one_frees) = explained(&env, &root.join("one.bin"));
+        // A directory made since the scan: explain knows no freeable bytes
+        // for it, and 0, the figure a client might send for that, meets
+        // nothing.
+        let fresh = root.join("made-since");
+        fs::create_dir(&fresh).unwrap();
+        fs::write(fresh.join("big.bin"), vec![6u8; 200_000]).unwrap();
+        let out = env
+            .cmd()
+            .args(["explain", "--json"])
+            .arg(&fresh)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let facts: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(facts["result"]["freeable_now_bytes"], Value::Null);
+        let fresh_handle = facts["result"]["handle"].as_str().unwrap().to_owned();
+        let items = json!([item(&one, one_frees), item(&fresh_handle, 0)]);
+        let (arguments, real) = (
+            json!({ "items": items }),
+            json!({"items": items, "dry_run": false}),
+        );
+        let ((dry, wet), _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, dry) = call(&client, "duscope_delete", &arguments).await;
+                let (_, wet) = call(&client, "duscope_delete", &real).await;
+                ((dry, wet), client)
+            },
+        );
+        for result in [&dry, &wet] {
+            assert_eq!(error_code(result), "expectation_mismatch", "{result:?}");
+            let value = result.structured_content.as_ref().unwrap();
+            let items = &value["result"]["plan"]["items"];
+            assert_eq!(items[0]["action"], "trash", "{value}");
+            assert_eq!(items[1]["action"], "refused", "{value}");
+            assert_eq!(items[1]["reason"], "expectation_mismatch", "{value}");
+            assert_eq!(value["result"]["trashed_count"], 0, "{value}");
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("the saved scan does not hold"),
+                "{value}"
+            );
+        }
+        assert_untouched(&env, &root);
+        assert!(fresh.join("big.bin").exists());
+    }
+}
+
+#[test]
+fn p5_mcp_01_an_item_whose_folder_became_a_link_out_of_the_roots_is_refused() {
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let base = env.work_dir().canonicalize().unwrap();
+        let root = base.join("served");
+        let victim = root.join("sub/victim.bin");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::create_dir_all(base.join("elsewhere")).unwrap();
+        fs::write(&victim, vec![8u8; 2_000]).unwrap();
+        let scanned = env
+            .cmd()
+            .args(["scan", "--save", "--json"])
+            .arg(&base)
+            .output()
+            .unwrap();
+        assert!(scanned.status.success(), "{scanned:?}");
+        let (handle, frees) = explained(&env, &victim);
+        // After the handle was issued, its folder moved out of the roots and
+        // a link to it took its place: the handle's path reaches the same
+        // entry, which now lies outside them.
+        let moved = base.join("elsewhere/sub");
+        fs::rename(root.join("sub"), &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, root.join("sub")).unwrap();
+        let (refused, _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, refused) = call(
+                    &client,
+                    "duscope_delete",
+                    &json!({"items": [item(&handle, frees)]}),
+                )
+                .await;
+                (refused, client)
+            },
+        );
+        assert_eq!(error_code(&refused), "refused_path", "{refused:?}");
+        let message = refused.structured_content.as_ref().unwrap()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            message.contains(&format!(
+                "resolves to {}",
+                moved.join("victim.bin").display()
+            )),
+            "{message}"
+        );
+        assert!(moved.join("victim.bin").exists());
+    }
+}

@@ -453,3 +453,57 @@ fn p5_core_03_a_directory_whose_mount_cannot_be_told_is_refused() {
         error.message
     );
 }
+
+#[test]
+fn p5_mcp_01_an_item_that_frees_other_than_its_figure_is_refused() {
+    let env = TestEnv::new();
+    let (root, index) = saved(&env);
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let plan_of = || {
+        clean_plan(
+            &[item(root.join("dir/b.bin")), item(root.join("link"))],
+            &index,
+            &q,
+            Method::Trash,
+        )
+        .unwrap()
+    };
+    let mut plan = plan_of();
+    let frees = plan.plan.items[0].frees_bytes.unwrap();
+    assert!(frees > 0);
+    let (allocated, total) = (plan.plan.total_allocated_bytes, plan.plan.total_frees_bytes);
+    // Within 1%, the item stays, and one refused already keeps its reason.
+    plan.refuse_unexpected(&[frees, 1234]);
+    assert_eq!(plan.plan.items[0].action, "trash");
+    assert_eq!(plan.plan.items[1].reason, Some("symlink"));
+    assert_eq!(plan.plan.total_frees_bytes, total);
+    assert_eq!(plan.plan.total_allocated_bytes, allocated);
+    // Off by more than 1%, it is refused, its figures kept for the reader,
+    // and the plan counts what is left.
+    let mut plan = plan_of();
+    plan.refuse_unexpected(&[frees * 2, 1234]);
+    assert_eq!(plan.plan.items[0].action, "refused");
+    assert_eq!(plan.plan.items[0].reason, Some(super::UNEXPECTED));
+    assert_eq!(plan.plan.items[0].frees_bytes, Some(frees));
+    assert_eq!(plan.plan.items[1].reason, Some("symlink"));
+    assert_eq!(plan.refused_count(), 2);
+    assert_eq!(
+        (plan.plan.total_allocated_bytes, plan.plan.total_frees_bytes),
+        (0, 0)
+    );
+    // A size no saved scan knows meets no figure, 0 included: a directory
+    // made since the scan is refused whatever it holds.
+    let fresh = root.join("made-since");
+    fs::create_dir(&fresh).unwrap();
+    fs::write(fresh.join("big.bin"), vec![7u8; 64 * 1024]).unwrap();
+    for expected in [0, 1, 64 * 1024] {
+        let mut plan = clean_plan(&[item(fresh.clone())], &index, &q, Method::Trash).unwrap();
+        assert_eq!(plan.plan.items[0].frees_bytes, None);
+        assert_eq!(plan.plan.items[0].action, "trash");
+        plan.refuse_unexpected(&[expected]);
+        assert_eq!(plan.plan.items[0].action, "refused", "{expected}");
+        assert_eq!(plan.plan.items[0].reason, Some(super::UNEXPECTED));
+        assert_eq!(plan.acting_count(), 0);
+    }
+}

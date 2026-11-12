@@ -833,3 +833,221 @@ fn p4_core_01_after_a_clean_an_import_is_renewed_by_a_new_scan() {
         )
     );
 }
+
+// P5-MCP-01: the two flags `duscope_delete` runs `clean` with, never typed
+// by a person (the tool's own tests are in `crates/duscope-mcp`).
+
+/// `explain --json` of `path`: its handle and `freeable_now_bytes`.
+fn handle(env: &TestEnv, path: &Path) -> (String, u64) {
+    let facts = ok(&run(env, &["explain", s(path), "--json"]));
+    (
+        facts["result"]["handle"].as_str().unwrap().to_owned(),
+        facts["result"]["freeable_now_bytes"].as_u64().unwrap(),
+    )
+}
+
+#[test]
+fn p5_mcp_01_a_dry_run_answers_the_plan_with_no_confirmation_left_open() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    let file = root.join("a.bin");
+    let (token, frees) = handle(&env, &file);
+    let expect = format!("--expect-item-bytes={frees}");
+    let value = ok(&run(
+        &env,
+        &["clean", "--from", &token, &expect, "--dry-run", "--json"],
+    ));
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["error"], Value::Null);
+    assert_eq!(value["next"], serde_json::json!([]));
+    assert_eq!(value["result"]["plan"]["confirmation_required"], true);
+    assert_eq!(value["result"]["trashed_count"], 0);
+    assert!(file.exists());
+    // Without --expect-item-bytes too, and refused all the same with
+    // --yes beside it, which it cannot be.
+    assert_eq!(
+        run(&env, &["clean", "--from", &token, "--dry-run", "--json"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&env, &["clean", "--from", &token, "--dry-run", "--yes"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert!(file.exists());
+}
+
+#[test]
+fn p5_mcp_01_an_item_off_its_figure_is_refused_and_nothing_moves() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    let (file, dir) = (root.join("a.bin"), root.join("dir"));
+    let (token_a, frees_a) = handle(&env, &file);
+    let (token_b, frees_b) = handle(&env, &dir);
+    let wrong = format!("--expect-item-bytes={}", frees_b * 3 + 8192);
+    let right = format!("--expect-item-bytes={frees_a}");
+    for mode in [["--dry-run", "--json"], ["--yes", "--json"]] {
+        let out = run(
+            &env,
+            &[
+                "clean", "--from", &token_a, "--from", &token_b, &right, &wrong, mode[0], mode[1],
+            ],
+        );
+        let value = failed(&out, 1, "expectation_mismatch");
+        let items = &value["result"]["plan"]["items"];
+        assert_eq!(items[0]["action"], "trash", "{value}");
+        assert_eq!(items[1]["action"], "refused", "{value}");
+        assert_eq!(items[1]["reason"], "expectation_mismatch", "{value}");
+        assert_eq!(value["result"]["plan"]["confirmation_required"], false);
+        assert_eq!(value["result"]["trashed_count"], 0);
+        assert!(file.exists() && dir.exists());
+    }
+    // A refused item of another kind is reported first, as the plan says.
+    let link = root.join("link");
+    let out = run(
+        &env,
+        &[
+            "clean",
+            "--from",
+            &token_a,
+            s(&link),
+            "--expect-bytes=1",
+            "--json",
+        ],
+    );
+    assert_eq!(json(&out)["error"]["code"], "refused_path");
+    // One figure per handle, or the command line is wrong.
+    let out = run(
+        &env,
+        &[
+            "clean",
+            "--from",
+            &token_a,
+            "--from",
+            &token_b,
+            "--expect-item-bytes=1",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(json(&out)["error"]["code"], "usage");
+    assert_eq!(
+        run(&env, &["clean", "--expect-item-bytes=1"]).status.code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn p5_mcp_01_an_item_whose_bytes_no_scan_knows_is_refused_whatever_its_figure() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    let file = root.join("a.bin");
+    let (token_a, frees_a) = handle(&env, &file);
+    // A directory made since the scan: what it frees is not known.
+    let fresh = root.join("made-since");
+    fs::create_dir(&fresh).unwrap();
+    fs::write(fresh.join("big.bin"), vec![5u8; 200_000]).unwrap();
+    let facts = ok(&run(&env, &["explain", s(&fresh), "--json"]));
+    assert_eq!(
+        facts["result"]["freeable_now_bytes"],
+        Value::Null,
+        "{facts}"
+    );
+    let token_d = facts["result"]["handle"].as_str().unwrap().to_owned();
+    let right = format!("--expect-item-bytes={frees_a}");
+    for figure in ["0", "1", "200000"] {
+        let unknown = format!("--expect-item-bytes={figure}");
+        for mode in ["--dry-run", "--yes"] {
+            let out = run(
+                &env,
+                &[
+                    "clean", "--from", &token_a, &right, "--from", &token_d, &unknown, mode,
+                    "--json",
+                ],
+            );
+            let value = failed(&out, 1, "expectation_mismatch");
+            let items = &value["result"]["plan"]["items"];
+            assert_eq!(items[0]["action"], "trash", "{value}");
+            assert_eq!(items[1]["action"], "refused", "{value}");
+            assert_eq!(items[1]["reason"], "expectation_mismatch", "{value}");
+            assert_eq!(items[1]["frees_bytes"], Value::Null, "{value}");
+            assert_eq!(value["result"]["trashed_count"], 0, "{value}");
+            let message = value["error"]["message"].as_str().unwrap();
+            assert!(
+                message.contains("the saved scan does not hold") && message.contains("made-since"),
+                "{message}"
+            );
+            assert!(
+                value["error"]["hint"].as_str().unwrap().contains("Rescan"),
+                "{value}"
+            );
+            assert!(file.exists() && fresh.join("big.bin").exists());
+        }
+    }
+}
+
+/// The message of the first item in the plan that failed.
+fn first_failure(value: &Value) -> &str {
+    value["result"]["plan"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|item| item["error"]["message"].as_str())
+        .unwrap_or_else(|| panic!("no item failed: {value}"))
+}
+
+#[test]
+fn p5_mcp_01_a_run_that_acted_on_some_items_says_how_many_of_how_many() {
+    // An item in a directory that cannot be written fails, the others go:
+    // the run's message, all an MCP client may show, says how many of the
+    // items went before the first failure.
+    let env = TestEnv::new();
+    let root = tree(&env);
+    for name in ["e.bin", "f.bin"] {
+        fs::write(root.join(name), vec![4u8; 2000]).unwrap();
+    }
+    fs::write(root.join("dir/c.bin"), vec![6u8; 2000]).unwrap();
+    save(&env, &root);
+    let dir = root.join("dir");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let delete = |items: &[&str]| {
+        let mut args = vec!["clean"];
+        args.extend_from_slice(items);
+        args.extend(["--permanent", "--yes", "--json"]);
+        run(&env, &args)
+    };
+    let gone = [root.join("a.bin"), root.join("e.bin"), root.join("f.bin")];
+    let kept = [dir.join("b.bin"), dir.join("c.bin")];
+    let one = delete(&[s(&gone[0]), s(&kept[0])]);
+    let two = delete(&[s(&gone[1]), s(&gone[2]), s(&kept[0]), s(&kept[1])]);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let value = json(&one);
+    assert_eq!(one.status.code(), Some(1), "{value}");
+    assert_eq!(value["result"]["deleted_count"], 1, "{value}");
+    let message = value["error"]["message"].as_str().unwrap();
+    let item = first_failure(&value);
+    assert_eq!(
+        message,
+        format!("1 of the 2 items was deleted; one was not: {item}")
+    );
+    assert!(!gone[0].exists() && kept[0].exists());
+
+    let value = json(&two);
+    assert_eq!(two.status.code(), Some(1), "{value}");
+    assert_eq!(value["result"]["deleted_count"], 2, "{value}");
+    let message = value["error"]["message"].as_str().unwrap();
+    let item = first_failure(&value);
+    assert_eq!(
+        message,
+        format!("2 of the 4 items were deleted; 2 were not, the first: {item}")
+    );
+    assert!(gone.iter().all(|path| !path.exists()));
+    assert!(kept.iter().all(|path| path.exists()));
+}
