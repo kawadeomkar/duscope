@@ -17,7 +17,7 @@ pub const SCHEMA_VERSION: &str = "0.2";
 
 /// The warning codes of the conventions appendix, the only values of
 /// [`Warning::code`].
-pub const WARNING_CODES: [&str; 16] = [
+pub const WARNING_CODES: [&str; 17] = [
     "partial_read",
     "mounts_excluded",
     "stale_index",
@@ -34,6 +34,7 @@ pub const WARNING_CODES: [&str; 16] = [
     "deprecated_flag",
     "tz_unavailable",
     "changed_since_scan",
+    "excluded_truncated",
 ];
 
 /// The error codes of the conventions appendix, the only values of
@@ -289,15 +290,25 @@ pub struct ScanBlock {
     /// reads the whole tree.
     #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::FALLBACK_REASONS)))))]
     pub fallback_reason: Option<&'static str>,
-    /// Every volume the scan met, entered or not.
+    /// The volumes the scan met within the path read, entered or not: the
+    /// one the path lies on, and those mounted at or under it; at the scan's
+    /// root, every one.
     pub volumes: Vec<VolumeEntry>,
     /// Files left out and directories not entered by the excludes
     /// (`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`,
-    /// `--skip-containers`). An incremental rescan counts the files as the
-    /// scan it renews counted them.
+    /// `--skip-containers`), in the whole scan. An incremental rescan counts
+    /// the files as the scan it renews counted them.
     pub excluded_count: u64,
-    /// Each directory the excludes kept the scan out of, path bytewise.
+    /// The directories the excludes kept the scan out of within the path
+    /// read (at the scan's root, every one), path bytewise. A list verb's
+    /// envelope names the first 20 of them in the scan's order (pre-order,
+    /// siblings bytewise), and the warning `excluded_truncated` counts the
+    /// others; `summary` and `explain` name every one.
     pub excluded: Vec<ExcludedEntry>,
+    /// The directories within the path read that `excluded` leaves out:
+    /// the count `excluded_truncated` reports.
+    #[serde(skip)]
+    pub excluded_unlisted: u64,
 }
 
 /// A directory the scan listed but did not enter because of an exclude.

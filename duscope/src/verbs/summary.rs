@@ -24,7 +24,8 @@ use crate::out::{Output, thousands};
 pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
     let source = source::source(&args.walk, &args.index, index_dir)?;
     let size = scan::size_kind(&args.walk);
-    let block = source.scan_block(&args.walk, size);
+    // Every excluded directory under the path: summary lists them all.
+    let block = source.scan_block(&args.walk, size, None);
     // A mount point the scan did not enter starts nothing.
     let unentered: Vec<u64> = block
         .volumes

@@ -52,7 +52,8 @@ use duscope_core::clean::{
     CleanItem, CleanOutcome, Method, Plan, UNEXPECTED, clean_execute, clean_plan_until,
 };
 use duscope_core::envelope::{
-    CleanEnvelope, CleanQuery, CleanResult, ErrorObject, SCHEMA_VERSION, ScanBlock, Tool, Warning,
+    CleanEnvelope, CleanQuery, CleanResult, ErrorObject, PlanItem, SCHEMA_VERSION, ScanBlock, Tool,
+    Warning,
 };
 use duscope_core::handle::{Handle, Key};
 use duscope_core::index::Index;
@@ -60,7 +61,9 @@ use duscope_core::query::{ExplainQuery, ScanSelector, SizeKind, TreeView, clock}
 
 use super::explain::unresolved_last;
 use super::next::{self, Hints};
-use super::source::{Lookup, core_failure, saved_block, scanned, stale_index};
+use super::source::{
+    LISTED_EXCLUDED, Lookup, core_failure, excluded_truncated, read_block, scanned, stale_index,
+};
 use super::treemap::shell_quote;
 use super::{Exit, Failure, scan};
 use crate::cli::CleanArgs;
@@ -116,13 +119,14 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     let mismatch = args.expect_bytes.filter(|&n| !plan.meets(n));
     let blocked = (refused > 0 && !args.skip_refused) || mismatch.is_some();
     let moving = plan.acting_count();
-    let scan_block = block(&resolved.index);
+    let scan_block = block(&resolved.index, &plan.plan.items);
     let mut warnings: Vec<Warning> = resolved
         .stale
         .then(|| stale_index(&resolved.index, &lookup.max_age))
         .into_iter()
         .chain(changed_since_scan(&resolved.index, plan.changed_count()))
         .chain(unread_items(plan.unread_count()))
+        .chain(excluded_truncated(&scan_block, None))
         .collect();
 
     // On a terminal, without --yes, the plan is shown and `yes` asked for
@@ -286,14 +290,23 @@ fn no_scan(first: &Path) -> Failure {
     ))
 }
 
-/// The scan block of the saved scan the plan's sizes come from.
-fn block(index: &duscope_core::index::Index) -> ScanBlock {
+/// The scan block of the saved scan the plan's sizes come from, read at
+/// the plan's `items` it holds: the excluded directories and volumes within
+/// them, the first excluded directories as a list names them.
+fn block(index: &Index, items: &[PlanItem]) -> ScanBlock {
     let size = if index.meta().size_kind == "apparent" {
         SizeKind::Apparent
     } else {
         SizeKind::Allocated
     };
-    saved_block(index, size)
+    let held: Vec<u32> = items
+        .iter()
+        .filter_map(|item| {
+            let rel = index.below_root(Path::new(OsStr::from_bytes(&item.path_bytes)))?;
+            index.lookup(rel)
+        })
+        .collect();
+    read_block(index, &held, size, Some(LISTED_EXCLUDED))
 }
 
 /// Why the run did not do all it was asked, if it did not: a refused item

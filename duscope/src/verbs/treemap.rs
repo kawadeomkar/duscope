@@ -345,7 +345,12 @@ pub fn draw(
         &classes,
     );
     let view = scanned.view();
-    let block = scan::scan_block(scanned, &args.walk, size);
+    let block = scan::scan_block(
+        scanned,
+        &args.walk,
+        size,
+        Some(super::source::LISTED_EXCLUDED),
+    );
     // The next commands name the tree as it was given, unless it is the
     // current directory.
     let here = std::env::current_dir()

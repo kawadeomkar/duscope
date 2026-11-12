@@ -8,13 +8,13 @@
 //! outright, `--no-scan` fails where no saved scan answers, and `--no-save`
 //! keeps a scan the verb runs from being saved.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use duscope_core::CoreError;
-use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
+use duscope_core::envelope::{Envelope, ExcludedEntry, ScanBlock, VolumeEntry, Warning};
 use duscope_core::index::{Index, ScanId, index_path};
 use duscope_core::query::{
     self, Resolved, ScanQuery, ScanSelector, SizeKind, Subtree, TreeView, clock, resolve_scan,
@@ -31,6 +31,11 @@ use crate::out::{Output, iso8601, thousands};
 
 /// `--max-age` when neither the flag nor the configuration sets it.
 const DEFAULT_MAX_AGE: &str = "7d";
+
+/// The excluded directories a list verb's envelope names at most: the
+/// first, in the scan's order, of those within the path it read. The
+/// warning `excluded_truncated` counts the others (decision E).
+pub const LISTED_EXCLUDED: usize = 20;
 
 /// Where a verb's rows come from.
 #[derive(Debug)]
@@ -447,16 +452,19 @@ impl Source {
         }
     }
 
-    /// The scan block: the scan's root, options, times and totals, and its
-    /// volumes; a saved scan's id, or the id a fresh one is saved under.
-    pub fn scan_block(&self, walk: &WalkArgs, size: SizeKind) -> ScanBlock {
+    /// The scan block: the scan's root, options, times and totals; its
+    /// volumes and excluded directories within the path read, the first
+    /// `listed` excluded directories when set (a list verb's,
+    /// [`LISTED_EXCLUDED`]); a saved scan's id, or the id a fresh one is
+    /// saved under.
+    pub fn scan_block(&self, walk: &WalkArgs, size: SizeKind, listed: Option<usize>) -> ScanBlock {
         match self {
             Source::Fresh { scanned, save } => {
-                let mut block = scan::scan_block(scanned, walk, size);
+                let mut block = scan::scan_block(scanned, walk, size, listed);
                 block.id = save.as_ref().map(|(id, _)| id.to_string());
                 block
             }
-            Source::Saved { index, .. } => saved_block(index, size),
+            Source::Saved { index, base, .. } => read_block(index, &[*base], size, listed),
         }
     }
 
@@ -664,19 +672,63 @@ fn scratch_dir(verb: &str) -> Result<PathBuf, Failure> {
     }
 }
 
-/// The scan block of a saved scan.
+/// The scan block of a saved scan read whole: every volume, every
+/// excluded directory.
 pub(super) fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
+    read_block(index, &[0], size, None)
+}
+
+/// The scan block of a saved scan read at `bases`, the entries its answer
+/// is about: the volumes and excluded directories within them (every one
+/// where a base is the root). `listed` caps the excluded directories at the
+/// first in the scan's order (its ids: pre-order, siblings bytewise) before
+/// any path is spelled, and the block counts the others in
+/// `excluded_unlisted`.
+pub(super) fn read_block(
+    index: &Index,
+    bases: &[u32],
+    size: SizeKind,
+    listed: Option<usize>,
+) -> ScanBlock {
     let meta = index.meta();
     let root = index.node(0);
     let options: serde_json::Value = serde_json::from_str(&meta.options).unwrap_or_default();
     let volumes = index.volumes();
     let root_path = index.root_path();
-    let mut excluded: Vec<(Vec<u8>, &'static str)> = index
+    let whole = bases.contains(&0);
+    let ranges: Vec<(u32, u32)> = bases
+        .iter()
+        .map(|&base| (base, index.node(base).last_id))
+        .collect();
+    let within: Vec<(u32, &'static str)> = index
         .excluded()
         .into_iter()
-        .map(|(id, reason)| (query::abs_path(index, id), reason))
+        .filter(|(id, _)| {
+            whole
+                || ranges
+                    .iter()
+                    .any(|&(first, last)| (first..=last).contains(id))
+        })
+        .collect();
+    let shown = listed.map_or(within.len(), |cap| cap.min(within.len()));
+    let mut excluded: Vec<(Vec<u8>, &'static str)> = within[..shown]
+        .iter()
+        .map(|&(id, reason)| (query::abs_path(index, id), reason))
         .collect();
     excluded.sort();
+    let mounts: Vec<&Path> = volumes
+        .iter()
+        .map(|v| Path::new(OsStr::from_bytes(&v.mount_point)))
+        .collect();
+    let read_at: Vec<PathBuf> = if whole {
+        Vec::new()
+    } else {
+        bases
+            .iter()
+            .map(|&base| PathBuf::from(OsString::from_vec(query::abs_path(index, base))))
+            .collect()
+    };
+    let kept = |i: usize| whole || read_at.iter().any(|at| volume_within(&mounts, i, at));
     ScanBlock {
         id: Some(meta.scan_id.to_string()),
         root: root_path.to_string_lossy().into_owned(),
@@ -705,7 +757,9 @@ pub(super) fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
         fallback_reason: None,
         volumes: volumes
             .iter()
-            .map(|v| VolumeEntry {
+            .enumerate()
+            .filter(|&(i, _)| kept(i))
+            .map(|(_, v)| VolumeEntry {
                 mount_point: lossy(&v.mount_point),
                 fs_type: v.fs_type.clone(),
                 entered: v.entered,
@@ -725,6 +779,84 @@ pub(super) fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
                 reason,
             })
             .collect(),
+        excluded_unlisted: (within.len() - shown) as u64,
+    }
+}
+
+/// Whether volume `i` of a scan's volumes, mounted at `mounts` (the root's
+/// first, as the walk met them), lies within the path `at`: mounted at or
+/// under it, or the volume `at` is on. That is the deepest of the volumes
+/// the walk crossed whose mount point is `at` or above it, else the root's:
+/// a path on the root's volume lies on it even where its mount point is not
+/// on the path, as macOS's Data volume (`/System/Volumes/Data`) holds
+/// `/Users` through a firmlink.
+fn volume_within(mounts: &[&Path], i: usize, at: &Path) -> bool {
+    if mounts[i].starts_with(at) {
+        return true;
+    }
+    let on = mounts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, mount)| at.starts_with(mount))
+        .max_by_key(|(_, mount)| mount.as_os_str().len())
+        .map_or(0, |(j, _)| j);
+    on == i
+}
+
+/// `excluded_truncated`, when `block`'s `excluded` leaves directories out:
+/// how many, and the `summary` that names every one, of the saved scan
+/// where it has an id. `path` is the path read, `None` for several (the
+/// items of `clean`).
+pub fn excluded_truncated(block: &ScanBlock, path: Option<&str>) -> Option<Warning> {
+    let unlisted = block.excluded_unlisted;
+    if unlisted == 0 {
+        return None;
+    }
+    let listed = block.excluded.len();
+    let hint = match (&block.id, path) {
+        (Some(id), Some(path)) => {
+            format!(
+                "Run duscope summary --scan {id} {} --json to list every one",
+                shell_quote(path)
+            )
+        }
+        (Some(id), None) => {
+            format!("Run duscope summary --scan {id} --json on each path to list every one")
+        }
+        (None, Some(path)) => format!(
+            "Run duscope summary {} --json with the same excludes to list every one",
+            shell_quote(path)
+        ),
+        (None, None) => {
+            "Run duscope summary --json on each path with the same excludes to list every one"
+                .to_owned()
+        }
+    };
+    Some(Warning {
+        code: "excluded_truncated",
+        message: format!(
+            "scan.excluded names the first {listed} of the {} directories the excludes kept \
+             the scan out of under the path, and leaves {unlisted} out",
+            listed as u64 + unlisted
+        ),
+        count: Some(unlisted),
+        hint: Some(hint),
+    })
+}
+
+/// Names `id` in `envelope`, the rows of a scan run for the verb that it
+/// saves once they are out (`scan --save`, `import`, `rescan`): `scan.id`,
+/// and the hint of `excluded_truncated`, which names the scan to read.
+pub fn saved_as<T>(envelope: &mut Envelope<T>, id: String) {
+    envelope.scan.id = Some(id);
+    let renewed = excluded_truncated(&envelope.scan, Some(&envelope.query.path));
+    for warning in &mut envelope.warnings {
+        if warning.code == "excluded_truncated"
+            && let Some(renewed) = &renewed
+        {
+            warning.clone_from(renewed);
+        }
     }
 }
 
@@ -809,5 +941,48 @@ pub fn core_failure(error: CoreError) -> Failure {
             Failure::new(Exit::Runtime, "untrusted_index", error.to_string()).hint(hint)
         }
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::volume_within;
+
+    /// The volumes of `mounts` within `at`, by mount point.
+    fn within<'m>(mounts: &[&'m str], at: &str) -> Vec<&'m str> {
+        let paths: Vec<&Path> = mounts.iter().map(Path::new).collect();
+        (0..mounts.len())
+            .filter(|&i| volume_within(&paths, i, Path::new(at)))
+            .map(|i| mounts[i])
+            .collect()
+    }
+
+    #[test]
+    fn p5_cli_02_a_path_keeps_the_volume_it_lies_on_and_those_under_it() {
+        // Linux: the root's volume is mounted above the root.
+        let linux = ["/", "/home", "/home/u/img", "/srv"];
+        assert_eq!(within(&linux, "/home/u"), ["/home", "/home/u/img"]);
+        assert_eq!(within(&linux, "/home/u/img"), ["/home/u/img"]);
+        assert_eq!(within(&linux, "/home/u/img/a"), ["/home/u/img"]);
+        assert_eq!(within(&linux, "/var/x"), ["/"]);
+        // A mount point named by its prefix's sibling is not under it.
+        assert_eq!(within(&["/", "/home2"], "/home"), ["/"]);
+        // macOS: the root's volume is the Data volume, whose mount point is
+        // not on the path to anything it holds through a firmlink.
+        let macos = ["/System/Volumes/Data", "/private/tmp/x/img"];
+        assert_eq!(
+            within(&macos, "/private/tmp/x/sub"),
+            ["/System/Volumes/Data"]
+        );
+        assert_eq!(
+            within(&macos, "/private/tmp/x"),
+            ["/System/Volumes/Data", "/private/tmp/x/img"]
+        );
+        assert_eq!(
+            within(&macos, "/private/tmp/x/img/d"),
+            ["/private/tmp/x/img"]
+        );
     }
 }

@@ -385,7 +385,7 @@ fn viewer(
 ) -> Result<Next, Failure> {
     let (walk, look, output, size) = (shared.walk, shared.look, shared.output, shared.size);
     let source = &shown.source;
-    let block = source.scan_block(walk, size);
+    let block = source.scan_block(walk, size, Some(source::LISTED_EXCLUDED));
     let summary = source.footer(&block, output);
     let warnings = source.warnings(walk);
     let warning = treemap::frame_warning(&warnings);

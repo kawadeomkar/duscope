@@ -29,7 +29,7 @@ use duscope_walk::{ScanEvent, Skip, WalkOptions};
 use super::next;
 use super::query::top_envelope;
 use super::scan::{self, Scanned};
-use super::source::{Source, core_failure, scanned};
+use super::source::{Source, core_failure, saved_as, scanned};
 use super::{Exit, Failure};
 use crate::cli::{AttrsArg, RescanArgs, SizeKind, WalkArgs};
 use crate::out::{Output, thousands};
@@ -96,7 +96,7 @@ pub fn run(args: &RescanArgs, index_dir: Option<&Path>, output: &Output) -> Resu
     };
     let (mut envelope, footer, fresh) =
         top_envelope(fresh, &walk, None, "rescan", false, true, None, output)?;
-    envelope.scan.id = Some(id.to_string());
+    saved_as(&mut envelope, id.to_string());
     let file = index_path(&dir, &id);
     envelope.next = next::list(&envelope, Some(&file), None);
     let how = how(read_again, envelope.scan.dir_count, took, fallback);
