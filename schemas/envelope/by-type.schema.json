@@ -475,7 +475,8 @@
                 "index_untouched",
                 "spilled",
                 "deprecated_flag",
-                "tz_unavailable"
+                "tz_unavailable",
+                "changed_since_scan"
               ]
             },
             {

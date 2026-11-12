@@ -3,11 +3,14 @@
 //! item says, the freed tiles and the reload; and on a small tree on disk,
 //! saved: a mark planned at its own path and never where a folder that
 //! has become a link leads, the question asked once, a paste that is not
-//! keys. Nothing here moves a file:
+//! keys. P5-CORE-04: what the pane says of an item that changed since the
+//! scan, and the pane measuring beside the viewer, each plan run here when
+//! the test says. Nothing here moves a file:
 //! `clean_execute` only runs through the binary, in `duscope/tests/pty`,
 //! where the test environment guards the real Trash.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -20,6 +23,7 @@ use duscope_core::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
 use duscope_core::interchange::import::{ImportFormat, import};
 use duscope_core::query::{ArenaView, SizeKind, TreeView};
 use duscope_core::rollup::{RollUp, roll_up};
+use duscope_core::rules::Classes;
 use duscope_testkit::{TestEnv, golden};
 use duscope_treemap::cells::Depth;
 use duscope_treemap::packs::Pack;
@@ -29,7 +33,10 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::terminal::Terminal;
 
-use super::{Answer, Body, DECLINED, Marks, Pane, State, Toggled, plan_rows};
+use super::{
+    Answer, Body, DECLINED, Marks, Pane, PlanJob, Planner, State, Toggled, changed_note, plan_rows,
+    unread_note,
+};
 use crate::cursor::tests::{char, first_frame, key, press};
 use crate::panes::Sources;
 use crate::panes::tests::{classes, mockup, opts, status};
@@ -697,6 +704,51 @@ fn on_disk(env: &TestEnv) -> (PathBuf, Index) {
     (root, index)
 }
 
+/// What `D` asked for, kept for the test to run when it likes, as the
+/// binary's thread would.
+type Jobs = Rc<RefCell<Vec<PlanJob>>>;
+
+/// Gives `app` a planner that keeps each job in the [`Jobs`] returned.
+fn planning(app: &mut App<'_>) -> Jobs {
+    let jobs: Jobs = Rc::default();
+    let kept = Rc::clone(&jobs);
+    app.with_effects(Effects {
+        plan: Some(Box::new(move |job| {
+            kept.borrow_mut().push(job);
+            Ok(())
+        })),
+        ..Effects::default()
+    });
+    jobs
+}
+
+fn no_env(_: &str) -> Option<OsString> {
+    None
+}
+
+/// Makes the plan `app` waits for and hands it over, as the binary does.
+fn land(app: &mut App<'_>, terminal: &mut Terminal<TestBackend>, jobs: &Jobs) {
+    let job = jobs.borrow_mut().remove(0);
+    assert_eq!(app.input(Input::Planned(job.run(&no_env))), Flow::Redraw);
+    terminal
+        .draw(|f| app.draw(f.area(), f.buffer_mut()))
+        .unwrap();
+}
+
+/// The pane of `marks` with its plan made and landed.
+fn planned_pane(marks: &Marks, index: &Index) -> Pane {
+    let jobs: Jobs = Rc::default();
+    let kept = Rc::clone(&jobs);
+    let mut start: Planner<'_> = Box::new(move |job| {
+        kept.borrow_mut().push(job);
+        Ok(())
+    });
+    let mut pane = Pane::open(marks, index, &Sources::of(index), 1, Some(&mut start));
+    let job = jobs.borrow_mut().remove(0);
+    assert!(pane.land(job.run(&no_env)));
+    pane
+}
+
 /// The plan of the pane `pane`, which must have one.
 fn planned(pane: &Pane) -> &CleanPlan {
     match &pane.state {
@@ -712,7 +764,7 @@ fn p4_tui_06_a_mark_is_planned_at_its_own_path() {
     let mut marks = Marks::default();
     marks.toggle(&index, id_of(&index, "dir/b.bin"));
     // As scanned: the path the scan holds, to be moved.
-    let pane = Pane::open(&marks, &index, &Sources::of(&index));
+    let pane = planned_pane(&marks, &index);
     let item = &planned(&pane).items[0];
     assert_eq!((item.action, item.reason), ("trash", None));
     assert_eq!(item.path, root.join("dir/b.bin").to_string_lossy());
@@ -727,7 +779,7 @@ fn p4_tui_06_a_mark_is_planned_at_its_own_path() {
     fs::write(outside.join("b.bin"), vec![9u8; 1024]).unwrap();
     fs::rename(root.join("dir"), root.join("dir.old")).unwrap();
     std::os::unix::fs::symlink(&outside, root.join("dir")).unwrap();
-    let pane = Pane::open(&marks, &index, &Sources::of(&index));
+    let pane = planned_pane(&marks, &index);
     let State::Unplanned(why) = &pane.state else {
         panic!("a plan of what the mark's path leads to: {:?}", pane.state);
     };
@@ -753,7 +805,7 @@ fn p4_tui_06_a_mark_whose_folder_leads_elsewhere_plans_nothing() {
     fs::write(other.join("b.bin"), vec![9u8; 1024]).unwrap();
     fs::rename(root.join("dir"), root.join("dir.old")).unwrap();
     std::os::unix::fs::symlink(&other, root.join("dir")).unwrap();
-    let mut pane = Pane::open(&marks, &index, &Sources::of(&index));
+    let mut pane = planned_pane(&marks, &index);
     let State::Unplanned(why) = &pane.state else {
         panic!("a plan of what the mark's path leads to: {:?}", pane.state);
     };
@@ -798,6 +850,7 @@ fn p4_tui_06_a_wrong_answer_closes_the_pane_and_a_paste_is_not_keys() {
         String::new(),
         None,
     );
+    let jobs = planning(&mut app);
     let mut terminal = first_frame(&app, 120, 40);
     // A paste of the keys that would mark, open the pane and answer it is
     // not those keys.
@@ -814,6 +867,7 @@ fn p4_tui_06_a_wrong_answer_closes_the_pane_and_a_paste_is_not_keys() {
     press(&mut app, &mut terminal, &char('d'));
     press(&mut app, &mut terminal, &char('D'));
     assert!(app.pane_open());
+    land(&mut app, &mut terminal, &jobs);
     let text = text_of(terminal.backend().buffer());
     assert!(
         text.contains("Type yes to move them to the Trash: ▌"),
@@ -841,6 +895,7 @@ fn p4_tui_06_a_wrong_answer_closes_the_pane_and_a_paste_is_not_keys() {
     // `D` asks again, from the start; so does an empty answer close it.
     press(&mut app, &mut terminal, &char('D'));
     assert!(app.pane_open());
+    land(&mut app, &mut terminal, &jobs);
     let text = text_of(terminal.backend().buffer());
     assert!(
         text.contains("Type yes to move them to the Trash: ▌"),
@@ -918,4 +973,262 @@ fn p4_tui_06_d_refuses_a_folder_that_holds_what_was_moved() {
     app.jump(downloads);
     press(&mut app, &mut terminal, &char('d'));
     assert_eq!(app.marked_ids(), [downloads]);
+}
+
+#[test]
+fn p5_core_04_the_pane_says_an_item_changed_since_the_scan() {
+    let env = TestEnv::new();
+    let (root, index) = on_disk(&env);
+    // The saved scan here is read from an ncdu export, which records no
+    // times: the file differs from its row, so the plan measures it from
+    // the tree, as `clean` does, and the pane says so under its line.
+    let mut marks = Marks::default();
+    marks.toggle(&index, id_of(&index, "big.bin"));
+    let pane = planned_pane(&marks, &index);
+    let State::Planned(plan) = &pane.state else {
+        panic!("no plan: {:?}", pane.state);
+    };
+    assert_eq!(plan.changed_count(), 1);
+    let item = &plan.plan.items[0];
+    let meta = fs::metadata(root.join("big.bin")).unwrap();
+    assert_eq!(
+        item.allocated_bytes,
+        std::os::unix::fs::MetadataExt::blocks(&meta) * 512
+    );
+    assert_eq!(item.frees_kind, Some("upper_bound"));
+    assert!(pane.asks());
+    let mocha = Pack::named("mocha").unwrap();
+    let mut canvas = Canvas::new(120, 40, &mocha, duscope_treemap::paint::Glyphs::Unicode);
+    pane.draw(&mut canvas, Rect::new(0, 2, 120, 37), &iec);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 120, 40));
+    crate::app::copy(&canvas.cells, Depth::TrueColor, buf.area, &mut buf);
+    let text = snapshot(&buf);
+    let note = "1 item changed since the saved scan, so the plan measured it from the tree";
+    assert!(text.contains(note), "{text}");
+    assert!(text.contains("Type yes"), "{text}");
+    // As `clean` words its warning, and nothing when nothing changed.
+    assert_eq!(changed_note(1).as_deref(), Some(note));
+    assert_eq!(
+        changed_note(2).as_deref(),
+        Some("2 items changed since the saved scan, so the plan measured them from the tree")
+    );
+    assert_eq!(changed_note(0), None);
+}
+
+/// A viewer of a saved scan on disk, `big.bin` marked, whose plans wait for
+/// the test.
+fn marked<'a>(
+    index: &'a Index,
+    mocha: &'a Pack,
+    classes: &'a Classes,
+) -> (App<'a>, Jobs, Terminal<TestBackend>) {
+    let mut app = App::new(
+        index,
+        opts(mocha, classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let jobs = planning(&mut app);
+    let mut terminal = first_frame(&app, 120, 40);
+    app.jump(id_of(index, "big.bin"));
+    press(&mut app, &mut terminal, &char('d'));
+    (app, jobs, terminal)
+}
+
+#[test]
+fn p5_core_04_the_pane_measures_beside_the_viewer_and_esc_gives_it_up() {
+    let env = TestEnv::new();
+    let (root, index) = on_disk(&env);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mut app, jobs, mut terminal) = marked(&index, &mocha, &classes);
+    // `D` answers at once: the plan is asked for, not made.
+    assert_eq!(press(&mut app, &mut terminal, &char('D')), Flow::Redraw);
+    assert!(app.pane_open());
+    assert_eq!(jobs.borrow().len(), 1);
+    let text = text_of(terminal.backend().buffer());
+    assert!(text.contains("mark pane · 1 marked"), "{text}");
+    assert!(text.contains("measuring 1 item on the disk…"), "{text}");
+    assert!(text.contains("Esc gives up"), "{text}");
+    assert!(!text.contains("Type yes"), "{text}");
+    // The viewer goes on: a resize redraws. Nothing typed counts, before
+    // there is a plan to answer, and `⏎` acts on nothing.
+    let resize = Event::Resize(100, 30);
+    assert_eq!(press(&mut app, &mut terminal, &resize), Flow::Redraw);
+    for c in ['y', 'e', 's'] {
+        assert_eq!(press(&mut app, &mut terminal, &char(c)), Flow::Wait);
+    }
+    press(&mut app, &mut terminal, &key(KeyCode::Enter));
+    assert!(app.pane_open());
+    assert!(root.join("big.bin").exists());
+    // `Esc` gives it up, and its plan stops.
+    assert!(!jobs.borrow()[0].stopped());
+    assert_eq!(
+        press(&mut app, &mut terminal, &key(KeyCode::Esc)),
+        Flow::Redraw
+    );
+    assert!(!app.pane_open());
+    assert!(jobs.borrow()[0].stopped());
+    // What it answers, once it has stopped, is nobody's.
+    let job = jobs.borrow_mut().remove(0);
+    assert_eq!(app.input(Input::Planned(job.run(&no_env))), Flow::Wait);
+    assert!(!app.pane_open());
+    assert_eq!(app.marked_ids(), [id_of(&index, "big.bin")]);
+}
+
+#[test]
+fn p5_core_04_ctrl_c_quits_while_the_pane_measures_and_stops_the_plan() {
+    let env = TestEnv::new();
+    let (_root, index) = on_disk(&env);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mut app, jobs, mut terminal) = marked(&index, &mocha, &classes);
+    press(&mut app, &mut terminal, &char('D'));
+    let ctrl_c = Event::Key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('c'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    assert_eq!(press(&mut app, &mut terminal, &ctrl_c), Flow::Quit);
+    assert!(!jobs.borrow()[0].stopped());
+    drop(app);
+    assert!(jobs.borrow()[0].stopped());
+}
+
+#[test]
+fn p5_core_04_a_plan_given_up_on_cannot_stand_for_marks_made_since() {
+    let env = TestEnv::new();
+    let (root, index) = on_disk(&env);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mut app, jobs, mut terminal) = marked(&index, &mocha, &classes);
+    // A plan of big.bin, finished the moment before the pane is left: the
+    // worst a late answer can be.
+    press(&mut app, &mut terminal, &char('D'));
+    let job = jobs.borrow_mut().remove(0);
+    let late = job.run(&no_env);
+    press(&mut app, &mut terminal, &key(KeyCode::Esc));
+    // The marks change: small.bin instead of big.bin.
+    let (big, small) = (id_of(&index, "big.bin"), id_of(&index, "small.bin"));
+    press(&mut app, &mut terminal, &char('d'));
+    assert!(app.marked_ids().is_empty());
+    app.jump(small);
+    press(&mut app, &mut terminal, &char('d'));
+    assert_eq!(app.marked_ids(), [small]);
+    assert_ne!(big, small);
+    // The new pane measures; the old plan is not its plan.
+    press(&mut app, &mut terminal, &char('D'));
+    assert_eq!(app.input(Input::Planned(late)), Flow::Wait);
+    terminal
+        .draw(|f| app.draw(f.area(), f.buffer_mut()))
+        .unwrap();
+    let text = text_of(terminal.backend().buffer());
+    assert!(text.contains("measuring 1 item"), "{text}");
+    assert!(!text.contains("Type yes"), "{text}");
+    assert!(!text.contains("big.bin"), "{text}");
+    // Nothing typed moves anything until the plan it answers is shown.
+    for c in ['y', 'e', 's'] {
+        press(&mut app, &mut terminal, &char(c));
+    }
+    press(&mut app, &mut terminal, &key(KeyCode::Enter));
+    assert!(app.pane_open());
+    assert!(root.join("big.bin").exists() && root.join("small.bin").exists());
+    // Its own plan shows the mark it was asked about, and asks.
+    land(&mut app, &mut terminal, &jobs);
+    let text = text_of(terminal.backend().buffer());
+    assert!(text.contains("small.bin"), "{text}");
+    assert!(
+        text.contains("Type yes to move them to the Trash: ▌"),
+        "{text}"
+    );
+}
+
+#[test]
+fn p5_core_04_a_plan_given_up_before_a_reload_is_not_the_reloaded_panes() {
+    let env = TestEnv::new();
+    let (_root, index) = on_disk(&env);
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mut app, jobs, mut terminal) = marked(&index, &mocha, &classes);
+    // `D`, then `Esc`: the plan is given up on, and answers later, on the
+    // channel the terminal session keeps across a reload.
+    press(&mut app, &mut terminal, &char('D'));
+    press(&mut app, &mut terminal, &key(KeyCode::Esc));
+    let old = jobs.borrow_mut().remove(0);
+    // `r`'s scan lands: the reloaded viewer keeps the mark, and its `D`
+    // asks again.
+    let carried = app.carry();
+    drop(app);
+    let mut app = App::new(
+        &index,
+        opts(&mocha, &classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let new_jobs = planning(&mut app);
+    app.restore(carried);
+    let mut terminal = first_frame(&app, 120, 40);
+    assert_eq!(app.marked_ids(), [id_of(&index, "big.bin")]);
+    press(&mut app, &mut terminal, &char('D'));
+    assert_eq!(new_jobs.borrow().len(), 1);
+    // The old answer is not the new pane's: it goes on measuring.
+    assert_eq!(app.input(Input::Planned(old.run(&no_env))), Flow::Wait);
+    terminal
+        .draw(|f| app.draw(f.area(), f.buffer_mut()))
+        .unwrap();
+    let text = text_of(terminal.backend().buffer());
+    assert!(text.contains("measuring 1 item"), "{text}");
+    assert!(!text.contains("Type yes"), "{text}");
+    // Its own plan lands.
+    land(&mut app, &mut terminal, &new_jobs);
+    let text = text_of(terminal.backend().buffer());
+    assert!(
+        text.contains("Type yes to move them to the Trash: ▌"),
+        "{text}"
+    );
+}
+
+#[test]
+fn p5_core_04_a_plan_that_cannot_start_or_read_its_scan_says_why() {
+    let env = TestEnv::new();
+    let (_root, index) = on_disk(&env);
+    let mut marks = Marks::default();
+    marks.toggle(&index, id_of(&index, "big.bin"));
+    // The thread could not start.
+    let mut start: Planner<'_> = Box::new(|_| Err("out of threads".to_owned()));
+    let pane = Pane::open(&marks, &index, &Sources::of(&index), 1, Some(&mut start));
+    assert!(matches!(&pane.state, State::Unplanned(why) if why.contains("out of threads")));
+    assert!(!pane.asks());
+    // No planner behind this viewer.
+    let pane = Pane::open(&marks, &index, &Sources::of(&index), 2, None);
+    assert!(matches!(&pane.state, State::Unplanned(_)));
+    // The saved scan has gone by the time the plan runs.
+    let jobs: Jobs = Rc::default();
+    let kept = Rc::clone(&jobs);
+    let mut start: Planner<'_> = Box::new(move |job| {
+        kept.borrow_mut().push(job);
+        Ok(())
+    });
+    let mut pane = Pane::open(&marks, &index, &Sources::of(&index), 3, Some(&mut start));
+    fs::remove_file(index.file()).unwrap();
+    let job = jobs.borrow_mut().remove(0);
+    assert!(pane.land(job.run(&no_env)));
+    assert!(
+        matches!(&pane.state, State::Unplanned(_)),
+        "{:?}",
+        pane.state
+    );
+    assert!(!pane.asks());
+}
+
+#[test]
+fn p5_core_04_the_pane_says_what_it_could_not_read() {
+    assert_eq!(unread_note(0), None);
+    assert_eq!(
+        unread_note(1).as_deref(),
+        Some("1 item could not be read whole, so what it frees is not known")
+    );
+    assert_eq!(
+        unread_note(2).as_deref(),
+        Some("2 items could not be read whole, so what they free is not known")
+    );
 }

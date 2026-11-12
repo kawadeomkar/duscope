@@ -259,6 +259,33 @@ pub(crate) fn read_only(_path: &std::path::Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
+/// The mount point nearest `dir` at it or under it, in the mount table read
+/// now.
+#[cfg(target_os = "linux")]
+pub(crate) fn mount_point_under(
+    dir: &std::path::Path,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    linux::mount_point_under(dir)
+}
+
+/// The mount point nearest `dir` at it or under it, in the kernel's record
+/// of its mounts read now, `dir` in each of its paths.
+#[cfg(target_os = "macos")]
+pub(crate) fn mount_point_under(
+    dir: &std::path::Path,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    macos::mount_point_under(dir)
+}
+
+/// The mount point nearest `dir` at it or under it: no mount table is read
+/// on this platform, so it cannot be told.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn mount_point_under(
+    _dir: &std::path::Path,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
 /// Whether a test run asked that the Full Disk Access probe meet the
 /// refusal of macOS's privacy protections on both its folders
 /// (`DUSCOPE_TEST_TCC=denied`, honoured in debug builds only, as

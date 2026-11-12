@@ -40,8 +40,8 @@ use duscope_core::rules::{Caches, Classes};
 use duscope_treemap::packs::Pack;
 use duscope_treemap::pixels::Pixels;
 use duscope_tui::{
-    App, Background, Carried, Effects, Ended, Input, MIN_SIZE, Rescan, ScanFacts, Session, Sources,
-    Tui,
+    App, Background, Carried, Effects, Ended, Input, MIN_SIZE, PlanJob, Planned, Planner, Rescan,
+    ScanFacts, Session, Sources, Tui,
 };
 
 use super::scan::Scanned;
@@ -256,6 +256,12 @@ struct Shared<'a> {
     tx: mpsc::Sender<Result<Landing, Failure>>,
     /// A rescan is running beside the viewer.
     running: Cell<bool>,
+    /// What each plan of the mark pane comes back on.
+    plan_rx: mpsc::Receiver<Planned>,
+    /// What a plan's thread answers on.
+    plan_tx: mpsc::Sender<Planned>,
+    /// The plans still running, those given up on included.
+    planning: Cell<u32>,
 }
 
 /// What a rescan has to show for itself.
@@ -317,6 +323,7 @@ fn show(
     };
     let packs = style.packs();
     let (tx, rx) = mpsc::channel();
+    let (plan_tx, plan_rx) = mpsc::channel();
     let shared = Shared {
         walk,
         excludes,
@@ -334,6 +341,9 @@ fn show(
         rx,
         tx,
         running: Cell::new(false),
+        plan_rx,
+        plan_tx,
+        planning: Cell::new(0),
     };
     let mut shown = Shown { source, file };
     let mut carried = None;
@@ -426,6 +436,7 @@ fn viewer(
     app.with_packs(shared.packs);
     app.with_ls_colors(shared.style.ls_colors());
     let start: Rescan<'_> = Box::new(|| start_rescan(shown, shared));
+    let plan: Planner<'_> = Box::new(|job| start_plan(job, shared));
     app.with_effects(Effects {
         write: Box::new(|bytes| {
             let mut out = io::stdout();
@@ -438,6 +449,7 @@ fn viewer(
         env: Box::new(|name| std::env::var_os(name)),
         size: Box::new(|bytes| output.units.size(bytes)),
         rescan: Some(start),
+        plan: Some(plan),
     });
     if let Some(found) = &shared.pixels {
         app.draw_in_pixels(found.clone());
@@ -472,40 +484,84 @@ fn viewer(
 }
 
 /// The next thing the viewer answers: a terminal event, waited for without
-/// waking while nothing is running; while `r`'s rescan runs, what it ends
-/// with, the terminal polled between looks at its channel.
+/// waking while nothing is running; while `r`'s rescan or `D`'s plan runs,
+/// what it ends with, the terminal polled between looks at their channels.
 fn next_input(shared: &Shared<'_>, root: &Path, landed: &mut Option<Shown>) -> io::Result<Input> {
     assert!(
         !shared.test_panic,
         "DUSCOPE_TEST_PANIC: a panic after the first frame"
     );
-    if !shared.running.get() {
+    if !shared.running.get() && shared.planning.get() == 0 {
         return duscope_tui::next_event().map(Input::Event);
     }
     loop {
-        match shared.rx.try_recv() {
-            Ok(result) => {
-                shared.running.set(false);
-                return Ok(match result.and_then(|landing| shown_of(landing, root)) {
-                    Ok(shown) => {
-                        *landed = Some(shown);
-                        Input::Landed
-                    }
-                    Err(failure) => Input::RescanFailed(failure.message),
-                });
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                shared.running.set(false);
-                return Ok(Input::RescanFailed(
-                    "the rescan stopped without an answer".to_owned(),
-                ));
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
+        if shared.planning.get() > 0
+            && let Ok(planned) = shared.plan_rx.try_recv()
+        {
+            shared.planning.set(shared.planning.get() - 1);
+            return Ok(Input::Planned(planned));
         }
-        if duscope_tui::event_ready(Duration::from_millis(100))? {
+        if shared.running.get() {
+            match shared.rx.try_recv() {
+                Ok(result) => {
+                    shared.running.set(false);
+                    return Ok(match result.and_then(|landing| shown_of(landing, root)) {
+                        Ok(shown) => {
+                            *landed = Some(shown);
+                            Input::Landed
+                        }
+                        Err(failure) => Input::RescanFailed(failure.message),
+                    });
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    shared.running.set(false);
+                    return Ok(Input::RescanFailed(
+                        "the rescan stopped without an answer".to_owned(),
+                    ));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        // A plan is often done at once: looked for sooner than a rescan,
+        // so the pane does not sit on "measuring" with its answer waiting.
+        let wait = if shared.planning.get() > 0 { 10 } else { 100 };
+        if duscope_tui::event_ready(Duration::from_millis(wait))? {
             return duscope_tui::next_event().map(Input::Event);
         }
     }
+}
+
+/// `D`: the plan of the marks beside the viewer, on a thread of its own, so
+/// the viewer goes on answering its keys while the marked folders are
+/// walked. Its answer is read by [`next_input`].
+fn start_plan(job: PlanJob, shared: &Shared<'_>) -> Result<(), String> {
+    let tx = shared.plan_tx.clone();
+    let gate = test_plan_gate();
+    thread::Builder::new()
+        .name("plan".to_owned())
+        .spawn(move || {
+            if let Some(gate) = gate {
+                while !gate.exists() && !job.stopped() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            // The viewer may have closed; nothing is waiting then.
+            let _: Result<(), mpsc::SendError<Planned>> =
+                tx.send(job.run(&|name| std::env::var_os(name)));
+        })
+        .map_err(|e| format!("cannot start it: {e}"))?;
+    shared.planning.set(shared.planning.get() + 1);
+    Ok(())
+}
+
+/// test-only: `DUSCOPE_TEST_PLAN_GATE=<path>` holds the mark pane's plan
+/// until the file at `<path>` exists, in debug builds alone, for the tests
+/// of a viewer that keeps answering while a plan runs.
+fn test_plan_gate() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var_os("DUSCOPE_TEST_PLAN_GATE").map(PathBuf::from)
 }
 
 /// `r`: the rescan beside the viewer, on a thread of its own, its logging

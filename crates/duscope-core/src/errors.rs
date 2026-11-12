@@ -108,9 +108,13 @@ pub enum CoreError {
         message: String,
     },
     /// What is at a path is not what its handle names: another device and
-    /// inode, so not the entry `explain` examined.
-    #[error("{0} is not the entry its handle names: it has been replaced since explain read it")]
+    /// inode, or the same changed since the saved scan, so not the entry
+    /// `explain` examined. The message names the path and which.
+    #[error("{0}")]
     PathChanged(String),
+    /// A plan was stopped before it finished: the caller gave up on it.
+    #[error("the plan was stopped before it finished")]
+    PlanStopped,
     /// `clean` was given an item twice, or one inside another.
     #[error("{0}")]
     CleanOverlap(String),

@@ -6,13 +6,44 @@
 //! that regenerates it. What deleting it frees is the plan's: its bytes less
 //! those a link or clone member outside the plan keeps, so a file whose
 //! other links lie elsewhere frees 0, and two links both in the plan free
-//! their bytes once. An item under the scan's root that the scan does not
-//! hold (made since) is planned from a fresh `stat`, a directory with its
-//! own walk; what it frees is not known.
+//! their bytes once.
+//!
+//! The scan's figures stand only for an item that is still what the scan
+//! saw. A file is compared with its row (kind, modification and change
+//! times, apparent and allocated size, links) through the `lstat` the plan
+//! takes anyway; a directory is walked, and the files, directories, apparent
+//! and allocated bytes and newest modification and change times under it
+//! compared with its rows, leaving out what lies under a directory the scan
+//! listed without entering. The change time is what a program cannot set:
+//! it moves when a file's time is restored after a write and when a link to
+//! it goes elsewhere. An item that differs has changed since the scan
+//! ([`Plan::changed_count`]): it is planned from the tree, as an item the
+//! scan does not hold (made since) is, from a fresh `stat`, a directory with
+//! its walk, whose bytes it frees at most (`upper_bound`); a directory the
+//! scan did not enter is planned the same way, without having changed. A
+//! file with other links that has changed frees its bytes at most, once
+//! however many of its links the plan holds. An item from a handle that has
+//! changed since the scan fails the plan ([`CoreError::PathChanged`]): the
+//! handle signs what the scan saw.
+//!
+//! A directory that holds one the scan did not enter, with bytes under it,
+//! keeps the scan's figures with those bytes added, and is an `upper_bound`:
+//! moving it moves them too. A directory a walk could not read whole has no
+//! figure at all (`frees_bytes` null, [`Plan::unread_count`]): what the walk
+//! missed is not known, and a figure from what it reached would look like a
+//! measurement, so no expectation is met by it.
 //!
 //! An item is refused, with its `reason`, when it is a symbolic link, a
 //! firmlink, a mount point, the scan's root (or `/`), on a read-only volume,
-//! or outside the scan's root. A refusal is a fact of the plan; whether it
+//! or outside the scan's root. For the Trash a directory that holds a mount
+//! point, at any depth, is refused as one (`mount_point`), and so is one
+//! whose mounts the system cannot tell: a move renames the directory with
+//! every volume mounted in it, which stays mounted in the Trash and is
+//! emptied with it. The mount table says so, read for the plan and again
+//! just before each move, and so does the walk that compares a directory
+//! with its rows, which meets a mount it does not enter (a mount point
+//! spelled otherwise than the table has it). A deletion never crosses a
+//! mount, and stops at one. A refusal is a fact of the plan; whether it
 //! stops the run (`--skip-refused`) and whether the plan is acted on
 //! (`--yes`, the prompt) is the binary's to decide, which calls
 //! [`clean_execute`] only then.
@@ -31,8 +62,10 @@
 //! touched. [`Plan::refuse_unexpected`] holds each item to it, for a caller
 //! that names what each item should free (the MCP tool): an item off by
 //! more than 1% is refused, a fact of the plan like any other refusal, and
-//! so is one whose bytes no saved scan knows (a directory made since the
-//! scan), whatever its figure.
+//! so is a directory whose bytes no saved scan measured (made since the
+//! scan, not entered by it, or holding what it did not enter), whatever its
+//! figure: `explain` gives none for what it never read, and the walk that
+//! prices it is the plan's own.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -40,14 +73,18 @@ use std::fs::Metadata;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use duscope_walk::{CheckedDir, Flags, Kind, RemoveError, ScanEvent, TrashError, WalkOptions};
+use duscope_walk::{
+    CheckedDir, DirId, Flags, Kind, RemoveError, ScanEvent, Skip, TrashError, WalkOptions,
+};
 
 use crate::CoreError;
 use crate::envelope::{CleanPlan, ErrorObject, Explain, PlanItem, name_fields};
 use crate::index::Index;
-use crate::index::writer::FIRMLINK;
-use crate::query::{ExplainQuery, TreeView, explain, explain_unindexed};
+use crate::index::writer::{EXCLUDED, EXCLUDED_CACHE, FIRMLINK};
+use crate::query::{ExplainQuery, TreeView, explain, explain_unindexed, kind_name};
 
 /// An item to plan: its path, absolute, with every symbolic link above its
 /// last component resolved and the last one kept, and, for an item from a
@@ -89,9 +126,65 @@ pub struct Plan {
     method: Method,
     /// Each item's `(dev, ino)` when planned, in the plan's order.
     idents: Vec<(u64, u64)>,
+    /// Where each item's figures come from, in the plan's order.
+    priced: Vec<Priced>,
+}
+
+/// Where an item's figures come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Priced {
+    /// The saved scan: the item is what its rows say, or is refused (its
+    /// figures move nothing).
+    Scan,
+    /// The saved scan, and a walk for what the scan did not read under the
+    /// item: what its rows hold has not changed, but a directory under it
+    /// the scan listed without entering holds bytes, or the walk could not
+    /// read all of it.
+    Partly,
+    /// The tree, the scan having no figures for it: an item made since the
+    /// scan, or a directory it listed without entering.
+    Unscanned,
+    /// The tree, the item having changed since the scan: it differs from
+    /// its rows.
+    Changed,
 }
 
 impl Plan {
+    /// The items that changed since the saved scan, whose figures come from
+    /// the tree: the `changed_since_scan` warning's count.
+    pub fn changed_count(&self) -> usize {
+        self.priced
+            .iter()
+            .filter(|&&priced| priced == Priced::Changed)
+            .count()
+    }
+
+    /// The items not refused that a walk could not read whole, whose
+    /// `frees_bytes` is null: what they free is not known.
+    pub fn unread_count(&self) -> usize {
+        self.plan
+            .items
+            .iter()
+            .filter(|item| item.action != "refused" && item.frees_bytes.is_none())
+            .count()
+    }
+
+    /// Whether item `at` is a directory whose bytes no saved scan measured,
+    /// or not all of them: one made since the scan, one it listed without
+    /// entering, or one that holds such a directory with bytes under it.
+    /// Some of its figures come from a walk at plan time, and `explain`
+    /// gives none for what the scan never read.
+    pub fn unmeasured(&self, at: usize) -> bool {
+        matches!(
+            self.priced.get(at),
+            Some(Priced::Unscanned | Priced::Partly)
+        ) && self
+            .plan
+            .items
+            .get(at)
+            .is_some_and(|item| item.kind == "dir")
+    }
+
     /// The refused items.
     pub fn refused_count(&self) -> usize {
         self.plan
@@ -116,22 +209,30 @@ impl Plan {
     }
 
     /// Whether what the plan frees, its `total_frees_bytes`, lies within
-    /// 1% of `expected` (`--expect-bytes`).
+    /// 1% of `expected` (`--expect-bytes`). A plan with an item whose
+    /// figure is not known meets no figure: its total leaves that item out.
     pub fn meets(&self, expected: u64) -> bool {
-        within_one_percent(self.plan.total_frees_bytes, expected)
+        self.unread_count() == 0 && within_one_percent(self.plan.total_frees_bytes, expected)
     }
 
     /// Refuses, with [`UNEXPECTED`], each item not refused already whose
     /// `frees_bytes` lies outside 1% of its figure in `expected`, given in
-    /// the plan's order, or is not known: an item no saved scan holds frees
-    /// what no figure can be checked against. The plan's totals then count
-    /// what is left.
+    /// the plan's order, or is not known, or is a directory no saved scan
+    /// measured ([`Plan::unmeasured`]): its bytes come from the plan's own
+    /// walk, not from the scan a figure is read from, so no figure is held
+    /// to account by it. The plan's totals then count what is left.
     pub fn refuse_unexpected(&mut self, expected: &[u64]) {
-        for (item, &expected) in self.plan.items.iter_mut().zip(expected) {
+        let unmeasured: Vec<bool> = (0..self.plan.items.len())
+            .map(|at| self.unmeasured(at))
+            .collect();
+        for ((item, &expected), unmeasured) in
+            self.plan.items.iter_mut().zip(expected).zip(unmeasured)
+        {
             if item.action != "refused"
-                && !item
-                    .frees_bytes
-                    .is_some_and(|frees| within_one_percent(frees, expected))
+                && (unmeasured
+                    || !item
+                        .frees_bytes
+                        .is_some_and(|frees| within_one_percent(frees, expected)))
             {
                 item.action = "refused";
                 item.reason = Some(UNEXPECTED);
@@ -183,13 +284,28 @@ pub struct CleanOutcome {
 /// should lie under, acting by `method`. A path that does not exist, or
 /// whose device and inode are not those of its handle, fails the plan
 /// ([`CoreError::ScanNotFound`], [`CoreError::PathChanged`]), as does an
-/// item named twice or inside another ([`CoreError::CleanOverlap`]): `clean`
-/// acts on all or none of a list.
+/// item from a handle that has changed since the scan
+/// ([`CoreError::PathChanged`]) and an item named twice or inside another
+/// ([`CoreError::CleanOverlap`]): `clean` acts on all or none of a list.
 pub fn clean_plan(
     items: &[CleanItem],
     index: &Index,
     q: &ExplainQuery<'_>,
     method: Method,
+) -> Result<Plan, CoreError> {
+    clean_plan_until(items, index, q, method, &Arc::default())
+}
+
+/// [`clean_plan`], stopped when `stop` is set: between items, and within
+/// one directory per walk worker, it then fails
+/// ([`CoreError::PlanStopped`]), so a plan a caller has given up on never
+/// reads as made from a walk cut short.
+pub fn clean_plan_until(
+    items: &[CleanItem],
+    index: &Index,
+    q: &ExplainQuery<'_>,
+    method: Method,
+    stop: &Arc<AtomicBool>,
 ) -> Result<Plan, CoreError> {
     let mut metas = Vec::with_capacity(items.len());
     for item in items {
@@ -204,31 +320,72 @@ pub fn clean_plan(
             .handle
             .is_some_and(|signed| signed != (meta.dev(), meta.ino()))
         {
-            return Err(CoreError::PathChanged(item.path.display().to_string()));
+            return Err(CoreError::PathChanged(format!(
+                "{} is not the entry its handle names: it has been replaced since explain read it",
+                item.path.display()
+            )));
         }
         metas.push(meta);
     }
     overlap(items, &metas)?;
     let mut planned = Vec::with_capacity(items.len());
     let mut ids = Vec::with_capacity(items.len());
+    let mut priced = Vec::with_capacity(items.len());
+    let mut unentered_bytes = Vec::with_capacity(items.len());
+    let mut linked = HashSet::new();
     for (item, meta) in items.iter().zip(&metas) {
+        if stop.load(Ordering::Relaxed) {
+            return Err(CoreError::PlanStopped);
+        }
         let below = index.below_root(&item.path);
         let under_root = below.is_some();
         let id = below.and_then(|rel| index.lookup(rel));
-        let mut facts = match id {
-            Some(id) => explain(index, id, q)?,
-            None => explain_unindexed(&item.path, q)?,
-        };
-        // A directory made since the scan: what is under it, not its inode
-        // alone.
-        if id.is_none() && under_root && meta.is_dir() {
-            facts.allocated_bytes = walked(&item.path);
+        let (reason, from, walk) = judged(item, meta, index, (id, under_root), method, stop)?;
+        if from == Priced::Changed && item.handle.is_some() {
+            return Err(CoreError::PathChanged(format!(
+                "{} has changed since the saved scan its handle was read from: it is not what \
+                 explain examined",
+                item.path.display()
+            )));
         }
-        let reason = refusal(&item.path, meta, index, id, under_root);
+        // Priced from the tree: kept out of the scan's figures, its id kept
+        // for the refusal only.
+        let from_scan = matches!(from, Priced::Scan | Priced::Partly);
+        let mut facts = match id {
+            Some(id) if from_scan => explain(index, id, q)?,
+            _ => explain_unindexed(&item.path, q)?,
+        };
+        if let Some(walk) = &walk
+            && matches!(from, Priced::Unscanned | Priced::Changed)
+        {
+            facts.allocated_bytes = walk.allocated;
+            facts.freeable_now_bytes = Some(walk.allocated);
+            facts.freeable_kind = Some("upper_bound");
+        }
+        // Its other links may be in this plan, or gone: it frees its bytes
+        // at most, and two links of one inode free them once.
+        if from == Priced::Changed && !meta.is_dir() && meta.nlink() > 1 {
+            let first = linked.insert((meta.dev(), meta.ino()));
+            facts.freeable_now_bytes = Some(if first { facts.allocated_bytes } else { 0 });
+            facts.freeable_kind = Some("upper_bound");
+        }
+        if walk.as_ref().is_some_and(|walk| walk.failed) {
+            facts.freeable_now_bytes = None;
+            facts.freeable_kind = None;
+        }
         planned.push(plan_item(&item.path, meta, &facts, reason, method));
-        ids.push(id);
+        ids.push(id.filter(|_| from_scan));
+        priced.push(from);
+        unentered_bytes.push(
+            walk.filter(|_| from == Priced::Partly)
+                .map_or(0, |walk| walk.unentered),
+        );
+    }
+    if stop.load(Ordering::Relaxed) {
+        return Err(CoreError::PlanStopped);
     }
     plan_frees(index, &ids, &mut planned)?;
+    add_unentered(&mut planned, &unentered_bytes);
     let (total_allocated_bytes, total_frees_bytes) = totals(&planned);
     Ok(Plan {
         plan: CleanPlan {
@@ -240,7 +397,316 @@ pub fn clean_plan(
         },
         method,
         idents: metas.iter().map(|m| (m.dev(), m.ino())).collect(),
+        priced,
     })
+}
+
+/// Why `item`, found with `meta`, is refused, if it is, where its figures
+/// come from, and the walk that measured it, if one did. `id` is its entry
+/// in `index`, and `under_root` whether the scan's root holds it.
+fn judged(
+    item: &CleanItem,
+    meta: &Metadata,
+    index: &Index,
+    (id, under_root): (Option<u32>, bool),
+    method: Method,
+    stop: &Arc<AtomicBool>,
+) -> Result<(Option<&'static str>, Priced, Option<Walked>), CoreError> {
+    let reason = refusal(&item.path, meta, index, id, under_root, method);
+    let (from, walk) = match id {
+        // Made since the scan: a directory with what is under it, not its
+        // inode alone.
+        None => (
+            Priced::Unscanned,
+            (under_root && meta.is_dir()).then(|| walked(&item.path, &HashSet::new(), stop)),
+        ),
+        // A refused item moves nothing: the scan's figures stand.
+        Some(_) if reason.is_some() => (Priced::Scan, None),
+        Some(id) => compared(index, id, &item.path, meta, stop)?,
+    };
+    // A mount the walk met under it, which the mount table missed: by
+    // another spelling of its path, say. Refused as one the table lists,
+    // its figures moving nothing.
+    if method == Method::Trash && reason.is_none() && walk.as_ref().is_some_and(|w| w.mount) {
+        return Ok(match id {
+            Some(_) => (Some("mount_point"), Priced::Scan, None),
+            None => (Some("mount_point"), from, walk),
+        });
+    }
+    Ok((reason, from, walk))
+}
+
+/// Adds to each item the bytes a walk found under the directories the scan
+/// did not enter: they go with it, and are what deleting it frees beyond the
+/// scan's figures, at most (a link between the two parts counts twice).
+fn add_unentered(planned: &mut [PlanItem], unentered: &[u64]) {
+    for (item, &bytes) in planned.iter_mut().zip(unentered) {
+        if bytes > 0 {
+            item.allocated_bytes = item.allocated_bytes.saturating_add(bytes);
+            if let Some(frees) = &mut item.frees_bytes {
+                *frees = frees.saturating_add(bytes);
+                item.frees_kind = Some("upper_bound");
+            }
+        }
+    }
+}
+
+/// Whether the indexed entry `id`, found at `path` with `meta`, is still
+/// what the scan saw, and the walk that prices it where the scan's figures
+/// do not cover it. A file (any entry not a directory) is compared with its
+/// row: its kind, modification and change times, apparent and allocated
+/// size and links. A directory is walked, and what lies under it on its
+/// volume compared with its rows: how many files and directories, their
+/// apparent and allocated bytes (each link and clone member as the rows
+/// count it, in full) and the newest modification and change times, what
+/// lies under a directory the scan listed without entering left out of
+/// both; a directory the scan did not enter itself has no rows to compare
+/// with. An entry whose kind changed has changed. A false difference costs
+/// an `upper_bound` and a warning; a missed one is a stale figure.
+fn compared(
+    index: &Index,
+    id: u32,
+    path: &Path,
+    meta: &Metadata,
+    stop: &Arc<AtomicBool>,
+) -> Result<(Priced, Option<Walked>), CoreError> {
+    let node = index.node(id);
+    if node.is_dir() != meta.is_dir() {
+        let walk = meta.is_dir().then(|| walked(path, &HashSet::new(), stop));
+        return Ok((Priced::Changed, walk));
+    }
+    if !node.is_dir() {
+        // As the walk reads them: devices, sockets and pipes hold no
+        // blocks of their own.
+        let allocated = if kind_of(meta) == "other" {
+            0
+        } else {
+            meta.blocks().saturating_mul(512)
+        };
+        let same = kind_name(node.kind) == kind_of(meta)
+            && node.mtime_ns == nanos(meta.mtime(), meta.mtime_nsec())
+            && node.ctime_ns == nanos(meta.ctime(), meta.ctime_nsec())
+            && node.apparent == meta.len()
+            && node.allocated == allocated
+            && u64::from(node.nlink) == meta.nlink();
+        return Ok((if same { Priced::Scan } else { Priced::Changed }, None));
+    }
+    if !index.entered(id) {
+        return Ok((Priced::Unscanned, Some(walked(path, &HashSet::new(), stop))));
+    }
+    let skipped = unentered(index, id, node.last_id)?;
+    let below: HashSet<Vec<u8>> = skipped.iter().map(|dir| dir.below.clone()).collect();
+    let walk = walked(path, &below, stop);
+    if walk.tally != rows(index, id, node.last_id, &skipped)? {
+        Ok((Priced::Changed, Some(walk)))
+    } else if walk.failed || walk.unentered > 0 {
+        Ok((Priced::Partly, Some(walk)))
+    } else {
+        // Priced from the scan: the walk is kept for the mounts it met.
+        Ok((Priced::Scan, Some(walk)))
+    }
+}
+
+/// A time in Unix nanoseconds, as the walk and the index hold it.
+fn nanos(secs: i64, nsec: i64) -> i64 {
+    secs.saturating_mul(1_000_000_000).saturating_add(nsec)
+}
+
+/// The kind of entry `meta` describes, by its name in the plan and the
+/// index: `dir`, `file`, `symlink` or `other`.
+fn kind_of(meta: &Metadata) -> &'static str {
+    let file_type = meta.file_type();
+    if file_type.is_dir() {
+        "dir"
+    } else if file_type.is_file() {
+        "file"
+    } else if file_type.is_symlink() {
+        "symlink"
+    } else {
+        "other"
+    }
+}
+
+/// What a walk and a subtree's rows are compared by: how many files (every
+/// entry not a directory) and directories, the directory itself included,
+/// their apparent and allocated bytes, the newest modification and change
+/// times, and the sum of the change times. Each entry counts in full: a
+/// later link and a clone member hold their bytes in their rows as they do
+/// in a walk, whichever member the scan charged them to.
+///
+/// The sum sees a change the newest time hides: one under an entry whose
+/// change time lies in the future (a clock set back, a volume whose change
+/// time is its modification time). It is kept as whole seconds and the
+/// nanoseconds past them, summed apart in 64 bits, so neither overflows on
+/// a tree of up to a billion entries, whatever their times: a time held in
+/// 64 bits of nanoseconds is under 2^63 / 10^9 whole seconds either way of
+/// 1970, and its nanoseconds past the second are under 10^9.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Tally {
+    files: u64,
+    dirs: u64,
+    apparent: u64,
+    allocated: u64,
+    max_mtime_ns: i64,
+    max_ctime_ns: i64,
+    ctime_secs: i64,
+    ctime_nanos: i64,
+}
+
+impl Tally {
+    /// The tally of nothing.
+    fn new() -> Tally {
+        Tally {
+            files: 0,
+            dirs: 0,
+            apparent: 0,
+            allocated: 0,
+            max_mtime_ns: i64::MIN,
+            max_ctime_ns: i64::MIN,
+            ctime_secs: 0,
+            ctime_nanos: 0,
+        }
+    }
+
+    /// Adds a change time, in Unix nanoseconds, to the sum: its whole
+    /// seconds and the nanoseconds past them, as the index's rows are summed
+    /// (integer `/` and `%` in SQL, truncating toward zero, as Rust's do).
+    fn add_ctime(&mut self, ctime_ns: i64) {
+        self.ctime_secs = self.ctime_secs.saturating_add(ctime_ns / NANOS);
+        self.ctime_nanos = self.ctime_nanos.saturating_add(ctime_ns % NANOS);
+    }
+}
+
+/// Nanoseconds in a second.
+const NANOS: i64 = 1_000_000_000;
+
+/// The tally of the rows `id..=last` of `index`, the directory `id` and
+/// everything the scan recorded under it, but for what lies under each of
+/// the directories in `skipped` (in id order): a directory whose reading
+/// failed part way holds what was read before, which a walk leaves out
+/// with the rest.
+fn rows(index: &Index, id: u32, last: u32, skipped: &[Unentered]) -> Result<Tally, CoreError> {
+    let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
+        file: index.file().display().to_string(),
+        message: e.to_string(),
+    };
+    // The ranges of ids to count: `id..=last` without each skipped
+    // directory's `dir + 1..=last`, a range inside another counted once.
+    let mut ranges = Vec::new();
+    let mut from = id;
+    for dir in skipped {
+        if dir.id >= from && dir.last > dir.id {
+            ranges.push((from, dir.id));
+            from = dir.last.saturating_add(1);
+        }
+    }
+    if from <= last {
+        ranges.push((from, last));
+    }
+    let mut tally = Tally::new();
+    for table in ["files", "dirs"] {
+        let mut stmt = index
+            .db()
+            .prepare(&format!(
+                "SELECT COUNT(*), COALESCE(SUM(apparent), 0), COALESCE(SUM(allocated), 0), \
+                 MAX(mtime), MAX(ctime), COALESCE(SUM(ctime / {NANOS}), 0), \
+                 COALESCE(SUM(ctime % {NANOS}), 0) FROM {table} WHERE id BETWEEN ?1 AND ?2"
+            ))
+            .map_err(corrupt)?;
+        for &(first, end) in &ranges {
+            let (n, apparent, allocated, newest, changed, secs, nanos): (
+                i64,
+                i64,
+                i64,
+                Option<i64>,
+                Option<i64>,
+                i64,
+                i64,
+            ) = stmt
+                .query_row([first, end], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                })
+                .map_err(corrupt)?;
+            let n = u64::try_from(n).unwrap_or(0);
+            if table == "files" {
+                tally.files += n;
+            } else {
+                tally.dirs += n;
+            }
+            tally.apparent = tally
+                .apparent
+                .saturating_add(u64::try_from(apparent).unwrap_or(0));
+            tally.allocated = tally
+                .allocated
+                .saturating_add(u64::try_from(allocated).unwrap_or(0));
+            tally.max_mtime_ns = tally.max_mtime_ns.max(newest.unwrap_or(i64::MIN));
+            tally.max_ctime_ns = tally.max_ctime_ns.max(changed.unwrap_or(i64::MIN));
+            tally.ctime_secs = tally.ctime_secs.saturating_add(secs);
+            tally.ctime_nanos = tally.ctime_nanos.saturating_add(nanos);
+        }
+    }
+    Ok(tally)
+}
+
+/// A directory under a planned one that the scan listed without entering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Unentered {
+    /// Its id.
+    id: u32,
+    /// The last id under it.
+    last: u32,
+    /// Its path below the planned directory.
+    below: Vec<u8>,
+}
+
+/// The directories under `id` (to `last`) the scan listed without entering
+/// them (an exclude, a cache rule, a container, an unreadable directory, a
+/// mount it did not cross), in id order: the scan holds nothing under them
+/// to compare a walk with.
+fn unentered(index: &Index, id: u32, last: u32) -> Result<Vec<Unentered>, CoreError> {
+    let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
+        file: index.file().display().to_string(),
+        message: e.to_string(),
+    };
+    let mut stmt = index
+        .db()
+        .prepare(
+            "SELECT id, last_id FROM dirs WHERE id > ?1 AND id <= ?2 \
+             AND (flags & ?3 != 0 OR errors IS NOT NULL) ORDER BY id",
+        )
+        .map_err(corrupt)?;
+    let skipped = EXCLUDED | EXCLUDED_CACHE | Flags::MOUNT_ROOT.bits() | FIRMLINK;
+    let candidates: Vec<(u32, u32)> = stmt
+        .query_map([id, last, skipped], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(corrupt)?;
+    let base = index.path(id);
+    Ok(candidates
+        .into_iter()
+        .filter(|&(dir, _)| !index.entered(dir))
+        .filter_map(|(dir, last)| {
+            let path = index.path(dir);
+            let below = if base.is_empty() {
+                &path[..]
+            } else {
+                path.strip_prefix(base.as_slice())?.strip_prefix(b"/")?
+            };
+            Some(Unentered {
+                id: dir,
+                last,
+                below: below.to_vec(),
+            })
+        })
+        .collect())
 }
 
 /// Fails when an item is named twice, or lies inside another item: the
@@ -286,37 +752,174 @@ fn overlap(items: &[CleanItem], metas: &[Metadata]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// The bytes on disk of the directory `path` and what is under it on its
-/// volume, each inode once.
-fn walked(path: &Path) -> u64 {
+/// What a walk of a directory found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Walked {
+    /// The bytes on disk of the directory and what is under it on its
+    /// volume, each inode once: what the plan prices it at.
+    allocated: u64,
+    /// Those of them under the directories it was told the scan did not
+    /// enter: what no row of the scan holds.
+    unentered: u64,
+    /// What it is compared with the scan's rows by, what lies under the
+    /// directories it was told the scan did not enter left out.
+    tally: Tally,
+    /// Whether something could not be read: a directory, an entry, or the
+    /// walk itself. Its bytes then say nothing of what was missed.
+    failed: bool,
+    /// Whether it met a mount under the directory, which it does not enter:
+    /// another volume, or a bind mount where the system tells one.
+    mount: bool,
+    /// The most directories it kept at once, to find the unentered ones and
+    /// leave out what lies under them.
+    #[cfg(test)]
+    kept_peak: usize,
+}
+
+/// The paths below a walk's root that lead to one of the `unentered`
+/// directories (paths below it too), the root's own (empty) included: only
+/// a directory at one of them can.
+fn leading(unentered: &HashSet<Vec<u8>>) -> HashSet<&[u8]> {
+    unentered
+        .iter()
+        .flat_map(|below| {
+            let ends = below.iter().enumerate().filter(|&(_, &b)| b == b'/');
+            std::iter::once(0)
+                .chain(ends.map(|(at, _)| at))
+                .map(move |end| &below[..end])
+        })
+        .collect()
+}
+
+/// Walks the directory `path` and what is under it on its volume. The
+/// tally leaves out what lies under each directory named in `unentered`
+/// (paths below `path`, as [`unentered`] gives them); the bytes on disk
+/// count everything. A walk stopped by `stop` has failed, as one that
+/// could not read part of the tree has.
+fn walked(path: &Path, unentered: &HashSet<Vec<u8>>, stop: &Arc<AtomicBool>) -> Walked {
     let opts = WalkOptions {
         one_file_system: true,
         clones: false,
+        cancel: Arc::clone(stop),
         ..WalkOptions::default()
     };
     let mut seen = HashSet::new();
-    let mut total = 0u64;
-    // A walk that fails part way leaves what it reached: the figure is the
-    // plan's, never what is moved.
-    let _ = duscope_walk::walk(path, &opts, |event| {
-        if let ScanEvent::Entry(entry) = event
-            && (entry.kind == Kind::Dir || entry.nlink <= 1 || seen.insert((entry.dev, entry.ino)))
+    let mut allocated = 0u64;
+    let mut under_unentered = 0u64;
+    let mut failed = false;
+    let mut mount = false;
+    let mut tally = Tally::new();
+    let leading = leading(unentered);
+    // The path below `path` of each directory that leads to an unentered
+    // one, and the directories under an unentered one, each kept while it
+    // is read: the walk delivers what a directory holds before it closes it.
+    let mut paths: HashMap<DirId, Vec<u8>> = HashMap::new();
+    let mut left_out: HashSet<DirId> = HashSet::new();
+    #[cfg(test)]
+    let mut kept_peak = 0;
+    let walk = duscope_walk::walk(path, &opts, |event| {
+        let entry = match event {
+            ScanEvent::Entry(entry) => entry,
+            ScanEvent::DirClosed { dir, errno } => {
+                failed |= errno.is_some();
+                paths.remove(&dir);
+                left_out.remove(&dir);
+                return;
+            }
+            ScanEvent::Error(_) => {
+                failed = true;
+                return;
+            }
+            // A walk that stays on its volume lists a mount without entering
+            // it; nothing else here is skipped, but by a rule of a scan.
+            ScanEvent::Skipped { reason, .. } => {
+                mount |= !matches!(
+                    reason,
+                    Skip::Excluded | Skip::ExcludedCache | Skip::Containers
+                );
+                return;
+            }
+            _ => return,
+        };
+        let counted =
+            entry.kind == Kind::Dir || entry.nlink <= 1 || seen.insert((entry.dev, entry.ino));
+        if counted {
+            allocated = allocated.saturating_add(entry.allocated);
+        }
+        if left_out.contains(&entry.parent) {
+            if counted {
+                under_unentered = under_unentered.saturating_add(entry.allocated);
+            }
+            if let Some(dir) = entry.dir {
+                left_out.insert(dir);
+            }
+            return;
+        }
+        if entry.kind == Kind::Dir {
+            tally.dirs += 1;
+        } else {
+            tally.files += 1;
+        }
+        tally.apparent = tally.apparent.saturating_add(entry.apparent);
+        tally.allocated = tally.allocated.saturating_add(entry.allocated);
+        tally.max_mtime_ns = tally.max_mtime_ns.max(entry.mtime_ns);
+        tally.max_ctime_ns = tally.max_ctime_ns.max(entry.ctime_ns);
+        tally.add_ctime(entry.ctime_ns);
+        if let Some(dir) = entry.dir.filter(|_| !unentered.is_empty()) {
+            // The walk's root is its own parent; a directory whose parent
+            // leads to no unentered one leads to none either.
+            let below = if dir == entry.parent {
+                Some(Vec::new())
+            } else {
+                paths.get(&entry.parent).map(|up| {
+                    let mut below = up.clone();
+                    if !below.is_empty() {
+                        below.push(b'/');
+                    }
+                    below.extend_from_slice(entry.name.as_bytes());
+                    below
+                })
+            };
+            match below {
+                Some(below) if unentered.contains(&below) => {
+                    left_out.insert(dir);
+                }
+                Some(below) if leading.contains(below.as_slice()) => {
+                    paths.insert(dir, below);
+                }
+                _ => {}
+            }
+        }
+        #[cfg(test)]
         {
-            total = total.saturating_add(entry.allocated);
+            kept_peak = std::cmp::max(kept_peak, paths.len() + left_out.len());
         }
     });
-    total
+    Walked {
+        allocated,
+        unentered: under_unentered,
+        tally,
+        failed: failed || walk.is_err(),
+        mount,
+        #[cfg(test)]
+        kept_peak,
+    }
 }
 
 /// Why `path` is refused, the first that applies; `None` when it is not.
 /// `id` is its entry in `index`, and `under_root` whether the scan's root
-/// holds it.
+/// holds it. For the Trash, a directory that holds a mount point is refused
+/// as `mount_point` too, and so is one whose mounts the system cannot tell:
+/// a move renames it with every volume mounted in it, which then stays
+/// mounted in the Trash and goes when the Trash is emptied. A deletion
+/// never crosses a mount, and stops at one ([`clean_execute`]).
 fn refusal(
     path: &Path,
     meta: &Metadata,
     index: &Index,
     id: Option<u32>,
     under_root: bool,
+    method: Method,
 ) -> Option<&'static str> {
     if meta.file_type().is_symlink() {
         return Some("symlink");
@@ -344,6 +947,12 @@ fn refusal(
     }
     if path.parent().is_none() || id == Some(0) {
         return Some("root");
+    }
+    if method == Method::Trash
+        && meta.is_dir()
+        && !duscope_walk::mount_point_under(path).is_ok_and(|point| point.is_none())
+    {
+        return Some("mount_point");
     }
     if duscope_walk::read_only_volume(path).unwrap_or(false) {
         return Some("read_only_volume");
@@ -470,21 +1079,12 @@ fn plan_item(
     let path_bytes = path.as_os_str().as_bytes().to_vec();
     let name = path.file_name().unwrap_or(OsStr::new("/")).as_bytes();
     let (name, name_raw) = name_fields(name);
-    let kind = if meta.is_dir() {
-        "dir"
-    } else if meta.is_file() {
-        "file"
-    } else if meta.file_type().is_symlink() {
-        "symlink"
-    } else {
-        "other"
-    };
     PlanItem {
         path: String::from_utf8_lossy(&path_bytes).into_owned(),
         path_bytes,
         name,
         name_raw,
-        kind,
+        kind: kind_of(meta),
         allocated_bytes: facts.allocated_bytes,
         frees_bytes: facts.freeable_now_bytes,
         frees_kind: facts.freeable_kind,
@@ -507,8 +1107,10 @@ fn plan_item(
 ///
 /// - **The Trash.** An item whose path no longer holds what the plan saw
 ///   (gone, or another device and inode) is `path_changed` and left alone;
-///   one whose volume has no Trash is `trash_unavailable` and left where it
-///   is: nothing is ever removed in its place.
+///   a directory the mount table, read again, lists a mount point in, or
+///   cannot be read for, is `refused_path` and left alone; one whose volume
+///   has no Trash is `trash_unavailable` and left where it is: nothing is
+///   ever removed in its place.
 /// - **`--permanent`.** The item is deleted through descriptors, by
 ///   `duscope-walk`'s [`unlink_checked`](duscope_walk::unlink_checked) and
 ///   [`remove_dir_checked`](duscope_walk::remove_dir_checked); a change on
@@ -547,23 +1149,74 @@ pub fn clean_execute(plan: &mut Plan) -> CleanOutcome {
     outcome
 }
 
-/// Moves `item` to the Trash when its path still holds `ident`.
+/// Moves `item` to the Trash when its path still holds `ident` and, for a
+/// directory, the mount table, read again, lists no mount point in it: one
+/// mounted since the plan would go with it.
 fn trash(item: &PlanItem, ident: (u64, u64)) -> Result<(), ErrorObject> {
     let path = Path::new(OsStr::from_bytes(&item.path_bytes));
     match std::fs::symlink_metadata(path).map(|m| (m.dev(), m.ino())) {
-        Ok(now) if now == ident => duscope_walk::move_to_trash(path).map_err(|e| match e {
-            TrashError::Unavailable(message) => error_object(
-                "trash_unavailable",
-                message,
-                Some("Rerun duscope clean with --permanent to delete it: its volume has no Trash"),
-                false,
-                "user",
-            ),
-            TrashError::Failed(message) => error_object("io_error", message, None, false, "user"),
-        }),
+        Ok(now) if now == ident => {
+            if item.kind == "dir" {
+                no_mount_in(path)?;
+            }
+            duscope_walk::move_to_trash(path).map_err(|e| match e {
+                TrashError::Unavailable(message) => error_object(
+                    "trash_unavailable",
+                    message,
+                    Some(
+                        "Rerun duscope clean with --permanent to delete it: its volume has no \
+                         Trash",
+                    ),
+                    false,
+                    "user",
+                ),
+                TrashError::Failed(message) => {
+                    error_object("io_error", message, None, false, "user")
+                }
+            })
+        }
         _ => Err(changed(&item.path)),
     }
 }
+
+/// `refused_path` when the mount table lists a mount point at the
+/// directory `dir` or under it, or cannot be read: a move to the Trash
+/// would take the volume along, mounted in the Trash.
+fn no_mount_in(dir: &Path) -> Result<(), ErrorObject> {
+    match duscope_walk::mount_point_under(dir) {
+        Ok(None) => Ok(()),
+        Ok(Some(point)) => Err(error_object(
+            "refused_path",
+            format!(
+                "{} is a mount point in {}, and a move to the Trash would take its volume along, \
+                 so it was not moved",
+                point.display(),
+                dir.display()
+            ),
+            Some(&format!(
+                "Run umount {} first, then duscope clean again",
+                point.display()
+            )),
+            false,
+            "user",
+        )),
+        Err(e) => Err(error_object(
+            "refused_path",
+            format!(
+                "cannot tell whether a volume is mounted in {} ({e}), and a move to the Trash \
+                 would take one along, so it was not moved",
+                dir.display()
+            ),
+            Some(UNKNOWN_MOUNTS),
+            false,
+            "user",
+        )),
+    }
+}
+
+/// The hint for a directory whose mounts the system cannot tell, which
+/// neither the Trash nor a deletion acts on.
+const UNKNOWN_MOUNTS: &str = "Run duscope clean again where the system's mount table can be read";
 
 /// Deletes `item`, adding to `freed` the bytes on disk its deletion frees:
 /// its parent directory opened from `/` one component at a time without
@@ -640,7 +1293,7 @@ fn removal_error(item: &Path, error: &RemoveError) -> ErrorObject {
                     item.display()
                 )
             },
-            Some("Rerun duscope clean without --permanent to move it to the Trash instead"),
+            Some(UNKNOWN_MOUNTS),
             false,
             "user",
         ),

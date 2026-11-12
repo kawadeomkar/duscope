@@ -10,10 +10,15 @@
 //! and after measures what went; `--expect-bytes` at the edges of its 1%.
 //! The race `--permanent` guards against is the library's test, between
 //! the plan and the deletion (`duscope-core`'s `clean` tests).
+//!
+//! P5-CORE-04: a tree changed since its scan is planned from what is there
+//! now, so `--expect-bytes` is held to the live bytes; an unchanged one keeps
+//! the scan's figures and goldens.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -976,7 +981,13 @@ fn p5_mcp_01_an_item_whose_bytes_no_scan_knows_is_refused_whatever_its_figure() 
             assert_eq!(items[0]["action"], "trash", "{value}");
             assert_eq!(items[1]["action"], "refused", "{value}");
             assert_eq!(items[1]["reason"], "expectation_mismatch", "{value}");
-            assert_eq!(items[1]["frees_bytes"], Value::Null, "{value}");
+            // P5-CORE-04: measured by the plan's own walk, which no figure
+            // from a saved scan is held to.
+            assert!(
+                items[1]["frees_bytes"].as_u64().unwrap() >= 200_000,
+                "{value}"
+            );
+            assert_eq!(items[1]["frees_kind"], "upper_bound", "{value}");
             assert_eq!(value["result"]["trashed_count"], 0, "{value}");
             let message = value["error"]["message"].as_str().unwrap();
             assert!(
@@ -1050,4 +1061,820 @@ fn p5_mcp_01_a_run_that_acted_on_some_items_says_how_many_of_how_many() {
     );
     assert!(gone.iter().all(|path| !path.exists()));
     assert!(kept.iter().all(|path| path.exists()));
+}
+
+// P5-CORE-04: what changed since the scan is priced from the tree.
+
+/// Writes `n` zero bytes to a new file at `path`, a mebibyte at a time.
+fn zeros(path: &Path, n: usize) {
+    let mut file = fs::File::create(path).unwrap();
+    let chunk = vec![0u8; 1 << 20];
+    let mut left = n;
+    while left > 0 {
+        let take = left.min(chunk.len());
+        file.write_all(&chunk[..take]).unwrap();
+        left -= take;
+    }
+}
+
+#[test]
+fn p5_core_04_expect_bytes_fails_against_live_bytes() {
+    // The audit's reproduction: a plan and --expect-bytes of 4,096 bytes,
+    // 50 MiB written since the scan.
+    let env = TestEnv::new();
+    let v = fs::canonicalize(env.tmp_dir()).unwrap().join("v");
+    let d = v.join("d");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("a"), vec![0u8; 4096]).unwrap();
+    let saved = ok(&run(
+        &env,
+        &["scan", s(&v), "--save", "--json", "--treemap", "never"],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    zeros(&d.join("big"), 52_428_800);
+    let out = run(
+        &env,
+        &[
+            "clean",
+            s(&d),
+            "--scan",
+            &id,
+            "--permanent",
+            "--expect-bytes",
+            "4096",
+            "--yes",
+            "--json",
+        ],
+    );
+    let value = failed(&out, 1, "expectation_mismatch");
+    assert!(d.join("a").exists() && d.join("big").exists());
+    assert_eq!(value["result"]["deleted_count"], 0);
+    assert_eq!(value["result"]["freed_bytes"], 0);
+    // The plan is the tree's: what the walk found, at most.
+    let plan = &value["result"]["plan"];
+    let total = plan["total_frees_bytes"].as_u64().unwrap();
+    assert!(total >= 52_428_800 + 4096, "{value}");
+    assert_eq!(plan["items"][0]["frees_kind"], "upper_bound", "{value}");
+    assert_eq!(plan["items"][0]["frees_bytes"], total, "{value}");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&thousands(total)) && message.contains("4,096"),
+        "{message}"
+    );
+    // The warning says why, and how to measure the tree again.
+    let warning = &value["warnings"][0];
+    assert_eq!(warning["code"], "changed_since_scan", "{value}");
+    assert_eq!(warning["count"], 1, "{value}");
+    let hint = warning["hint"].as_str().unwrap();
+    assert!(
+        hint.starts_with("Run duscope rescan")
+            && hint.contains(&id)
+            && hint.ends_with("to measure the tree again"),
+        "{hint}"
+    );
+    // The live figure is the one a plan meets; a dry run waits for --yes.
+    let out = run(
+        &env,
+        &[
+            "clean",
+            s(&d),
+            "--scan",
+            &id,
+            "--permanent",
+            "--expect-bytes",
+            &total.to_string(),
+            "--json",
+        ],
+    );
+    failed(&out, 1, "confirmation_required");
+
+    // A directory made since the scan counts its walk too: 0 no longer
+    // passes for it.
+    let fresh = v.join("made-since");
+    fs::create_dir(&fresh).unwrap();
+    fs::write(fresh.join("c"), vec![1u8; 64 * 1024]).unwrap();
+    let out = run(
+        &env,
+        &[
+            "clean",
+            s(&fresh),
+            "--scan",
+            &id,
+            "--permanent",
+            "--expect-bytes",
+            "0",
+            "--yes",
+            "--json",
+        ],
+    );
+    let value = failed(&out, 1, "expectation_mismatch");
+    assert!(fresh.join("c").exists());
+    assert!(
+        value["result"]["plan"]["total_frees_bytes"]
+            .as_u64()
+            .unwrap()
+            >= 64 * 1024,
+        "{value}"
+    );
+    // Made since, not changed: no warning for it.
+    assert_eq!(value["warnings"], serde_json::json!([]), "{value}");
+}
+
+#[test]
+fn p5_core_04_an_unchanged_fixture_tree_keeps_index_figures() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.fixtures().root()).unwrap();
+    let saved = ok(&run(
+        &env,
+        &["scan", s(&root), "--save", "--json", "--threads", "4"],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let os = std::env::consts::OS;
+    // P4-CORE-01's two plans, as their goldens hold them.
+    let items = [
+        root.join("home/Projects/npm-app/node_modules"),
+        root.join("cases/hard-links/a/original.bin"),
+    ];
+    for (format, flag) in [("json", "--json"), ("plain", "--plain")] {
+        let mut args = vec!["clean"];
+        args.extend(items.iter().map(|p| s(p)));
+        args.push(flag);
+        let out = run(&env, &args);
+        assert_eq!(out.status.code(), Some(1));
+        let text = String::from_utf8(out.stdout).unwrap();
+        golden(
+            &format!("clean_{format}_plan@{os}.snap"),
+            &normalize(&text, &root, &id),
+        );
+    }
+    // Every folder two levels down, each planned alone, the fixture tree's
+    // cases among them (links, clones, sparse and compressed files, an
+    // unreadable folder, odd names, times and file types): none has changed
+    // since the scan, so none is priced from the tree.
+    let mut planned = 0;
+    for top in ["home", "cases"] {
+        for entry in fs::read_dir(root.join(top)).unwrap() {
+            let path = entry.unwrap().path();
+            if !fs::symlink_metadata(&path).unwrap().is_dir() {
+                continue;
+            }
+            let value = json(&run(&env, &["clean", s(&path), "--scan", &id, "--json"]));
+            let warnings = value["warnings"].as_array().unwrap();
+            assert!(
+                warnings.iter().all(|w| w["code"] != "changed_since_scan"),
+                "{}: {value}",
+                path.display()
+            );
+            planned += 1;
+        }
+    }
+    assert!(planned > 20, "{planned}");
+    // Every file in the cases, as items of one plan: a file is compared
+    // through its `lstat`, where the scan read it through the directory
+    // listing, and the two must agree on clones, compressed and sparse
+    // files and file types. `wide` is the same file a hundred thousand
+    // times over.
+    let mut files = Vec::new();
+    let mut folders = vec![root.join("cases")];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            // A name that is not UTF-8, as the Linux tree holds, is no
+            // argument of this command line.
+            if path.to_str().is_none() {
+                continue;
+            }
+            // A folder that may be listed but not entered holds entries no
+            // one can stat.
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let kind = meta.file_type();
+            if kind.is_dir() {
+                if path.file_name().unwrap() != "wide" && fs::read_dir(&path).is_ok() {
+                    folders.push(path);
+                }
+            } else if !kind.is_symlink() {
+                files.push(path);
+            }
+        }
+    }
+    assert!(files.len() > 50, "{}", files.len());
+    let mut args = vec!["clean", "--scan", &id, "--dry-run", "--json"];
+    args.extend(files.iter().map(|p| s(p)));
+    let value = json(&run(&env, &args));
+    assert_eq!(
+        value["result"]["plan"]["items"].as_array().unwrap().len(),
+        files.len(),
+        "{value}"
+    );
+    let warnings = value["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().all(|w| w["code"] != "changed_since_scan"),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn p5_core_04_clean_from_an_entry_changed_since_the_scan_is_path_changed() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    save(&env, &root);
+    let dir = root.join("dir");
+    let (token, _) = handle(&env, &dir);
+    // Its file grown in place: the same directory, the same inode, but not
+    // what the scan saw and explain signed.
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("b.bin"))
+        .unwrap();
+    file.write_all(&vec![1u8; 30_000]).unwrap();
+    drop(file);
+    for mode in ["--dry-run", "--yes"] {
+        let value = failed(
+            &run(&env, &["clean", "--from", &token, mode, "--json"]),
+            1,
+            "path_changed",
+        );
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("has changed since the saved scan"),
+            "{message}"
+        );
+        let hint = value["error"]["hint"].as_str().unwrap();
+        assert!(hint.contains("duscope rescan"), "{hint}");
+        assert!(dir.join("b.bin").exists());
+    }
+    // By path, the plan is the tree's, and says so.
+    let value = failed(
+        &run(&env, &["clean", s(&dir), "--json"]),
+        1,
+        "confirmation_required",
+    );
+    assert_eq!(
+        value["warnings"][0]["code"], "changed_since_scan",
+        "{value}"
+    );
+    assert_eq!(
+        value["result"]["plan"]["items"][0]["frees_kind"],
+        "upper_bound"
+    );
+}
+
+/// Bytes on disk of `path` itself, as a scan counts them.
+fn on_disk(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path).unwrap().blocks() * 512
+}
+
+#[test]
+fn p5_core_04_expect_bytes_counts_what_the_scan_did_not_enter() {
+    // The audit's reproduction, through an exclude: 50 MiB under a folder
+    // the scan listed and did not enter, nothing changed since. On APFS the
+    // plan read 4,096 bytes and the deletion freed 52,432,896.
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    let (app, cache) = (top.join("app"), top.join("app/cache"));
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(app.join("main.rs"), b"fn main() {}\n").unwrap();
+    zeros(&cache.join("blob"), 52_428_800);
+    let saved = ok(&run(
+        &env,
+        &[
+            "scan",
+            s(&top),
+            "--exclude",
+            "app/cache",
+            "--save",
+            "--json",
+        ],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let scanned = on_disk(&app) + on_disk(&app.join("main.rs")) + on_disk(&cache);
+    let live = scanned + on_disk(&cache.join("blob"));
+    let delete = |figure: u64| {
+        let figure = figure.to_string();
+        run(
+            &env,
+            &[
+                "clean",
+                s(&app),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                &figure,
+                "--yes",
+                "--json",
+            ],
+        )
+    };
+    let value = failed(&delete(scanned), 1, "expectation_mismatch");
+    assert!(cache.join("blob").exists(), "{value}");
+    assert_eq!(value["result"]["deleted_count"], 0);
+    let item = &value["result"]["plan"]["items"][0];
+    assert_eq!(item["frees_bytes"], live, "{value}");
+    assert_eq!(item["frees_kind"], "upper_bound", "{value}");
+    assert!(
+        value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["code"] != "changed_since_scan"),
+        "{value}"
+    );
+    // What is there is met, and is what the deletion frees.
+    let value = ok(&delete(live));
+    assert!(!app.exists());
+    assert_eq!(value["result"]["freed_bytes"], live, "{value}");
+}
+
+#[test]
+fn p5_core_04_a_tool_item_holding_what_the_scan_did_not_enter_is_refused() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    let (app, cache) = (top.join("app"), top.join("app/cache"));
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(app.join("main.rs"), b"fn main() {}\n").unwrap();
+    fs::write(cache.join("blob"), vec![6u8; 64 * 1024]).unwrap();
+    ok(&run(
+        &env,
+        &[
+            "scan",
+            s(&top),
+            "--exclude",
+            "app/cache",
+            "--save",
+            "--json",
+        ],
+    ));
+    let (token, frees) = handle(&env, &app);
+    let from = format!("--from={token}");
+    let figure = format!("--expect-item-bytes={frees}");
+    let value = failed(
+        &run(&env, &["clean", &from, &figure, "--dry-run", "--json"]),
+        1,
+        "expectation_mismatch",
+    );
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("does not hold everything under"),
+        "{value}"
+    );
+    assert!(cache.join("blob").exists());
+}
+
+#[test]
+fn p5_core_04_a_sparse_file_made_dense_with_its_time_restored_fails_expect_bytes() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("sparse");
+    let dir = top.join("d");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("s.bin");
+    let len = 52_428_800u64;
+    fs::File::create(&file).unwrap().set_len(len).unwrap();
+    let saved = ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let scanned = on_disk(&dir) + on_disk(&file);
+    let was = fs::metadata(&file).unwrap().modified().unwrap();
+    let mut open = fs::OpenOptions::new().write(true).open(&file).unwrap();
+    let chunk = vec![5u8; 1 << 20];
+    for _ in 0..50 {
+        open.write_all(&chunk).unwrap();
+    }
+    open.sync_all().unwrap();
+    open.set_modified(was).unwrap();
+    drop(open);
+    let figure = scanned.to_string();
+    let value = failed(
+        &run(
+            &env,
+            &[
+                "clean",
+                s(&dir),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                &figure,
+                "--yes",
+                "--json",
+            ],
+        ),
+        1,
+        "expectation_mismatch",
+    );
+    assert!(file.exists(), "{value}");
+    assert_eq!(
+        value["warnings"][0]["code"], "changed_since_scan",
+        "{value}"
+    );
+    let live = value["result"]["plan"]["total_frees_bytes"]
+        .as_u64()
+        .unwrap();
+    assert!(live >= len, "{value}");
+    assert_eq!(live, on_disk(&dir) + on_disk(&file), "{value}");
+}
+
+#[test]
+fn p5_core_04_a_links_other_half_removed_fails_expect_bytes() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("links");
+    let (d, e) = (top.join("d"), top.join("e"));
+    fs::create_dir_all(&d).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    fs::write(d.join("a"), vec![4u8; 1 << 20]).unwrap();
+    fs::hard_link(d.join("a"), e.join("b")).unwrap();
+    let saved = ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let plan = ok(&run(
+        &env,
+        &["clean", s(&d), "--scan", &id, "--dry-run", "--json"],
+    ));
+    let scanned = plan["result"]["plan"]["total_frees_bytes"]
+        .as_u64()
+        .unwrap();
+    assert!(scanned < 1 << 20, "{plan}");
+    fs::remove_file(e.join("b")).unwrap();
+    let figure = scanned.to_string();
+    let value = failed(
+        &run(
+            &env,
+            &[
+                "clean",
+                s(&d),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                &figure,
+                "--yes",
+                "--json",
+            ],
+        ),
+        1,
+        "expectation_mismatch",
+    );
+    assert!(d.join("a").exists(), "{value}");
+    assert_eq!(
+        value["warnings"][0]["code"], "changed_since_scan",
+        "{value}"
+    );
+    assert!(
+        value["result"]["plan"]["total_frees_bytes"]
+            .as_u64()
+            .unwrap()
+            >= 1 << 20,
+        "{value}"
+    );
+}
+
+#[test]
+fn p5_core_04_a_linked_file_appended_to_is_not_priced_at_nothing() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("linked");
+    let x = top.join("x");
+    fs::create_dir_all(&x).unwrap();
+    let (p, q) = (x.join("p"), x.join("q"));
+    fs::write(&p, vec![4u8; 1 << 20]).unwrap();
+    fs::hard_link(&p, &q).unwrap();
+    let saved = ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let mut file = fs::OpenOptions::new().append(true).open(&p).unwrap();
+    file.write_all(b"more").unwrap();
+    drop(file);
+    let delete = |figure: u64| {
+        let figure = figure.to_string();
+        run(
+            &env,
+            &[
+                "clean",
+                s(&p),
+                s(&q),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                &figure,
+                "--yes",
+                "--json",
+            ],
+        )
+    };
+    let value = failed(&delete(0), 1, "expectation_mismatch");
+    assert!(p.exists() && q.exists(), "{value}");
+    let live = on_disk(&p);
+    assert_eq!(
+        value["result"]["plan"]["total_frees_bytes"], live,
+        "{value}"
+    );
+    let value = ok(&delete(live));
+    assert!(!p.exists() && !q.exists());
+    assert_eq!(value["result"]["freed_bytes"], live, "{value}");
+}
+
+/// Whether the test runs as root, whom no mode stops.
+fn is_root(env: &TestEnv) -> bool {
+    let uid = env.command("id").arg("-u").output().unwrap();
+    String::from_utf8_lossy(&uid.stdout).trim() == "0"
+}
+
+#[test]
+fn p5_core_04_a_directory_the_walk_cannot_read_meets_no_figure() {
+    let env = TestEnv::new();
+    if is_root(&env) {
+        return;
+    }
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    let (d, secret) = (top.join("d"), top.join("d/secret"));
+    fs::create_dir_all(&secret).unwrap();
+    fs::write(d.join("a"), vec![1u8; 4096]).unwrap();
+    zeros(&secret.join("blob"), 1 << 20);
+    let saved = ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let mode = |bits| fs::set_permissions(&secret, fs::Permissions::from_mode(bits)).unwrap();
+    mode(0o000);
+    // The plan names no figure for it, and says why.
+    let value = ok(&run(
+        &env,
+        &["clean", s(&d), "--scan", &id, "--dry-run", "--json"],
+    ));
+    let plan = &value["result"]["plan"];
+    assert_eq!(plan["items"][0]["frees_bytes"], Value::Null, "{value}");
+    assert_eq!(plan["items"][0]["frees_kind"], Value::Null, "{value}");
+    let codes: Vec<&str> = value["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"partial_read"), "{value}");
+    assert!(codes.contains(&"changed_since_scan"), "{value}");
+    // Not the total's own figure, nor the one the scan gave.
+    let total = plan["total_frees_bytes"].as_u64().unwrap().to_string();
+    for figure in ["0", total.as_str()] {
+        let out = run(
+            &env,
+            &[
+                "clean",
+                s(&d),
+                "--scan",
+                &id,
+                "--permanent",
+                "--expect-bytes",
+                figure,
+                "--yes",
+                "--json",
+            ],
+        );
+        let value = failed(&out, 1, "expectation_mismatch");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("could not be read whole"), "{value}");
+        assert!(d.join("a").exists(), "{value}");
+    }
+    mode(0o755);
+    assert!(secret.join("blob").exists());
+}
+
+#[test]
+fn p5_core_04_a_tool_item_a_walk_cannot_read_is_refused() {
+    let env = TestEnv::new();
+    if is_root(&env) {
+        return;
+    }
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    let (d, secret) = (top.join("d"), top.join("d/secret"));
+    fs::create_dir_all(&secret).unwrap();
+    fs::write(secret.join("blob"), vec![1u8; 4096]).unwrap();
+    let mode = |bits| fs::set_permissions(&secret, fs::Permissions::from_mode(bits)).unwrap();
+    // Unreadable at the scan as now: nothing has changed, so the handle
+    // plans, and no figure is held to account by what was never read.
+    mode(0o000);
+    ok(&run(&env, &["scan", s(&top), "--save", "--json"]));
+    let (token, _) = handle(&env, &d);
+    let from = format!("--from={token}");
+    let value = failed(
+        &run(
+            &env,
+            &[
+                "clean",
+                &from,
+                "--expect-item-bytes=0",
+                "--dry-run",
+                "--json",
+            ],
+        ),
+        1,
+        "expectation_mismatch",
+    );
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("could not be read whole"), "{value}");
+    mode(0o755);
+    assert!(secret.join("blob").exists());
+}
+
+#[test]
+fn p5_core_04_handles_from_two_saved_scans_are_a_usage_error() {
+    let env = TestEnv::new();
+    let base = fs::canonicalize(env.tmp_dir()).unwrap();
+    let (one, two) = (base.join("one"), base.join("two"));
+    for root in [&one, &two] {
+        fs::create_dir_all(root).unwrap();
+        fs::write(root.join("a.bin"), vec![7u8; 3000]).unwrap();
+        save(&env, root);
+    }
+    let (first, _) = handle(&env, &one.join("a.bin"));
+    let (second, _) = handle(&env, &two.join("a.bin"));
+    // The plan is made against one saved scan, which never saw the other
+    // handle's entry: neither is planned, and nothing moves.
+    let out = run(
+        &env,
+        &[
+            "clean",
+            &format!("--from={first}"),
+            &format!("--from={second}"),
+            "--yes",
+            "--json",
+        ],
+    );
+    let value = failed(&out, 2, "usage");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("two saved scans"), "{value}");
+    assert!(one.join("a.bin").exists() && two.join("a.bin").exists());
+    // Handles from one scan plan as before.
+    let value = failed(
+        &run(&env, &["clean", &format!("--from={first}"), "--json"]),
+        1,
+        "confirmation_required",
+    );
+    assert_eq!(actions(&value), ["trash:"]);
+}
+
+/// A folder that holds a mount point and is not one, from the system's own
+/// mounts: on macOS `/System/Volumes`, where the Data volume and the
+/// others the system mounts are; on Linux the folder above one of the
+/// mount table's mount points that is not one itself (`/sys/fs` above
+/// `/sys/fs/cgroup`). `None` where the table has none.
+fn folder_holding_a_mount() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return Some(PathBuf::from("/System/Volumes"));
+    }
+    let table = fs::read("/proc/self/mountinfo").ok()?;
+    // The mount point is the fifth field; one with an escaped byte is left
+    // out rather than unescaped.
+    let points: Vec<PathBuf> = table
+        .split(|&b| b == b'\n')
+        .filter_map(|line| line.split(|&b| b == b' ').nth(4))
+        .filter(|point| !point.contains(&b'\\'))
+        .map(|point| PathBuf::from(String::from_utf8_lossy(point).into_owned()))
+        .collect();
+    points
+        .iter()
+        .filter_map(|point| point.parent())
+        .find(|folder| {
+            *folder != Path::new("/") && !points.iter().any(|p| p == folder) && folder.is_dir()
+        })
+        .map(Path::to_owned)
+}
+
+#[test]
+fn p5_core_04_a_folder_holding_a_mount_point_is_refused_for_the_trash() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let id = save(&env, &root);
+    let Some(folder) = folder_holding_a_mount() else {
+        duscope_testkit::skip("no folder here holds a mount point");
+        return;
+    };
+    // The Trash would take the volumes mounted in it along: refused for
+    // what it holds before it is outside the scan's root. Planned only.
+    let value = failed(
+        &run(&env, &["clean", s(&folder), "--scan", &id, "--json"]),
+        1,
+        "refused_path",
+    );
+    assert_eq!(
+        actions(&value),
+        ["refused:mount_point"],
+        "{}",
+        folder.display()
+    );
+    // A deletion stops at a mount instead, leaving it and the folders
+    // above it: what the folder holds does not refuse it.
+    let value = failed(
+        &run(
+            &env,
+            &["clean", s(&folder), "--scan", &id, "--permanent", "--json"],
+        ),
+        1,
+        "refused_path",
+    );
+    assert_ne!(
+        actions(&value),
+        ["refused:mount_point"],
+        "{}",
+        folder.display()
+    );
+}
+
+/// Unmounts what a test mounted, innermost first, however it ends.
+#[cfg(target_os = "linux")]
+struct Mounted<'a> {
+    env: &'a TestEnv,
+    points: Vec<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Mounted<'_> {
+    fn drop(&mut self) {
+        for point in self.points.iter().rev() {
+            let _ = self.env.command("umount").arg(point).output();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts a tmpfs and a bind mount; root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_core_04_linux_a_folder_holding_a_mount_stays_out_of_the_trash() {
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    if !is_root(&env) {
+        duscope_testkit::skip("mounting needs root");
+        return;
+    }
+    let root = tree(&env);
+    // A tmpfs two folders down, another device; and a bind mount of a
+    // folder of the same device, which no device number tells.
+    let (tmpfs, bound) = (root.join("t"), root.join("b"));
+    let outside = fs::canonicalize(env.tmp_dir()).unwrap().join("outside");
+    for dir in [tmpfs.join("deep/m"), bound.join("m"), outside.clone()] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(tmpfs.join("kept.bin"), vec![1u8; 2000]).unwrap();
+    fs::write(outside.join("target.bin"), vec![2u8; 3000]).unwrap();
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    for args in [
+        vec![
+            "-t".to_owned(),
+            "tmpfs".to_owned(),
+            "-o".to_owned(),
+            "size=1m".to_owned(),
+            "tmpfs".to_owned(),
+            s(&tmpfs.join("deep/m")).to_owned(),
+        ],
+        vec![
+            "--bind".to_owned(),
+            s(&outside).to_owned(),
+            s(&bound.join("m")).to_owned(),
+        ],
+    ] {
+        let point = PathBuf::from(args.last().unwrap());
+        let out = env.command("mount").args(&args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "mount {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        mounted.points.push(point);
+    }
+    fs::write(tmpfs.join("deep/m/on-tmpfs.bin"), vec![3u8; 1000]).unwrap();
+    let id = save(&env, &root);
+    for folder in [&tmpfs, &bound] {
+        let value = failed(
+            &run(&env, &["clean", s(folder), "--scan", &id, "--json"]),
+            1,
+            "refused_path",
+        );
+        assert_eq!(actions(&value), ["refused:mount_point"], "{value}");
+        let value = failed(
+            &run(
+                &env,
+                &["clean", s(folder), "--scan", &id, "--yes", "--json"],
+            ),
+            1,
+            "refused_path",
+        );
+        assert_eq!(actions(&value), ["refused:mount_point"], "{value}");
+        assert_eq!(value["result"]["trashed_count"], 0);
+    }
+    // Nothing moved: the folders, the mounts and what is on them.
+    assert_eq!(fs::read(tmpfs.join("kept.bin")).unwrap(), [1u8; 2000]);
+    assert_eq!(
+        fs::read(tmpfs.join("deep/m/on-tmpfs.bin")).unwrap(),
+        [3u8; 1000]
+    );
+    assert_eq!(fs::read(bound.join("m/target.bin")).unwrap(), [2u8; 3000]);
+    assert!(!env.xdg_data_home().join("Trash/files/t").exists());
+    assert!(!env.xdg_data_home().join("Trash/files/b").exists());
+    drop(mounted);
 }

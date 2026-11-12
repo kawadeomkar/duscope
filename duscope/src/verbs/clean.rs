@@ -5,8 +5,15 @@
 //! handle's MAC and expiry are checked, and its path must still hold the
 //! device and inode it names. The plan is made against a saved scan, the
 //! newest that holds the first item (or `--scan`): its root bounds what may
-//! move, and its sizes are the plan's. With none, the run fails
-//! `scan_not_found`.
+//! move, and its sizes are the plan's for each item still as it saw it. An
+//! item that has changed since is measured from the tree, and a
+//! `changed_since_scan` warning counts them, with the rescan that measures
+//! the tree again; a handle's item that has changed fails the run
+//! (`path_changed`). A directory that holds one the scan did not enter
+//! counts what a walk found there too, as an upper bound. One a walk could
+//! not read whole has no figure (`partial_read`): no `--expect-bytes` is met
+//! then, and `--expect-item-bytes` refuses it. With no saved scan, the run
+//! fails `scan_not_found`.
 //!
 //! A refused item makes the whole run a dry run (`refused_path`) unless
 //! `--skip-refused`; so does a plan whose `total_frees_bytes` is not within
@@ -20,23 +27,29 @@
 //!
 //! The MCP tool `duscope_delete` runs this verb through two flags of its
 //! own, never typed: `--expect-item-bytes`, one figure per `--from` in
-//! their order, which refuses an item off by more than 1%, and one whose
-//! bytes the saved scan does not know whatever its figure; and `--dry-run`,
-//! which answers the plan as a successful answer with no prompt and no
-//! `--yes` hint, since a client asks for it as a plan, not a confirmation.
+//! their order, which refuses an item off by more than 1%, and a directory
+//! whose bytes the saved scan did not measure whatever its figure; and
+//! `--dry-run`, which answers the plan as a successful answer with no
+//! prompt and no `--yes` hint, since a client asks for it as a plan, not a
+//! confirmation.
 //! Under a tool call, acting claims the call's point of no return
 //! (`CallSignals::commit`) just before anything moves: a call cancelled,
 //! past its deadline or whose client has gone by then (its input ended, or
 //! a write to it failed) moves nothing (`interrupted`), and one committed
-//! runs to its end.
+//! runs to its end. The plan's walks stop with the call, so a call given up
+//! on frees the server's one worker rather than measuring on for no one.
+//! Handles from different saved scans are a usage error: a plan is made
+//! against one.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use duscope_core::CoreError;
 use duscope_core::clean::{
-    CleanItem, CleanOutcome, Method, Plan, UNEXPECTED, clean_execute, clean_plan,
+    CleanItem, CleanOutcome, Method, Plan, UNEXPECTED, clean_execute, clean_plan_until,
 };
 use duscope_core::envelope::{
     CleanEnvelope, CleanQuery, CleanResult, ErrorObject, SCHEMA_VERSION, ScanBlock, Tool, Warning,
@@ -93,7 +106,7 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     } else {
         Method::Trash
     };
-    let mut plan = clean_plan(&items, &resolved.index, &q, method).map_err(core_failure)?;
+    let mut plan = planned(&items, &resolved.index, &q, method)?;
     plan.refuse_unexpected(&args.expect_item_bytes);
     let query = query(args, &plan);
 
@@ -108,6 +121,8 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         .stale
         .then(|| stale_index(&resolved.index, &lookup.max_age))
         .into_iter()
+        .chain(changed_since_scan(&resolved.index, plan.changed_count()))
+        .chain(unread_items(plan.unread_count()))
         .collect();
 
     // On a terminal, without --yes, the plan is shown and `yes` asked for
@@ -167,6 +182,28 @@ pub fn run(args: &CleanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
     match failure {
         Some(failure) => Err(failure.reported()),
         None => Ok(()),
+    }
+}
+
+/// The plan of `items` against `index`. Under an MCP tool call it stops
+/// with the call (cancelled, past its deadline, its client gone), whose
+/// answer no longer waits for it, and nothing moves.
+fn planned(
+    items: &[CleanItem],
+    index: &Index,
+    q: &ExplainQuery<'_>,
+    method: Method,
+) -> Result<Plan, Failure> {
+    let stop = super::mcp::running_call().map_or_else(Arc::default, |call| call.cancel);
+    match clean_plan_until(items, index, q, method, &stop) {
+        Err(CoreError::PlanStopped) => {
+            log::info!(
+                "the tool call was stopped before clean acted, while it planned: nothing is \
+                 moved or deleted"
+            );
+            Err(stopped_failure(method))
+        }
+        plan => plan.map_err(core_failure),
     }
 }
 
@@ -296,11 +333,25 @@ fn failure(
         );
     }
     if let Some(expected) = mismatch {
-        let message = format!(
-            "the plan frees {} bytes, not within 1% of --expect-bytes {}, so nothing was {moved}",
-            thousands(plan.plan.total_frees_bytes),
-            thousands(expected)
-        );
+        let unknown = plan
+            .plan
+            .items
+            .iter()
+            .find(|item| item.action != "refused" && item.frees_bytes.is_none());
+        let message = match unknown {
+            Some(item) => format!(
+                "{} could not be read whole, so what it frees is not known and --expect-bytes \
+                 {} cannot be met: nothing was {moved}",
+                item.path,
+                thousands(expected)
+            ),
+            None => format!(
+                "the plan frees {} bytes, not within 1% of --expect-bytes {}, so nothing was \
+                 {moved}",
+                thousands(plan.plan.total_frees_bytes),
+                thousands(expected)
+            ),
+        };
         return Some(
             Failure::new(Exit::Runtime, "expectation_mismatch", message)
                 .hint("Run duscope clean without --yes and review the plan again"),
@@ -386,11 +437,25 @@ fn unexpected(plan: &Plan, expected: &[u64], moved: &str) -> Option<Failure> {
         thousands(plan.refused_count() as u64),
         thousands(items.len() as u64),
     );
-    // An item the saved scan does not hold: what it frees is not known, so
-    // no figure is met until a scan measures it.
-    let Some(frees) = item.frees_bytes else {
+    // A directory a walk could not read whole: nothing says what it frees.
+    if item.frees_bytes.is_none() {
         let message = format!(
-            "{count}: the saved scan does not hold {}, so what it frees is not known",
+            "{count}: {} could not be read whole, so what it frees is not known",
+            item.path
+        );
+        return Some(
+            Failure::new(Exit::Runtime, "expectation_mismatch", message)
+                .hint("Make what is under it readable, then explain it again"),
+        );
+    }
+    // A directory the saved scan did not measure, or not all of: what it
+    // frees comes from the plan's own walk, so no figure is met until a
+    // scan measures it.
+    let frees = item.frees_bytes.filter(|_| !plan.unmeasured(at));
+    let Some(frees) = frees else {
+        let message = format!(
+            "{count}: the saved scan does not hold everything under {}, so no figure from it \
+             can be checked",
             item.path
         );
         return Some(
@@ -414,7 +479,9 @@ fn unexpected(plan: &Plan, expected: &[u64], moved: &str) -> Option<Failure> {
 
 /// Verifies each `--from` handle with the key in the index directory and
 /// adds its path to `items`, with the device and inode it names; the scan
-/// the first handle answered from, when it names one.
+/// the handles answered from, when one names one. Handles from different
+/// saved scans are a usage error: the plan is made against one, and an item
+/// would be held to a scan that never saw it.
 fn handles(
     args: &CleanArgs,
     dir: Option<&Path>,
@@ -433,12 +500,26 @@ fn handles(
         .hint("Run duscope with --index-dir naming the directory explain used"));
     };
     let key = Key::open(dir).map_err(core_failure)?;
-    let mut scan = None;
+    let mut scan: Option<String> = None;
     for token in &args.from {
         // The clock, not --test-now: a handle holds fifteen minutes.
         let payload = Handle::verify(&key, token, clock::now()).map_err(core_failure)?;
-        if scan.is_none() && !payload.scan_id.is_empty() {
-            scan = Some(payload.scan_id.clone());
+        match &scan {
+            _ if payload.scan_id.is_empty() => {}
+            None => scan = Some(payload.scan_id.clone()),
+            Some(first) if *first != payload.scan_id => {
+                return Err(Failure::new(
+                    Exit::Usage,
+                    "usage",
+                    format!(
+                        "the --from handles come from two saved scans, {first} and {}: clean \
+                         plans against one",
+                        payload.scan_id
+                    ),
+                )
+                .hint("Run duscope clean once for each saved scan's handles"));
+            }
+            Some(_) => {}
         }
         items.push(CleanItem {
             path: PathBuf::from(OsStr::from_bytes(&payload.path)),
@@ -495,17 +576,57 @@ fn first_error(plan: &Plan) -> Option<&ErrorObject> {
     plan.plan.items.iter().find_map(|item| item.error.as_ref())
 }
 
-/// The saved scan is not changed by a move or a deletion: a rescan of it,
-/// named as `next` names it, measures the tree again; an import, which has
-/// no scan options to rescan with, is renewed by a new scan of its root.
-fn index_untouched(index: &Index, method: Method) -> Warning {
-    let command = if scanned(index) {
+/// The command that measures `index`'s tree again: a rescan of it, named as
+/// `next` names it; for an import, which has no scan options to rescan
+/// with, a new scan of its root.
+fn measure_again(index: &Index) -> String {
+    if scanned(index) {
         let id = index.meta().scan_id.to_string();
         next::command("rescan", None, &[], &id, index.file())
     } else {
         let root = index.root_path().to_string_lossy();
         format!("duscope scan --save {}", shell_quote(&root))
-    };
+    }
+}
+
+/// The `changed` items differ from the saved scan's rows, so the plan
+/// measured them from the tree; none when there are none.
+fn changed_since_scan(index: &Index, changed: usize) -> Option<Warning> {
+    (changed > 0).then(|| Warning {
+        code: "changed_since_scan",
+        message: format!(
+            "{} changed since the saved scan, so the plan measured {} from the tree",
+            count(changed, "item"),
+            if changed == 1 { "it" } else { "them" }
+        ),
+        count: Some(changed as u64),
+        hint: Some(format!(
+            "Run {} to measure the tree again",
+            measure_again(index)
+        )),
+    })
+}
+
+/// `unread` items could not be read whole, so what they free is not known;
+/// none when there are none.
+fn unread_items(unread: usize) -> Option<Warning> {
+    (unread > 0).then(|| Warning {
+        code: "partial_read",
+        message: format!(
+            "{} could not be read whole while the plan measured {}, so what {} is not known",
+            count(unread, "item"),
+            if unread == 1 { "it" } else { "them" },
+            if unread == 1 { "it frees" } else { "they free" },
+        ),
+        count: Some(unread as u64),
+        hint: Some("Make what is under it readable, then run duscope clean again".to_owned()),
+    })
+}
+
+/// The saved scan is not changed by a move or a deletion: the command
+/// [`measure_again`] names measures the tree again.
+fn index_untouched(index: &Index, method: Method) -> Warning {
+    let command = measure_again(index);
     let what = match method {
         Method::Trash => "what moved to the Trash",
         Method::Permanent => "what was deleted",

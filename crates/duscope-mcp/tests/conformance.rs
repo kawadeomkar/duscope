@@ -2234,6 +2234,96 @@ fn p5_mcp_01_an_entry_no_saved_scan_holds_is_refused_whatever_its_expect_bytes()
 }
 
 #[test]
+fn p5_core_04_an_entry_changed_since_the_scan_is_path_changed() {
+    // The tool runs `clean`, so it holds a handle to what the scan saw: a
+    // folder whose file grew in place since keeps its device and inode, and
+    // the figure explain gave for it is the scan's, which the item would
+    // otherwise meet.
+    for (lifecycle, version) in revisions() {
+        let env = TestEnv::new();
+        let root = delete_tree(&env);
+        let (one, one_frees) = explained(&env, &root.join("one.bin"));
+        let (dir, dir_frees) = explained(&env, &root.join("dir"));
+        let mut grown = fs::OpenOptions::new()
+            .append(true)
+            .open(root.join("dir/two.bin"))
+            .unwrap();
+        grown.write_all(&vec![3u8; 50_000]).unwrap();
+        drop(grown);
+        let items = json!([item(&one, one_frees), item(&dir, dir_frees)]);
+        let (arguments, real) = (
+            json!({ "items": items }),
+            json!({"items": items, "dry_run": false}),
+        );
+        let ((dry, wet), _) = session(
+            spawn(&env, &roots(&root, &["--allow-delete"]), &[]),
+            lifecycle,
+            version,
+            |client, _| async move {
+                let (_, dry) = call(&client, "duscope_delete", &arguments).await;
+                let (_, wet) = call(&client, "duscope_delete", &real).await;
+                ((dry, wet), client)
+            },
+        );
+        for result in [&dry, &wet] {
+            assert_eq!(error_code(result), "path_changed", "{result:?}");
+            let value = result.structured_content.as_ref().unwrap();
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("has changed since the saved scan"),
+                "{value}"
+            );
+        }
+        assert_untouched(&env, &root);
+    }
+}
+
+#[test]
+fn p5_core_04_a_call_past_its_deadline_stops_the_walk_its_plan_makes() {
+    // A deadline of 0 ms passes as the call starts: the walk that measures
+    // a folder of many folders stops with the call, rather than measuring on
+    // for no one while the server's one worker waits.
+    let [(lifecycle, version), _] = revisions();
+    let env = TestEnv::new();
+    let many = env
+        .work_dir()
+        .canonicalize()
+        .unwrap()
+        .join("trash-tree/dir/many");
+    for i in 0..2000 {
+        fs::create_dir_all(many.join(format!("{i:04}"))).unwrap();
+    }
+    let root = delete_tree(&env);
+    let (dir, dir_frees) = explained(&env, &root.join("dir"));
+    let arguments = json!({"items": [item(&dir, dir_frees)]});
+    let ((stopped, next), transcript) = session(
+        spawn(
+            &env,
+            &roots(&root, &["--allow-delete", "--log-level", "debug"]),
+            &[("DUSCOPE_TEST_MCP_DEADLINE_MS", "0")],
+        ),
+        lifecycle,
+        version,
+        |client, _| async move {
+            let (_, stopped) = call(&client, "duscope_delete", &arguments).await;
+            // The next call runs once the first call's verb has returned.
+            let (_, next) = call(&client, "duscope_scans", &json!({})).await;
+            ((stopped, next), client)
+        },
+    );
+    assert_eq!(error_code(&stopped), "deadline_exceeded", "{stopped:?}");
+    assert_eq!(error_code(&next), "deadline_exceeded", "{next:?}");
+    assert!(
+        transcript.stderr.contains("while it planned"),
+        "{}",
+        transcript.stderr
+    );
+    assert_untouched(&env, &root);
+}
+
+#[test]
 fn p5_mcp_01_an_item_whose_folder_became_a_link_out_of_the_roots_is_refused() {
     for (lifecycle, version) in revisions() {
         let env = TestEnv::new();

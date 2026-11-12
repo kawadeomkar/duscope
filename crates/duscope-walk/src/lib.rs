@@ -639,6 +639,25 @@ pub fn read_only_volume(path: &Path) -> io::Result<bool> {
     platform::read_only(path)
 }
 
+/// The mount point nearest `dir`, at it or under it, in the system's mount
+/// table read now (`/proc/self/mountinfo` on Linux, `getfsstat(2)` on
+/// macOS), comparing whole components; `None` when the table lists none
+/// there. A move to the Trash renames a folder with any volume mounted
+/// inside it, which stays mounted in the Trash: `clean` refuses such a
+/// folder by this, which sees what a walk cannot (a mount under a directory
+/// it cannot read, a bind mount of the same device). `dir` is absolute and
+/// resolved; on macOS a directory of the Data volume is looked for by both
+/// its paths (`/Users/a` and `/System/Volumes/Data/Users/a`), since a mount
+/// point is recorded by the one it was mounted at.
+///
+/// # Errors
+///
+/// When the table cannot be read or lists no mount holding `dir`, which
+/// leaves the mounts under it unknown; on other platforms, always.
+pub fn mount_point_under(dir: &Path) -> io::Result<Option<PathBuf>> {
+    platform::mount_point_under(dir)
+}
+
 /// A directory's modification and status-change times, in Unix
 /// nanoseconds, as [`stamp_dirs`] reads them and the walk records them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

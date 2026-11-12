@@ -113,6 +113,8 @@ pub enum Input {
     Landed,
     /// The rescan `r` started failed: why.
     RescanFailed(String),
+    /// The plan `D` asked for, made beside the viewer.
+    Planned(mark::Planned),
 }
 
 /// Why [`run_session`] returned.
@@ -127,7 +129,8 @@ pub enum Ended {
 /// What the viewer keeps across a reload, the view it ran on gone: the
 /// view, the sort, the mask, the colours and the cursor as paths, the marks
 /// as absolute paths, each kept only where the new scan holds the same
-/// path. What is freed goes: the new scan measures it.
+/// path, and the count of the mark pane's plans. What is freed goes: the
+/// new scan measures it.
 #[derive(Debug)]
 pub struct Carried {
     tab: Tab,
@@ -146,6 +149,10 @@ pub struct Carried {
     /// The marks, absolute.
     marks: Vec<Vec<u8>>,
     session: Session,
+    /// How many panes have asked for a plan: a plan given up on before the
+    /// reload still answers, on the terminal session's channel, under its
+    /// number, which no pane of the new viewer may take for its own.
+    plans: u64,
 }
 
 /// What the viewer moved to the Trash this session, which the binary prints
@@ -182,6 +189,9 @@ pub struct Effects<'a> {
     pub size: Box<mark::SizeText<'a>>,
     /// Starts `r`'s rescan; `None` where the viewer has none (a test's).
     pub rescan: Option<Rescan<'a>>,
+    /// Starts `D`'s plan beside the viewer; `None` where the viewer has
+    /// none (a test's), and the pane then says it cannot plan.
+    pub plan: Option<mark::Planner<'a>>,
 }
 
 impl std::fmt::Debug for Effects<'_> {
@@ -199,6 +209,7 @@ impl Default for Effects<'_> {
             env: Box::new(|_| None),
             size: Box::new(human_size),
             rescan: None,
+            plan: None,
         }
     }
 }
@@ -293,6 +304,9 @@ pub struct App<'a> {
     freed: Freed,
     /// `D`: the mark pane, while it is open.
     pane: Option<mark::Pane>,
+    /// How many panes have asked for a plan, which numbers each one; kept
+    /// across a reload, as the plans' channel is.
+    plans: u64,
     /// The last click, which a second one on its cell makes a double click.
     clicks: Clicks,
     /// A rescan is running beside the viewer.
@@ -444,6 +458,7 @@ impl<'a> App<'a> {
             marks: mark::Marks::default(),
             freed: Freed::default(),
             pane: None,
+            plans: 0,
             clicks: Clicks::default(),
             rescanning: false,
             landed: false,
@@ -498,6 +513,7 @@ impl<'a> App<'a> {
             cursor: self.cursor.paths(self.view),
             marks: self.marks.paths(self.view),
             session: self.session,
+            plans: self.plans,
         }
     }
 
@@ -520,6 +536,7 @@ impl<'a> App<'a> {
             self.opts.pack = pack;
         }
         self.session = carried.session;
+        self.plans = carried.plans;
         self.cursor.set_labels(self.labels);
         self.cursor.restore(self.view, &carried.cursor);
         let dropped = self.marks.restore(self.view, &carried.marks);
@@ -1148,7 +1165,8 @@ impl<'a> App<'a> {
     /// landing reloads (or waits for the filter prompt to close, whose text
     /// it would lose); its failure is said on the key line. The mark pane
     /// cannot be open then: `D` waits for a running rescan, and `r` is a
-    /// letter of the answer in the pane.
+    /// letter of the answer in the pane. A plan goes to the pane that asked
+    /// for it, and is dropped if that pane has gone.
     pub fn input(&mut self, input: Input) -> Flow {
         match input {
             Input::Event(event) => self.on(&event),
@@ -1168,6 +1186,13 @@ impl<'a> App<'a> {
                     kind: Notice::Warning,
                 });
                 Flow::Redraw
+            }
+            Input::Planned(planned) => {
+                if self.pane.as_mut().is_some_and(|pane| pane.land(planned)) {
+                    Flow::Redraw
+                } else {
+                    Flow::Wait
+                }
             }
         }
     }
@@ -1325,8 +1350,8 @@ impl<'a> App<'a> {
         Flow::Redraw
     }
 
-    /// `D`: the mark pane, planned now; with nothing marked or a rescan
-    /// running, a word on the key line.
+    /// `D`: the mark pane, its plan asked for beside the viewer; with
+    /// nothing marked or a rescan running, a word on the key line.
     fn open_pane(&mut self) -> Flow {
         if self.marks.is_empty() {
             return self.warn("nothing is marked: d marks the selection".to_owned());
@@ -1336,7 +1361,14 @@ impl<'a> App<'a> {
         if self.rescanning {
             return self.warn("a rescan is running: D opens when it lands".to_owned());
         }
-        self.pane = Some(mark::Pane::open(&self.marks, self.view, &self.sources));
+        self.plans += 1;
+        self.pane = Some(mark::Pane::open(
+            &self.marks,
+            self.view,
+            &self.sources,
+            self.plans,
+            self.effects.plan.as_mut(),
+        ));
         Flow::Redraw
     }
 
