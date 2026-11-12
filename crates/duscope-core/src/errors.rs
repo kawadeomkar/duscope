@@ -40,6 +40,10 @@ pub enum CoreError {
         /// What failed.
         message: String,
     },
+    /// An index write was stopped before it finished: the caller gave up
+    /// on it, and no file is left.
+    #[error("the index write was stopped before it finished, so nothing was saved")]
+    IndexWriteStopped,
     /// A saved scan could not be read: not an index, or damaged.
     #[error("cannot read the index {file}: {message}")]
     IndexCorrupt {

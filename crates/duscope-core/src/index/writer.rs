@@ -9,6 +9,13 @@
 //! its roll-up, which numbered the entries and charged the hard links and
 //! clones (DEV-36).
 //!
+//! A write can be stopped ([`IndexWriter::write_until`]): Ctrl-C, or an MCP
+//! tool call cancelled or past its deadline, sets the flag the scan's walk
+//! read. `SQLite`'s progress handler reads it inside every statement, the
+//! rows and the indexes alike, and interrupts the statement once it is set;
+//! the flag is read once more before the rename. A stopped write removes its
+//! temporary file and leaves nothing.
+//!
 //! `SQLite` runs with its default page cache of about 2 MB and sorts each
 //! index's keys through a file past that (`temp_store = FILE`), so a save
 //! costs little more memory than the scan it follows. The file is `SQLite`'s
@@ -26,6 +33,9 @@ use std::fmt::Display;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use duscope_walk::{Attrs, Boundary, DirId, FullAttrs, Skip};
 use rusqlite::{Connection, ErrorCode, Statement, Transaction, params};
@@ -134,33 +144,85 @@ impl IndexWriter {
         meta: &ScanMeta,
         dir: &Path,
     ) -> Result<ScanId, CoreError> {
-        let scans = dir.join("scans");
-        let path = index_path(dir, &meta.scan_id);
-        let fail = |e: &dyn Display| CoreError::IndexWrite {
-            file: path.display().to_string(),
-            message: e.to_string(),
-        };
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&scans)
-            .map_err(|e| fail(&e))?;
-        let tmp = scans.join(format!("{}.db.tmp-{}", meta.scan_id, std::process::id()));
-        let written = write_file(arena, rollup, meta, &tmp)
-            .map_err(|e| fail(&e))
-            .and_then(|()| {
-                kill_before_rename();
-                fs::rename(&tmp, &path).map_err(|e| fail(&e))?;
-                // The rename itself is durable once the directory is synced.
-                File::open(&scans)
-                    .and_then(|d| d.sync_all())
-                    .map_err(|e| fail(&e))
-            });
-        if written.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        written.map(|()| meta.scan_id.clone())
+        IndexWriter::write_until(arena, rollup, meta, dir, &Arc::default())
     }
+
+    /// [`IndexWriter::write`], stopped when `stop` is set: before it
+    /// starts, inside any statement every 1,000 steps of `SQLite`'s
+    /// machine, and once more before the rename. It then fails
+    /// ([`CoreError::IndexWriteStopped`]) and leaves no file. Once the file
+    /// has its name the write is done, and finishes whatever `stop` says.
+    pub fn write_until(
+        arena: &Arena,
+        rollup: &RollUp,
+        meta: &ScanMeta,
+        dir: &Path,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<ScanId, CoreError> {
+        write_in(arena, rollup, meta, dir, stop, &|db, indexes| {
+            db.execute_batch(indexes)
+        })
+    }
+}
+
+/// Steps of `SQLite`'s machine between looks at a write's stop flag: a few
+/// microseconds of work, so a stop lands within a statement, and a look
+/// costs one atomic load.
+const PROGRESS_OPS: i32 = 1_000;
+
+/// [`IndexWriter::write_until`], building the indexes with
+/// `create_indexes`, which a test replaces to stop the write while they are
+/// built.
+fn write_in(
+    arena: &Arena,
+    rollup: &RollUp,
+    meta: &ScanMeta,
+    dir: &Path,
+    stop: &Arc<AtomicBool>,
+    create_indexes: &dyn Fn(&Connection, &str) -> rusqlite::Result<()>,
+) -> Result<ScanId, CoreError> {
+    let stopped = || stop.load(Ordering::Relaxed);
+    if stopped() {
+        return Err(CoreError::IndexWriteStopped);
+    }
+    let scans = dir.join("scans");
+    let path = index_path(dir, &meta.scan_id);
+    let fail = |e: &dyn Display| {
+        if stopped() {
+            CoreError::IndexWriteStopped
+        } else {
+            CoreError::IndexWrite {
+                file: path.display().to_string(),
+                message: e.to_string(),
+            }
+        }
+    };
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&scans)
+        .map_err(|e| fail(&e))?;
+    let tmp = scans.join(format!("{}.db.tmp-{}", meta.scan_id, std::process::id()));
+    let written = write_file_until(arena, rollup, meta, &tmp, stop, create_indexes)
+        .map_err(|e| fail(&e))
+        .and_then(|()| {
+            kill_before_rename();
+            if stopped() {
+                return Err(CoreError::IndexWriteStopped);
+            }
+            fs::rename(&tmp, &path).map_err(|e| fail(&e))?;
+            // The rename itself is durable once the directory is synced.
+            File::open(&scans)
+                .and_then(|d| d.sync_all())
+                .map_err(|e| CoreError::IndexWrite {
+                    file: path.display().to_string(),
+                    message: e.to_string(),
+                })
+        });
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written.map(|()| meta.scan_id.clone())
 }
 
 /// `DUSCOPE_TEST_KILL_BEFORE_RENAME`, in a debug build: the process dies
@@ -181,15 +243,10 @@ fn kill_before_rename() {
     }
 }
 
-/// Builds the whole file at `tmp`, synced, ready to rename.
-fn write_file(arena: &Arena, rollup: &RollUp, meta: &ScanMeta, tmp: &Path) -> Result<(), String> {
-    write_file_with(arena, rollup, meta, tmp, &|db, indexes| {
-        db.execute_batch(indexes)
-    })
-}
-
-/// [`write_file`], building the indexes with `create_indexes`, which a test
-/// replaces to fail: a sort file on a full disk cannot be arranged portably.
+/// Builds the whole file at `tmp`, synced, ready to rename, building the
+/// indexes with `create_indexes`, which a test replaces to fail: a sort
+/// file on a full disk cannot be arranged portably.
+#[cfg(test)]
 fn write_file_with(
     arena: &Arena,
     rollup: &RollUp,
@@ -197,15 +254,56 @@ fn write_file_with(
     tmp: &Path,
     create_indexes: &dyn Fn(&Connection, &str) -> rusqlite::Result<()>,
 ) -> Result<(), String> {
-    match build(arena, rollup, meta, tmp, "FILE", create_indexes) {
-        Err(Failure::SortFile(cause)) => {
+    write_file_until(arena, rollup, meta, tmp, &Arc::default(), create_indexes)
+}
+
+/// Builds the whole file at `tmp`, synced, ready to rename, unless `stop`
+/// is set first; building the indexes with `create_indexes`.
+fn write_file_until(
+    arena: &Arena,
+    rollup: &RollUp,
+    meta: &ScanMeta,
+    tmp: &Path,
+    stop: &Arc<AtomicBool>,
+    create_indexes: &dyn Fn(&Connection, &str) -> rusqlite::Result<()>,
+) -> Result<(), String> {
+    match build(arena, rollup, meta, tmp, "FILE", stop, create_indexes) {
+        // A stopped build fails as it can; it is not built again.
+        Err(Failure::SortFile(cause)) if !stop.load(Ordering::Relaxed) => {
             log::warn!(
                 "building the indexes failed ({cause}): building the file again with the sort in memory"
             );
             fs::remove_file(tmp).map_err(|e| e.to_string())?;
-            build(arena, rollup, meta, tmp, "MEMORY", create_indexes).map_err(Failure::into_message)
+            build(arena, rollup, meta, tmp, "MEMORY", stop, create_indexes)
+                .map_err(Failure::into_message)
         }
         built => built.map_err(Failure::into_message),
+    }
+}
+
+/// What a build's progress handler does: whether `stop` is set, which
+/// interrupts the statement running (`SQLITE_INTERRUPT`).
+///
+/// `DUSCOPE_TEST_SLOW_WRITE_MS`, in a debug build: the handler's first
+/// call, in the first statement that runs [`PROGRESS_OPS`] steps (the
+/// file rows of a tree of forty files do; twenty do not), waits that many
+/// milliseconds first, or until `stop` is set, so that a test can stop a
+/// write under way.
+fn until_stopped(stop: &Arc<AtomicBool>) -> impl FnMut() -> bool + Send + 'static {
+    let stop = Arc::clone(stop);
+    let mut slow = cfg!(debug_assertions)
+        .then(|| std::env::var("DUSCOPE_TEST_SLOW_WRITE_MS").ok())
+        .flatten()
+        .and_then(|ms| ms.parse().ok())
+        .map(Duration::from_millis);
+    move || {
+        if let Some(wait) = slow.take() {
+            let started = Instant::now();
+            while started.elapsed() < wait && !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        stop.load(Ordering::Relaxed)
     }
 }
 
@@ -250,13 +348,15 @@ fn from_sort_file(error: &rusqlite::Error) -> bool {
 }
 
 /// One build of the whole file at `tmp`, `SQLite`'s sort spilling as
-/// `temp_store` says: `FILE`, or `MEMORY` to keep it in memory.
+/// `temp_store` says: `FILE`, or `MEMORY` to keep it in memory. Its
+/// statements stop once `stop` is set.
 fn build(
     arena: &Arena,
     rollup: &RollUp,
     meta: &ScanMeta,
     tmp: &Path,
     temp_store: &str,
+    stop: &Arc<AtomicBool>,
     create_indexes: &dyn Fn(&Connection, &str) -> rusqlite::Result<()>,
 ) -> Result<(), Failure> {
     let other = |e: &dyn Display| Failure::Other(e.to_string());
@@ -269,6 +369,8 @@ fn build(
         .open(tmp)
         .map_err(|e| other(&e))?;
     let mut db = Connection::open(tmp).map_err(|e| other(&e))?;
+    db.progress_handler(PROGRESS_OPS, Some(until_stopped(stop)))
+        .map_err(|e| other(&e))?;
     db.execute_batch(&format!(
         "PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; \
          PRAGMA locking_mode = EXCLUSIVE; PRAGMA temp_store = {temp_store};"

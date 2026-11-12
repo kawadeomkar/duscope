@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use duscope_core::CoreError;
 use duscope_core::arena::Arena;
 use duscope_core::envelope::{ExcludedEntry, ScanBlock, VolumeEntry, Warning};
 use duscope_core::index::{IndexWriter, ScanId, ScanMeta, index_path, random_bytes};
@@ -69,6 +70,10 @@ pub struct Scanned {
     /// root that holds the home's protected folders
     /// ([`full_disk_access_missing`]).
     pub full_disk_access_missing: bool,
+    /// The flag that stopped the walk: Ctrl-C's, or under an MCP tool call
+    /// the call's. Set once the walk is over, it stops the index write
+    /// ([`write_index`]), which then leaves nothing.
+    pub stop: Arc<AtomicBool>,
 }
 
 /// Set while `duscope mcp` serves: the Full Disk Access warning then names
@@ -322,7 +327,9 @@ fn save_failed(message: String) -> Failure {
 }
 
 /// Writes the index of `scanned` under `dir`, silently: what `save` and a
-/// rescan the viewer runs beside its terminal share.
+/// rescan the viewer runs beside its terminal share. Stopped by the scan's
+/// flag ([`Scanned::stop`]), it fails `interrupted` (exit 130) and saves
+/// nothing.
 pub(super) fn write_index(
     scanned: &Scanned,
     walk: &WalkArgs,
@@ -355,8 +362,18 @@ pub(super) fn write_index(
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let started = Instant::now();
-    IndexWriter::write(&scanned.arena, &scanned.rollup, &meta, dir)
-        .map_err(|e| save_failed(e.to_string()))?;
+    IndexWriter::write_until(&scanned.arena, &scanned.rollup, &meta, dir, &scanned.stop).map_err(
+        |e| match e {
+            // Ctrl-C, or the tool call's cancellation or deadline, after the
+            // walk: one line on stderr from a shell, as during the walk.
+            CoreError::IndexWriteStopped => Failure::new(
+                Exit::Interrupted,
+                "interrupted",
+                "the scan was interrupted before its index was saved",
+            ),
+            e => save_failed(e.to_string()),
+        },
+    )?;
     let secs = started.elapsed().as_secs_f64();
     let entries = scanned.rollup.len();
     #[allow(clippy::cast_precision_loss)]
@@ -661,17 +678,19 @@ pub(super) fn scan_by<E>(
     duscope_walk::prepare();
     // Ctrl-C stops the walk; if it has not stopped soon after, the process
     // ends anyway. Nothing is written before a scan completes, and once the
-    // walk is over the result is written whole. A scan an MCP tool call runs
-    // stops instead when the call is cancelled or runs past its deadline,
-    // which set the call's flag, and leaves Ctrl-C to end the server as it
-    // would at any other time; it counts its entries for the call's
-    // progress.
+    // walk is over the output is written whole; Ctrl-C then sets the flag
+    // alone, which stops the index write that follows (`write_index`). A
+    // scan an MCP tool call runs stops instead when the call is cancelled or
+    // runs past its deadline, which set the call's flag, during the walk or
+    // the write, and leaves Ctrl-C to end the server as it would at any
+    // other time; it counts its entries for the call's progress.
     let call = super::mcp::running_call();
     let interrupts = match &call {
         Some(call) => Interrupts::unarmed(Arc::clone(&call.cancel)),
         None => Interrupts::arm(),
     };
     opts.cancel = Arc::clone(&interrupts.flag);
+    let stop = Arc::clone(&interrupts.flag);
     let started = Instant::now();
     let started_ns = now(walk_args)?;
     let mut arena = Arena::new(opts.attrs);
@@ -738,6 +757,7 @@ pub(super) fn scan_by<E>(
         fallback: None,
         source: "scan",
         full_disk_access_missing,
+        stop,
     };
     phases(&scanned, walk_time, rollup_time);
     Ok(Ok(scanned))
@@ -1127,10 +1147,12 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
 /// took over 200 ms on machines whose timers overshoot. The watcher blocks
 /// until SIGINT or the stand-down, without polling. Dropping the guard once
 /// the walk is over ends the watcher; the two share a lock, so a Ctrl-C
-/// while the result is written lets it finish rather than cut it off from
-/// another thread. Where SIGINT was inherited ignored (a background job),
-/// or the watcher cannot be started, Ctrl-C keeps its usual effect and the
-/// flag is never set.
+/// while the output is written lets it finish rather than cut it off from
+/// another thread. The handler stays: a later Ctrl-C still sets the flag,
+/// which the index write reads ([`write_index`]), stopping it and removing
+/// its temporary file before the process exits 130. Where SIGINT was
+/// inherited ignored (a background job), or the watcher cannot be started,
+/// Ctrl-C keeps its usual effect and the flag is never set.
 struct Interrupts {
     flag: Arc<AtomicBool>,
     /// Set once the walk is over, under the lock the watcher exits under.
@@ -1264,6 +1286,7 @@ mod tests {
             fallback: None,
             source: "scan",
             full_disk_access_missing: false,
+            stop: std::sync::Arc::default(),
         }
     }
 
@@ -1309,6 +1332,7 @@ mod tests {
             fallback: None,
             source: "scan",
             full_disk_access_missing: false,
+            stop: std::sync::Arc::default(),
         };
         let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/"]).unwrap().verb
         else {
@@ -1397,6 +1421,7 @@ mod tests {
             fallback: None,
             source: "scan",
             full_disk_access_missing: false,
+            stop: std::sync::Arc::default(),
         };
         let found = warnings(&placeholders);
         let dataless = found.iter().find(|w| w.code == "dataless_present").unwrap();
@@ -1475,6 +1500,7 @@ mod tests {
             fallback: None,
             source: "scan",
             full_disk_access_missing: false,
+            stop: std::sync::Arc::default(),
         };
         let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
         else {

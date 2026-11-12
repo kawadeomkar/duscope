@@ -14,9 +14,10 @@
 //!
 //! The calls run one at a time on the server's worker thread (P3-MCP-05). A
 //! call's verb runs with the call's [`CallSignals`] at hand
-//! ([`running_call`]): a scan stops its walk when the call is cancelled or
-//! runs past its deadline, as it stops for Ctrl-C from a shell, and counts
-//! the entries it reads, which the server reports as the call's progress.
+//! ([`running_call`]): a scan stops its walk, or the index write after it
+//! (P5-CORE-07), when the call is cancelled or runs past its deadline, as it
+//! stops for Ctrl-C from a shell, and counts the entries it reads, which the
+//! server reports as the call's progress.
 
 use std::cell::RefCell;
 use std::ffi::OsString;
