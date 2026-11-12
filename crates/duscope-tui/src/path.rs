@@ -11,8 +11,6 @@
 //! index's `dirs` (`TreeView::child_dirs`), so descending reads the folder
 //! descended into and nothing under it.
 
-use std::cmp::Reverse;
-
 use duscope_core::query::{SizeKind, TreeView, children};
 
 /// The selected path and the cursor on it.
@@ -148,7 +146,10 @@ impl Path {
 }
 
 /// The children of `dir`, largest first by `size` and in their order
-/// among equals, as the siblings pane lists them; none for a file.
+/// among equals, as the siblings pane lists them without a mask; none for
+/// a file. The viewer reads them through [`crate::views::Viewing::listed`],
+/// which keeps them; the tests check its order against this.
+#[cfg(test)]
 #[must_use]
 pub fn siblings(view: &dyn TreeView, dir: u32, size: SizeKind) -> Vec<u32> {
     let node = view.node(dir);
@@ -159,7 +160,7 @@ pub fn siblings(view: &dyn TreeView, dir: u32, size: SizeKind) -> Vec<u32> {
         .map(|id| (view.node(id).size(size), id))
         .collect();
     // Stable: equals keep their order.
-    kids.sort_by_key(|&(bytes, _)| Reverse(bytes));
+    kids.sort_by_key(|&(bytes, _)| std::cmp::Reverse(bytes));
     kids.into_iter().map(|(_, id)| id).collect()
 }
 

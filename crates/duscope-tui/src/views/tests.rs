@@ -1858,3 +1858,208 @@ fn p4_tui_05_a_folder_of_a_million_files_on_t3() {
     step("mask cleared", &[key(KeyCode::Esc)]);
     step("a move", &[key(KeyCode::Up)]);
 }
+
+// P4-TUI-08: a wide folder's children are read once for the siblings pane
+// and the moves and clicks that walk them, not once per frame or click.
+
+/// A view of `view` that counts the reads of each entry through it.
+struct PerEntry<'a> {
+    view: &'a ArenaView<'a>,
+    reads: RefCell<Vec<u32>>,
+}
+
+impl<'a> PerEntry<'a> {
+    fn new(view: &'a ArenaView<'a>) -> PerEntry<'a> {
+        PerEntry {
+            view,
+            reads: RefCell::new(vec![0; usize::try_from(view.len()).unwrap()]),
+        }
+    }
+
+    /// The reads of each entry in `ids` since the last call: the reads in
+    /// all, and how many entries were read more than once.
+    fn take(&self, ids: std::ops::Range<u32>) -> (u32, usize) {
+        let mut reads = self.reads.borrow_mut();
+        let counts = &reads[ids.start as usize..ids.end as usize];
+        let total = counts.iter().sum();
+        let again = counts.iter().filter(|&&n| n > 1).count();
+        reads.fill(0);
+        (total, again)
+    }
+
+    fn note(&self, id: u32) {
+        self.reads.borrow_mut()[usize::try_from(id).unwrap()] += 1;
+    }
+}
+
+impl TreeView for PerEntry<'_> {
+    fn len(&self) -> u32 {
+        self.view.len()
+    }
+    fn node(&self, id: u32) -> duscope_core::query::Node {
+        self.note(id);
+        self.view.node(id)
+    }
+    fn root_path(&self) -> &Path {
+        self.view.root_path()
+    }
+    fn full_attrs(&self) -> bool {
+        self.view.full_attrs()
+    }
+    fn name(&self, id: u32) -> std::borrow::Cow<'_, [u8]> {
+        self.note(id);
+        self.view.name(id)
+    }
+}
+
+/// A root holding a file larger than all the rest, `huge`, and a folder
+/// `big/` of `n` files of different sizes, too many for a tile each: the
+/// cursor starts on `huge`, and `big/`'s children are the ids after it.
+fn wide(n: usize) -> (Arena, RollUp) {
+    let mut json = String::from(r#"[1,2,{"progname":"ncdu"},[{"name":"/wide"}"#);
+    let _ = write!(json, r#",[{{"name":"big"}}"#);
+    for i in 0..n {
+        let size = (i * 7919 % 10_007 + 1) * 64;
+        let _ = write!(
+            json,
+            r#",{{"name":"f{i:06}","asize":{size},"dsize":{size}}}"#
+        );
+    }
+    let huge = n * 10_008 * 64;
+    let _ = write!(json, r#"],{{"name":"huge","asize":{huge},"dsize":{huge}}}"#);
+    json.push_str("]]");
+    let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
+        .unwrap()
+        .arena;
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
+#[test]
+fn p4_tui_08_ten_frames_in_a_wide_folder_read_its_children_once() {
+    // A folder of 100,000: the first frame of its siblings pane reads them
+    // once, and the nine moves along it read the rows they draw; were the
+    // pane's list read for every frame, the ten would read each child ten
+    // times.
+    const N: u32 = 100_000;
+    let tree = wide(N as usize);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/wide"));
+    let reads = PerEntry::new(&view);
+    let big = id_of(&view, "big");
+    let children = big + 1..big + 1 + N;
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = App::new(
+        &reads,
+        opts(&mocha, &classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let mut terminal = first_frame(&app, 120, 40);
+    assert_eq!(app.selected(), id_of(&view, "huge"));
+    // The cursor on a child of `big/`, no frame drawn of it yet.
+    app.jump(big + 1);
+    reads.take(children.clone());
+    // Ten frames: the siblings pane focused, then nine moves along it.
+    let mut events = vec![key(KeyCode::Tab)];
+    events.extend(std::iter::repeat_n(key(KeyCode::Down), 9));
+    let mut selected = Vec::new();
+    for event in &events {
+        assert_eq!(press(&mut app, &mut terminal, event), Flow::Redraw);
+        selected.push(app.selected());
+        let text = text_of(terminal.backend().buffer());
+        // The pane lists `big/`'s children, with a `… n more` row.
+        assert!(text.contains("in big ·"), "{text}");
+        assert!(text.contains("■ … "), "{text}");
+    }
+    let (read, again) = reads.take(children);
+    assert!(
+        selected.iter().all(|&id| id > big && id <= big + N),
+        "{selected:?}"
+    );
+    assert_eq!(
+        selected.iter().collect::<HashSet<_>>().len(),
+        10,
+        "{selected:?}"
+    );
+    // Each once, and the rows drawn again: ten frames of at most a pane's
+    // rows.
+    assert!(read >= N, "{read} reads of {N} children");
+    assert!(read <= N + 10 * 64, "{read} reads of {N} children");
+    assert!(again <= 10 * 32, "{again} children read more than once");
+}
+
+#[test]
+fn p4_tui_08_ten_clicks_on_a_wide_folders_pool_read_its_children_once() {
+    use std::time::{Duration, Instant};
+
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use duscope_treemap::paint::DrawnKind;
+
+    use crate::layout::layout;
+
+    // A click on the `+N small` tile of a folder of 100,000 selects the
+    // largest of the children pooled there, found in the folder's list in
+    // size order, which is read once: ten clicks read each child once, not
+    // ten times.
+    const N: u32 = 100_000;
+    let tree = wide(N as usize);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/wide"));
+    let reads = PerEntry::new(&view);
+    let big = id_of(&view, "big");
+    let children = big + 1..big + 1 + N;
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let mut app = App::new(
+        &reads,
+        opts(&mocha, &classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let (w, h) = (120, 40);
+    let mut terminal = first_frame(&app, w, h);
+    let map = app.map();
+    let index = map
+        .tiles()
+        .iter()
+        .position(|t| t.kind == DrawnKind::Small && t.id == big)
+        .unwrap_or_else(|| panic!("no pool: {:?}", map.tiles()));
+    let pool = map.tiles()[index].rect;
+    let area = layout(w, h).map;
+    let (x, y) = (
+        area.x + pool.x + pool.w / 2,
+        area.y + pool.y.midpoint(pool.y + pool.h) / 2,
+    );
+    // The largest child the pool holds, the first of equals.
+    let pooled = (big + 1..=big + N)
+        .filter(|&id| map.mark(&view, id) == crate::zoom::Mark::Tile(index))
+        .min_by_key(|&id| (std::cmp::Reverse(view.node(id).allocated), id))
+        .unwrap();
+    reads.take(children.clone());
+    let start = Instant::now();
+    for i in 0..10 {
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        // A second apart: single clicks, never a double one.
+        let flow = app.mouse(click, start + Duration::from_secs(i));
+        assert_eq!(flow == Flow::Redraw, i == 0, "click {i}");
+        if flow == Flow::Redraw {
+            terminal
+                .draw(|f| app.draw(f.area(), f.buffer_mut()))
+                .unwrap();
+        }
+        assert_eq!(app.selected(), pooled, "click {i}");
+    }
+    let (read, _) = reads.take(children);
+    // Once, for the list; then the tiles' own children the search passes
+    // on each click, and the rows of the one frame drawn.
+    let tiles = u32::try_from(map.tiles().len()).unwrap();
+    assert!(read >= N, "{read} reads of {N} children");
+    assert!(read <= N + 10 * tiles + 64, "{read} reads of {N} children");
+}
