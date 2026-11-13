@@ -39,6 +39,19 @@ pub struct StaleQuery {
     pub after: Option<After>,
 }
 
+impl StaleQuery {
+    /// Its cut, as an index reads it: the files unchanged since the cutoff
+    /// and at least `--min-size`, with the filters that read no path;
+    /// `None` when a filter reads paths.
+    pub(crate) fn cut(&self) -> Option<Cut> {
+        let mut cut = Cut::of(&self.filters, self.size)?;
+        cut.min_size = cut.min_size.max(self.min_size);
+        cut.unchanged_before = Some(self.now.saturating_sub(self.older_than));
+        cut.atime = self.atime;
+        Some(cut)
+    }
+}
+
 /// The stale files under the root of `view`.
 pub fn stale(
     view: &(impl TreeView + ?Sized),
@@ -64,21 +77,13 @@ pub fn stale(
     let root = view.node(0);
     let after = q.after.as_ref();
     let seen = after.map_or(0, |a| a.seen);
-    // Without a filter, from the view's own ranking where it has one (the
-    // index's plans): the same cut, the same order.
-    let ranked = (root.is_dir()
-        && !q.atime
-        && q.filters.is_empty()
-        && q.sort == SortKey::Size
-        && !q.reverse
-        && q.size == SizeKind::Allocated)
-        .then_some(q.limit)
+    // From the view's own ranking where it has one (the index's plans):
+    // the same cut, with the filters that read no path, in the same order.
+    let ranked = (root.is_dir() && q.sort == SortKey::Size && !q.reverse)
+        .then(|| q.cut())
         .flatten()
-        .and_then(|limit| {
-            let cut = Cut {
-                before: cutoff,
-                min_allocated: q.min_size,
-            };
+        .zip(q.limit)
+        .and_then(|(cut, limit)| {
             let first = usize::try_from(seen).ok()?.checked_add(limit)?;
             page_of(ranked_files(view, 0, first, Some(cut))?, after)
         });

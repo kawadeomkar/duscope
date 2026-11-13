@@ -12,6 +12,10 @@ fast it answers, on T2 unless `--trees` says otherwise.
   `by-type`, over the whole scan and over its largest directory, each against
   the saved scan (`--scan <id>`): p50 and p95 end to end, the process's start
   included, warm.
+- **The filtered shapes:** `top --files` and `stale` with the filters the
+  index answers (P2-QRY-10: a depth, a size bound, apparent size, a time
+  window), timed as the queries are and recorded per tree under `shapes`
+  with the rows each matched; no target holds them yet, so they are no gate.
 - **The first query after a cache drop:** `top --scan`, cold, against a scan
   saved beside the cold trees.
 - **The index's size:** bytes per entry of a basic index and of an
@@ -87,6 +91,22 @@ GATES: Tuple[Tuple[str, str, float, Optional[str]], ...] = (
 # The subtree by-type limit counts per this many files of the subtree.
 BY_TYPE_PER = 100_000
 
+# The filtered shapes (P2-QRY-10): each one's name, and the verb and flags it
+# runs against the saved scan of the tree. On T2 every file is 0 or 4 KiB on
+# disk and none reaches 1 MiB, so `--min-size 1M` keeps none and the sizes
+# tie densely; the modification times are the generator's (trees.mtime_ns:
+# 2023-11-14T22:13:20Z and up to 20,000 s after), so `--since` keeps about
+# two thirds of the files on any machine, as `--size apparent --min-size 1K`
+# keeps a third. `stale` keeps what its default age leaves, by depth.
+SHAPES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("top_files_depth", ("top", "--files", "--depth", "3")),
+    ("top_files_min_size", ("top", "--files", "--min-size", "1M")),
+    ("top_files_apparent", ("top", "--files", "--size", "apparent")),
+    ("top_files_apparent_min_size", ("top", "--files", "--size", "apparent", "--min-size", "1K")),
+    ("top_files_since", ("top", "--files", "--since", "2023-11-15T00:00:00Z")),
+    ("stale_depth", ("stale", "--min-size", "1", "--max-depth", "4")),
+)
+
 # What `scan -v` prints (duscope/src/verbs/scan.rs), after the logger's prefix.
 WRITE_LINE = re.compile(r"write: ([0-9,]+) entries in ([0-9.]+) s: ([0-9.]+) µs/entry")
 WALK_LINE = re.compile(r"walk: .*? in ([0-9.]+) s")
@@ -134,6 +154,16 @@ def gates(values: Dict[str, Optional[float]], platform: str) -> List[Dict[str, o
         holds = None if value is None or not applies else (value <= limit if op == "<=" else value >= limit)
         out.append({"name": name, "value": value, "op": op, "limit": limit, "binds": binds, "holds": holds})
     return out
+
+
+def matched(argv: Sequence[str], what: str) -> int:
+    """The `total_count` a list verb's `--json` answer gives: the rows it
+    matched before its limit."""
+    done = _run(argv, what)
+    try:
+        return int(json.loads(done.stdout)["total_count"])
+    except (ValueError, KeyError, TypeError) as e:
+        raise measure.MeasureError(f"{what}: `{shlex.join(argv)}` gave no total_count: {e}") from None
 
 
 def under_pty(argv: Sequence[str]) -> List[str]:
@@ -434,6 +464,7 @@ class Run:
                     top.append(tool)
 
         self.part("queries", queries)
+        self.part("filtered shapes", lambda: found.update({"shapes": self.shapes(ref, path, scans["basic"])}))
         if "cold" in modes:
             self.part("first query after a cache drop", lambda: self.first_query(tree_dirs, work, cold_cmd))
         speedups: Dict[str, Optional[float]] = {}
@@ -448,6 +479,20 @@ class Run:
                 self.part(name, lambda c=competitor: speedups.update({c.tool.name: self.d34(c, top[0], path, work[tree_dirs["warm"]])}))
         found["speedups"] = speedups
         return {"gate_values": self.values, **found}
+
+    def shapes(self, ref: Duscope, path: str, scan: str) -> Dict[str, Dict[str, object]]:
+        """Each of SHAPES against the saved scan `scan` of the tree at `path`:
+        its row, as `results` holds a query's, with the rows it matched."""
+        session = self.session("warm", path, None)
+        out: Dict[str, Dict[str, object]] = {}
+        for name, (verb, *flags) in SHAPES:
+            argv = ref.argv(verb, path, *flags, "--scan", scan, "--json")
+            count = matched(argv, f"running the {name} shape")
+            tool = tools.ad_hoc(name, shlex.join(argv))
+            row = measure.row(self.t.name, "warm", name, tool.command(), session.alone(tool))
+            out[name] = {**row, "kind": "shape", "total_count": count}
+            self.log(f"{self.t.name}: {name} matched {count:,} rows, p50 {_ms(float(row['p50_s'])):g} ms")
+        return out
 
     def session(self, mode: str, path: str, cold_cmd: Optional[str]) -> measure.Session:
         warmup = self.args.warmup if mode == "warm" else 0
