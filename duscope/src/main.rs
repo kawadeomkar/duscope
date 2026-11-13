@@ -165,9 +165,20 @@ fn execute(mut cli: Cli, matches: &ArgMatches, capture: Option<&Capture>) -> u8 
             verbs::report_interrupt();
             failure.exit.code()
         }
-        // The index is written after the output, which stands, and clean's
-        // plan carries its own error: the failure goes to stderr, never as a
-        // second envelope.
+        // A verb run for an MCP tool call wrote its envelope to the capture,
+        // which nothing has read yet: a failed save replaces it with the
+        // error, so that the client is not handed a scan id no saved scan
+        // has (P3-MCP-09).
+        Err(failure) if failure.code == "index_write_failed" && capture.is_some() => {
+            if let Some(capture) = capture {
+                capture.borrow_mut().clear();
+            }
+            output.failure(&failure);
+            failure.exit.code()
+        }
+        // On the command line the index is written after the output, which
+        // stands, and clean's plan carries its own error: the failure goes
+        // to stderr, never as a second envelope.
         Err(failure) if failure.code == "index_write_failed" || failure.reported => {
             out::to_stderr(&failure);
             failure.exit.code()
@@ -197,7 +208,7 @@ fn report_undecided(failure: &Failure, capture: Option<&Capture>) {
 /// A configuration file that cannot be used: one that is not there is a
 /// usage error (the flag or variable named it), one that cannot be read
 /// otherwise a runtime error, and one with a bad key or value a usage error.
-fn config_failure(error: &CoreError) -> Failure {
+pub(crate) fn config_failure(error: &CoreError) -> Failure {
     let failure = match error {
         CoreError::ConfigRead { source, .. } if source.kind() != io::ErrorKind::NotFound => {
             Failure::new(Exit::Runtime, "io_error", error.to_string())

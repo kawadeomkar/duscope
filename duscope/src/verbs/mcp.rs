@@ -6,8 +6,11 @@
 //! runs from a shell ([`crate::run_captured`]): the same flags, the same
 //! configuration file, the same index directory and `--max-chars`, so the
 //! result's `structuredContent` is the envelope that command prints, byte
-//! for byte. Nothing but protocol messages reaches stdout; the log goes to
-//! stderr at `--log-level`.
+//! for byte. The server reads the configuration file as every verb does,
+//! and stops at start on one it cannot use; its index directory is
+//! `--index-dir` or `DUSCOPE_INDEX_DIR`, then the file's `index_dir`, then
+//! the default (P3-MCP-09). Nothing but protocol messages reaches stdout;
+//! the log goes to stderr at `--log-level`.
 //!
 //! The calls run one at a time on the server's worker thread (P3-MCP-05). A
 //! call's verb runs with the call's [`CallSignals`] at hand
@@ -19,6 +22,7 @@ use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use duscope_core::config::{Config, ConfigSource};
 use duscope_core::index;
 use duscope_mcp::discover::ServerConfig;
 use duscope_mcp::roots::{Refusal, Roots};
@@ -33,22 +37,16 @@ use crate::out::{DEFAULT_MAX_CHARS, OutputArgs};
 
 /// Serves until the client closes stdin.
 pub fn serve(args: &McpArgs, global: &GlobalArgs, output: &OutputArgs) -> Result<(), Failure> {
+    // Read before anything else, as main reads it for every other verb.
+    let source = ConfigSource::locate(global.config.as_deref(), |name| std::env::var_os(name));
+    let config = Config::load(&source).map_err(|e| crate::config_failure(&e))?;
     let roots = Roots::new(&args.roots).map_err(|e| {
         Failure::new(Exit::Usage, "usage", e.to_string())
             .hint("Run duscope mcp with --roots naming directories there are")
     })?;
-    let index_dir = global
-        .index_dir
-        .clone()
-        .or_else(|| index::default_dir(|name| std::env::var_os(name)))
-        .ok_or_else(|| {
-            Failure::new(
-                Exit::Usage,
-                "usage",
-                "there is no index directory: HOME and XDG_CACHE_HOME are unset",
-            )
-            .hint("Run duscope mcp with --index-dir DIR")
-        })?;
+    let index_dir = index_dir(global.index_dir.clone(), &config, |name| {
+        std::env::var_os(name)
+    })?;
     let max_chars = output.max_chars.unwrap_or(DEFAULT_MAX_CHARS);
     let mut registry = Registry::new(max_chars, args.allow_delete);
     for tool in tools() {
@@ -89,6 +87,34 @@ pub fn serve(args: &McpArgs, global: &GlobalArgs, output: &OutputArgs) -> Result
     Transport::start(std::io::stdin(), std::io::stdout(), server)
         .and_then(Transport::wait)
         .map_err(failed)
+}
+
+/// The index directory the server reads and saves into, as every verb
+/// chooses it (`cli::apply_config`): `given`, which is `--index-dir` or
+/// `DUSCOPE_INDEX_DIR`, then the configuration's `index_dir`, then the
+/// default under `env`'s `XDG_CACHE_HOME` or `HOME`.
+fn index_dir(
+    given: Option<PathBuf>,
+    config: &Config,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Result<PathBuf, Failure> {
+    given
+        .or_else(|| {
+            config
+                .defaults
+                .index_dir
+                .as_ref()
+                .map(|dir| dir.value.clone())
+        })
+        .or_else(|| index::default_dir(env))
+        .ok_or_else(|| {
+            Failure::new(
+                Exit::Usage,
+                "usage",
+                "there is no index directory: HOME and XDG_CACHE_HOME are unset",
+            )
+            .hint("Run duscope mcp with --index-dir DIR")
+        })
 }
 
 /// The tools the server offers.
@@ -448,5 +474,56 @@ mod fixture {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("test_panic's verb panicked, as its test asked");
+    }
+}
+
+#[cfg(test)]
+mod index_dir_order {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use duscope_core::config::Config;
+    use duscope_testkit::TestEnv;
+
+    use super::index_dir;
+
+    /// The order, from the environment's own values: the test process's
+    /// environment is not the test's to set.
+    #[test]
+    fn p3_mcp_09_the_configured_index_directory_comes_after_the_flag_and_the_variable() {
+        let env = TestEnv::new();
+        let configured = env.work_dir().join("configured");
+        let config = Config::parse(
+            &format!("[defaults]\nindex_dir = \"{}\"\n", configured.display()),
+            &env.xdg_config_home().join("duscope/config.toml"),
+        )
+        .unwrap();
+        let vars = |name: &str| -> Option<OsString> {
+            match name {
+                "HOME" => Some(env.home().into()),
+                "XDG_CACHE_HOME" => Some(env.xdg_cache_home().into()),
+                _ => None,
+            }
+        };
+        // --index-dir, or DUSCOPE_INDEX_DIR, which clap reads into it.
+        let given = env.index_dir();
+        assert_eq!(
+            index_dir(Some(given.clone()), &config, vars).unwrap(),
+            given
+        );
+        // Then the configuration's.
+        assert_eq!(index_dir(None, &config, vars).unwrap(), configured);
+        // Then the default.
+        assert_eq!(
+            index_dir(None, &Config::default(), vars).unwrap(),
+            env.xdg_cache_home().join("duscope")
+        );
+        let none = index_dir(None, &Config::default(), |_| None).unwrap_err();
+        assert_eq!(none.code, "usage");
+        // The configuration's needs neither HOME nor XDG_CACHE_HOME.
+        assert_eq!(
+            index_dir(None, &config, |_| None).unwrap(),
+            PathBuf::from(&configured)
+        );
     }
 }
