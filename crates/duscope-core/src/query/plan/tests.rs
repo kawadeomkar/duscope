@@ -287,6 +287,36 @@ fn p2_qry_01_under_binds_the_subtree() {
     ));
 }
 
+#[test]
+fn p5_sec_04_ties_are_walked_past_a_directory_naming_itself_its_parent() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    // Five files of one size, so the last row kept ties with others and
+    // the ties are found by walking the tree in path order.
+    let mut tree = MemProvider::new("/t");
+    tree.file("x1", 10)
+        .file("x2", 10)
+        .file("a/y1", 10)
+        .file("a/y2", 10)
+        .file("c/z1", 10);
+    let sound = mem_index(&tree, &dir.join("sound"));
+    let want = sound.largest_files(0, 3, None, Some(Plan::Range)).unwrap();
+    assert_eq!(paths(&sound, &want.ids), ["/t/a/y1", "/t/a/y2", "/t/c/z1"]);
+    // The root's row names the root its parent, which the reader accepts
+    // (the root is its own parent): the walk must not enter it again.
+    let file = mem_index(&tree, &dir.join("self")).file().to_owned();
+    let db = rusqlite::Connection::open(&file).unwrap();
+    db.execute_batch("UPDATE dirs SET parent_id = 0 WHERE id = 0")
+        .unwrap();
+    drop(db);
+    let index = Index::open(&file).unwrap();
+    for plan in [Plan::Range, Plan::Walk] {
+        let got = index.largest_files(0, 3, None, Some(plan)).unwrap();
+        assert_eq!(got, want, "{plan:?}");
+    }
+    assert!(index.failure().is_none());
+}
+
 /// The timings P2-QRY-01 promises, printed: each plan on the root and on a
 /// subtree of `DUSCOPE_BENCH_INDEX` (an index of T2), and a 22-level path
 /// resolved in the fixture tree's deep case. Run in a release build:

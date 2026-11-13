@@ -50,6 +50,7 @@ use rusqlite::{Connection, Row};
 use super::ScanOptions;
 use crate::CoreError;
 use crate::index::Index;
+use crate::index::reader::dir_ids;
 use crate::index::writer::{EXCLUDED, EXCLUDED_CACHE, FIRMLINK, SKIPPED_CONTAINERS};
 use crate::query::{TreeView, kind_name};
 
@@ -646,7 +647,7 @@ impl Saved {
             message: e.to_string(),
         };
         let db = index.db();
-        let dirs = load_dirs(db).map_err(corrupt)?;
+        let dirs = load_dirs(db, index.len()).map_err(corrupt)?;
         let volumes = load_volumes(db).map_err(corrupt)?;
         let mut children: HashMap<u32, HashMap<Box<[u8]>, usize>> = HashMap::new();
         for (at, dir) in dirs.iter().enumerate().skip(1) {
@@ -756,17 +757,24 @@ impl Saved {
     }
 }
 
-fn load_dirs(db: &Connection) -> rusqlite::Result<Vec<SavedDir>> {
+/// The saved scan's directories, in id order, from a scan of `len`
+/// entries. Each row is checked as the reader checks it ([`dir_ids`]):
+/// [`Saved::rel`] climbs the parents to the root, and
+/// [`Saved::subtree_dirs`] counts from a directory to its `last_id`.
+fn load_dirs(db: &Connection, len: u32) -> rusqlite::Result<Vec<SavedDir>> {
     let mut stmt = db.prepare(
-        "SELECT id, last_id, parent_id, name, mtime, ctime, dev, flags, errors FROM dirs \
-         ORDER BY id",
+        "SELECT id, last_id, parent_id, name, mtime, ctime, dev, flags, errors, files_end \
+         FROM dirs ORDER BY id",
     )?;
     let rows = stmt.query_map([], |row| {
         let id: u32 = row.get(0)?;
+        let last_id: u32 = row.get(1)?;
+        let parent: Option<u32> = row.get(2)?;
+        dir_ids(id, parent, row.get(9)?, last_id, len)?;
         Ok(SavedDir {
             id,
-            last_id: row.get(1)?,
-            parent: row.get::<_, Option<u32>>(2)?.unwrap_or(id),
+            last_id,
+            parent: parent.unwrap_or(id),
             name: row.get::<_, Vec<u8>>(3)?.into_boxed_slice(),
             mtime: row.get(4)?,
             ctime: row.get(5)?,

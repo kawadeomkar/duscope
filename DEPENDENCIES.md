@@ -32,7 +32,7 @@ Every external crate a workspace crate depends on directly has a row here. The r
 - **Maintainers** is the number of crates.io owners (users and teams) who can publish the crate.
 - **Last release** is the crate's newest version on crates.io and its date.
 - Maintainers and last release are read from the crates.io API (`/api/v1/crates/<name>` and `/api/v1/crates/<name>/owners`) when a row is added or its pin changes.
-- **The fuzz targets** (`fuzz/`) are a crate of their own outside the workspace, as cargo-fuzz lays them out, built on nightly only and never published, so neither table lists them. Beside the workspace crates they depend on `libfuzzer-sys` (`=0.4.13`, the libFuzzer runtime cargo-fuzz builds targets against; MIT or Apache-2.0, with LLVM's NCSA licence for libFuzzer's C++ sources).
+- **The fuzz targets** (`fuzz/`) are a crate of their own outside the workspace, as cargo-fuzz lays them out, built on nightly only and never published, so neither table lists them. Beside the workspace crates they depend on `libfuzzer-sys` (`=0.4.13`, the libFuzzer runtime cargo-fuzz builds targets against; MIT or Apache-2.0, with LLVM's NCSA licence for libFuzzer's C++ sources), `serde_json`, which reads back what the `jsonrpc` target writes, and `rusqlite`, the workspace's own pin, with which the `index_rows` target changes the rows of its copy of an index.
 
 ## Dependencies of the published crates
 

@@ -22,7 +22,7 @@ use crate::envelope::{ByTypeEntry, Example, name_fields};
 use crate::index::writer::LATER_LINK;
 use crate::rules::{Class, Classes, ext};
 
-use super::{Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, pct, remain};
+use super::{Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, ids, pct, remain};
 
 /// What `by-type` was asked.
 #[derive(Debug, Clone)]
@@ -177,7 +177,7 @@ pub fn classify(
     let mut components: Vec<Cow<'_, [u8]>> = above_root.into_iter().map(Cow::Borrowed).collect();
     // The directories open above the current id: (last id, its class).
     let mut open: Vec<(u32, Option<Class>)> = vec![(u32::MAX, above)];
-    for id in 0..=root.last_id {
+    for id in ids(view, 0, root.last_id) {
         let node = view.node(id);
         while open.last().is_some_and(|&(last, _)| id > last) {
             open.pop();

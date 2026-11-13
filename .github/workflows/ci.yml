@@ -592,7 +592,7 @@ jobs:
       matrix:
         # Every target of fuzz/Cargo.toml, as nightly-fuzz.yml runs them
         # (crates/duscope-core/tests/fuzz_workflows.rs checks both lists).
-        target: [sql, ncdu, gdu, gpscan, args, jsonrpc]
+        target: [sql, ncdu, gdu, gpscan, args, jsonrpc, index_rows]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

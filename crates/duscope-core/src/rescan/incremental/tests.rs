@@ -18,8 +18,10 @@ use duscope_walk::{
 use rusqlite::types::Value;
 
 use super::{Changes, Checks, Fallback, History, MAX_AGE_NS, Merged, Stop, merge, plan, sample};
+use crate::CoreError;
 use crate::arena::Arena;
 use crate::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
+use crate::query::TreeView;
 use crate::rollup::roll_up;
 
 /// The mark every volume of a test's scans carries, on every platform.
@@ -829,4 +831,130 @@ fn p5_core_01_under_attrs_full_an_incremental_saved_scan_is_read_whole() {
     );
     assert_eq!(reached(Attrs::Full, false, "full-whole"), None);
     assert_eq!(reached(Attrs::Basic, true, "basic-incremental"), None);
+}
+
+#[test]
+fn p5_sec_04_a_saved_scan_whose_rows_break_the_layout_is_index_corrupt() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    file(&root.join("root.txt"), 10);
+    file(&root.join("a/b/f"), 8192);
+    fs::create_dir_all(root.join("c")).unwrap();
+    let started = now_ns();
+    let (saved, _) = full(&root, &env.tmp_dir().join("index"), "rows", started, "{}");
+    let names: Vec<(u32, Vec<u8>)> = saved
+        .db()
+        .prepare("SELECT id, name FROM dirs WHERE id > 0 ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        names,
+        [(2, b"a".to_vec()), (3, b"b".to_vec()), (5, b"c".to_vec())],
+        "the ids the cases name"
+    );
+    let quiet = |under: &Path| Ok(reporting(under, &[]));
+    let history = script(&quiet);
+    let checks = Checks {
+        now_ns: started + 3_600_000_000_000,
+        max_age_ns: MAX_AGE_NS,
+        tool_version: "0.0.0",
+    };
+    // Each case a copy of the saved scan in a directory of its own, changed
+    // there: an index is never edited in place.
+    let copy = |case: &str, sql: &str| -> Index {
+        let dir = env.tmp_dir().join(case).join("scans");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(saved.file().file_name().unwrap());
+        fs::copy(saved.file(), &file).unwrap();
+        let db = rusqlite::Connection::open(&file).unwrap();
+        db.execute_batch(sql).unwrap();
+        drop(db);
+        Index::open(&file).unwrap()
+    };
+    assert!(plan(&copy("sound", ""), &checks, &history).is_ok());
+    for (case, sql, reported) in [
+        (
+            "cycle",
+            "UPDATE dirs SET parent_id = 3 WHERE id = 2",
+            "dirs row 2: its parent_id 3 is not below its id",
+        ),
+        (
+            "self-parent",
+            "UPDATE dirs SET parent_id = 2 WHERE id = 2",
+            "dirs row 2: its parent_id 2 is not below its id",
+        ),
+        (
+            "last-before-id",
+            "UPDATE dirs SET last_id = 1 WHERE id = 2",
+            "dirs row 2: id <= files_end <= last_id < n_entries fails (files_end 2, last_id 1, \
+             n_entries 6)",
+        ),
+        (
+            "last-past-the-scan",
+            "UPDATE dirs SET last_id = 6 WHERE id = 2",
+            "dirs row 2: id <= files_end <= last_id < n_entries fails (files_end 2, last_id 6, \
+             n_entries 6)",
+        ),
+        (
+            "no-parent",
+            "UPDATE dirs SET parent_id = NULL WHERE id = 3",
+            "dirs row 3: its parent_id is NULL, which only the root's may be",
+        ),
+    ] {
+        match plan(&copy(case, sql), &checks, &history) {
+            Err(Stop::Index(CoreError::IndexCorrupt { message, .. })) => {
+                assert_eq!(message, reported, "{case}");
+            }
+            other => panic!("{case}: {other:?}"),
+        }
+    }
+}
+
+/// The rows an incremental rescan writes keep the layout: a merged index
+/// after creates, deletes and a rename reads whole with no failed read, and
+/// the next rescan loads its directories.
+#[test]
+fn p5_sec_04_a_merged_index_keeps_the_layout() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    let (parent, _) = full(
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        now_ns(),
+        "{}",
+    );
+    file(&root.join("a/a4/newdir/inner/file"), 4000);
+    fs::remove_dir_all(root.join("doomed/sub1")).unwrap();
+    fs::rename(root.join("mover/m"), root.join("b/m")).unwrap();
+    let reported = [
+        "a/a4",
+        "a/a4/newdir",
+        "a/a4/newdir/inner",
+        "doomed",
+        "doomed/sub1",
+        "doomed/sub1/sub2",
+        "mover",
+        "b",
+    ];
+    let replay = |under: &Path| Ok(reporting(under, &reported));
+    let history = script(&replay);
+    let (merged, _) = incremental(&parent, &root, &env.tmp_dir().join("merged"), &history).unwrap();
+    assert!(merged.meta().incremental);
+    for id in 0..merged.len() {
+        merged.path(id);
+        merged.child_dirs(id);
+        // As a walk down the tree holds a directory's children.
+        let _ = crate::query::children(&merged, &merged.node(id)).count();
+    }
+    assert!(merged.failure().is_none(), "{:?}", merged.failure());
+    // As `scans --check` holds every row: dense ids, each nested where its
+    // parent's ids place it.
+    crate::check::rows_keep_the_layout(&merged).unwrap();
+    let saved = super::Saved::load(&merged).unwrap();
+    assert_eq!(saved.dirs.len() as u64, merged.node(0).dir_count);
 }

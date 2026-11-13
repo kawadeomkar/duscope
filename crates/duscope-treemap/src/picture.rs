@@ -195,7 +195,7 @@ pub(crate) fn draw(
         if root.is_dir() {
             walk.block(&root, area, 0, folder)?;
         } else {
-            let class = walk.class_of[0];
+            let class = walk.class_of.first().copied().unwrap_or(Class::Other);
             let color = tile_color(view, &opts.paint, &root, class, base.depth, folder);
             walk.leaf(
                 area,
@@ -355,10 +355,16 @@ impl Walk<'_, '_, '_> {
                         self.block(&node, tile.rect, node.depth, folder)?;
                     } else {
                         self.note(id, dir, tile.rect, DrawnKind::Leaf);
+                        // `get`: the view keeps every id below its length,
+                        // and a class past it would be a damaged index's,
+                        // which the verb reports.
                         let class = if node.is_dir() {
                             dominant(self.view, &self.class_of, paint.size, id, false)
                         } else {
-                            self.class_of[id as usize]
+                            self.class_of
+                                .get(id as usize)
+                                .copied()
+                                .unwrap_or(Class::Other)
                         };
                         let depth = node.depth + self.base.depth;
                         let color = tile_color(self.view, paint, &node, class, depth, folder);

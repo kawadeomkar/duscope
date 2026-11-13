@@ -19,7 +19,22 @@
 //!
 //! The queries' views cannot return errors, so a read that fails after the
 //! file opened is kept and the entry reads as empty; the verb asks
-//! [`Index::failure`] once its query is done.
+//! [`Index::failure`] once its query is done. A row whose ids break the
+//! layout, which a walk of the tree would follow for ever, fails its read
+//! (`dir_ids`, `file_ids`), and so does an id below `n_entries` that
+//! neither table holds. Once a read has failed, every entry reads as empty
+//! without a query and the walks over ids stop ([`crate::query::ids`]). A
+//! walk down the tree holds each directory's children to the layout as it
+//! lists them, so that it reads each entry once ([`crate::query::children`],
+//! [`crate::query::Subtree`]). An `n_entries` past the highest id + 1 is
+//! refused at open, from the two tables' keys.
+//!
+//! So a saved index whose rows break the layout never makes a verb read for
+//! ever; a verb that reads a damaged row fails `index_corrupt`; a verb that
+//! does not may answer from the rows it read, with no warning. Only `scans
+//! --check` holds every row to the layout ([`crate::check`]): the check is
+//! a pass over both tables, which at open would cost more than the query it
+//! came before.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -218,7 +233,7 @@ impl Index {
             "full" => Attrs::Full,
             _ => Attrs::Basic,
         };
-        let len = u32::try_from(meta.int("n_entries")).unwrap_or(0);
+        let len = entry_count(&db, meta.int("n_entries")).map_err(corrupt)?;
         let root_bytes = meta.bytes("root");
         let read = ScanMeta {
             scan_id,
@@ -326,6 +341,14 @@ impl Index {
     /// read as an empty entry.
     pub fn failure(&self) -> Option<String> {
         self.failed.borrow().clone()
+    }
+
+    /// Whether a read has failed since the file opened ([`Index::failure`]):
+    /// from then on every entry reads as empty without a query, since the
+    /// verb fails `index_corrupt` whatever else it reads, and a walk over
+    /// the ids stops ([`crate::query::ids`]).
+    pub fn failed(&self) -> bool {
+        self.failed.borrow().is_some()
     }
 
     /// Every volume the scan met, in the order it met them.
@@ -681,6 +704,13 @@ impl Index {
         }
     }
 
+    /// Keeps, as the first failed read when it is, that the row of entry
+    /// `id` in `table` breaks the layout as a walk of the tree found it:
+    /// `what`, worded as [`dir_ids`] words a row it refuses.
+    pub(crate) fn out_of_layout(&self, table: &str, id: u32, what: &str) {
+        self.fail(&misplaced(table, id, what));
+    }
+
     /// Keeps the first failed read.
     fn fail(&self, e: &rusqlite::Error) {
         let mut failed = self.failed.borrow_mut();
@@ -699,8 +729,14 @@ impl Index {
     /// Entry `id`'s node and name: from a block kept, or an entry read
     /// alone; read alone unless the entry read alone before it is its
     /// neighbour (a walk) or its block has been missed [`MISSES`] times;
-    /// else from its block, read and kept first.
+    /// else from its block, read and kept first. `None`, with no query,
+    /// once a read has failed ([`Index::failed`]): an id that neither table
+    /// holds would otherwise cost a query each, and a crafted `n_entries`
+    /// leaves billions of them.
     fn entry<T>(&self, id: u32, f: impl FnOnce(&(Node, Vec<u8>)) -> T) -> Option<T> {
+        if self.failed() {
+            return None;
+        }
         if id >= self.len {
             self.fail(&rusqlite::Error::QueryReturnedNoRows);
             return None;
@@ -766,7 +802,9 @@ impl Index {
         let dir = self
             .db
             .prepare(&format!("SELECT {DIR_COLUMNS} FROM dirs WHERE id = ?1"))?
-            .query_row([id], |row| Ok((dir_from_row(id, row)?, row.get(14)?)))
+            .query_row([id], |row| {
+                Ok((dir_from_row(id, row, self.len)?, row.get(14)?))
+            })
             .optional()?;
         if let Some(entry) = dir {
             return Ok(entry);
@@ -777,6 +815,10 @@ impl Index {
                  WHERE f.id = ?1"
             ))?
             .query_row([id], |row| Ok((file_from_row(id, row)?, row.get(14)?)))
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => missing(id, self.len),
+                e => e,
+            })
     }
 
     /// The block of ids from `start`, every id in it found in one table or
@@ -798,7 +840,7 @@ impl Index {
         let mut rows = dirs.query([start, end])?;
         while let Some(row) = rows.next()? {
             let id: u32 = row.get(0)?;
-            put(id, (dir_from_row(id, row)?, row.get(14)?));
+            put(id, (dir_from_row(id, row, self.len)?, row.get(14)?));
         }
         let mut files = self.db.prepare(&format!(
             "SELECT {FILE_COLUMNS} FROM files AS f LEFT JOIN dirs AS d ON d.id = f.parent_id \
@@ -809,8 +851,12 @@ impl Index {
             let id: u32 = row.get(0)?;
             put(id, (file_from_row(id, row)?, row.get(14)?));
         }
-        let entries: Option<Vec<(Node, Vec<u8>)>> = slots.into_iter().collect();
-        let entries = entries.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if let Some(gap) = slots.iter().position(Option::is_none) {
+            // At most BLOCK slots.
+            let gap = u32::try_from(gap).unwrap_or(BLOCK);
+            return Err(missing(start + gap, self.len));
+        }
+        let entries = slots.into_iter().flatten().collect();
         Ok(Block { start, entries })
     }
 }
@@ -960,12 +1006,18 @@ impl TreeView for Index {
 
     /// From `dirs_parent_name`: a directory's subdirectories are rows that
     /// name it their parent, where the default hops from sibling to sibling
-    /// through blocks far apart.
+    /// through blocks far apart. Only rows after it: a row that names itself
+    /// its parent would be its own subdirectory, and a walk down the tree
+    /// would enter it for ever. None, with no query, once a read has failed,
+    /// as every entry then reads as empty.
     fn child_dirs(&self, dir: u32) -> Vec<(u32, u32)> {
+        if self.failed() {
+            return Vec::new();
+        }
         let read = || -> rusqlite::Result<Vec<(u32, u32)>> {
-            let mut stmt = self
-                .db
-                .prepare("SELECT id, last_id FROM dirs WHERE parent_id = ?1 ORDER BY id")?;
+            let mut stmt = self.db.prepare(
+                "SELECT id, last_id FROM dirs WHERE parent_id = ?1 AND id > ?1 ORDER BY id",
+            )?;
             stmt.query_map([dir], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect()
         };
@@ -977,12 +1029,17 @@ impl TreeView for Index {
 }
 
 /// A directory's node from its `dirs` row, as [`Index::read_block`] selects
-/// it (`id` first).
-fn dir_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
+/// it (`id` first), in a scan of `len` entries; a row whose ids break the
+/// layout fails ([`dir_ids`]).
+fn dir_from_row(id: u32, row: &Row<'_>, len: u32) -> rusqlite::Result<Node> {
     let flags: u32 = row.get(12)?;
+    let parent: Option<u32> = row.get(3)?;
+    let files_end: u32 = row.get(2)?;
+    let last_id: u32 = row.get(1)?;
+    dir_ids(id, parent, files_end, last_id, len)?;
     Ok(Node {
         id,
-        parent: row.get::<_, Option<u32>>(3)?.unwrap_or(0),
+        parent: parent.unwrap_or(0),
         depth: row.get(4)?,
         kind: Kind::Dir,
         allocated: unsigned(row.get(6)?),
@@ -1001,24 +1058,29 @@ fn dir_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
         flags: Flags::from_bits_truncate(flags),
         upper_bound: flags & UPPER_BOUND != 0,
         unreadable: row.get(13)?,
-        files_end: row.get(2)?,
-        last_id: row.get(1)?,
+        files_end,
+        last_id,
     })
 }
 
 /// A non-directory's node from its `files` row and its parent's depth, as
-/// [`Index::read_block`] selects them (`id` first).
+/// [`Index::read_block`] selects them (`id` first); a row whose parent is
+/// not before it fails, as a directory's does ([`dir_ids`]).
 fn file_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
     let flags: u32 = row.get(12)?;
     let kind: String = row.get(11)?;
     let parent_depth: Option<u32> = row.get(13)?;
+    let parent: u32 = row.get(1)?;
+    file_ids(id, parent)?;
     Ok(Node {
         id,
-        parent: row.get(1)?,
+        parent,
+        // Saturating: the parent's depth is its row's, which nothing
+        // checks against the rows above it.
         depth: if id == 0 {
             0
         } else {
-            parent_depth.map_or(0, |d| d + 1)
+            parent_depth.map_or(0, |d| d.saturating_add(1))
         },
         kind: match kind.as_str() {
             "file" => Kind::File,
@@ -1045,6 +1107,109 @@ fn file_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
         files_end: id,
         last_id: id,
     })
+}
+
+/// Refuses the row of directory `id` unless its ids keep the layout every
+/// index is written in (`docs/index-format.md`, Ids): numbered in pre-order,
+/// so it has a parent and the parent comes before it (the root's own
+/// `parent_id` is not checked), and its own files end at `files_end` and its
+/// subtree at `last_id`, within the scan's `len` entries. An index may come
+/// from anyone (SECURITY.md), and the queries that climb to the root or walk
+/// a subtree end on these terms alone: a parent cycle would climb for ever,
+/// and a subtree that ends before it starts or past the scan would count
+/// wrong or read for ever. Whether a row nests inside its parent's subtree
+/// is not checked: it needs the parent's row, and no query needs it to end.
+pub(crate) fn dir_ids(
+    id: u32,
+    parent: Option<u32>,
+    files_end: u32,
+    last_id: u32,
+    len: u32,
+) -> rusqlite::Result<()> {
+    if id != 0 && parent.is_none_or(|parent| parent >= id) {
+        let what = match parent {
+            Some(parent) => format!("its parent_id {parent} is not below its id"),
+            None => "its parent_id is NULL, which only the root's may be".to_owned(),
+        };
+        return Err(misplaced("dirs", id, &what));
+    }
+    if !(id <= files_end && files_end <= last_id && last_id < len) {
+        return Err(misplaced(
+            "dirs",
+            id,
+            &format!(
+                "id <= files_end <= last_id < n_entries fails (files_end {files_end}, \
+                 last_id {last_id}, n_entries {len})"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses the row of file `id` unless its parent comes before it, as a
+/// directory's must ([`dir_ids`]). A scan of a single file stores the file
+/// as the root, whose `parent_id` is not checked.
+pub(crate) fn file_ids(id: u32, parent: u32) -> rusqlite::Result<()> {
+    if id != 0 && parent >= id {
+        return Err(misplaced(
+            "files",
+            id,
+            &format!("its parent_id {parent} is not below its id"),
+        ));
+    }
+    Ok(())
+}
+
+/// The error of a row whose ids break the layout: `SQLITE_CORRUPT`, which
+/// the verb reports as `index_corrupt`.
+pub(crate) fn misplaced(table: &str, id: u32, what: &str) -> rusqlite::Error {
+    layout_error(format!("{table} row {id}: {what}"))
+}
+
+/// The error of id `id`, below the scan's `len` entries, which neither
+/// table holds: the ids run from 0 with none left out.
+pub(crate) fn missing(id: u32, len: u32) -> rusqlite::Error {
+    layout_error(format!(
+        "no row of dirs or files has id {id}, below n_entries {len}"
+    ))
+}
+
+/// The error of rows that break the layout, as `message` says:
+/// `SQLITE_CORRUPT`, which the verb reports as `index_corrupt`.
+pub(crate) fn layout_error(message: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+        Some(message),
+    )
+}
+
+/// The scan's entry count from `scan_meta.n_entries`, `entries`: 0 where it
+/// does not fit a `u32` (every row then fails its read), and refused past
+/// the highest id + 1. Ids run from 0 with none left out, so the highest
+/// is one less than the count: a count past it would have every walk over
+/// the ids ask for rows that no table holds.
+fn entry_count(db: &Connection, entries: i64) -> Result<u32, String> {
+    let ids = highest_id(db).map_err(|e| e.to_string())?.saturating_add(1);
+    if entries > ids {
+        return Err(format!(
+            "scan_meta.n_entries {entries} is more than the highest id + 1 ({ids})"
+        ));
+    }
+    Ok(u32::try_from(entries).unwrap_or(0))
+}
+
+/// The highest id in `dirs` and `files`, -1 when both are empty: each
+/// table's `max(id)`, which `SQLite` reads from the end of the table's key.
+fn highest_id(db: &Connection) -> rusqlite::Result<i64> {
+    let mut highest = -1;
+    for table in ["dirs", "files"] {
+        let max: Option<i64> =
+            db.query_row(&format!("SELECT max(id) FROM {table}"), [], |row| {
+                row.get(0)
+            })?;
+        highest = highest.max(max.unwrap_or(-1));
+    }
+    Ok(highest)
 }
 
 /// How a volume compares names: without case, in NFC, or both.

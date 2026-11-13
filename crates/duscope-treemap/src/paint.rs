@@ -40,7 +40,7 @@
 
 use std::borrow::Cow;
 
-use duscope_core::query::{Node, SizeKind, TreeView, children, classify};
+use duscope_core::query::{Node, SizeKind, TreeView, children, classify, ids};
 use duscope_core::rules::{Class, Classes};
 
 use crate::cells::{Cell, CellBuffer, Color, lay_out};
@@ -361,11 +361,18 @@ fn paint_into(
 }
 
 /// Each entry's class by pre-order id, as `by-type` reads it
-/// ([`classify`]), so the tiles agree with the legend.
+/// ([`classify`]), so the tiles agree with the legend. Grown as the ids are
+/// read, in order: a saved scan's `n_entries` is not held to its rows, and
+/// a walk stops at the first id no row holds, so the list is as long as
+/// the rows read, whatever the count says.
 #[must_use]
 pub fn classes_of(view: &(impl TreeView + ?Sized), classes: &Classes) -> Vec<Class> {
-    let mut out = vec![Class::Other; view.len() as usize];
-    classify(view, classes, |node, class| out[node.id as usize] = class);
+    let mut out = Vec::new();
+    classify(view, classes, |node, class| {
+        if node.id as usize == out.len() {
+            out.push(class);
+        }
+    });
     out
 }
 
@@ -536,10 +543,15 @@ impl<V: TreeView + ?Sized> Painter<'_, '_, '_, V> {
         folder: Option<usize>,
         labelled: bool,
     ) {
+        // `get`: the view keeps every id below its length, and a class past
+        // it would be a damaged index's, which the verb reports.
         let class = if node.is_dir() {
             self.dominant(node.id, false)
         } else {
-            self.class_of[node.id as usize]
+            self.class_of
+                .get(node.id as usize)
+                .copied()
+                .unwrap_or(Class::Other)
         };
         let base = tile_color(
             self.view,
@@ -782,12 +794,12 @@ pub fn dominant(
         dir.last_id
     };
     let mut bytes = [0u64; 7];
-    for child in id + 1..=last {
+    for child in ids(view, id + 1, last) {
         let node = view.node(child);
         if !node.is_dir() {
-            let i = Class::ALL
-                .iter()
-                .position(|&c| c == class_of[child as usize])
+            let i = class_of
+                .get(child as usize)
+                .and_then(|&class| Class::ALL.iter().position(|&c| c == class))
                 .unwrap_or(6);
             bytes[i] += node.counted(size);
         }
@@ -1102,5 +1114,53 @@ mod tests {
             truncate("e\u{301}e\u{301}e\u{301}", 3, Glyphs::Unicode),
             "e\u{301}e\u{301}e\u{301}"
         );
+    }
+}
+
+#[cfg(test)]
+mod p5_sec_04 {
+    use std::path::PathBuf;
+
+    use duscope_core::interchange::import::{ImportFormat, import};
+    use duscope_core::query::{ArenaView, SizeKind};
+    use duscope_core::rollup::roll_up;
+    use duscope_core::rules::{Class, Classes};
+
+    use super::{Base, ColorBy, Glyphs, PaintOpts, dominant, paint_viewer};
+    use crate::packs::Pack;
+    use crate::pixels::Picture;
+
+    /// The second guard: a class list shorter than the view (an id past its
+    /// end comes only from a damaged index, which the view keeps inside it
+    /// and the verb reports) reads as `other` wherever a tile looks a class
+    /// up, where it was an index past the list's end, a panic.
+    #[test]
+    fn p5_sec_04_an_id_past_the_class_list_reads_as_other() {
+        let json = r#"[1,2,{"progname":"ncdu"},[{"name":"/t"},{"name":"a.rs","asize":4096,"dsize":4096},[{"name":"d"},{"name":"b.zip","asize":8192,"dsize":8192}]]]"#;
+        let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
+            .unwrap()
+            .arena;
+        let rollup = roll_up(&mut arena);
+        let view = ArenaView::new(&arena, &rollup, PathBuf::from("/t"));
+        let (pack, classes) = (Pack::mocha(), Classes::vendored());
+        let opts = PaintOpts {
+            pack: &pack,
+            color_by: ColorBy::Type,
+            glyphs: Glyphs::Unicode,
+            depth: None,
+            min_tile: 1,
+            pool_files: false,
+            size: SizeKind::Allocated,
+            now: 0,
+            classes: &classes,
+        };
+        assert_eq!(
+            dominant(&view, &[], SizeKind::Allocated, 0, false),
+            Class::Other
+        );
+        let (_, drawn) = paint_viewer(&view, &opts, 40, 12, &[], Base::default());
+        assert!(!drawn.is_empty());
+        let picture = Picture::draw(&view, &opts, 20, 6, (8, 16), Some(&[]), Base::default());
+        assert!(picture.is_ok());
     }
 }

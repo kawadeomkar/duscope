@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use crate::envelope::{TopEntry, name_fields};
 
 use super::{
-    After, Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, kind_name,
+    After, Filters, Node, Page, SizeKind, SortKey, TreeView, abs_path, flag_names, ids, kind_name,
     next_after, page_of, pct, ranked_after, ranked_files, remain, timegrammar::iso8601,
 };
 
@@ -83,7 +83,7 @@ pub fn top(view: &(impl TreeView + ?Sized), q: &TopQuery) -> Page<TopEntry> {
         // A root that is a file is its own one row. The files are ranked
         // as they are found, so only the rows --limit can keep are held.
         let max = q.depth.unwrap_or(u32::MAX);
-        let candidates = (0..=root.last_id).filter(|&id| {
+        let candidates = ids(view, 0, root.last_id).filter(|&id| {
             let n = view.node(id);
             !n.is_dir() && n.depth <= max && q.filters.keeps(view, &n, q.size)
         });

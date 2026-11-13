@@ -676,3 +676,279 @@ fn p2_sec_01_tool_versions_are_versions() {
         assert!(!super::is_version(bad), "{bad}");
     }
 }
+
+/// A small index whose ids are known, under `dir`: `/t` holding `root.txt`
+/// (1), `a` (2) holding `b` (3) holding `f` (4), and `c` (5); then changed
+/// by `sql`, as whoever made a damaged or hostile file could.
+fn layout(dir: &Path, sql: &str) -> PathBuf {
+    let mut tree = MemProvider::new("/t");
+    tree.file("root.txt", 10).file("a/b/f", 8192).dir("c");
+    let file = small_index(dir, &tree, "abcdef012345", 1);
+    let db = Connection::open(&file).unwrap();
+    db.execute_batch(sql).unwrap();
+    drop(db);
+    file
+}
+
+/// Rows whose ids break the layout, each with the start of what the read
+/// reports: a parent cycle (two directories, two files), an entry its own
+/// parent, own files or a subtree that end before their directory or past
+/// the scan's six entries, a parent after the entry, and a directory with
+/// no parent below the root.
+const OUT_OF_LAYOUT: [(&str, &str); 11] = [
+    (
+        "UPDATE dirs SET parent_id = 3 WHERE id = 2",
+        "dirs row 2: its parent_id 3 is not below its id",
+    ),
+    (
+        "UPDATE dirs SET parent_id = 2 WHERE id = 2",
+        "dirs row 2: its parent_id 2 is not below its id",
+    ),
+    (
+        "UPDATE dirs SET last_id = 1 WHERE id = 2",
+        "dirs row 2: id <= files_end <= last_id < n_entries fails (files_end 2, last_id 1, \
+         n_entries 6)",
+    ),
+    (
+        "UPDATE dirs SET last_id = 6 WHERE id = 2",
+        "dirs row 2: id <= files_end <= last_id < n_entries fails (files_end 2, last_id 6,",
+    ),
+    (
+        "UPDATE dirs SET last_id = 6 WHERE id = 0",
+        "dirs row 0: id <= files_end <= last_id < n_entries fails (files_end 1, last_id 6,",
+    ),
+    (
+        "UPDATE dirs SET files_end = 2 WHERE id = 3",
+        "dirs row 3: id <= files_end <= last_id < n_entries fails (files_end 2, last_id 4,",
+    ),
+    (
+        "UPDATE dirs SET files_end = 5 WHERE id = 3",
+        "dirs row 3: id <= files_end <= last_id < n_entries fails (files_end 5, last_id 4,",
+    ),
+    (
+        "UPDATE files SET parent_id = 4 WHERE id = 1; UPDATE files SET parent_id = 1 WHERE id = 4",
+        "files row 1: its parent_id 4 is not below its id",
+    ),
+    (
+        "UPDATE files SET parent_id = 4 WHERE id = 4",
+        "files row 4: its parent_id 4 is not below its id",
+    ),
+    (
+        "UPDATE dirs SET parent_id = 5 WHERE id = 3",
+        "dirs row 3: its parent_id 5 is not below its id",
+    ),
+    (
+        "UPDATE dirs SET parent_id = NULL WHERE id = 3",
+        "dirs row 3: its parent_id is NULL, which only the root's may be",
+    ),
+];
+
+#[test]
+fn p5_sec_04_rows_out_of_layout_fail_the_read_and_every_walk_ends() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    // The layout the rows below break.
+    let sound = Index::open(&layout(&dir.join("sound"), "")).unwrap();
+    let paths: Vec<Vec<u8>> = (0..sound.len()).map(|id| sound.path(id)).collect();
+    assert_eq!(
+        paths,
+        [&b""[..], b"root.txt", b"a", b"a/b", b"a/b/f", b"c"],
+        "the ids the cases name"
+    );
+    assert!(sound.failure().is_none());
+    for (n, (sql, reported)) in OUT_OF_LAYOUT.into_iter().enumerate() {
+        let index = Index::open(&layout(&dir.join(n.to_string()), sql)).unwrap();
+        // Every climb to the root ends, and no directory is its own
+        // subdirectory.
+        for id in 0..index.len() {
+            index.path(id);
+            assert!(
+                index.child_dirs(id).iter().all(|&(child, _)| child > id),
+                "{sql}: {id}"
+            );
+        }
+        // So does every query that walks the tree.
+        query::top(
+            &index,
+            &TopQuery {
+                files: true,
+                ..TopQuery::default()
+            },
+        );
+        query::top(&index, &TopQuery::default());
+        query::tree(
+            &index,
+            &TreeQuery {
+                depth: Some(10),
+                ..TreeQuery::default()
+            },
+        );
+        let failure = index.failure();
+        assert!(
+            failure.as_deref().is_some_and(|f| f.starts_with(reported)),
+            "{sql}: {failure:?}"
+        );
+    }
+}
+
+#[test]
+fn p5_sec_04_a_directory_naming_itself_its_parent_is_not_its_own_subdirectory() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    let sound = Index::open(&layout(&dir.join("sound"), "")).unwrap();
+    let deep = TreeQuery {
+        depth: Some(10),
+        ..TreeQuery::default()
+    };
+    // The root names itself its parent: a row the reader accepts, since the
+    // root is its own parent, and its subdirectories are still `a` and `c`.
+    let index = Index::open(&layout(
+        &dir.join("root"),
+        "UPDATE dirs SET parent_id = 0 WHERE id = 0",
+    ))
+    .unwrap();
+    assert_eq!(index.child_dirs(0), [(2, 4), (5, 5)]);
+    assert_eq!(index.child_dirs(0), sound.child_dirs(0));
+    assert_eq!(
+        json(query::tree(&index, &deep).entries),
+        json(query::tree(&sound, &deep).entries)
+    );
+    assert!(index.failure().is_none());
+    // A directory below it: not its own subdirectory, and refused when read.
+    let index = Index::open(&layout(
+        &dir.join("below"),
+        "UPDATE dirs SET parent_id = 3 WHERE id = 3",
+    ))
+    .unwrap();
+    assert!(index.child_dirs(3).is_empty());
+    assert!(index.child_dirs(2).is_empty());
+    index.node(3);
+    assert!(
+        index
+            .failure()
+            .is_some_and(|f| f.starts_with("dirs row 3: its parent_id 3 is not below its id")),
+        "{:?}",
+        index.failure()
+    );
+}
+
+/// A view of a folder ([`Subtree`]), which `render`, `tree` and the viewer
+/// read a path below the root through, keeps every id it gives inside the
+/// folder, however the rows lie: `b`'s subtree ending past `a`'s, its last
+/// id read as the view's past the view's end, was a class looked up past
+/// the end of the treemap's list, a panic. Such a row is the index's
+/// failed read.
+#[test]
+fn p5_sec_04_a_view_of_a_folder_keeps_its_ids_inside_it() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    let index = Index::open(&layout(
+        &dir.join("past"),
+        "UPDATE dirs SET files_end = 5, last_id = 5 WHERE id = 3",
+    ))
+    .unwrap();
+    let a = Subtree::new(&index, 2);
+    assert_eq!(a.len(), 3);
+    for id in 0..a.len() {
+        let node = a.node(id);
+        assert!(
+            node.files_end < a.len() && node.last_id < a.len(),
+            "{id}: {node:?}"
+        );
+    }
+    assert!(
+        index.failure().is_some_and(|f| f.starts_with(
+            "dirs row 3: its parent_id 2 and last_id 5 put it outside the subtree of the entry 2, \
+             which ends at 4"
+        )),
+        "{:?}",
+        index.failure()
+    );
+    // A file whose parent lies before the folder.
+    let index = Index::open(&layout(
+        &dir.join("outside"),
+        "UPDATE files SET parent_id = 0 WHERE id = 4",
+    ))
+    .unwrap();
+    let a = Subtree::new(&index, 2);
+    a.node(2);
+    assert!(
+        index.failure().is_some_and(|f| f.starts_with(
+            "files row 4: its parent_id 0 and last_id 4 put it outside the subtree of the entry 2"
+        )),
+        "{:?}",
+        index.failure()
+    );
+    // The unbroken index reads as it did.
+    let index = Index::open(&layout(&dir.join("sound"), "")).unwrap();
+    let a = Subtree::new(&index, 2);
+    assert_eq!(
+        (0..a.len())
+            .map(|id| a.node(id).last_id)
+            .collect::<Vec<_>>(),
+        [2, 2, 2]
+    );
+    assert!(index.failure().is_none());
+}
+
+/// The rows an import writes keep the layout: the reference fixture tree
+/// exported as ncdu's JSON, as gdu's and as a `.gpscan`, imported again and
+/// saved as the `import` verb saves it, reads whole with no failed read.
+#[test]
+fn p5_sec_04_imported_indexes_keep_the_layout() {
+    use crate::interchange::gpscan::{self, GpscanOpts};
+    use crate::interchange::import::import;
+    use crate::interchange::ncdu::{self, NcduOpts};
+    use std::os::unix::ffi::OsStrExt;
+
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    let (_, _, _, scanned) = fixture_index(&dir.join("scan"), Attrs::Basic);
+    let mut ncdu_json = Vec::new();
+    let opts = NcduOpts {
+        progver: "0.0.0",
+        timestamp: 1,
+    };
+    ncdu::write(&scanned, 0, &opts, &mut ncdu_json).unwrap();
+    let mut gdu_json = ncdu_json.clone();
+    let at = gdu_json
+        .windows(9)
+        .position(|w| w == b"\"duscope\"")
+        .unwrap();
+    gdu_json.splice(at..at + 9, b"\"gdu\"".iter().copied());
+    let mut gpscan_xml = Vec::new();
+    let opts = GpscanOpts {
+        apparent: false,
+        volume_path: b"/".to_vec(),
+        volume_size: 1 << 40,
+        free_space: 1 << 39,
+        scan_time_ns: 1,
+        app_version: "0.0.0",
+    };
+    gpscan::write(&scanned, 0, &opts, &mut gpscan_xml).unwrap();
+    for (name, bytes) in [
+        ("ncdu", ncdu_json),
+        ("gdu", gdu_json),
+        ("gpscan", gpscan_xml),
+    ] {
+        let mut imported = import(bytes.as_slice(), None).unwrap();
+        assert_eq!(imported.format.as_str(), name);
+        let rollup = roll_up(&mut imported.arena);
+        let root = PathBuf::from(std::ffi::OsStr::from_bytes(&imported.root));
+        let mut meta = meta(ScanId::new(name.as_bytes(), 1, [0; 8]), &root, 1);
+        meta.source = imported.format.source().to_owned();
+        IndexWriter::write(&imported.arena, &rollup, &meta, &dir.join(name)).unwrap();
+        let index = Index::open(&index_path(&dir.join(name), &meta.scan_id)).unwrap();
+        assert!(index.len() > 100, "{name}: {} entries", index.len());
+        for id in 0..index.len() {
+            index.path(id);
+            index.child_dirs(id);
+            // As a walk down the tree holds a directory's children.
+            let _ = query::children(&index, &index.node(id)).count();
+        }
+        assert!(index.failure().is_none(), "{name}: {:?}", index.failure());
+        // As `scans --check` holds every row: dense ids, each nested where
+        // its parent's ids place it.
+        crate::check::rows_keep_the_layout(&index).unwrap();
+    }
+}

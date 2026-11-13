@@ -211,11 +211,19 @@ impl Index {
             "SELECT id, name FROM files WHERE id BETWEEN ?2 AND ?3 AND {cond} \
              ORDER BY id LIMIT {PAGE}"
         ))?;
+        // Only rows after the directory, as `child_dirs` reads them: a row
+        // that names itself its parent would be entered for ever.
         let mut subdirs = self
             .db()
-            .prepare("SELECT name, id FROM dirs WHERE parent_id = ?1")?;
+            .prepare("SELECT name, id FROM dirs WHERE parent_id = ?1 AND id > ?1")?;
         let mut frame = |id: u32| -> rusqlite::Result<Option<Frame>> {
             let node = self.node(id);
+            // An entry that does not read as a directory is not walked: a
+            // row the index could not read, which the verb reports, reads
+            // as an empty entry whose ids nothing checked.
+            if !node.is_dir() {
+                return Ok(None);
+            }
             let held = holds
                 .query_row(
                     rusqlite::params![size, id, node.last_id, min, before],

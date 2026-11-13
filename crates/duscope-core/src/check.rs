@@ -29,6 +29,12 @@
 //! slash: an index file no scan wrote) is not read, and counts as changed,
 //! so a crafted file cannot lead the sweep outside its root.
 //!
+//! Before any of that, every row of `dirs` and `files` is held to the
+//! index's layout, as a query holds the rows it reads
+//! (`rows_keep_the_layout`). A query reads only the rows its answer needs,
+//! so a damaged row it never reaches goes unreported; here it does not, and
+//! the verb fails `index_corrupt` with nothing read from the tree.
+//!
 //! The answer is only ever reported: nothing reads it to skip work.
 
 use std::os::unix::ffi::OsStrExt;
@@ -37,6 +43,7 @@ use std::time::Instant;
 
 use crate::CoreError;
 use crate::index::Index;
+use crate::index::reader::{dir_ids, file_ids, layout_error, misplaced, missing};
 use crate::query::TreeView;
 
 /// Directories read per call to [`duscope_walk::stamp_dirs`]: the paths of
@@ -94,14 +101,16 @@ fn listable(name: &[u8]) -> bool {
 ///
 /// # Errors
 ///
-/// [`CoreError::IndexCorrupt`] when the index's directories or its scan
-/// options cannot be read.
+/// [`CoreError::IndexCorrupt`] when a row of `dirs` or `files` breaks the
+/// index's layout or an id below `n_entries` has no row, or the index's
+/// directories or its scan options cannot be read.
 pub fn sweep(index: &Index, leave_out: &[PathBuf]) -> Result<Sweep, CoreError> {
     let started = Instant::now();
     let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
         file: index.file().display().to_string(),
         message: e.to_string(),
     };
+    rows_keep_the_layout(index).map_err(corrupt)?;
     let (options, _) = crate::rescan::options(index)?;
     let meta = index.meta();
     // Touched while the scan ran, with the margin on either side.
@@ -185,6 +194,141 @@ pub fn sweep(index: &Index, leave_out: &[PathBuf]) -> Result<Sweep, CoreError> {
         found.changed_count
     );
     Ok(found)
+}
+
+/// Holds every row of `dirs` and `files` to the layout, through the
+/// functions the reader holds a row to it with, so the two cannot disagree:
+/// a NULL or a value that does not fit fails here as it does there. `NOT
+/// INDEXED`: the rows come from the tables a query reads, never from a
+/// covering index, whose content `PRAGMA quick_check` does not compare with
+/// its table and a crafted file can make say anything.
+///
+/// The two tables are read side by side in id order, which is pre-order,
+/// with the directories whose subtrees hold the current id open: the ids
+/// must run from 0 to `n_entries - 1` with none left out and none in both
+/// tables, and each entry below the root must lie where its parent's ids
+/// place it (a file up to the parent's `files_end`, a directory after it
+/// with its subtree inside the parent's), so that a walk over the ids or
+/// down the tree meets nothing the reader would refuse.
+pub(crate) fn rows_keep_the_layout(index: &Index) -> rusqlite::Result<()> {
+    let db = index.db();
+    let len = index.len();
+    let mut dir_rows =
+        db.prepare("SELECT id, parent_id, files_end, last_id FROM dirs NOT INDEXED ORDER BY id")?;
+    let mut dirs = dir_rows.query([])?;
+    let mut next_dir = || -> rusqlite::Result<Option<Row>> {
+        let Some(row) = dirs.next()? else {
+            return Ok(None);
+        };
+        let (id, parent, files_end, last) = (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+        dir_ids(id, parent, files_end, last, len)?;
+        Ok(Some(Row {
+            id,
+            parent,
+            dir: Some((files_end, last)),
+        }))
+    };
+    let mut file_rows = db.prepare("SELECT id, parent_id FROM files NOT INDEXED ORDER BY id")?;
+    let mut files = file_rows.query([])?;
+    let mut next_file = || -> rusqlite::Result<Option<Row>> {
+        let Some(row) = files.next()? else {
+            return Ok(None);
+        };
+        let (id, parent) = (row.get(0)?, row.get(1)?);
+        file_ids(id, parent)?;
+        Ok(Some(Row {
+            id,
+            parent: Some(parent),
+            dir: None,
+        }))
+    };
+    let (mut dir, mut file) = (next_dir()?, next_file()?);
+    // The directories whose subtrees hold the id reached, the innermost
+    // last: each one's id, `files_end` and `last_id`.
+    let mut open: Vec<(u32, u32, u32)> = Vec::new();
+    // The id the rows have reached.
+    let mut expected = 0u32;
+    loop {
+        let row = match (&dir, &file) {
+            (None, None) => break,
+            (Some(d), Some(f)) if d.id == f.id => {
+                return Err(layout_error(format!(
+                    "dirs and files both have a row with id {}",
+                    d.id
+                )));
+            }
+            (Some(d), Some(f)) if d.id < f.id => dir.take(),
+            (Some(_), None) => dir.take(),
+            _ => file.take(),
+        };
+        let Some(row) = row else { break };
+        if row.id != expected {
+            return Err(missing(expected, len));
+        }
+        if row.id >= len {
+            return Err(layout_error(format!(
+                "a row has id {}, which is not below n_entries {len}",
+                row.id
+            )));
+        }
+        nests(&row, &mut open)?;
+        if row.dir.is_some() {
+            dir = next_dir()?;
+        } else {
+            file = next_file()?;
+        }
+        expected = row.id.saturating_add(1);
+    }
+    if expected < len {
+        return Err(missing(expected, len));
+    }
+    Ok(())
+}
+
+/// A row of `dirs` or `files` as the check reads it: its id, its parent,
+/// and a directory's `files_end` and `last_id`.
+struct Row {
+    id: u32,
+    parent: Option<u32>,
+    dir: Option<(u32, u32)>,
+}
+
+/// Holds `row`, the next in id order, to where the directories `open`
+/// (each one's id, `files_end` and `last_id`, the innermost last) place
+/// it, and opens it when it is a directory.
+fn nests(row: &Row, open: &mut Vec<(u32, u32, u32)>) -> rusqlite::Result<()> {
+    let id = row.id;
+    let table = if row.dir.is_some() { "dirs" } else { "files" };
+    while open.last().is_some_and(|&(_, _, last)| last < id) {
+        open.pop();
+    }
+    let what = match (open.last(), row.dir) {
+        // The root.
+        (None, _) if id == 0 => None,
+        (None, _) => Some("it lies past the root's last_id".to_owned()),
+        (Some(&(parent, ..)), _) if row.parent != Some(parent) => Some(format!(
+            "its parent_id {} is not {parent}, the directory whose subtree its id lies in",
+            row.parent
+                .map_or_else(|| "NULL".to_owned(), |p| p.to_string())
+        )),
+        (Some(&(_, files_end, _)), None) if id > files_end => Some(format!(
+            "it is a file past its parent's files_end, {files_end}"
+        )),
+        (Some(&(_, files_end, _)), Some(_)) if id <= files_end => Some(format!(
+            "it is a directory that its parent's files_end, {files_end}, takes in as a file"
+        )),
+        (Some(&(.., end)), Some((_, last))) if last > end => {
+            Some(format!("its last_id {last} is past its parent's, {end}"))
+        }
+        _ => None,
+    };
+    if let Some(what) = what {
+        return Err(misplaced(table, id, &what));
+    }
+    if let Some((files_end, last)) = row.dir {
+        open.push((id, files_end, last));
+    }
+    Ok(())
 }
 
 /// Reads the stamps of the directories in `chunk`, following links when
@@ -432,14 +576,12 @@ mod tests {
     fn p5_core_02_a_sweep_that_compares_no_directory_is_stale() {
         let env = TestEnv::new();
         let root = tree(&env);
-        let index = save(&root, &env.tmp_dir());
-        let file = index.file().to_owned();
-        drop(index);
-        // A crafted file without directories.
-        let db = rusqlite::Connection::open(&file).unwrap();
-        db.execute("DELETE FROM dirs", []).unwrap();
-        drop(db);
-        let found = sweep(&Index::open(&file).unwrap(), &[]).unwrap();
+        // A scan of a single file, which holds no directory. (A saved scan
+        // whose `dirs` rows are deleted leaves ids that no row holds, which
+        // `Index::open` refuses.)
+        let index = save(&root.join("a/b/file"), &env.tmp_dir());
+        assert_eq!(index.rows("dirs").unwrap(), Some(0));
+        let found = sweep(&index, &[]).unwrap();
         assert_eq!((found.dir_count, found.changed_count), (0, 0));
         assert!(found.stale());
     }

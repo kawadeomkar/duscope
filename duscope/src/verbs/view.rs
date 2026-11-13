@@ -370,7 +370,9 @@ fn show(
             crate::out::warn(&[index_untouched(&shown)]);
         }
     }
-    Ok(())
+    // A saved scan whose rows the viewer found damaged as it walked them
+    // fails as any verb's would, once the terminal is given back.
+    shown.source.check()
 }
 
 /// One viewer of `shown` on the terminal, until `q`, `Ctrl-C` or a landed

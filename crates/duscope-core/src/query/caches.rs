@@ -27,8 +27,8 @@ use std::path::Path;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::{
-    After, Filters, Page, SizeKind, SortKey, TreeView, next_after, pct, ranked_after, remain,
-    timegrammar::iso8601,
+    After, Filters, Page, SizeKind, SortKey, TreeView, failed, next_after, pct, ranked_after,
+    remain, timegrammar::iso8601,
 };
 use crate::envelope::{CacheEntry, ProjectEntry, name_fields};
 use crate::rules::{Caches, Confirm};
@@ -342,7 +342,7 @@ fn find(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Vec<Found> {
                 break;
             }
         }
-        if id > last {
+        if id > last || failed(view) {
             break;
         }
         let node = view.node(id);

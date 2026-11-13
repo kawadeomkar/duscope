@@ -358,6 +358,18 @@ duscope opens every index file the same way, trusted or not ([SECURITY.md](../SE
   - `scan_id` is not 12 lowercase hex digits, or `tool_version` is not a
     version: `index_corrupt`;
   - its major `index_version` is another: `index_version_mismatch`.
+- **Rows out of layout.** The ids of `dirs` and `files` together run from 0
+  to `n_entries - 1`, with none left out. Every directory has
+  `id <= files_end <= last_id < n_entries`, and every entry other than the root
+  a parent below its id. A directory's own files are the ids up to its
+  `files_end`, each naming it as parent, and the subtrees of its
+  subdirectories fill the ids after them, to its `last_id`. An `n_entries`
+  past the highest id + 1 is refused when the file opens (`index_corrupt`). A
+  row that breaks the rest never makes a verb read for ever, and a walk down
+  the tree reads each entry once. A verb that reads such a row, or meets an id
+  that no row holds, fails `index_corrupt`, exit 5; a verb that does not may
+  answer from the rows it read, with no warning. `scans --check` reads every
+  row.
 
 A program that writes index files for duscope to read keeps within these.
 
