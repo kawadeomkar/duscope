@@ -53,7 +53,7 @@ pub const SCAN_META_KEYS: [&str; 25] = [
     "sibling_order",
 ];
 
-/// The DDL of the index: the tables, the `index_version` row, then the four
+/// The DDL of the index: the tables, the `index_version` row, then the
 /// indexes.
 pub const SCHEMA: &str = include_str!("index/schema.sql");
 

@@ -184,9 +184,9 @@ fn p2_idx_01_the_indexes_follow_the_tables() {
     // The proposal's eight, and shared_members (DEV-68).
     assert_eq!(tables.matches("CREATE TABLE").count(), 9);
     let statements: Vec<&str> = indexes.lines().filter(|l| !l.trim().is_empty()).collect();
-    // The proposal's four, and the partial `dirs_errors`, `dirs_excluded`
-    // and `files_dataless` (DEV-68).
-    assert_eq!(statements.len(), 7, "{statements:?}");
+    // `dirs_parent_name`, `files_allocated`, and the partial `dirs_errors`,
+    // `dirs_excluded` and `files_dataless` (DEV-68).
+    assert_eq!(statements.len(), 5, "{statements:?}");
     assert!(
         statements.iter().all(|s| s.starts_with("CREATE INDEX ")),
         "{statements:?}"
@@ -195,6 +195,33 @@ fn p2_idx_01_the_indexes_follow_the_tables() {
         layout(&applied(&[tables, indexes])),
         layout(&applied(&[SCHEMA])),
         "the two parts build the same index as the whole"
+    );
+}
+
+#[test]
+fn p2_idx_06_the_indexes_built_are_the_five_the_format_documents() {
+    let db = applied(&[SCHEMA]);
+    let indexes = strings(
+        &db,
+        "SELECT name FROM sqlite_schema WHERE type = 'index' AND sql IS NOT NULL \
+         AND name NOT LIKE ?1 ORDER BY rowid",
+        "sqlite_%",
+    );
+    assert_eq!(
+        indexes,
+        [
+            "dirs_parent_name",
+            "files_allocated",
+            "dirs_errors",
+            "dirs_excluded",
+            "files_dataless"
+        ]
+    );
+    let doc = fs::read_to_string(workspace().join("docs/index-format.md")).unwrap();
+    assert_eq!(first_cells(section(&doc, "## Indexes")), indexes);
+    assert!(
+        !SCHEMA.contains("dirs_cum_allocated") && !SCHEMA.contains("files_mtime"),
+        "the two dropped indexes stay out of the schema"
     );
 }
 

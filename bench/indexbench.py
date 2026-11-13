@@ -63,8 +63,8 @@ PTYRUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ptyrun.py")
 # reads them: (what is measured, how it compares, the limit, the platforms it
 # binds, or None for both). The subtree by-type limit is per 100k files of the
 # subtree (BY_TYPE_PER). The warm write's limit is the first nightly's 2.51
-# µs per entry plus 10%, for an index of seven indexes where the target's 2.5
-# came from four (DEV-107). A cold run's share of the scan is measured and
+# µs per entry plus 10%, set when the index had seven indexes where the target's
+# 2.5 came from four (DEV-107). A cold run's share of the scan is measured and
 # recorded but holds no line (DEV-108): on a fast disk a cold walk costs less
 # per entry than any write, and the write starts after the output.
 GATES: Tuple[Tuple[str, str, float, Optional[str]], ...] = (

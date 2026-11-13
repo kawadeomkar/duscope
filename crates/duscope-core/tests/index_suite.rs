@@ -222,6 +222,78 @@ fn changed(file: &Path, name: &str, sql: &str) -> PathBuf {
     copy
 }
 
+/// P2-IDX-06: a file written while the schema still built
+/// `dirs_cum_allocated` and `files_mtime` answers as one without them, since
+/// no query named them.
+#[test]
+fn p2_idx_06_a_file_holding_the_two_dropped_indexes_answers_alike() {
+    let env = TestEnv::new();
+    let file = write(&env.tmp_dir(), 1_700_000_000_000_000_000);
+    let older = changed(
+        &file,
+        "seven.db",
+        "CREATE INDEX dirs_cum_allocated ON dirs (cum_allocated DESC); \
+         CREATE INDEX files_mtime ON files (mtime);",
+    );
+    let indexes = |path: &Path| -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND sql IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!((indexes(&file), indexes(&older)), (5, 7));
+    let with_five = Index::open(&file).unwrap();
+    let with_seven = Index::open(&older).unwrap();
+    let tops = |index: &Index| {
+        (
+            query::top(index, &TopQuery::default()),
+            query::top(
+                index,
+                &TopQuery {
+                    files: true,
+                    ..TopQuery::default()
+                },
+            ),
+        )
+    };
+    assert_eq!(tops(&with_seven), tops(&with_five));
+    let stale = |index: &Index| {
+        query::stale(
+            index,
+            &StaleQuery {
+                now: 4_102_444_800_000_000_000,
+                older_than: 1,
+                ..StaleQuery::default()
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(stale(&with_seven), stale(&with_five));
+    assert!(!stale(&with_five).entries.is_empty());
+    let classes = Classes::vendored();
+    let by_type = |index: &Index| {
+        query::by_type(
+            index,
+            &ByTypeQuery {
+                classes: &classes,
+                examples: 3,
+                filters: Filters::default(),
+                limit: None,
+                size: SizeKind::Allocated,
+                sort: SortKey::Size,
+                reverse: false,
+            },
+        )
+    };
+    assert_eq!(by_type(&with_seven), by_type(&with_five));
+    assert!(with_five.failure().is_none(), "{:?}", with_five.failure());
+    assert!(with_seven.failure().is_none(), "{:?}", with_seven.failure());
+}
+
 #[test]
 fn p2_test_01_a_newer_minor_opens_and_another_major_is_refused() {
     let env = TestEnv::new();
