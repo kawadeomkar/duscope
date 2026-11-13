@@ -523,9 +523,7 @@ so. Each item the plan refuses gives its `reason`:
 - `firmlink`: the item is a macOS firmlink.
 - `mount_point`: the item is a mount point, or, for the Trash, a directory with
   a mount point anywhere under it, or one where the mount table cannot be read:
-  a move would take the mounted volume into the Trash. On Linux an overlayfs
-  file can be refused this way too
-  ([limits.md](limits.md#overlayfs-without-xino-clean-refuses-files-as-mount-points-linux)).
+  a move would take the mounted volume into the Trash.
 - `root`: the item is the saved scan's root, or `/`.
 - `outside_root`: the item is not under the saved scan's root.
 - `read_only_volume`: the item's volume is mounted read-only.
@@ -571,6 +569,9 @@ where it is: on macOS a volume that has no Trash; on Linux a volume whose
 `.Trash/<uid>` or `.Trash-<uid>` at its top cannot be used or made, or no home
 Trash when neither `XDG_DATA_HOME` nor `HOME` is set. On Linux duscope only ever
 renames an item into a Trash on its own filesystem, never copies it.
+On an overlayfs mount, a directory from a lower layer cannot be renamed into
+the overlay's Trash unless the overlay uses `redirect_dir`
+([limits.md](limits.md#overlayfs-what-the-trash-cannot-take-linux)).
 
 What to do: where neither `XDG_DATA_HOME` nor `HOME` is set, set `HOME` (or
 `XDG_DATA_HOME`) and run `duscope clean` again. Otherwise `--permanent` deletes
@@ -595,6 +596,9 @@ What to do: run `duscope explain --json` on the path again for a fresh handle.
 Exit 1. The path of a `--from` handle no longer holds what `explain` examined:
 another file or directory is there (another device and inode), or the same one
 changed since the saved scan.
+On an overlayfs mount, a file from a lower layer with more than one hard link
+fails this way when moved to the Trash: its copy-up makes it another inode
+([limits.md](limits.md#overlayfs-what-the-trash-cannot-take-linux)).
 
 A handle found so while planning stops the run: nothing is moved or deleted.
 While acting, an item named by path or by handle fails this way too, alone,

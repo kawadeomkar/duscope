@@ -215,16 +215,23 @@ No flag keeps a scan inside one subvolume. `summary` gives the bytes on each
 subvolume under the path in `subvolumes[]`, and the rows of their top
 directories carry the flag `subvolume`.
 
-### overlayfs without `xino`: `clean` refuses files as mount points (Linux)
+### overlayfs: what the Trash cannot take (Linux)
 
-On an overlayfs mount whose layers lie on different filesystems, a file reports
-the device of the layer it comes from, not the overlay's, unless the overlay
-uses `xino` and the file's inode number fits it ([the kernel's overlayfs
-documentation](https://docs.kernel.org/filesystems/overlayfs.html)). `clean`
-tells a mount point by a device other than its directory's, so it refuses such
-a file, named as an item, as `mount_point`. A directory reports the overlay's
-device, so a directory there is not refused, and moving or deleting it takes
-its files with it.
+On an overlayfs mount `clean` plans files and directories as on any volume, and
+the overlay's own `.Trash-<uid>` takes them. A move to the Trash renames the
+item inside the overlay, and overlayfs first copies an item that comes from a
+lower layer up into the upper one ([the kernel's overlayfs
+documentation](https://docs.kernel.org/filesystems/overlayfs.html)). So, for an
+item from a lower layer:
+
+- What it frees is overstated: emptying the Trash deletes the copy in the
+  upper layer, and the lower layer, which is read-only, keeps its bytes.
+- A file with more than one hard link is not moved: after the copy-up it is
+  another inode, so the move is undone and the item fails `path_changed`, left
+  where it was.
+- A directory is moved only when the overlay is mounted with `redirect_dir=on`;
+  otherwise the rename fails across the layers and the item fails
+  `trash_unavailable`, left where it was.
 
 ### Paths that are not UTF-8 (Linux)
 
