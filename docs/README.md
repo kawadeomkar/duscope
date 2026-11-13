@@ -14,8 +14,9 @@ ones at the top of the repository.
   refuses to open.
 - [limits.md](limits.md): what duscope cannot measure, or measures only
   within bounds (clones and reflinks, snapshots, the Full Disk Access probe,
-  FSEvents history, memory, subvolumes, overlayfs, names that are not UTF-8),
-  and why.
+  FSEvents history, memory and fixed limits, automount points, subvolumes,
+  overlayfs, names that are not UTF-8, streamed output, the Trash on network
+  filesystems, the viewer's terminal), and why.
 - [manual-checks.md](manual-checks.md): the acceptance checks done by hand
   (GrandPerspective opening an export, browsers drawing `render`'s SVG), with
   the program's version and the last result.

@@ -97,31 +97,51 @@ and `scan.excluded` names them with the reason `skipped_containers`.
 On macOS, `rescan` reads again only the directories the volume's FSEvents
 history reports changed since the saved scan. macOS keeps that history for a
 time it does not document, and says nothing when the history no longer reaches
-back to a given point. Before it trusts the history, duscope checks:
+back to a given point. So duscope checks the history before it trusts it, and
+again before it saves. A check that fails makes it read the whole tree, or, for
+a volume mounted below the scan's root, that volume's part, and
+`scan.fallback_reason` names the check:
 
-- the saved scan is younger than `--max-age` (7 days by default);
-- the volume's history is the one the scan recorded, its logging is on, the
-  system is the same build (an update of macOS makes the next rescan a full
-  one), and the event ids have not gone back;
-- no events were dropped, the history was read to its end within 30 seconds,
-  and it reports at most 15% of the scan's directories;
-- the options it scans with are the saved scan's; and network, FAT and exFAT
-  volumes never have their history used.
+- `index_too_old`: the saved scan is older than `--max-age` (7 days by
+  default), or, taken with `--attrs full`, was itself an incremental rescan.
+- `volume_changed`: a volume's history is not the one the scan recorded
+  (another device, another FSEvents database), or the scan recorded none.
+- `fsevents_disabled`: logging is off on the volume (`.fseventsd/no_log`), or
+  the volume is neither APFS nor HFS+. The history of a FAT or exFAT volume,
+  whose coarse times need not change when a directory's entries do, and of a
+  network volume, which holds none of the changes other machines make, is
+  never used.
+- `history_gone`: the history cannot stand in for the scan: the system is
+  another build (an update of macOS makes the next rescan a full one), the
+  event ids went back or wrapped, the volume was mounted again since, the
+  history was not read to its end within 30 seconds, or the scan followed
+  symbolic links.
+- `events_dropped`: FSEvents dropped events since the scan.
+- `too_many_changes`: the history reports more than 15% of the scan's
+  directories.
+- `options_changed`: another version of duscope took the saved scan, or a file
+  its options name (`--exclude-from`, `--ignore-from`, the configuration's
+  cache rules) changed since.
+- `post_check_failed`: the root, or a volume's mount point below it, is no
+  longer the directory the scan read; or, before saving, it reads again 1% of
+  the directories it took from the saved scan (at least 1,000, or all of them
+  when there are fewer), and every file it took that shares its blocks or its
+  inode, and one of them changed where the history reports no change.
 
-Then, before saving, it reads again 1% of the directories it took from the
-saved scan (at least 1,000, or all of them when there are fewer), and every
-file it took that shares its blocks or its inode. A check that fails makes it
-read the whole tree, and `scan.fallback_reason` says why; for a volume mounted
-below the scan's root, it reads that volume's part whole instead. What it cannot
-see: on the startup disk's Data volume, changes made from recoveryOS or another
-system between a shutdown and the next startup (CAVEATS in `duscope man`).
+What it cannot see: on the startup disk's Data volume, changes made from
+recoveryOS or another system between a shutdown and the next startup (CAVEATS
+in `duscope man`). FSEvents records no reads either, so a rescan of a scan
+taken with `--attrs full` keeps the access times that scan read for what it
+takes from it, and `stale --atime` judges those files by the times read then.
 `duscope rescan --full` always reads the whole tree.
 
 ### A Linux rescan reads the whole tree
 
 Linux keeps no persistent change history, so `rescan` there scans the whole
 tree again with the saved scan's options, and `rescan --incremental` fails with
-`not_available`. `duscope diff OLD latest` then shows what changed.
+`not_available`. `duscope diff OLD latest --under ROOT`, with `OLD` the saved
+scan's id and `ROOT` its root, then shows what changed: without `--under`,
+`latest` is the newest scan that holds the working directory.
 
 ### `scans --check` sees structure, not contents
 
@@ -144,8 +164,9 @@ A scan holds every entry in memory until the walk is over and the index is
 written: a 48-byte record per entry and another per directory, beside every
 name and the smaller tables. Nothing streams entries into the index during the
 walk, so a tree too large for the machine's memory cannot be scanned in one
-piece. Scan its parts one at a time, or leave large subtrees out with
-`--exclude` or `-x`.
+piece. Scan its parts one at a time, or leave large subtrees out of the scan
+with `duscope scan --exclude` or `-x`. (On the list verbs, `--exclude` leaves
+rows out of the answer, not directories out of the scan.)
 
 ### At most 4 GiB of names
 
@@ -155,7 +176,34 @@ makes the scan fail with `io_error` ("the scan is too large for the arena: the
 names fill 4 GiB") once its walk is over, and nothing is saved. With names of 20
 bytes on average, the names fill 4 GiB at about 200 million entries.
 
+### Fixed limits on input
+
+Some inputs have a fixed limit, so that a client or a file cannot make duscope
+hold or do without bound; they are listed in
+[SECURITY.md](../SECURITY.md#limits-on-memory-and-time), and the MCP server's
+in [mcp.md](mcp.md#limits). Among them: an MCP message of at most 1 MiB; at
+most 64 requests, or 32 MiB of them, waiting behind the running call, past
+which a request is answered `-31000` ("the server is busy"); a statement of
+`query --sql` within its `--timeout` (5 seconds by default, 60 at most) and
+256 MiB of SQLite's heap; and a compressed file `import` reads, 1 GiB once
+decompressed. A scan has no such limit: neither its entries nor its depth is
+capped, and the time a chain of very deep directories takes grows faster than
+its depth.
+
 ## Filesystems
+
+### Automount points (Linux)
+
+An automount point the kernel has not mounted yet (an NFS submount, debugfs's
+`tracing`) is listed and not entered, since opening it would mount a
+filesystem: only `--include-network` without `-x` enters it, and so mounts it.
+Nothing records the point: it has no row in `scan.volumes`, adds nothing to
+the `mounts_excluded` warning and carries no flag, so it reads as an empty
+directory.
+
+Under `--follow-symlinks`, a symbolic link that leads to such a point mounts
+it when the scan follows the link, whatever `-x` and `--include-network` say;
+whether the scan then enters what was mounted follows the usual rules.
 
 ### No `--one-subvolume` (Linux)
 
@@ -181,7 +229,67 @@ its files with it.
 
 A Linux name can be any bytes, and JSON holds text. Each row's `path` and
 `name` is the text with invalid bytes replaced, and `path_raw` and `name_raw`
-carry the exact bytes in base64 when they are not UTF-8: pass those back.
-`--plain` writes each row's path as its bytes. Some fields have no such twin
-and stay lossy, among them `scan.root`, `scan.excluded[].path`, `query.path`,
-`via`, `mount_point`, the commands in `next`, and the paths `scans` lists.
+carry the exact bytes in base64 (standard, padded) when they are not UTF-8:
+decoded, they are the path to give a command on the command line. `--plain`
+writes each row's path as its bytes. Some fields have no such twin and stay
+lossy, among them `scan.root`, `scan.excluded[].path`, `query.path`, `via`,
+`mount_point`, the commands in `next`, and the paths `scans` lists.
+
+Over MCP such a path cannot be passed back: a tool takes a path as a JSON
+string, which holds text only, so no tool can be asked about an entry whose
+path is not UTF-8. A tool can still be asked about a directory above it whose
+path is.
+
+## Output
+
+### `--limit` does not apply to `--format ndjson`
+
+Under `--format ndjson` the list verbs (`top`, `tree`, `by-type`, `stale`,
+`caches`) and `diff` write every row, as `--all` does: `--limit` is not read,
+so `--limit 2` writes all of them. Read only the lines needed, or leave out
+`--format ndjson` for a page of `--limit` rows.
+
+### A stream cut short has no `end` line
+
+With `--format ndjson` or `--plain`, `top` and `stale` write each row as they
+read it from the saved scan. A read that fails after rows were written (the
+file damaged, or overwritten while it is read: `index_corrupt`) ends the
+output where it is: `ndjson` has no `end` line, and the error envelope follows
+on stdout; `--plain`, which has no trailer, writes the error on stderr. The
+warnings go with it: `ndjson` carries them only in its `end` line, and
+`--plain` writes them on stderr after the rows. Act on streamed rows only once
+the `end` line has come, or, for `--plain`, once the command has exited 0.
+
+## Deleting
+
+### A btrfs subvolume is a mount point to `clean` (Linux)
+
+A btrfs subvolume reports a device of its own, another than its parent
+directory's, and `clean` tells a mount point by its device: a subvolume named
+as an item is refused as `mount_point`, and `--permanent` stops at one under an
+item (`refused_path`). The hint's `umount` does not apply to a subvolume that
+is not mounted on its own; `btrfs subvolume delete` deletes one.
+
+### The Trash on NFS, 9p and FUSE (Linux)
+
+`clean` moves an item into the Trash with `renameat2` and `RENAME_NOREPLACE`,
+so that the move never replaces an entry already there. Some filesystems
+refuse that flag: NFS, 9p and Ceph, and a FUSE filesystem whose server does
+not offer it (NTFS through ntfs-3g among them). There duscope first looks for
+the name, and renames when nothing is there, as `mv -n` does. An entry another
+program makes under that name in between is replaced: in the Trash, on the way
+in, and at the item's own name when what was moved proves to be another entry
+and is moved back. Only a program writing in that same directory at that
+moment can bring this about.
+
+## The interactive viewer
+
+### `kill -INT` and `kill -QUIT` leave the terminal raw
+
+The viewer gives the terminal back (raw mode off, the main screen, mouse
+reporting off) when it ends by `q` or `Ctrl-C`, an error, a panic, or the
+signals `SIGTERM` and `SIGHUP`. In the viewer `Ctrl-C` and `Ctrl-\` are keys,
+not signals; a `SIGINT` or `SIGQUIT` sent from outside it (`kill -INT`,
+`kill -QUIT`) is not answered, and where it ends the viewer the terminal is
+left as the viewer had it. `reset` gives it back. To end the viewer from
+outside, send `SIGTERM`, `kill`'s default.

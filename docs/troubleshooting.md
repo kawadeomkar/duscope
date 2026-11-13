@@ -32,7 +32,10 @@ hint: Check the path, or run duscope scan in the directory to measure
 
 In JSON, stdout gets `"ok": false` and an `error` object: `code`, `message`,
 `hint`, `retryable` (whether running the same command again may succeed) and
-`fixable_by` (`user`, `agent` or `none`). The exit statuses:
+`fixable_by` (`user`, `agent` or `none`). On the command line two failures
+write no error envelope, [`interrupted`](#interrupted) and
+[`index_write_failed`](#index_write_failed): their entries say what stdout
+holds then. The exit statuses:
 
 | Status | Meaning |
 | --- | --- |
@@ -82,11 +85,21 @@ each with its `reason`:
 
 | `reason` | The volume | To enter it |
 | --- | --- | --- |
-| `network` | NFS, SMB, FUSE, 9p, AFP or autofs; on Linux also an automount point the kernel has not mounted yet | `--include-network` (for an automount point, without `-x`) |
+| `network` | NFS, SMB, FUSE, 9p, AFP or autofs | `--include-network` |
 | `one_file_system` | any mount other than the root's, under `-x` | leave out `-x` |
 | `kernel` | proc, sysfs, cgroup and the other kernel pseudo-filesystems, and macOS's devfs | never entered |
 | `bind_cycle` | a bind mount of a directory already on the path, which would loop | never entered |
 | `excluded_cache` | a mount point holding a `CACHEDIR.TAG`, under `--exclude-caches` | leave out `--exclude-caches` |
+
+No volume carries the other values the schema allows for `reason`, which are a
+directory's: `excluded` and `skipped_containers` mark a directory an exclude
+pattern or `--skip-containers` kept the scan out of, a mount point among them,
+which `scan.excluded` names instead; `firmlinked` marks, on macOS, the way into
+the Data volume a scan does not take (its mount point, or its firmlinks), left
+out so that nothing counts twice.
+
+On Linux an automount point the kernel has not mounted yet is not counted here,
+and reads as an empty directory ([limits.md](limits.md#automount-points-linux)).
 
 What to do: nothing, when the volume is not part of the question. Otherwise
 scan again with the flag the table gives.
@@ -205,11 +218,14 @@ Ubuntu), or give the date in RFC 3339 with its offset
 
 ### `excluded_truncated`
 
-A list names in `scan.excluded` at most the first 20 directories, in the scan's
-order, that the excludes (`--exclude`, `--exclude-from`, `--ignore-from`,
-`--exclude-caches`, `--skip-containers`, the configuration's `[excludes]`) kept
-the scan out of under the path. `count` says how many more there are;
-`scan.excluded_count` is the whole scan's number.
+An envelope names in `scan.excluded` at most the first 20 directories, in the
+scan's order, that the excludes (`scan --exclude`, `--exclude-from`,
+`--ignore-from`, `--exclude-caches`, `--skip-containers`, the configuration's
+`[excludes]`) kept the scan out of under the path: every verb's but those of
+`summary`, `schema` and `explain` of a path, which name every one. `count` says
+how many more there are. `scan.excluded_count` is another figure: the
+directories not entered and the files left out by the excludes, in the whole
+scan.
 
 What to do: the command in the hint (`duscope summary --scan ID PATH --json`)
 lists every one under the path.
@@ -250,8 +266,8 @@ What to do: the command in the hint, `duscope rescan` (for a tree read by
 
 ### `attrs_not_collected`
 
-The conventions list this code among the warnings, but duscope raises it as an
-error, exit 1. The command needs an attribute that only a scan with
+The envelope's schema lists this code among the warnings, but duscope raises
+it as an error, exit 1. The command needs an attribute that only a scan with
 `--attrs full` collects (the access or birth time, mode, owner or group), and
 the scan it read has the basic attributes: `stale --atime`, `--time atime` or
 `btime` with a time filter, `--fields` naming `atime`, `btime`, `mode`, `uid` or
@@ -275,17 +291,36 @@ value (`m` in a duration, which could be minutes or months), flags that
 conflict, or a `--limit` above 100 without `-o FILE`, `--all` or
 `--format ndjson`. The message says which.
 
+`duscope view` and `duscope scan -i` give it too, before any scan, when the
+viewer cannot start: stdout is not a terminal (a pipe, a file, `-o`); the
+output is one for programs (`--json`, `--plain`, `--format` or
+`DUSCOPE_FORMAT` naming `json`, `plain` or `ndjson`, `CI`, or an agent's
+environment, where `CLAUDECODE`, `CODEX_THREAD_ID`, `CODEX_VERSION` or
+`GEMINI_CLI` is set); or the terminal is smaller than 80×24.
+
 What to do: correct the command; `duscope VERB --help` lists the verb's flags.
+For the viewer, run it in a terminal of at least 80×24, or use `duscope top`
+or `duscope tree` for text.
 
 ### `scan_not_found`
 
-Exit 3. The path does not exist, or the saved scan asked for cannot be found:
-`--scan` names no saved scan (or an id prefix several share, which is `usage`),
-`--no-scan` was given and no saved scan holds the path, `--under` names a path
-the scan does not hold, or `clean` found no saved scan holding its items.
+Exit 3. The path does not exist (or is a symbolic link that leads nowhere), or
+the saved scan asked for cannot be found:
+
+- `--scan` names no saved scan: no saved scan's id starts with the prefix (one
+  that several share is `usage`), or no index file is at the path.
+- The path is not in the scan `--scan` names: "PATH is not in scan ID, whose
+  root is ROOT".
+- No saved scan holds the path, or the working directory when none is given:
+  under `--no-scan`; for `rescan`, `explain --errors` and `scans --check`; for
+  `diff`'s `latest`, which looks for the path `--under` names, else the working
+  directory; and for `clean`'s first item.
+- There is no index directory to look in (neither `HOME` nor `XDG_CACHE_HOME`
+  is set), for `rescan`, `diff` or an id prefix given to `--scan`.
 
 What to do: check the path; `duscope scans` lists the saved scans with their
-ids and roots.
+ids and roots. For `diff OLD latest`, give `--under` the scanned root (or run
+it inside the tree).
 
 ### `permission_denied`
 
@@ -310,30 +345,67 @@ What to do: fix what the message names, then run the command again.
 
 ### `interrupted`
 
-Exit 130. Ctrl-C stopped the command, while it read the tree or while it saved
-the scan, which then saved nothing. It prints one line on stderr and no
-envelope. Under `duscope mcp`, a tool call cancelled or past its deadline before
-`clean` acted gets it too: nothing was moved or deleted.
+Exit 130. Ctrl-C stopped the command while it read the tree (a scan's walk, or
+the file `import` reads) or while it saved the scan, and no scan was saved. On
+the command line it is one line on stderr, `duscope: interrupted`, and no error
+envelope. What stdout holds depends on when:
+
+- During the walk or the read, nothing: the result comes after it.
+- During the save, for `scan --save`, `rescan`, `import`, and a list verb,
+  `summary` or `render` that scanned because no saved scan held the path: the
+  whole result, printed before the save began, under `--json` an envelope with
+  `"ok": true` whose `scan.id` names no file. Only the exit status and the line
+  on stderr say that nothing was saved. `query`, `export` and `view` save such
+  a scan before they print, so they have printed nothing.
+
+Under `duscope mcp` a client sees this code from `duscope_delete` alone, when
+its input ended before the call acted: nothing was moved. A call that is
+cancelled gets no answer, and one past its deadline gets
+[`deadline_exceeded`](#deadline_exceeded).
 
 What to do: run the command again.
 
 ### `index_write_failed`
 
-Exit 1, and running the command again may succeed. The result was printed, but
-the scan could not be saved: there is no index directory (neither `HOME` nor
-`XDG_CACHE_HOME` is set), or it cannot be written (permissions, a full disk).
-The scan id in the output then names no file. Under `duscope mcp` the error
-replaces the result, so a client never holds an id that names nothing.
+Exit 1, and running the command again may succeed. A scan could not be saved:
+the index directory cannot be written (permissions, a full disk), or there is
+none, since neither `HOME` nor `XDG_CACHE_HOME` is set. On the command line the
+error goes to stderr alone, never as an envelope, and what came before it
+depends on the verb:
 
-What to do: give `--index-dir` (or `DUSCOPE_INDEX_DIR`) a writable directory, or
-`--no-save` to scan without saving.
+- `scan --save`, `rescan`, `import`, and a list verb, `summary` or `render`
+  that scanned because no saved scan held the path, save after they print: the
+  result was printed, and the scan id in it names no file.
+- `query` and `export` save the scan they ran before they answer from it, and
+  `view` before it takes the terminal: nothing was printed, under `--json` too.
+- With no index directory, `scan --save` fails this way after printing and
+  `import` before it reads the file; `rescan` fails `scan_not_found`, with no
+  saved scan to renew; and a verb that scans when no saved scan holds the path
+  saves nothing, with no error.
+
+Under `duscope mcp` the error replaces the result, so a client never holds an
+id that names nothing.
+
+What to do: give `--index-dir` (or `DUSCOPE_INDEX_DIR`) a writable directory,
+or set `HOME`. To scan without saving: `scan` without `--save`, or `--no-save`
+on a verb that scans when no saved scan holds the path (the list verbs,
+`summary`, `query`, `export`, `render`, `view`). `rescan` and `import` always
+save.
 
 ### `index_corrupt`
 
 Exit 5. A saved scan's file is damaged: SQLite cannot read it, or its rows do
-not hold the layout duscope writes. `duscope scans --check SCAN` runs SQLite's
-own check on it. When duscope looks for the newest saved scan it passes over a
-file it cannot open, and `duscope scans` names such a file on stderr.
+not hold the layout duscope writes ([index-format.md](index-format.md)). A verb
+checks only the rows it reads, so a file damaged elsewhere can answer with no
+warning. `duscope scans --check SCAN` reads the whole file: SQLite's
+`PRAGMA quick_check`, then every row of `dirs` and `files` held to the layout,
+before it compares the tree ([`index_stale`](#index_stale)). When duscope looks
+for the newest saved scan it passes over a file it cannot open, and
+`duscope scans` names such a file on stderr.
+
+`top` and `stale` under `--format ndjson` or `--plain` write each row as they
+read it, so a read that fails after the first rows ends the output there, with
+no `end` line ([limits.md](limits.md#a-stream-cut-short-has-no-end-line)).
 
 What to do: remove the file (`scans/<id>.db` in the index directory) and scan
 the tree again, `duscope scan --save PATH`.
@@ -416,7 +488,8 @@ on Linux is always, since Linux keeps no change history, and on macOS when a
 check of the history fails (the message gives the reason).
 
 What to do: `duscope rescan` without `--incremental` reads the whole tree, and
-`duscope diff OLD latest` shows what changed.
+`duscope diff OLD latest --under ROOT`, with `OLD` the saved scan's id and
+`ROOT` its root, shows what changed.
 
 ### `not_compiled`
 
@@ -437,8 +510,10 @@ What to do: review the plan, then run the same command with `--yes`.
 
 ### `refused_path`
 
-Exit 1. `clean` refused an item, and nothing was moved or deleted. Each refused
-item gives its `reason`:
+Exit 1. `clean` refused an item. A refusal in the plan stops the run, unless
+`--skip-refused`, before anything is moved or deleted; one met while acting
+(below) fails that item alone, and the items moved or deleted before it stay
+so. Each item the plan refuses gives its `reason`:
 
 - `symlink`: the item is a symbolic link.
 - `firmlink`: the item is a macOS firmlink.
@@ -451,23 +526,39 @@ item gives its `reason`:
 - `outside_root`: the item is not under the saved scan's root.
 - `read_only_volume`: the item's volume is mounted read-only.
 - `expectation_mismatch`: under `duscope_delete`, the item frees other than the
-  client expected.
+  client expected ([`expectation_mismatch`](#expectation_mismatch)).
 
-`--permanent` also stops at a mount point, or a directory it cannot tell is not
-one, under an item: that item fails `refused_path`, and what was removed before
-it stays removed. Under `duscope mcp`, a path outside `--roots`, or longer than
+While acting, the Trash refuses a directory that the mount table, read again
+just before its move, lists a mount point in, or cannot be read for; and
+`--permanent` stops at a mount point, or a directory it cannot tell is not one,
+under an item: that item fails `refused_path`, and what was removed before it
+stays removed. Under `duscope mcp`, a path outside `--roots`, or longer than
 4096 bytes, is refused with this code ([mcp.md](mcp.md#the---roots-rule)).
 
 What to do: `--skip-refused` acts on the other items. For a mount point, unmount
-it first, as the hint says.
+it first, as the hint says. A btrfs subvolume is a mount point to `clean` but
+cannot be unmounted when it is not mounted on its own
+([limits.md](limits.md#a-btrfs-subvolume-is-a-mount-point-to-clean-linux)).
 
 ### `expectation_mismatch`
 
 Exit 1. The plan frees bytes not within 1% of `--expect-bytes`, or an item could
 not be read whole, so what it frees is unknown: nothing was moved or deleted.
 
+Under `duscope mcp`, `duscope_delete` holds each item to the figure the client
+gives with its handle, and refuses with this `reason` an item that frees other
+than that within 1%, one that could not be read whole, and a directory the
+saved scan did not measure whole, whatever the figure: one made since the
+scan, one it did not enter, or one holding a directory it did not enter that
+has bytes under it. Such a directory's bytes come from the plan's own walk,
+which no figure from the scan can vouch for. When these are the only
+refusals, the call fails with this code; otherwise `refused_path`.
+
 What to do: run `duscope clean` without `--yes` and review the plan; when the
-tree changed since the figure was taken, take the figure again.
+tree changed since the figure was taken, take the figure again. For a directory
+the saved scan did not measure whole, rescan the tree that holds it
+(`duscope_scan`, or `duscope rescan`), then call `duscope_explain` again for a
+handle and its bytes.
 
 ### `trash_unavailable`
 
@@ -477,8 +568,9 @@ where it is: on macOS a volume that has no Trash; on Linux a volume whose
 Trash when neither `XDG_DATA_HOME` nor `HOME` is set. On Linux duscope only ever
 renames an item into a Trash on its own filesystem, never copies it.
 
-What to do: `--permanent` deletes the item instead, as the hint says; only when
-you mean it.
+What to do: where neither `XDG_DATA_HOME` nor `HOME` is set, set `HOME` (or
+`XDG_DATA_HOME`) and run `duscope clean` again. Otherwise `--permanent` deletes
+the item instead, as the hint says; only when you mean it.
 
 ### `handle_invalid`
 
@@ -500,8 +592,20 @@ Exit 1. The path of a `--from` handle no longer holds what `explain` examined:
 another file or directory is there (another device and inode), or the same one
 changed since the saved scan.
 
-What to do: rescan the tree that holds it (`duscope rescan`), then run
-`duscope explain --json` again for a handle of what is there now.
+A handle found so while planning stops the run: nothing is moved or deleted.
+While acting, an item named by path or by handle fails this way too, alone,
+when it has gone from its path or been replaced since the plan ("… is not what
+the plan saw"): it is left where it is, and the other items are still moved or
+deleted. Under `--permanent`, a directory on the way to the item that is no
+longer the one the plan saw leaves the item whole; a change under a directory
+being deleted ("… changed while … was being deleted, so the deletion stopped
+there") leaves what was deleted before it deleted, and counted in
+`freed_bytes`.
+
+What to do: for an item named by path, run `duscope clean` again to plan what
+is there now, as the hint says. For a handle, rescan the tree that holds it
+(`duscope rescan`), then run `duscope explain --json` again for a handle of
+what is there now.
 
 ### `deadline_exceeded`
 
@@ -523,3 +627,18 @@ Some lines on stderr carry no code:
 - `duscope scans` writes a `duscope: warn:` line for each file in the index
   directory it cannot read as an index, and lists the others (see
   [`index_corrupt`](#index_corrupt)).
+- `duscope: warn: no handle: …`: `explain --json` answered with a null
+  `handle` and nothing in `warnings`, because the path has changed since the
+  saved scan (another kind, or for anything but a directory another
+  modification time), or the handle key (`handle.key` in the index directory)
+  cannot be read or made. A path that is gone gets no handle either, and no
+  line. Under `duscope mcp` the line reaches only the server's log, never the
+  client. To get a handle, rescan the tree (`duscope rescan`), then run
+  `explain --json` again.
+- `duscope: warn: building the indexes failed (…): building the file again with
+  the sort in memory`: while a save built the index file, SQLite could not
+  make or write its temporary sort file (the temporary directory full, or none
+  writable), so the save started over with the sort in memory, which costs
+  memory in place of disk. To give the file room, set `SQLITE_TMPDIR` to a
+  directory that has it; [SECURITY.md](../SECURITY.md#3-index-files) says where
+  the file goes otherwise and what it holds.
