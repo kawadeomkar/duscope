@@ -61,13 +61,30 @@
 //! cancelled, as is the running call when the reader stops on the failure
 //! (or meets the end of the input after it), unless it is past its point of
 //! no return. The worker stops once the running call's verb has returned.
+//!
+//! A panic ends the process in a release build, which aborts on one
+//! (DEV-87): nothing unwinds, so neither the worker's answer to a verb that
+//! panicked nor the internal error a dropped responder sends is ever written.
+//! The binary's panic hook calls [`answer_before_abort`] first, in that build
+//! alone. The running call is stopped, unless it is past its point of no
+//! return, and answered `-32603`, which says, for a call past that point,
+//! that some of what it asked for may be done; then each request queued
+//! behind it is answered in order, one the reader answered with that answer
+//! and a call `-32603`, since it never runs. The hook waits on no lock for
+//! more than a moment, since the thread that panicked may hold it: a response
+//! whose lock stays held is not sent, and once a response cannot be written,
+//! none after it is. A request read once the queue has been answered, or the
+//! one the reader was handling if it panicked, gets no answer. Where panics
+//! unwind, as in the tests, the server survives a verb's panic: the call is
+//! answered `-32603`, saying the same of a call past its point of no return,
+//! and the next one runs.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -81,7 +98,7 @@ use crate::progress::{self, PROGRESS, PROGRESS_EVERY, Reporter};
 use crate::roots::Refusal;
 use crate::server::{self, Revision, Tools};
 use crate::tools::{CallResult, Context, Prepared};
-use crate::transport::Responder;
+use crate::transport::{Responder, lock_briefly};
 
 /// How long a tool call may run unless its tool says otherwise: 30 seconds.
 pub const DEADLINE: Duration = Duration::from_secs(30);
@@ -132,6 +149,10 @@ pub struct CallSignals {
     /// compare-and-swap so that the verb and the worker cannot both win.
     stage: Arc<AtomicU8>,
 }
+
+/// The worker of the server this process runs, for [`answer_before_abort`]:
+/// the last one started. The binary runs one server; the tests start many.
+static SERVING: Mutex<Weak<Shared>> = Mutex::new(Weak::new());
 
 /// A call neither committed nor stopped.
 const RUNNING: u8 = 0;
@@ -245,6 +266,31 @@ impl Call {
         self.responder().is_some()
     }
 
+    /// The tool the request names.
+    fn tool(&self) -> &str {
+        self.params
+            .as_ref()
+            .and_then(|params| params.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("the tool")
+    }
+
+    /// For the panic hook: the response, if the call still owes one, taken
+    /// with the call stopped, unless its verb is past its point of no return
+    /// (`true` beside the response then), so that a verb still running acts
+    /// on nothing once its call is answered. `Err` while the response's lock
+    /// stays held.
+    fn take_before_abort(&self) -> Result<Option<(Responder, bool)>, ()> {
+        let mut owed = match lock_briefly(&self.responder) {
+            Ok(owed) => owed,
+            Err(TryLockError::Poisoned(owed)) => owed.into_inner(),
+            Err(TryLockError::WouldBlock) => return Err(()),
+        };
+        Ok(owed
+            .take()
+            .map(|responder| (responder, !self.signals.stop())))
+    }
+
     /// Ends the call without a response and tells its verb to stop, unless
     /// its verb is past its point of no return: whether it stopped. The
     /// response is held while the call is stopped, so a verb that stops can
@@ -283,6 +329,95 @@ struct Shared {
 impl Shared {
     fn state(&self) -> MutexGuard<'_, State> {
         lock(&self.state)
+    }
+
+    /// [`answer_before_abort`], for this worker.
+    fn answer_before_abort(&self) {
+        let mut state = match lock_briefly(&self.state) {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(state)) => state.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                warn!("the MCP worker's queue stayed locked: its requests go unanswered");
+                return;
+            }
+        };
+        // Held to the end, so that nothing joins the queue while it is
+        // answered.
+        let running = state.running.clone();
+        let queued: Vec<Job> = state.queue.drain(..).collect();
+        let on_call_thread = thread::current().name() == Some(CALL_THREAD);
+        let mut owed: Vec<(Responder, Result<Box<RawValue>, RpcError>)> = Vec::new();
+        if let Some(call) = running {
+            match call.take_before_abort() {
+                Ok(Some((responder, committed))) => {
+                    let tool = call.tool();
+                    let subject = if on_call_thread {
+                        format!("{tool}'s verb panicked")
+                    } else {
+                        format!("the server panicked while {tool} ran")
+                    };
+                    let message =
+                        format!("{}; the server is stopping", panicked(&subject, committed));
+                    owed.push((responder, Err(RpcError::internal(message))));
+                }
+                Ok(None) => debug!("request {} was answered already", call.id),
+                Err(()) => warn!(
+                    "request {}'s response stayed locked: it goes unanswered",
+                    call.id
+                ),
+            }
+        }
+        for job in queued {
+            match job {
+                Job::Answer(responder, outcome) => owed.push((responder, outcome)),
+                Job::Call(call) => match call.take_before_abort() {
+                    Ok(Some((responder, _))) => {
+                        let message = format!(
+                            "the server is stopping after a panic: {} did not run",
+                            call.tool()
+                        );
+                        owed.push((responder, Err(RpcError::internal(message))));
+                    }
+                    Ok(None) => debug!("request {} was cancelled", call.id),
+                    Err(()) => warn!(
+                        "request {}'s response stayed locked: it goes unanswered",
+                        call.id
+                    ),
+                },
+            }
+        }
+        let mut owed = owed.into_iter();
+        for (responder, outcome) in owed.by_ref() {
+            let id = responder.id().clone();
+            if let Err(e) = responder.respond_before_abort(outcome) {
+                warn!("could not answer request {id} before the server stops: {e}");
+                break;
+            }
+        }
+        // Nothing more can be written, so nothing more is tried: a responder
+        // dropped unanswered would wait for the output.
+        for (responder, _) in owed {
+            responder.abandon();
+        }
+        drop(state);
+    }
+}
+
+/// Answers what the server this process runs still owes, for the panic hook
+/// of a build that aborts on a panic, before the process ends: the running
+/// call `-32603`, then each request queued behind it, in order (the
+/// module's documentation says how). It waits on no lock for more than a
+/// moment, and does nothing when no server runs. A build that unwinds must
+/// not call it: there the server survives the panic and the queued requests
+/// are answered as usual.
+pub fn answer_before_abort() {
+    let serving = match lock_briefly(&SERVING) {
+        Ok(serving) => serving.upgrade(),
+        Err(TryLockError::Poisoned(serving)) => serving.into_inner().upgrade(),
+        Err(TryLockError::WouldBlock) => None,
+    };
+    if let Some(shared) = serving {
+        shared.answer_before_abort();
     }
 }
 
@@ -328,6 +463,7 @@ impl Worker {
             config,
             timing,
         };
+        *lock(&SERVING) = Arc::downgrade(&shared);
         let worker_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name(WORKER_THREAD.to_owned())
@@ -565,9 +701,9 @@ impl Setup {
             } else {
                 match outcome {
                     Ok(outcome) => prepared.result(outcome),
-                    Err(_) => Err(RpcError::internal(format!(
-                        "{}'s verb panicked",
-                        prepared.tool().name()
+                    Err(_) => Err(RpcError::internal(panicked(
+                        &format!("{}'s verb panicked", prepared.tool().name()),
+                        call.signals.committed(),
                     ))),
                 }
             };
@@ -736,6 +872,19 @@ fn send(responder: Responder, outcome: Result<Box<RawValue>, RpcError>) {
     let id = responder.id().clone();
     if let Err(e) = responder.respond_raw(outcome) {
         debug!("could not answer request {id}: {e}");
+    }
+}
+
+/// Why a call failed when its verb, or the server, panicked: `subject`, and,
+/// for a call past its point of no return, that some of what it asked for
+/// may be done, which nothing can now report.
+fn panicked(subject: &str, committed: bool) -> String {
+    if committed {
+        format!(
+            "{subject} past its point of no return: some of what the call asked for may be done"
+        )
+    } else {
+        subject.to_owned()
     }
 }
 

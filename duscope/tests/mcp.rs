@@ -21,14 +21,21 @@
 //! in turn, a scan's progress (`DUSCOPE_TEST_MCP_PROGRESS_MS` shortens its
 //! two seconds), the deadline (`DUSCOPE_TEST_MCP_DEADLINE_MS`), a cancelled
 //! call, and the scans a client that died had queued.
+//!
+//! P3-MCP-08: a verb that panics (`DUSCOPE_TEST_MCP_TOOLS=panic` adds the
+//! fixture tool `test_panic`), under `DUSCOPE_TEST_PANIC=abort`, which ends
+//! the process after the panic hook as the release build's abort does;
+//! under `=sigabrt`, which really aborts there, on Linux alone; and without
+//! it, where the server survives.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::symlink;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::{ExitStatus, Output, Stdio};
 
 use duscope_testkit::{TestEnv, golden};
 use serde_json::{Value, json};
@@ -1661,4 +1668,159 @@ fn p3_mcp_05_the_scans_a_dead_client_queued_never_run() {
     // The first scan ran and its answer could not be sent; the two queued
     // behind it never started.
     assert_eq!(saved_ids(&env).len(), 1, "{stderr}");
+}
+
+// P3-MCP-08.
+
+/// How the panic hook ends a debug build under `DUSCOPE_TEST_PANIC=abort`:
+/// the status a shell gives a process `SIGABRT` ended, without the signal.
+const TEST_ABORT_STATUS: i32 = 134;
+
+/// What a server ended by `DUSCOPE_TEST_PANIC=abort` wrote: one line a
+/// message, the last line whole.
+fn messages(stdout: &[u8]) -> Vec<Value> {
+    let text = std::str::from_utf8(stdout).unwrap();
+    assert!(text.ends_with('\n'), "a partial line: {text:?}");
+    text.lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+        .collect()
+}
+
+/// The acceptance check, short of the abort itself. A debug build unwinds,
+/// so `DUSCOPE_TEST_PANIC=abort` stands in for the release build's
+/// `panic = "abort"`: the hook runs as it would there, then ends the process
+/// with status 134 rather than `SIGABRT`, since on macOS an abort writes a
+/// crash report into the account's own `~/Library/Logs/DiagnosticReports`.
+/// What this proves: every request owed is answered, in order, with whole
+/// lines, before the process ends. What it does not: that the release build
+/// runs the hook before it aborts, which Rust's `panic = "abort"` does by
+/// design (the hook, then the abort) and no test here runs.
+#[test]
+fn p3_mcp_08_a_panicking_verb_answers_every_call_before_the_server_ends() {
+    let (status, stderr) = every_call_answered_before_the_end("abort");
+    assert_eq!(
+        status.code(),
+        Some(TEST_ABORT_STATUS),
+        "{status:?}: {stderr}"
+    );
+    assert_eq!(status.signal(), None);
+}
+
+/// The same server ended by a real `abort()` once the hook has run, which
+/// flushes nothing: the answers are already out. Linux alone: on macOS the
+/// abort would write a crash report into the account's own
+/// `~/Library/Logs/DiagnosticReports`, whatever `HOME` says. Like the test
+/// above it runs a debug build, so it does not show the release build's
+/// runtime calling the hook.
+#[cfg(target_os = "linux")]
+#[test]
+fn p3_mcp_08_a_real_abort_after_the_hook_ends_the_server_by_sigabrt() {
+    const SIGABRT: i32 = 6;
+    let (status, stderr) = every_call_answered_before_the_end("sigabrt");
+    assert_eq!(status.signal(), Some(SIGABRT), "{status:?}: {stderr}");
+    assert_eq!(status.code(), None, "{status:?}: {stderr}");
+}
+
+/// Runs a server with one running and two queued calls whose running verb
+/// panics, under `DUSCOPE_TEST_PANIC=<knob>`, and checks that every request
+/// owed was answered, in order and in whole lines, and that the panic's
+/// message followed on stderr. Returns how the process ended and its stderr.
+fn every_call_answered_before_the_end(knob: &str) -> (ExitStatus, String) {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let after = base.join("panic-now");
+    let mut child = env
+        .cmd()
+        .arg("mcp")
+        .args(roots(&[&root]))
+        .env("DUSCOPE_TEST_MCP_TOOLS", "panic")
+        .env("DUSCOPE_TEST_PANIC", knob)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let logged = std::thread::spawn(move || {
+        let mut text = String::new();
+        stderr.read_to_string(&mut text).unwrap();
+        text
+    });
+    let mut stdin = child.stdin.take().unwrap();
+    for request in [
+        call(1, "test_panic", &json!({"after": after})),
+        call(2, "duscope_scans", &json!({})),
+        call(3, "test_top", &json!({"path": root})),
+        request(4, "tools/list", &json!({})),
+    ] {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    // The reader answers tools/list at once, and had queued the two calls
+    // before it: the running verb may panic now.
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    std::fs::write(&after, b"").unwrap();
+    let mut rest = Vec::new();
+    stdout.read_to_end(&mut rest).unwrap();
+    let status = child.wait().unwrap();
+    drop(stdin);
+    let stderr = logged.join().unwrap();
+    let written = [first.into_bytes(), rest].concat();
+    let messages = messages(&written);
+    let ids: Vec<&Value> = messages.iter().map(|m| &m["id"]).collect();
+    assert_eq!(ids, [4, 1, 2, 3], "{messages:#?}");
+    assert!(messages[0]["result"]["tools"].is_array(), "{}", messages[0]);
+    assert_eq!(
+        messages[1]["error"],
+        json!({
+            "code": -32603,
+            "message": "internal error: test_panic's verb panicked; the server is stopping",
+        })
+    );
+    for (message, tool) in [(&messages[2], "duscope_scans"), (&messages[3], "test_top")] {
+        assert_eq!(message["error"]["code"], -32603, "{message}");
+        assert_eq!(
+            message["error"]["message"],
+            format!("internal error: the server is stopping after a panic: {tool} did not run")
+        );
+    }
+    // The panic's own message still reaches stderr, after the answers.
+    assert!(
+        stderr.contains("test_panic's verb panicked, as its test asked"),
+        "{stderr}"
+    );
+    (status, stderr)
+}
+
+#[test]
+fn p3_mcp_08_where_panics_unwind_the_server_answers_and_goes_on() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let after = base.join("panic-now");
+    std::fs::write(&after, b"").unwrap();
+    let served = serve_with_env(
+        &env,
+        &[("DUSCOPE_TEST_MCP_TOOLS", "panic")],
+        &roots(&[&root]),
+        &[
+            call(1, "test_panic", &json!({"after": after})),
+            call(2, "duscope_scans", &json!({})),
+        ],
+    );
+    assert_eq!(served.output.status.code(), Some(0), "{}", served.stderr);
+    assert_eq!(
+        served.response(1)["error"],
+        json!({"code": -32603, "message": "internal error: test_panic's verb panicked"})
+    );
+    assert_eq!(served.result(2)["isError"], false);
+    assert!(
+        served
+            .stderr
+            .contains("test_panic's verb panicked, as its test asked"),
+        "{}",
+        served.stderr
+    );
 }

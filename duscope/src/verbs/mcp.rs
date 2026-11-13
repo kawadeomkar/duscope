@@ -60,11 +60,13 @@ pub fn serve(args: &McpArgs, global: &GlobalArgs, output: &OutputArgs) -> Result
             )
         })?;
     }
-    let runner = VerbRunner {
+    let runner: Box<dyn Runner> = Box::new(VerbRunner {
         index_dir: index_dir.clone(),
         max_chars: output.max_chars,
         config: global.config.clone(),
-    };
+    });
+    #[cfg(debug_assertions)]
+    let runner: Box<dyn Runner> = Box::new(fixture::Panicking(runner));
     // A scan's Full Disk Access warning names the app that runs the server.
     super::scan::serving_mcp();
     let config = ServerConfig::new(&crate::agent::briefing());
@@ -73,7 +75,7 @@ pub fn serve(args: &McpArgs, global: &GlobalArgs, output: &OutputArgs) -> Result
             registry,
             roots,
             index_dir,
-            runner: Box::new(runner),
+            runner,
         })
         .with_timing(timing());
     log::info!("serving on stdin and stdout");
@@ -95,8 +97,9 @@ fn tools() -> Vec<Box<dyn duscope_mcp::tools::Tool>> {
     #[cfg(debug_assertions)]
     let tools = {
         let mut tools = tools;
-        if std::env::var_os("DUSCOPE_TEST_MCP_TOOLS").is_some_and(|v| !v.is_empty()) {
-            tools.extend(fixture::tools());
+        if let Some(fixtures) = std::env::var_os("DUSCOPE_TEST_MCP_TOOLS").filter(|v| !v.is_empty())
+        {
+            tools.extend(fixture::tools(fixtures == "panic"));
         }
         tools
     };
@@ -217,20 +220,28 @@ mod tests;
 /// Tools for the tests alone, in debug builds under
 /// `DUSCOPE_TEST_MCP_TOOLS`: two verbs behind the machinery every tool goes
 /// through, kept apart from the shipped tools so that the machinery's tests
-/// stay as they are while the tools change.
+/// stay as they are while the tools change; and, when its value is `panic`,
+/// `test_panic`, whose verb panics (P3-MCP-08).
 #[cfg(debug_assertions)]
 mod fixture {
     use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use duscope_mcp::roots::Refusal;
     use duscope_mcp::tools::{
-        Annotations, Context, Invocation, Tool, path_argument, scan_argument,
+        Annotations, Context, Invocation, Outcome, Runner, Tool, path_argument, scan_argument,
     };
+    use duscope_mcp::worker::CallSignals;
     use serde_json::{Map, Value};
 
-    /// The fixture tools.
-    pub fn tools() -> Vec<Box<dyn Tool>> {
-        vec![Box::new(Summary), Box::new(Top)]
+    /// The fixture tools, `test_panic` among them when `panic`.
+    pub fn tools(panic: bool) -> Vec<Box<dyn Tool>> {
+        let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(Summary), Box::new(Top)];
+        if panic {
+            tools.push(Box::new(Panic));
+        }
+        tools
     }
 
     const READ_ONLY: Annotations = Annotations {
@@ -341,5 +352,101 @@ mod fixture {
                 envelope["returned_count"], envelope["total_count"]
             )
         }
+    }
+
+    /// The verb `test_panic` runs, which is no verb of the command line's:
+    /// [`Panicking`] runs it.
+    const PANIC_VERB: &str = "test-panic";
+
+    /// How long `test_panic`'s verb waits for its file before it panics all
+    /// the same.
+    const PANIC_PATIENCE: Duration = Duration::from_secs(10);
+
+    /// `test_panic AFTER`: a verb that panics, as one with a bug would, once
+    /// the file `after` exists, which the test creates when the server holds
+    /// the calls it means to queue behind it.
+    struct Panic;
+
+    impl Tool for Panic {
+        fn name(&self) -> &'static str {
+            "test_panic"
+        }
+
+        fn description(&self) -> &'static str {
+            "Panics once a file exists (a test fixture)."
+        }
+
+        fn input_schema(&self) -> &'static str {
+            r#"{
+              "type": "object",
+              "properties": {
+                "after": { "type": "string", "description": "The file that makes the verb panic" }
+              },
+              "required": ["after"],
+              "additionalProperties": false
+            }"#
+        }
+
+        fn annotations(&self) -> Annotations {
+            READ_ONLY
+        }
+
+        fn invocation(
+            &self,
+            arguments: &Map<String, Value>,
+            _: &Context<'_>,
+        ) -> Result<Invocation, Refusal> {
+            let after = arguments.get("after").and_then(Value::as_str).unwrap_or("");
+            Ok(Invocation {
+                verb: PANIC_VERB,
+                args: vec![after.into()],
+            })
+        }
+
+        fn summary(&self, _: &Value) -> String {
+            "the verb returned".to_owned()
+        }
+    }
+
+    /// The server's runner in a debug build: `test_panic`'s verb, which it
+    /// runs itself, and every other verb as the runner it holds runs them.
+    pub struct Panicking(pub Box<dyn Runner>);
+
+    impl std::fmt::Debug for Panicking {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Panicking").finish_non_exhaustive()
+        }
+    }
+
+    impl Runner for Panicking {
+        fn run(&self, invocation: &Invocation) -> Outcome {
+            panic_on(invocation);
+            self.0.run(invocation)
+        }
+
+        fn run_call(&self, invocation: &Invocation, call: &CallSignals) -> Outcome {
+            panic_on(invocation);
+            self.0.run_call(invocation, call)
+        }
+
+        fn refuse(&self, refusal: &Refusal) -> Outcome {
+            self.0.refuse(refusal)
+        }
+    }
+
+    /// For `test_panic`'s verb, waits until its file exists, for
+    /// [`PANIC_PATIENCE`] at most, and panics.
+    fn panic_on(invocation: &Invocation) {
+        if invocation.verb != PANIC_VERB {
+            return;
+        }
+        let after = invocation.args.first().map(PathBuf::from);
+        let started = Instant::now();
+        while after.as_ref().is_some_and(|after| !after.exists())
+            && started.elapsed() < PANIC_PATIENCE
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("test_panic's verb panicked, as its test asked");
     }
 }

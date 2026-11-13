@@ -1,0 +1,2 @@
+### Fixed
+- `duscope mcp`: a bug that makes duscope panic during a tool call still ends the server, but it now answers first: the running call and every request waiting behind it get a JSON-RPC internal error (`-32603`) saying the server is stopping, where they met the end of its output before. A call that had begun to change something, such as a `duscope_delete` moving entries, says that some of the change may be done.
