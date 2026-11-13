@@ -120,6 +120,38 @@ pub fn ndjson<T: Serialize>(out: &mut dyn Write, envelope: &Envelope<T>) -> io::
     })
 }
 
+/// [`ndjson`] of `envelope` with `rows` for its entries, each row written
+/// as it comes and none held: the header line, a line per row, and the
+/// trailer, whose `returned_count` is the rows written. `settle` runs after
+/// the last row; an error from it ends the lines there, without the
+/// trailer. The envelope's own entries are not read.
+pub fn ndjson_rows<T, R: Serialize>(
+    out: &mut dyn Write,
+    envelope: &Envelope<T>,
+    rows: impl IntoIterator<Item = R>,
+    settle: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let header: NdjsonLine<'_, R> = NdjsonLine::Scan {
+        schema_version: envelope.schema_version,
+        tool: envelope.tool,
+        scan: &envelope.scan,
+        query: &envelope.query,
+    };
+    json(out, &header)?;
+    let mut returned = 0u64;
+    for row in rows {
+        json(out, &NdjsonLine::Entry(&row))?;
+        returned += 1;
+    }
+    settle()?;
+    let trailer: NdjsonLine<'_, R> = NdjsonLine::End {
+        returned_count: returned,
+        total_count: envelope.total_count,
+        warnings: &envelope.warnings,
+    };
+    json(out, &trailer)
+}
+
 /// The `ndjson` lines of a listing of saved scans.
 pub fn ndjson_listing<T: Serialize>(out: &mut dyn Write, listing: &Listing<T>) -> io::Result<()> {
     let mut line = |value: &NdjsonLine<'_, T>| json(out, value);
@@ -147,21 +179,25 @@ pub fn plain<'a>(
     null: bool,
     header: bool,
 ) -> io::Result<()> {
-    let end = if null { b'\0' } else { b'\n' };
     if header {
-        out.write_all(fields.join("\t").as_bytes())?;
-        out.write_all(&[end])?;
+        record(out, &[Cow::Borrowed(fields.join("\t").as_bytes())], null)?;
     }
     for row in rows {
-        for (i, field) in row.iter().enumerate() {
-            if i > 0 {
-                out.write_all(b"\t")?;
-            }
-            out.write_all(field)?;
-        }
-        out.write_all(&[end])?;
+        record(out, &row, null)?;
     }
     Ok(())
+}
+
+/// One `--plain` record: its fields tab-separated, ended by a newline or,
+/// with `null`, a NUL.
+pub fn record(out: &mut dyn Write, fields: &[Cow<'_, [u8]>], null: bool) -> io::Result<()> {
+    for (i, field) in fields.iter().enumerate() {
+        if i > 0 {
+            out.write_all(b"\t")?;
+        }
+        out.write_all(field)?;
+    }
+    out.write_all(if null { b"\0" } else { b"\n" })
 }
 
 /// The error envelope of a failure.

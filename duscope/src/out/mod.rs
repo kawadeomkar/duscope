@@ -244,6 +244,14 @@ impl Output {
     pub fn is_json(&self) -> bool {
         matches!(self.format, Format::Json | Format::Ndjson)
     }
+
+    /// Whether a list's rows are written as they are built, none held
+    /// ([`Output::list_rows`]): `ndjson` and `--plain`, whose rows stand
+    /// alone. JSON is one object, which `--max-chars` measures whole, and a
+    /// table sizes its columns from every row.
+    pub fn streams(&self) -> bool {
+        matches!(self.format, Format::Ndjson | Format::Plain)
+    }
 }
 
 /// A row a list verb prints.
@@ -994,6 +1002,78 @@ impl Output {
         written
     }
 
+    /// Writes a list verb's rows as they are built, holding none of them,
+    /// in a format that [`Output::streams`]: `ndjson` (the header, a line
+    /// per row, the trailer) or `--plain`, each row cut to `--fields`
+    /// alone. `envelope` gives the header and the trailer; its entries are
+    /// not read. `settle` answers for the rows once the last is written
+    /// (a saved scan's read that failed while they were built): its
+    /// failure ends the output there, without `ndjson`'s trailer, and is
+    /// returned. In another format the rows are collected and written as
+    /// [`Output::list`] writes them.
+    pub fn list_rows<T: Row>(
+        &self,
+        envelope: &Envelope<T>,
+        rows: impl Iterator<Item = T>,
+        settle: impl FnOnce() -> Result<(), Failure>,
+        footer: &str,
+    ) -> Result<(), Failure> {
+        if !self.streams() {
+            let entries: Vec<T> = rows.collect();
+            settle()?;
+            let collected = Envelope {
+                returned_count: entries.len() as u64,
+                entries,
+                ok: envelope.ok,
+                schema_version: envelope.schema_version,
+                tool: envelope.tool,
+                scan: envelope.scan.clone(),
+                query: envelope.query.clone(),
+                total_count: envelope.total_count,
+                truncated: envelope.truncated,
+                next_cursor: envelope.next_cursor.clone(),
+                warnings: envelope.warnings.clone(),
+                next: envelope.next.clone(),
+            };
+            return self.list(&collected, footer);
+        }
+        let chosen = self.chosen::<T>(envelope.query.command)?;
+        if let Some(chosen) = &chosen {
+            let named = matches!(self.fields, Some(Fields::Named(_)));
+            fields::check_attrs(chosen, envelope.scan.attrs, named)?;
+        }
+        // A failed settle stops the writer with an error of its own, and
+        // the failure is returned in place of the write's.
+        let mut failed = None;
+        let settled = || {
+            settle().map_err(|failure| {
+                failed = Some(failure);
+                std::io::Error::other("the rows could not be read")
+            })
+        };
+        let written = match (self.format, chosen.as_deref()) {
+            (Format::Ndjson, Some(chosen)) => self.sink(|out| {
+                let rows = rows.map(|row| fields::selected(&row, chosen));
+                format::ndjson_rows(out, envelope, rows, settled)
+            }),
+            (Format::Ndjson, None) => {
+                self.sink(|out| format::ndjson_rows(out, envelope, rows, settled))
+            }
+            (_, chosen) => self.sink(|out| {
+                self.plain_rows(out, rows, chosen)?;
+                settled()
+            }),
+        };
+        if let Some(failure) = failed {
+            return Err(failure);
+        }
+        self.footer(footer);
+        if !self.is_json() && !self.quiet {
+            warn(&envelope.warnings);
+        }
+        written
+    }
+
     /// `--fields help`, written: the fields of rows of type `T`, one per
     /// line (an object under JSON), and `true`; or `unknown_field` for a
     /// name `--fields` gives that `T` does not have, before anything runs.
@@ -1058,6 +1138,31 @@ impl Output {
                 self.header,
             ),
         }
+    }
+
+    /// [`Output::plain`] of rows that are built as they are written.
+    fn plain_rows<T: Row>(
+        &self,
+        out: &mut dyn Write,
+        rows: impl Iterator<Item = T>,
+        chosen: Option<&[&'static str]>,
+    ) -> std::io::Result<()> {
+        let names = chosen.unwrap_or(T::FIELDS);
+        if self.header {
+            format::record(
+                out,
+                &[Cow::Borrowed(names.join("\t").as_bytes())],
+                self.null,
+            )?;
+        }
+        for row in rows {
+            let record = match chosen {
+                Some(chosen) => fields::plain(&row, chosen),
+                None => row.plain(),
+            };
+            format::record(out, &record, self.null)?;
+        }
+        Ok(())
     }
 
     /// Writes `value`, an envelope of `rows` with `warnings`, as JSON:

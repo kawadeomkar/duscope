@@ -3,7 +3,8 @@
 //! tree, by-type and stale (the other `--json` goldens and top's four
 //! formats live beside their packages' tests); `du` parity of the binary's
 //! totals on the fixture tree, and on a system tree in the nightly; and the
-//! scan's peak RSS per entry on the benchmark trees.
+//! scan's peak RSS per entry on the benchmark trees. P2-QRY-13: the peak RSS
+//! of `--all`, which streams its rows, on T2.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -607,6 +608,94 @@ fn rss_peaks(
     );
     peaks.sort_unstable();
     (entries, peaks)
+}
+
+/// The most a list verb's `--all` may hold at its peak, in bytes per entry
+/// of the tree, once its rows are written as they are built (P2-QRY-13):
+/// ranking every row still holds a sort key and a path for each, about 200
+/// bytes per entry of T2 on an arm64 Mac (`top --files --all`, 202 MB),
+/// where holding every row built took 870 (761 MB, the 2026-11-09 audit).
+const STREAMED_ALL_BUDGET: u64 = 300;
+
+/// P2-QRY-13: `top --files --all` and `stale --all`, as `ndjson`, on a scan
+/// of T2 saved first, every file a row: the median peak RSS of three runs
+/// under hyperfine stays within [`STREAMED_ALL_BUDGET`] bytes per entry.
+/// `HYPERFINE` names the hyperfine to run; T2 is under
+/// `DUSCOPE_BENCH_TREES` (which must hold it), else `bench/.trees`.
+#[test]
+#[ignore = "needs the T2 bench tree and hyperfine; DUSCOPE_TEST_PLATFORM=1"]
+fn p2_qry_13_all_streams_its_rows_within_a_peak_rss_budget_on_t2() {
+    if !platform_tests() {
+        return;
+    }
+    let env = TestEnv::new();
+    let named = std::env::var_os("DUSCOPE_BENCH_TREES");
+    let trees = named.clone().map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/.trees"),
+        PathBuf::from,
+    );
+    let root = trees.join("T2");
+    if !root.is_dir() {
+        assert!(named.is_none(), "T2 is not built under {}", trees.display());
+        eprintln!("skipped T2: not built under {}", trees.display());
+        return;
+    }
+    let hyperfine = std::env::var_os("HYPERFINE").unwrap_or_else(|| "hyperfine".into());
+    let bin = shipped(&env).to_string_lossy().into_owned();
+    let scan = &scan_json(&env, &["--save", "--treemap", "never"], &root)["scan"];
+    let id = scan["id"].as_str().unwrap().to_owned();
+    let entries = scan["file_count"].as_u64().unwrap() + scan["dir_count"].as_u64().unwrap();
+    let index_dir = env.index_dir().to_string_lossy().into_owned();
+    let root = root.to_string_lossy().into_owned();
+    let verbs: [(&str, &[&str]); 2] = [
+        ("top", &["top", "--files"]),
+        ("stale", &["stale", "--min-size", "0", "--older-than", "0h"]),
+    ];
+    for (name, args) in verbs {
+        let mut words: Vec<&str> = vec![&bin];
+        words.extend_from_slice(args);
+        words.extend([root.as_str(), "--all", "--format", "ndjson", "--scan", &id]);
+        words.extend(["--index-dir", index_dir.as_str()]);
+        let command: Vec<String> = words.iter().map(|w| shell_quote(w)).collect();
+        let export = env.tmp_dir().join(format!("{name}-all.json"));
+        let out = env
+            .command(&hyperfine)
+            .args(["-N", "--runs", "3", "--warmup", "0", "--style", "none"])
+            .args(["--metrics", "time_wall_clock,memory_peak_resident"])
+            .arg("--export-json")
+            .arg(&export)
+            .args(["--command-name", name])
+            .arg(command.join(" "))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "hyperfine: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&export).unwrap()).unwrap();
+        // Byte counts well inside f64's integers.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let mut peaks: Vec<u64> = result["results"][0]["measurements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|run| run["memory_peak_resident"]["value"].as_f64())
+            .map(|peak| peak as u64)
+            .collect();
+        assert_eq!(peaks.len(), 3, "{result}");
+        peaks.sort_unstable();
+        let peak = peaks[1];
+        eprintln!(
+            "{name} --all on T2: {entries} entries, median peak {peak} bytes, {} per entry (budget {STREAMED_ALL_BUDGET}; runs {peaks:?})",
+            peak / entries
+        );
+        assert!(
+            peak <= STREAMED_ALL_BUDGET * entries,
+            "{name} --all on T2: {peak} bytes is over {STREAMED_ALL_BUDGET} per entry"
+        );
+    }
 }
 
 /// `text` quoted for the shell hyperfine runs its command in.

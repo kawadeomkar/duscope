@@ -131,6 +131,14 @@ impl Serialize for Selected<'_> {
     }
 }
 
+/// `row` cut to `fields`.
+pub fn selected<'f>(row: &impl Serialize, fields: &'f [&'static str]) -> Selected<'f> {
+    Selected {
+        row: object(row),
+        fields,
+    }
+}
+
 /// `envelope` with each row cut to `fields`.
 pub fn select<'f, T: Row>(
     envelope: &Envelope<T>,
@@ -139,10 +147,7 @@ pub fn select<'f, T: Row>(
     let entries = envelope
         .entries
         .iter()
-        .map(|row| Selected {
-            row: object(row),
-            fields,
-        })
+        .map(|row| selected(row, fields))
         .collect();
     Envelope {
         ok: envelope.ok,
