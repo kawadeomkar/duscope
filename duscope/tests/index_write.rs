@@ -283,6 +283,45 @@ fn p2_idx_02_v_reports_the_write() {
     assert!(err.contains(" µs/entry"), "{err}");
 }
 
+/// P2-IDX-07, with no mount: `SQLite` builds a temporary file's name in 512
+/// bytes, so a directory it accepts but whose path leaves no room for the
+/// name fails the sort with a bare `SQLITE_ERROR` (`unixGetTempname`). Ten
+/// thousand directories with long names give more than the sort's 2 MB of
+/// memory, so it needs the file. The save is built again in memory and
+/// succeeds. Linux opens the file with `O_TMPFILE`, by its directory alone,
+/// so there it has no name to build and the first build succeeds.
+#[test]
+fn p2_idx_07_a_temporary_directory_path_too_long_for_sqlite_builds_in_memory() {
+    let env = TestEnv::new();
+    let mut long = env.tmp_dir();
+    while long.as_os_str().len() < 520 {
+        long.push("d".repeat(200));
+    }
+    fs::create_dir_all(&long).unwrap();
+    let root = env.work_dir().join("tree");
+    let name = "x".repeat(245);
+    for n in 0..10_000 {
+        fs::create_dir_all(root.join(format!("{n:05}{name}"))).unwrap();
+    }
+    let out = run(
+        &env,
+        &["scan", root.to_str().unwrap(), "--save", "--json"],
+        &[("SQLITE_TMPDIR", long.to_str().unwrap())],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(envelope(&out)["ok"], true);
+    if cfg!(target_os = "macos") {
+        assert!(
+            err.contains("building the indexes failed"),
+            "the first build failed on the temporary name: {err}"
+        );
+    }
+    let names = scans(&env.index_dir());
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(names[0].ends_with(".db"), "{names:?}");
+}
+
 /// Mounts a 64 KiB tmpfs at `point` for the life of the guard.
 #[cfg(target_os = "linux")]
 struct Tmpfs<'e> {
@@ -295,6 +334,57 @@ impl Drop for Tmpfs<'_> {
     fn drop(&mut self) {
         let _ = self.env.command("umount").arg(&self.point).status();
     }
+}
+
+/// P2-IDX-07, on a real full filesystem: `SQLITE_TMPDIR` names a 64 KiB
+/// tmpfs, and ten thousand directories with long names give more than the
+/// sort's 2 MB of memory, so its temporary file lands there and fails. The
+/// save is built again in memory and succeeds.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts a small tmpfs as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p2_idx_07_linux_a_full_temporary_directory_does_not_fail_the_save() {
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        return;
+    }
+    if !is_root(&env) {
+        duscope_testkit::skip("mounting needs root");
+        return;
+    }
+    let point = env.tmp_dir().join("full");
+    fs::create_dir_all(&point).unwrap();
+    let mounted = env
+        .command("mount")
+        .args(["-t", "tmpfs", "-o", "size=64k", "tmpfs"])
+        .arg(&point)
+        .status()
+        .unwrap();
+    assert!(mounted.success(), "mount -t tmpfs");
+    let _guard = Tmpfs {
+        env: &env,
+        point: point.clone(),
+    };
+    let root = env.work_dir().join("tree");
+    let long = "x".repeat(240);
+    for n in 0..10_000 {
+        fs::create_dir_all(root.join(format!("{n:05}{long}"))).unwrap();
+    }
+    let out = run(
+        &env,
+        &["scan", root.to_str().unwrap(), "--save", "--json"],
+        &[("SQLITE_TMPDIR", point.to_str().unwrap())],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(envelope(&out)["ok"], true);
+    assert!(
+        err.contains("building the indexes failed"),
+        "the first build failed on the full directory: {err}"
+    );
+    let names = scans(&env.index_dir());
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(names[0].ends_with(".db"), "{names:?}");
 }
 
 #[cfg(target_os = "linux")]

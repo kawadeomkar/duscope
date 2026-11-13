@@ -32,6 +32,14 @@ reads none.
 Where saved scans are kept, as
 .BR \-\-index\-dir .
 .TP
+.BR SQLITE_TMPDIR ", " TMPDIR
+Where a save puts SQLite's temporary sort file while it builds an index
+(mode 0600, unlinked as it is opened); otherwise the first writable of
+.IR /var/tmp ,
+.IR /usr/tmp ,
+.I /tmp
+and the current directory.
+.TP
 .B DUSCOPE_THREADS
 The scanner's worker threads, as
 .BR \-\-threads .
