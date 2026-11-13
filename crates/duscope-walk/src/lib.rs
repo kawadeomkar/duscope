@@ -27,8 +27,10 @@ mod scheduler;
 #[cfg(test)]
 mod tests;
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic;
@@ -241,13 +243,21 @@ pub trait Provider: Send + Sync {
 /// handle, so the directories on its path can be walked back to the root,
 /// and, while the walk keeps them, its parent's descriptor and its own (see
 /// `platform::DirFd`).
-#[derive(Debug)]
+///
+/// It holds its name, not its path. Every directory above one being read
+/// is kept alive by it, so a handle that held its path would make a chain
+/// `n` levels deep hold about `n²` bytes; [`path`](DirHandle::path) builds
+/// the path from the names when it is asked for.
 pub struct DirHandle {
     id: DirId,
-    path: PathBuf,
-    /// The path relative to the root, `/`-separated, as the directory was
-    /// reached; empty for the root.
-    rel: Vec<u8>,
+    /// The name its parent listed it by: under `--follow-symlinks`, a
+    /// link's own name. The root's is its entry's.
+    name: NameRef,
+    /// Where its path starts: the root's path as given, or for a directory
+    /// reached through a link followed under `--follow-symlinks`, the
+    /// link's resolved target. `None` for any other directory, whose path
+    /// is its parent's joined with its name.
+    base: Option<PathBuf>,
     depth: u32,
     dev: u64,
     ino: u64,
@@ -262,21 +272,21 @@ pub struct DirHandle {
 }
 
 impl DirHandle {
-    /// The handle of `entry`, a directory numbered `id` at `rel` below the
-    /// root (empty when no exclude needs it), inside `parent`, whose
-    /// descriptor it opens relative to when `parent_fd` holds it.
+    /// The handle of `entry`, a directory numbered `id`, inside `parent`,
+    /// whose descriptor it opens relative to when `parent_fd` holds it.
+    /// `base` is where its path starts (the root's path, a followed link's
+    /// resolved target), `None` below those.
     fn new(
         id: DirId,
-        path: PathBuf,
-        rel: Vec<u8>,
+        base: Option<PathBuf>,
         entry: &Entry,
         parent: Option<Arc<DirHandle>>,
         parent_fd: Option<Arc<platform::DirFd>>,
     ) -> DirHandle {
         DirHandle {
             id,
-            path,
-            rel,
+            name: entry.name.clone(),
+            base,
             depth: parent.as_ref().map_or(0, |p| p.depth + 1),
             dev: entry.dev,
             ino: entry.ino,
@@ -320,17 +330,25 @@ impl DirHandle {
     }
 
     /// A handle for tests: `path`, `depth` levels below a root, with a
-    /// handle for each directory between them.
+    /// handle for each directory between them. A path with no last name
+    /// to join (`/`, `a/..`) starts a path of its own, as the root does.
     #[cfg(test)]
     pub(crate) fn detached(path: impl Into<PathBuf>, depth: u32) -> DirHandle {
         let path = path.into();
         let parent = depth
             .checked_sub(1)
             .map(|up| Arc::new(DirHandle::detached(path.parent().unwrap_or(&path), up)));
+        let (name, base) = match path.file_name() {
+            Some(name) if parent.is_some() => (NameRef::from(name), None),
+            name => (
+                NameRef::from(name.unwrap_or(path.as_os_str())),
+                Some(path.clone()),
+            ),
+        };
         DirHandle {
             id: DirId::ROOT,
-            path,
-            rel: Vec::new(),
+            name,
+            base,
             depth,
             dev: 0,
             ino: 0,
@@ -341,14 +359,53 @@ impl DirHandle {
         }
     }
 
-    /// The path relative to the root of this directory's child `name`.
-    fn rel_of(&self, name: &[u8]) -> Vec<u8> {
-        let mut rel = Vec::with_capacity(self.rel.len() + 1 + name.len());
-        rel.extend_from_slice(&self.rel);
-        if !rel.is_empty() {
-            rel.push(b'/');
+    /// A handle for tests: the directory `name` inside `parent`.
+    #[cfg(test)]
+    pub(crate) fn below(parent: Arc<DirHandle>, name: &str) -> DirHandle {
+        DirHandle {
+            id: DirId::ROOT,
+            name: NameRef::from(name),
+            base: None,
+            depth: parent.depth + 1,
+            dev: 0,
+            ino: 0,
+            mnt_id: 0,
+            parent: Some(parent),
+            parent_fd: Mutex::new(None),
+            fd: Mutex::new(None),
         }
-        rel.extend_from_slice(name);
+    }
+
+    /// The bytes this handle holds: its fields, the counts of its `Arc`,
+    /// its name's bytes (counted even when held in place) and its base's
+    /// heap. A new field is counted here.
+    #[cfg(test)]
+    pub(crate) fn footprint(&self) -> usize {
+        2 * size_of::<usize>()
+            + size_of::<DirHandle>()
+            + self.name.as_bytes().len()
+            + self.base.as_ref().map_or(0, PathBuf::capacity)
+    }
+
+    /// The directory's path relative to the root, `/`-separated, by the
+    /// names the walk reached it through (a link followed under
+    /// `--follow-symlinks` by its own name), for the globs and ignore
+    /// rules; empty for the root. Built on each call, a step a level.
+    fn rel(&self) -> Vec<u8> {
+        let names: Vec<&[u8]> = self
+            .ancestors()
+            .take_while(|dir| dir.parent.is_some())
+            .map(|dir| dir.name.as_bytes())
+            .collect();
+        let len = names.iter().map(|name| name.len() + 1).sum::<usize>();
+        // Room for an entry's name after it, which `Rel` appends.
+        let mut rel = Vec::with_capacity(len + NAME_ROOM);
+        for (i, name) in names.iter().rev().enumerate() {
+            if i > 0 {
+                rel.push(b'/');
+            }
+            rel.extend_from_slice(name);
+        }
         rel
     }
 
@@ -387,18 +444,149 @@ impl DirHandle {
         self.id
     }
 
+    /// The name its parent listed it by: under `--follow-symlinks`, a
+    /// link's own name, not its target's. The root's is its entry's: the
+    /// path's last component, or the whole path when it has none (`/`).
+    #[must_use]
+    pub fn name(&self) -> &NameRef {
+        &self.name
+    }
+
     /// The directory's path, to open: the root as given joined with the
     /// names below it; below a link followed under `--follow-symlinks`, the
     /// link's resolved target joined with the names below that.
+    ///
+    /// It is built from the names on each call, a step a level, so a caller
+    /// that needs it twice keeps it. The walk opens a directory relative to
+    /// its parent's descriptor by its [`name`](DirHandle::name), and builds
+    /// its path only to open it by path or to name it to the system.
     #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> PathBuf {
+        let mut names = Vec::new();
+        let mut dir = self;
+        let base = loop {
+            if let Some(base) = &dir.base {
+                break base.as_path();
+            }
+            names.push(dir.name.as_os_str());
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => break Path::new(""),
+            }
+        };
+        let len = names
+            .iter()
+            .fold(base.as_os_str().len(), |len, name| len + 1 + name.len());
+        let mut path = PathBuf::with_capacity(len);
+        path.push(base);
+        for name in names.iter().rev() {
+            path.push(name);
+        }
+        path
     }
 
     /// How far below the root the directory is; the root is 0.
     #[must_use]
     pub fn depth(&self) -> u32 {
         self.depth
+    }
+}
+
+/// The parents only this handle keeps are dropped one after another, in a
+/// loop. Dropped as fields, each would drop its own parent inside its
+/// drop, a stack frame a level, and the walk reads chains deeper than
+/// `PATH_MAX` allows to name: a deep enough one would overflow a worker's
+/// 2 MiB stack. [`Arc::into_inner`] hands a parent over only to the last
+/// of its holders, even when two of its children are dropped at once on
+/// two workers, so each parent is dropped once.
+impl Drop for DirHandle {
+    fn drop(&mut self) {
+        let mut next = self.parent.take();
+        while let Some(mut parent) = next.and_then(Arc::into_inner) {
+            next = parent.parent.take();
+        }
+    }
+}
+
+/// The parent by its id alone: a derived `Debug` would print every handle
+/// up to the root, recursively.
+impl fmt::Debug for DirHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirHandle")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("base", &self.base)
+            .field("depth", &self.depth)
+            .field("dev", &self.dev)
+            .field("ino", &self.ino)
+            .field("mnt_id", &self.mnt_id)
+            .field("parent", &self.parent.as_ref().map(|parent| parent.id))
+            .finish_non_exhaustive()
+    }
+}
+
+/// Room for one name of up to `NAME_MAX` (255) bytes and its separator.
+const NAME_ROOM: usize = 256;
+
+/// Paths relative to the root of one directory's entries, for the globs
+/// and ignore rules, in one buffer: the directory's own, built once, then
+/// each entry's name after it in turn. No handle holds its path relative
+/// to the root, which would cost the `n²` bytes a full path does.
+struct Rel {
+    buf: Vec<u8>,
+    /// The length of the directory's own path.
+    dir: usize,
+}
+
+impl Rel {
+    fn of(dir: &DirHandle) -> Rel {
+        let buf = dir.rel();
+        Rel {
+            dir: buf.len(),
+            buf,
+        }
+    }
+
+    /// The path relative to the root of the directory's entry `name`.
+    fn child(&mut self, name: &NameRef) -> &[u8] {
+        self.buf.truncate(self.dir);
+        if self.dir > 0 {
+            self.buf.push(b'/');
+        }
+        self.buf.extend_from_slice(name.as_bytes());
+        &self.buf
+    }
+}
+
+/// The path of a directory just listed, built only when something asks
+/// for it (a mount met, a `CACHEDIR.TAG` read): where a followed link led,
+/// or its parent's path joined with its name.
+struct ChildPath<'a> {
+    dir: &'a DirHandle,
+    name: &'a NameRef,
+    target: Option<&'a Path>,
+    built: OnceCell<PathBuf>,
+}
+
+impl<'a> ChildPath<'a> {
+    fn new(dir: &'a DirHandle, name: &'a NameRef, target: Option<&'a Path>) -> ChildPath<'a> {
+        ChildPath {
+            dir,
+            name,
+            target,
+            built: OnceCell::new(),
+        }
+    }
+
+    fn get(&self) -> &Path {
+        if let Some(target) = self.target {
+            return target;
+        }
+        self.built.get_or_init(|| {
+            let mut path = self.dir.path();
+            path.push(self.name.as_os_str());
+            path
+        })
     }
 }
 
@@ -980,7 +1168,7 @@ pub fn walk_with<P: Provider + ?Sized>(
         threads,
         ..WalkSummary::default()
     };
-    let root_dir = DirHandle::new(DirId::ROOT, root.to_owned(), Vec::new(), &entry, None, None);
+    let root_dir = DirHandle::new(DirId::ROOT, Some(root.to_owned()), &entry, None, None);
     let (root_dev, root_mnt_id) = (entry.dev, entry.mnt_id);
     sink(ScanEvent::Entry(entry));
     if let Ok(mut volume) = provider.volume(root) {
@@ -1444,14 +1632,16 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         shared: &PoolShared<Job, Event>,
     ) -> Option<Adopted> {
         let mut adopted = Adopted::default();
-        // Paths relative to the root, built only for globs and ignore rules.
+        // Paths relative to the root, built only for globs and ignore rules:
+        // the directory's own once, then each entry's after it.
         let by_path = self.excludes.as_ref().filter(|ex| ex.wants_rel());
-        let rel_of =
-            |name: &NameRef| by_path.map_or_else(Vec::new, |_| dir.rel_of(name.as_bytes()));
+        let mut rel = by_path.map(|_| Rel::of(dir));
         // An entry the excludes leave out reports nothing, not even that it
         // could not be read or vanished.
         errors.retain(|error| {
-            if by_path.is_some_and(|ex| ex.matches(&rel_of(&error.name), None)) {
+            if let (Some(ex), Some(rel)) = (by_path, rel.as_mut())
+                && ex.matches(rel.child(&error.name), None)
+            {
                 return false;
             }
             let gone = Failed::of(error.errno) == Failed::Vanished;
@@ -1461,8 +1651,8 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             !gone
         });
         // Where each directory reached through a link is read from.
-        let resolved = if self.opts.follow_symlinks {
-            self.follow_links(dir, entries, errors)
+        let mut resolved = if self.opts.follow_symlinks {
+            self.follow_links(dir, rel.as_mut(), entries, errors)
         } else {
             Vec::new()
         };
@@ -1471,11 +1661,10 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
             entry.parent = dir.id;
             entry.dir = None;
             let is_dir = entry.kind == Kind::Dir;
-            let rel = rel_of(&entry.name);
-            let excluded = self
-                .excludes
-                .as_ref()
-                .and_then(|ex| ex.excluded(&rel, entry, listing));
+            let excluded = self.excludes.as_ref().and_then(|ex| {
+                let rel = rel.as_mut().map_or(&[][..], |rel| rel.child(&entry.name));
+                ex.excluded(rel, entry, listing)
+            });
             if excluded.is_some() {
                 adopted.excluded += 1;
                 if !is_dir {
@@ -1490,13 +1679,12 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     return None;
                 };
                 entry.dir = Some(id);
-                // The path only a directory needs: a file costs no copy. A
-                // directory reached through a link opens by its path; any
-                // other relative to this one's descriptor, while it is kept.
-                let (path, parent_fd) = match resolved.get(i) {
-                    Some(Some(target)) => (target.clone(), None),
-                    _ => (dir.path.join(entry.name.as_os_str()), dir.kept_fd()),
-                };
+                // A directory reached through a link opens by its resolved
+                // path; any other relative to this one's descriptor, while
+                // it is kept. Its path is built only if something here asks
+                // for it.
+                let target = resolved.get_mut(i).and_then(Option::take);
+                let path = ChildPath::new(dir, &entry.name, target.as_deref());
                 let mut skip = excluded;
                 if skip.is_none() && self.containers.contains(&(entry.dev, entry.ino)) {
                     adopted.excluded += 1;
@@ -1509,7 +1697,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                     // enter, so a skipped mount is never touched.
                     if skip.is_none()
                         && self.excludes.as_ref().is_some_and(Excludes::wants_tags)
-                        && self.provider.cachedir_tag(&path)
+                        && self.provider.cachedir_tag(path.get())
                     {
                         adopted.excluded += 1;
                         for volume in &mut adopted.volumes[met..] {
@@ -1518,14 +1706,19 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                         skip = Some(Skip::ExcludedCache);
                     }
                 }
+                drop(path);
                 if let Some(reason) = skip {
                     adopted.skipped.push((id, reason));
                     continue;
                 }
+                let parent_fd = if target.is_none() {
+                    dir.kept_fd()
+                } else {
+                    None
+                };
                 jobs.push(Job::ReadDir(Arc::new(DirHandle::new(
                     id,
-                    path,
-                    rel,
+                    target,
                     entry,
                     Some(Arc::clone(dir)),
                     parent_fd,
@@ -1556,23 +1749,28 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     fn follow_links(
         &self,
         dir: &DirHandle,
+        mut relative: Option<&mut Rel>,
         entries: &mut Vec<Entry>,
         errors: &mut Vec<ScanError>,
     ) -> Vec<Option<PathBuf>> {
         let mut resolved = Vec::with_capacity(entries.len());
         let mut kept = Vec::with_capacity(entries.len());
+        // The directory's path, built at its first link.
+        let mut dir_path = None;
         for entry in entries.drain(..) {
-            let excluded = || {
-                self.excludes.as_ref().is_some_and(|ex| {
-                    ex.wants_rel() && ex.matches(&dir.rel_of(entry.name.as_bytes()), Some(false))
-                })
-            };
-            if entry.kind != Kind::Symlink || excluded() {
+            let excluded = entry.kind == Kind::Symlink
+                && match (self.excludes.as_ref(), relative.as_deref_mut()) {
+                    (Some(ex), Some(rel)) => ex.matches(rel.child(&entry.name), Some(false)),
+                    _ => false,
+                };
+            if entry.kind != Kind::Symlink || excluded {
                 kept.push(entry);
                 resolved.push(None);
                 continue;
             }
-            let path = dir.path.join(entry.name.as_os_str());
+            let path = dir_path
+                .get_or_insert_with(|| dir.path())
+                .join(entry.name.as_os_str());
             let errno = match self.provider.follow(&path, self.opts) {
                 Ok((real, target)) => {
                     let is_dir = target.kind == Kind::Dir;
@@ -1610,24 +1808,24 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     }
 
     /// Decides whether the walk enters `entry`, a directory of `dir` at
-    /// `path`. Never a directory already on the path (a bind mount of an
-    /// ancestor, or one the kernel did not report as a mount); at a mount
-    /// crossing, never a kernel pseudo-filesystem, a network one only under
-    /// `--include-network`, and under `-x` no mount other than the root's (a
-    /// firmlink leads into the volume the root's own is paired with, so it
-    /// is no crossing for `-x`); then whatever the provider skips. A mount's
-    /// volume is added to `volumes` the first time it is met, read in full
-    /// only when the walk enters it. `None` enters.
+    /// `path` (built only when a mount is met). Never a directory already on
+    /// the path (a bind mount of an ancestor, or one the kernel did not
+    /// report as a mount); at a mount crossing, never a kernel
+    /// pseudo-filesystem, a network one only under `--include-network`, and
+    /// under `-x` no mount other than the root's (a firmlink leads into the
+    /// volume the root's own is paired with, so it is no crossing for
+    /// `-x`); then whatever the provider skips. A mount's volume is added to
+    /// `volumes` the first time it is met, read in full only when the walk
+    /// enters it. `None` enters.
     ///
     /// The bind-cycle test walks the directory's ancestors, one pointer per
-    /// level (bounded by `PATH_MAX`); a mount is classified once, and the
-    /// classification is kept for the volume row of a mount that is not
-    /// entered.
+    /// level; a mount is classified once, and the classification is kept
+    /// for the volume row of a mount that is not entered.
     fn decide(
         &self,
         dir: &DirHandle,
         entry: &Entry,
-        path: &Path,
+        path: &ChildPath<'_>,
         volumes: &mut Vec<VolumeInfo>,
     ) -> Option<Skip> {
         let cycle = dir
@@ -1660,7 +1858,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         let provider_skip = skip.is_some_and(|s| s == Skip::Firmlinked);
         if !provider_skip && self.claim(entry.mnt_id) {
             let volume = match skip {
-                None => self.provider.volume(path).ok(),
+                None => self.provider.volume(path.get()).ok(),
                 Some(_) => met,
             };
             if let Some(mut volume) = volume {
@@ -1676,7 +1874,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     /// What [`Provider::mount_info`] says of the mount `entry` crossed into
     /// at `path`, read the first time the mount is met; `None` when it
     /// cannot be read.
-    fn met(&self, entry: &Entry, path: &Path) -> Option<VolumeInfo> {
+    fn met(&self, entry: &Entry, path: &ChildPath<'_>) -> Option<VolumeInfo> {
         if let Some(met) = self
             .mounts
             .lock()
@@ -1685,7 +1883,7 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         {
             return met.info.clone();
         }
-        let info = self.provider.mount_info(path, entry.dev).ok();
+        let info = self.provider.mount_info(path.get(), entry.dev).ok();
         self.mounts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

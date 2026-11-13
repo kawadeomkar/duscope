@@ -980,15 +980,17 @@ impl Pruning<'_> {
     /// directory the walk did not list (the root, one reached through a
     /// link) is read.
     fn start(&self, dir: &DirHandle) -> Decision {
+        // Built from the names on the way up, once for both uses.
+        let path = dir.path();
         let decision = lock(&self.decisions)
-            .remove(dir.path())
+            .remove(&path)
             .unwrap_or(Decision::Read(None));
         match decision {
             Decision::Graft(saved) => {
                 lock(&self.grafts).push(Grafted {
                     dir: dir.id(),
                     saved,
-                    path: dir.path().to_owned(),
+                    path,
                 });
             }
             Decision::Read(saved) => {
@@ -1002,17 +1004,22 @@ impl Pruning<'_> {
     /// Decides for each subdirectory among `entries`, just read from `dir`
     /// (the saved directory `saved`), before the walk takes them.
     fn decide(&self, dir: &DirHandle, saved: Option<u32>, entries: &[Entry]) {
-        let mut decided = Vec::new();
-        for entry in entries.iter().filter(|e| e.kind == Kind::Dir) {
-            let decision = match saved {
-                Some(parent) => self.plan.decide(dir.path(), parent, entry),
-                None => Decision::Read(None),
-            };
-            decided.push((dir.path().join(entry.name.as_os_str()), decision));
+        let mut subdirs = entries.iter().filter(|e| e.kind == Kind::Dir).peekable();
+        if subdirs.peek().is_none() {
+            return;
         }
-        if !decided.is_empty() {
-            lock(&self.decisions).extend(decided);
-        }
+        // Built once for every subdirectory, and only when there is one.
+        let path = dir.path();
+        let decided: Vec<_> = subdirs
+            .map(|entry| {
+                let decision = match saved {
+                    Some(parent) => self.plan.decide(&path, parent, entry),
+                    None => Decision::Read(None),
+                };
+                (path.join(entry.name.as_os_str()), decision)
+            })
+            .collect();
+        lock(&self.decisions).extend(decided);
     }
 }
 

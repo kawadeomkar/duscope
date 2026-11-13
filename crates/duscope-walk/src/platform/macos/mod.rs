@@ -414,7 +414,7 @@ impl Provider for MacProvider {
         }
         // The walk root's own path, resolved: below a followed link the
         // directory's path is the link's target, not under the root.
-        let root = self.real_root(dir.ancestors().last()?.path())?;
+        let root = self.real_root(&dir.ancestors().last()?.path())?;
         left_out(
             entry.boundary,
             &firmlink_sources(),

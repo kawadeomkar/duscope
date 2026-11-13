@@ -216,16 +216,20 @@ impl Mounts {
     /// once, joined with the names below it. A directory reached through a
     /// link followed under `--follow-symlinks` has its resolved path already.
     fn real(&self, dir: &DirHandle, name: &[u8]) -> io::Result<PathBuf> {
-        let given = dir.ancestors().last().map_or(dir.path(), DirHandle::path);
-        let Ok(below) = dir.path().strip_prefix(given) else {
-            return Ok(dir.path().join(OsStr::from_bytes(name)));
+        let path = dir.path();
+        let given = dir
+            .ancestors()
+            .last()
+            .map_or_else(|| path.clone(), DirHandle::path);
+        let Ok(below) = path.strip_prefix(&given) else {
+            return Ok(path.join(OsStr::from_bytes(name)));
         };
         let mut root = self.root.lock().unwrap_or_else(PoisonError::into_inner);
         let real_root = match &*root {
-            Some((cached, real)) if cached == given => real.clone(),
+            Some((cached, real)) if *cached == given => real.clone(),
             _ => {
-                let real = fs::canonicalize(given)?;
-                *root = Some((given.to_owned(), real.clone()));
+                let real = fs::canonicalize(&given)?;
+                *root = Some((given, real.clone()));
                 real
             }
         };
