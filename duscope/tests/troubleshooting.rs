@@ -1,10 +1,12 @@
-//! P5-DOC-02: `docs/troubleshooting.md` has an entry, a heading of its own,
-//! for every warning code and every error code duscope has
-//! (`duscope_core::envelope::WARNING_CODES` and `ERROR_CODES`), and none for
-//! a code it does not have; and the relative links of it and
+//! P5-DOC-02: `docs/troubleshooting.md` has an entry, a heading of its own
+//! with text under it, for every warning code and every error code duscope
+//! has (`duscope_core::envelope::WARNING_CODES` and `ERROR_CODES`), and none
+//! for a code it does not have; the lists of `clean`'s refusal reasons, of a
+//! volume's reasons and of a rescan's fall-back reasons are the envelope's
+//! (`duscope_core::envelope::values`); and the relative links of it and
 //! `docs/limits.md` lead to a file, and to a heading of it where they name
 //! one. The docs job's lychee checks the links too, but only this test sees
-//! a code added without an entry.
+//! a code or a reason added without an entry.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -12,7 +14,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use duscope_core::envelope::{ERROR_CODES, WARNING_CODES};
+use duscope_core::envelope::{ERROR_CODES, WARNING_CODES, values};
 
 /// The documents this package wrote.
 const DOCUMENTS: [&str; 2] = ["limits.md", "troubleshooting.md"];
@@ -39,16 +41,16 @@ fn prose(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// A line of prose as a heading, if it is one: its level and its text.
+fn heading(line: &str) -> Option<(usize, &str)> {
+    let level = line.bytes().take_while(|&b| b == b'#').count();
+    let rest = line.get(level..)?;
+    (level > 0 && rest.starts_with(' ')).then(|| (level, rest.trim()))
+}
+
 /// The headings of a markdown text: their level and their text.
 fn headings(text: &str) -> Vec<(usize, &str)> {
-    prose(text)
-        .into_iter()
-        .filter_map(|line| {
-            let level = line.bytes().take_while(|&b| b == b'#').count();
-            let rest = line.get(level..)?;
-            (level > 0 && rest.starts_with(' ')).then(|| (level, rest.trim()))
-        })
-        .collect()
+    prose(text).into_iter().filter_map(heading).collect()
 }
 
 /// The codes the `## <section>` of troubleshooting.md has entries for: its
@@ -168,6 +170,106 @@ fn repeated<'c>(codes: &[&'c str]) -> Vec<&'c str> {
     repeated
 }
 
+/// Each heading of a markdown text with the prose lines under it, up to the
+/// next heading: its level, its text and those lines.
+fn sections(text: &str) -> Vec<(usize, &str, Vec<&str>)> {
+    let mut found: Vec<(usize, &str, Vec<&str>)> = Vec::new();
+    for line in prose(text) {
+        match heading(line) {
+            Some((level, heading)) => found.push((level, heading, Vec::new())),
+            None => {
+                if let Some((_, _, body)) = found.last_mut() {
+                    body.push(line);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The prose lines under the heading `heading` of a markdown text, up to the
+/// next heading.
+fn section<'t>(text: &'t str, heading: &str) -> Vec<&'t str> {
+    let mut matching = sections(text)
+        .into_iter()
+        .filter(|(_, h, _)| *h == heading)
+        .map(|(_, _, body)| body);
+    let body = matching
+        .next()
+        .unwrap_or_else(|| panic!("no heading {heading:?}"));
+    assert!(matching.next().is_none(), "two headings {heading:?}");
+    body
+}
+
+/// The names a list in `lines` gives, one per item: each line that starts
+/// ``- `name`:``.
+fn listed<'t>(lines: &[&'t str]) -> Vec<&'t str> {
+    lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("- `")?.split_once("`:"))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The text of `lines` with the exit status an error entry starts with
+/// (`Exit 3.`) taken off: what the entry says beyond it.
+fn beyond_the_exit_status(lines: &[&str]) -> String {
+    let text = lines.join(" ");
+    let text = text.trim();
+    let rest = text
+        .strip_prefix("Exit ")
+        .and_then(|rest| rest.split_once('.'))
+        .filter(|(status, _)| status.parse::<u8>().is_ok())
+        .map_or(text, |(_, rest)| rest);
+    rest.trim().to_owned()
+}
+
+/// What is wrong with the names `documented` against the code's list
+/// `code`: a name the code has and the document does not, one the document
+/// has and the code does not, and one the document gives twice.
+fn against(documented: &[&str], code: &[&str]) -> Vec<String> {
+    let mut wrong: Vec<String> = code
+        .iter()
+        .filter(|name| !documented.contains(name))
+        .map(|name| format!("{name}: in the code, not in the document"))
+        .collect();
+    let mut unknown: Vec<&str> = documented
+        .iter()
+        .copied()
+        .filter(|name| !code.contains(name))
+        .collect();
+    unknown.sort_unstable();
+    unknown.dedup();
+    wrong.extend(
+        unknown
+            .into_iter()
+            .map(|name| format!("{name}: in the document, not in the code")),
+    );
+    wrong.extend(
+        repeated(documented)
+            .into_iter()
+            .map(|name| format!("{name}: twice in the document")),
+    );
+    wrong
+}
+
+/// The reasons the table of `lines` gives a volume: the first cell of each
+/// row below the header, a name in backticks.
+fn table_reasons<'t>(lines: &[&'t str]) -> Vec<&'t str> {
+    lines
+        .iter()
+        .filter(|line| line.starts_with('|'))
+        // The header and the line under it.
+        .skip(2)
+        .map(|row| {
+            row.split('|')
+                .nth(1)
+                .and_then(|cell| cell.trim().strip_prefix('`')?.strip_suffix('`'))
+                .unwrap_or_else(|| panic!("the row {row:?} names no reason"))
+        })
+        .collect()
+}
+
 #[test]
 fn p5_doc_02_every_warning_code_has_an_entry() {
     let text = read(&docs().join("troubleshooting.md"));
@@ -250,6 +352,102 @@ fn p5_doc_02_each_error_entry_gives_its_exit_status() {
             "{code}: the entry starts {first:?}, not with its exit status {exit}"
         );
     }
+}
+
+#[test]
+fn p5_doc_02_every_entry_has_text_under_its_heading() {
+    for name in DOCUMENTS {
+        let text = read(&docs().join(name));
+        let empty: Vec<&str> = sections(&text)
+            .into_iter()
+            // A `##` heading may only group the entries under it.
+            .filter(|(level, _, body)| *level >= 3 && beyond_the_exit_status(body).is_empty())
+            .map(|(_, heading, _)| heading)
+            .collect();
+        assert!(
+            empty.is_empty(),
+            "docs/{name}: nothing under the headings {empty:?}"
+        );
+    }
+}
+
+#[test]
+fn p5_doc_02_the_refusal_reasons_are_clean_s() {
+    let text = read(&docs().join("troubleshooting.md"));
+    let documented = listed(&section(&text, "`refused_path`"));
+    let wrong = against(&documented, &values::REFUSALS);
+    assert!(
+        wrong.is_empty(),
+        "docs/troubleshooting.md, refused_path's reasons: {wrong:#?}"
+    );
+}
+
+#[test]
+fn p5_doc_02_the_volume_reasons_are_the_scan_s() {
+    let text = read(&docs().join("troubleshooting.md"));
+    let entry = section(&text, "`mounts_excluded`");
+    let table = table_reasons(&entry);
+    assert!(!table.is_empty(), "mounts_excluded has no table of reasons");
+    let unknown: Vec<&str> = table
+        .iter()
+        .copied()
+        .filter(|reason| !values::SKIP_REASONS.contains(reason))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "docs/troubleshooting.md, mounts_excluded: reasons the code does not have: {unknown:?}"
+    );
+    assert!(repeated(&table).is_empty(), "{table:?}");
+    // The reasons no volume carries, a directory's, are named beside the
+    // table.
+    let words = entry.join(" ");
+    let missing: Vec<&str> = values::SKIP_REASONS
+        .into_iter()
+        .filter(|reason| !words.contains(&format!("`{reason}`")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "docs/troubleshooting.md, mounts_excluded: reasons it does not name: {missing:?}"
+    );
+}
+
+#[test]
+fn p5_doc_02_the_fall_back_reasons_are_rescan_s() {
+    let text = read(&docs().join("limits.md"));
+    let documented = listed(&section(
+        &text,
+        "FSEvents history is advisory (macOS rescans)",
+    ));
+    let wrong = against(&documented, &values::FALLBACK_REASONS);
+    assert!(
+        wrong.is_empty(),
+        "docs/limits.md, the fall-back reasons: {wrong:#?}"
+    );
+}
+
+#[test]
+fn p5_doc_02_the_checks_find_an_empty_entry_and_a_wrong_list() {
+    let text = "# T\n\n## Errors\n\n### `a`\n\nExit 2.\n\n### `b`\n\nExit 1. Why.\n\n\
+                ```text\n### `fenced`\n```\n\n### `c`\n\n- `x`: one.\n- `y`: two.\n\
+                - `x`: again.\n\n| `reason` | The volume |\n| --- | --- |\n| `p` | q |\n";
+    let empty: Vec<&str> = sections(text)
+        .into_iter()
+        .filter(|(level, _, body)| *level >= 3 && beyond_the_exit_status(body).is_empty())
+        .map(|(_, heading, _)| heading)
+        .collect();
+    assert_eq!(empty, ["`a`"]);
+    let entry = section(text, "`c`");
+    let documented = listed(&entry);
+    assert_eq!(documented, ["x", "y", "x"]);
+    assert_eq!(
+        against(&documented, &["y", "z"]),
+        [
+            "z: in the code, not in the document",
+            "x: in the document, not in the code",
+            "x: twice in the document",
+        ]
+    );
+    assert_eq!(table_reasons(&entry), ["p"]);
 }
 
 #[test]
