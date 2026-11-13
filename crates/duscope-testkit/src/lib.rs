@@ -129,8 +129,12 @@ fn skip_fs_when(ci: bool, missing: Option<&str>, fs_type: &str, why: &str) {
     skip_when(ci, why);
 }
 
-/// The duscope binary of the current build: beside the `deps/` directory
-/// that holds the running test executable.
+/// The duscope binary of the current build: in the profile directory
+/// (`target/debug/`), where Cargo copies the binaries it builds, whose
+/// build holds the running test executable. Before Cargo 1.100 a test runs
+/// from that directory's `deps/`; from 1.100 on, from
+/// `build/<package>/<hash>/out/` below it (the build directory's layout of
+/// 1.100).
 ///
 /// Cargo builds that binary only when the run includes the duscope
 /// package's tests (`cargo test --workspace`, `just test`, `cargo test -p
@@ -144,11 +148,26 @@ fn skip_fs_when(ci: bool, missing: Option<&str>, fs_type: &str, why: &str) {
 pub fn duscope_bin() -> PathBuf {
     let exe =
         std::env::current_exe().unwrap_or_else(|e| panic!("duscope-testkit: current_exe: {e}"));
-    let mut dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
-    if dir.ends_with("deps") {
-        dir.pop();
-    }
-    dir.join(format!("duscope{}", std::env::consts::EXE_SUFFIX))
+    bin_beside(&exe)
+}
+
+/// The duscope binary of the build `exe`, a test executable, belongs to
+/// (see [`duscope_bin`]); beside `exe` when it is in neither layout.
+fn bin_beside(exe: &Path) -> PathBuf {
+    let dir = exe.parent().unwrap_or(Path::new(""));
+    let profile = if dir.ends_with("deps") {
+        dir.parent()
+    } else if dir.ends_with("out") {
+        dir.ancestors()
+            .nth(3)
+            .filter(|build| build.ends_with("build"))
+            .and_then(Path::parent)
+    } else {
+        None
+    };
+    profile
+        .unwrap_or(dir)
+        .join(format!("duscope{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// Builds a copy of the reference fixture tree of its own in `dir`, for a
@@ -784,7 +803,43 @@ impl Fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::{ci_says, skip_fs_when, skip_when};
+    use super::{bin_beside, ci_says, skip_fs_when, skip_when};
+    use std::path::Path;
+
+    #[test]
+    fn p0_test_04_the_binary_is_found_from_either_cargo_layout() {
+        let bin = format!("duscope{}", std::env::consts::EXE_SUFFIX);
+        for (exe, profile) in [
+            // Before Cargo 1.100.
+            (
+                "/w/target/debug/deps/agent-0123456789abcdef",
+                "/w/target/debug",
+            ),
+            (
+                "/w/target/release/deps/smoke-0123456789abcdef",
+                "/w/target/release",
+            ),
+            // From 1.100 on.
+            (
+                "/w/target/debug/build/duscope/0123456789abcdef/out/agent-0123456789abcdef",
+                "/w/target/debug",
+            ),
+            (
+                "/w/target/x86_64-unknown-linux-musl/release/build/duscope-core/0123456789abcdef/out/duscope_core-0123456789abcdef",
+                "/w/target/x86_64-unknown-linux-musl/release",
+            ),
+            // Elsewhere, and an `out/` that is not in a build directory: beside it.
+            ("/w/bin/agent", "/w/bin"),
+            ("/w/out/agent", "/w/out"),
+            ("/w/a/b/c/out/agent", "/w/a/b/c/out"),
+        ] {
+            assert_eq!(
+                bin_beside(Path::new(exe)),
+                Path::new(profile).join(&bin),
+                "{exe}"
+            );
+        }
+    }
 
     #[test]
     fn p1_test_01_ci_is_any_value_but_empty_0_or_false() {

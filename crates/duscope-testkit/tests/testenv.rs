@@ -134,11 +134,15 @@ fn p0_test_01_cmd_runs_the_duscope_binary_under_the_environment() {
     let program = PathBuf::from(cmd.get_program());
     assert_eq!(program, duscope_testkit::duscope_bin());
     assert_eq!(program.file_name().unwrap(), "duscope");
+    // In the profile directory that holds this test's build, `deps/` before
+    // Cargo 1.100 and `build/` from 1.100 on.
     let exe = std::env::current_exe().unwrap();
-    assert_eq!(
-        program.parent(),
-        exe.parent().unwrap().parent(),
-        "beside deps/"
+    let profile = program.parent().unwrap();
+    assert!(exe.starts_with(profile), "{}", exe.display());
+    assert!(
+        profile.join(".cargo-lock").is_file(),
+        "{}",
+        profile.display()
     );
     let envs: Vec<(OsString, OsString)> = cmd
         .get_envs()
