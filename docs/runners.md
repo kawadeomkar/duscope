@@ -118,6 +118,57 @@ findmnt -no SOURCE,FSTYPE,OPTIONS -T "$BENCH_HOME"; lsblk -d -o NAME,MODEL,ROTA,
 df -h "$BENCH_HOME"; df -i "$BENCH_HOME"
 ```
 
+## The musl loop
+
+The x86_64 musl build, with mimalloc as its allocator, is the binary the Linux
+archives and `.deb`s ship. On bench-linux, the only machine it had run on, 3 of
+1,653 warm T2 scans aborted in the roll-up, a slice index out of range, two of
+them on a single flipped bit (bit 7); none of 2,100 scans of the glibc build did
+there. The project's Linux development VM shares bench-linux's Proxmox host,
+whose memory is suspect, so a run on either cannot tell a bad build from a bad
+host. [musl-loop.yml](../.github/workflows/musl-loop.yml) runs the same build on
+GitHub's hosted `ubuntu-24.04` runners instead. A dispatch runs it and nothing
+else triggers it, so it is never a required check and runs no other job:
+
+```sh
+gh workflow run musl-loop.yml --repo kawadeomkar/duscope --ref <branch>   # main, or a branch to try
+```
+
+Four shards, each on a runner of its own, share `runs` (8,000, so 2,000 each);
+each builds the binary in `just repro`'s environment for the musl target (its
+SHA-256 is in the step summary; a reproducible build gives every shard the
+same), builds T2 with `bench/run.sh build` at `scale` (1), and runs the
+harness's command line, `duscope scan --json --treemap never` on T2, its share
+of times with the page cache warm. A scan still running after 10 minutes is
+stopped and counted as failed. The shard runs every scan, then fails if any
+exited other than 0; its artifact `musl-loop-N` holds `exit-codes.txt` (each
+scan and its exit status), `failures.txt` (each failed scan and its signal, as
+`SIGABRT`, or status), `run-N.stderr` for each failed scan (a panic's message,
+with the values of the slice index), `count.txt` and `runner.txt` (the CPU
+model, cores, memory and kernel). A second dispatch waits for the first to end.
+
+```sh
+gh run download <run id> --repo kawadeomkar/duscope --pattern 'musl-loop-*' --dir musl-loop
+cat musl-loop/*/count.txt; cat musl-loop/*/failures.txt 2>/dev/null   # no failures.txt: no failure
+```
+
+Reading it: bench-linux's rate was about 1 in 550 (95% interval: 1 in 190 to 1
+in 2,700). No abort in 8,000 scans puts the build's rate below 1 in 2,700 (95%),
+under that whole interval, which points at the host. Any abort on a hosted
+runner is a bug in the build, and reopens the allocator decision (DEV-47).
+
+A hosted runner has 4 CPUs against bench-linux's 10, so its scans start 8 threads
+where bench-linux's started 20 (twice the logical CPUs), and a clean run is strong
+evidence for the host, not proof. The `threads` input, blank by default, passes
+`--threads N` to every scan and adds it to each `count.txt` line, so a second
+dispatch can start as many as bench-linux did:
+
+```sh
+gh workflow run musl-loop.yml --repo kawadeomkar/duscope --ref <branch> -f threads=20
+```
+
+That matches the number of threads, not how many run at once: at most 4 do.
+
 ## Setting up a runner
 
 Each step is done once per machine, in this order. The commands for the Mac and

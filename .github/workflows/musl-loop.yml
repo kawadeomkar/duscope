@@ -1,0 +1,148 @@
+# The musl loop (P5-BENCH-02): the x86_64 musl build with mimalloc, the binary
+# the Linux archives and .debs ship, scans T2 warm thousands of times on
+# GitHub's hosted runners.
+#
+# On bench-linux, the only machine that build had run on, 3 of 1,653 warm T2
+# scans aborted in the roll-up, against none of 2,100 with glibc. The project's
+# Linux VMs share one host whose memory is suspect, so only another machine
+# tells a bad build from a bad host (docs/runners.md, "The musl loop"). No
+# abort in 8,000 scans points at the host; any abort is a bug in the build.
+#
+# A dispatch runs it, and nothing else: no push, pull request or schedule, so
+# none of its jobs is ever a required check, and it runs no other job. Four
+# shards on four runners share `runs`. Each builds the binary in `just repro`'s
+# environment for the musl target, builds T2, runs every one of its scans, and
+# then fails if any exited other than 0. Each keeps every scan's exit code,
+# each failure's signal and stderr, and its count, after a failure or a timeout
+# too, as the artifact musl-loop-<shard>.
+
+name: Musl loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "the scans in all, shared out across the four shards"
+        default: "8000"
+      scale:
+        description: "T2's bench/run.sh --scale"
+        default: "1"
+      threads:
+        description: "each scan's --threads; blank is the default, twice the CPUs (bench-linux ran 20)"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # One loop at a time: a second dispatch waits for the first to end.
+  group: musl-loop
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # As ci.yml installs it.
+  JUST_VERSION: "1.59.0"
+
+jobs:
+  musl-loop:
+    name: musl-loop (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    # Hours of scans: the most a job on a hosted runner may run.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain, the musl target and musl-tools
+        run: |
+          rustup toolchain install --profile minimal && rustc --version
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q musl-tools
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      # `just repro` builds the host's target alone. Its environment, which
+      # release.yml's builds use too, and its command line with --target build
+      # the musl one, into the same target directory.
+      - name: Use the reproducible build environment
+        run: just repro-env target/repro | tee -a "$GITHUB_ENV"
+      - name: Build the x86_64 musl binary
+        run: |
+          cargo build --release --locked -p duscope --target x86_64-unknown-linux-musl --target-dir target/repro
+          sha256sum target/repro/x86_64-unknown-linux-musl/release/duscope | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/musl-loop"
+          { sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1; nproc; free -h | sed -n 2p; uname -r; } \
+            | tee "$RUNNER_TEMP/musl-loop/runner.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Build T2
+        env:
+          SCALE: ${{ inputs.scale }}
+        run: bench/run.sh build --trees T2 --scale "$SCALE" --trees-dir "$RUNNER_TEMP/trees"
+      # The harness's command line (bench/tools.py), warm: the tree was just
+      # written, and every scan counts. A scan still running after 10 minutes
+      # is stopped and counted as failed (124). `threads`, when set, adds
+      # --threads N where the harness's thread sweep writes it.
+      - name: Scan T2 again and again
+        env:
+          RUNS: ${{ inputs.runs }}
+          THREADS: ${{ inputs.threads }}
+          SHARD: ${{ strategy.job-index }}
+          SHARDS: ${{ strategy.job-total }}
+          DUSCOPE: target/repro/x86_64-unknown-linux-musl/release/duscope
+          TREES: ${{ runner.temp }}/trees
+          OUT: ${{ runner.temp }}/musl-loop
+        run: |
+          [[ $RUNS =~ ^[1-9][0-9]*$ ]] || { echo "::error title=musl-loop::runs is not a whole number above 0: $RUNS"; exit 1; }
+          [[ -z $THREADS || $THREADS =~ ^[1-9][0-9]*$ ]] || { echo "::error title=musl-loop::threads is not blank or a whole number above 0: $THREADS"; exit 1; }
+          shopt -s nullglob
+          trees=("$TREES"/T2*/)
+          if (( ${#trees[@]} != 1 )); then
+            echo "::error title=musl-loop::expected one T2 in $TREES, found ${#trees[@]}"
+            exit 1
+          fi
+          tree=${trees[0]%/}
+          # This shard's share: RUNS split evenly, the first shards taking one
+          # more each where it does not divide.
+          runs=$(( RUNS / SHARDS + (SHARD < RUNS % SHARDS ? 1 : 0) ))
+          mkdir -p "$OUT"
+          : > "$OUT/exit-codes.txt"
+          failed=0
+          for (( run = 1; run <= runs; run++ )); do
+            status=0
+            timeout 600 "$DUSCOPE" scan --json --treemap never ${THREADS:+--threads "$THREADS"} "$tree" > /dev/null 2> "$OUT/stderr" || status=$?
+            echo "$run $status" >> "$OUT/exit-codes.txt"
+            if (( status == 0 )); then continue; fi
+            failed=$(( failed + 1 ))
+            if (( status == 124 )); then
+              how="timed out after 600 s"
+            elif (( status > 128 )); then
+              how="signal $(( status - 128 ))"
+              name=$(kill -l "$status" 2> /dev/null) && how="SIG$name"
+            else
+              how="exit $status"
+            fi
+            mv "$OUT/stderr" "$OUT/run-$run.stderr"
+            echo "run $run: $how" >> "$OUT/failures.txt"
+            echo "::error title=musl-loop::shard $(( SHARD + 1 )) of $SHARDS, run $run: $how (its stderr is in the artifact)"
+          done
+          rm -f "$OUT/stderr"
+          echo "shard $(( SHARD + 1 )) of $SHARDS: $runs scans of $RUNS, $failed failed${THREADS:+ (--threads $THREADS)}" | tee "$OUT/count.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          (( failed == 0 ))
+      # Kept on a failure and a timeout too: the exit codes so far are the count.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: musl-loop-${{ matrix.shard }}
+          path: ${{ runner.temp }}/musl-loop/
+          if-no-files-found: ignore
+          retention-days: 90
