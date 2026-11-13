@@ -874,6 +874,28 @@ pub fn is_firmlink(path: &Path) -> bool {
     platform::firmlink(path)
 }
 
+/// Whether the entry at `path`, absolute and resolved, read as `meta`
+/// without following a link, is a mount point: `clean` refuses one
+/// (`mount_point`). `/`, which has no directory, is never one here; the
+/// caller judges it.
+///
+/// - **Linux.** A directory on another device than its parent is one (a
+///   mount, or a btrfs subvolume, which `--permanent` never enters either).
+///   Otherwise an entry is one when it is the root of a mount, or an
+///   automount point, read through its directory's descriptor: `statx`'s
+///   mount-root attribute (Linux 5.8); else its mount id against its
+///   directory's, from `name_to_handle_at`; else the mount table
+///   (`/proc/self/mountinfo`); and where none of them answers, when its
+///   device is not its directory's. A file's device alone says nothing:
+///   overlayfs reports a directory on the overlay's device and a file on
+///   the device of the layer under it (without `xino`), so a file of a
+///   merged directory is no mount point, and a file bind mount is one.
+/// - **macOS.** When its device is not its directory's: every mount has a
+///   device of its own, and there are no bind mounts.
+pub fn is_mount_point(path: &Path, meta: &std::fs::Metadata) -> bool {
+    platform::mount_point(path, meta)
+}
+
 /// Whether the volume holding `path` is mounted read-only (`statvfs`'s
 /// `ST_RDONLY`): `clean` refuses an item on one.
 pub fn read_only_volume(path: &Path) -> io::Result<bool> {

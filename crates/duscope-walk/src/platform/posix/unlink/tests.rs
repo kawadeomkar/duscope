@@ -550,6 +550,42 @@ fn p5_core_03_linux_where_nothing_tells_a_mount_point_nothing_is_removed() {
     assert!(fs::symlink_metadata(&item).is_err());
 }
 
+/// P5-CORE-10: what `clean`'s plan asks of an entry, each kernel answering
+/// by what it has: a file and a directory of the test's tree are no mount's
+/// root, `/proc` is one, and where nothing answers nothing is said.
+#[cfg(target_os = "linux")]
+#[test]
+fn p5_core_10_linux_an_entry_is_a_mount_root_by_whatever_the_kernel_tells() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let item = CheckedDir::open(&root.join("item")).unwrap();
+    let slash = CheckedDir::open(Path::new("/")).unwrap();
+    let mut kernels = vec![hook::Kernel::default()];
+    kernels.extend(old_kernels());
+    for kernel in kernels {
+        let _kernel = hook::as_kernel(kernel);
+        for name in ["a.bin", "sub", "empty"] {
+            assert_eq!(
+                item.mount_root(OsStr::new(name)),
+                Some(false),
+                "{kernel:?}: {name}"
+            );
+        }
+        assert_eq!(
+            slash.mount_root(OsStr::new("proc")),
+            Some(true),
+            "{kernel:?}"
+        );
+    }
+    for kernel in nothing_tells() {
+        let _kernel = hook::as_kernel(kernel);
+        assert_eq!(item.mount_root(OsStr::new("a.bin")), None, "{kernel:?}");
+        assert_eq!(slash.mount_root(OsStr::new("proc")), None, "{kernel:?}");
+    }
+    // An entry that is not there says nothing either.
+    assert_eq!(item.mount_root(OsStr::new("gone")), None);
+}
+
 #[cfg(target_os = "linux")]
 fn path(p: &Path) -> &str {
     p.to_str().unwrap()

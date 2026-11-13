@@ -10,6 +10,7 @@ use std::sync::{Mutex, PoisonError};
 
 use super::statx;
 use crate::platform::posix;
+use crate::platform::posix::unlink::CheckedDir;
 use crate::{DirHandle, Entry, Kind, NameRef, Normalization, VolumeClass, VolumeInfo};
 
 /// One line of `/proc/self/mountinfo`.
@@ -347,6 +348,41 @@ pub(in crate::platform) fn mount_point_under(dir: &Path) -> io::Result<Option<Pa
     nearest_under(&parse_mountinfo(&fs::read("/proc/self/mountinfo")?), dir)
 }
 
+/// Whether the entry at `path`, absolute and resolved, read as `meta`
+/// without following a link, is a mount point to `clean`. A directory on
+/// another device than its parent is one, as before: a mount, or a
+/// btrfs subvolume, which `--permanent` never enters either. Otherwise the
+/// entry is one when it is the root of a mount, or an automount point,
+/// by what [`CheckedDir::mount_root`] reads through its directory's
+/// descriptor (`statx`'s mount-root attribute, the two mount ids, the
+/// mount table); where none of them answers, when its device is not its
+/// directory's, as before. A non-directory's own device says nothing of a
+/// mount: overlayfs reports a directory on the overlay's device and a file
+/// on the device of the layer that holds it, unless `xino` maps them all
+/// to the overlay's (the overlayfs documentation's "Inode properties").
+/// `/`, which has no directory, is the caller's to judge.
+pub(in crate::platform) fn mount_point(path: &Path, meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    let other_device = crate::platform::other_device(parent, meta.dev());
+    if meta.is_dir() && other_device {
+        return true;
+    }
+    let root = CheckedDir::open(parent)
+        .ok()
+        .and_then(|dir| dir.mount_root(name));
+    is_mount_point(meta.is_dir(), other_device, root)
+}
+
+/// [`mount_point`]'s rule, for an entry that is a directory (`dir`) or not,
+/// on another device than its directory or not, and the root of a mount by
+/// what the system tells (`root`, `None` where nothing answers).
+pub(super) fn is_mount_point(dir: bool, other_device: bool, root: Option<bool>) -> bool {
+    (dir && other_device) || root.unwrap_or(other_device)
+}
+
 /// The mount point in `table` nearest `dir` at it or under it, comparing
 /// whole components.
 fn nearest_under(table: &[Mount], dir: &Path) -> io::Result<Option<PathBuf>> {
@@ -405,7 +441,9 @@ fn describe(dev: u64, mount: Mount, total_bytes: u64, free_bytes: u64) -> Volume
 mod tests {
     use std::path::Path;
 
-    use super::{Mount, case_sensitive, nearest_under, parse_mountinfo, subvolume_of};
+    use super::{
+        Mount, case_sensitive, is_mount_point, nearest_under, parse_mountinfo, subvolume_of,
+    };
 
     /// The mounts of a pool `tank` (its root dataset, a child, a snapshot
     /// mounted under `.zfs`, and a bind mount of the child), a second pool,
@@ -526,5 +564,38 @@ mod tests {
         assert_eq!(case_sensitive("ntfs3", &[]), Some(true));
         assert_eq!(case_sensitive("ntfs3", &["nocase".to_owned()]), Some(false));
         assert_eq!(case_sensitive("hfsplus", &[]), None, "HFSX is sensitive");
+    }
+
+    /// P5-CORE-10: `clean`'s mount points, by what an entry is, whether its
+    /// device is its directory's, and whether the system says it is the
+    /// root of a mount (`None`: nothing answers).
+    #[test]
+    fn p5_core_10_a_file_on_another_device_is_a_mount_point_only_as_a_mount_root() {
+        let cases = [
+            // A file of an overlay without xino: its layer's device, no mount.
+            ((false, true, Some(false)), false),
+            // A file bound over another, from another filesystem or the same.
+            ((false, true, Some(true)), true),
+            ((false, false, Some(true)), true),
+            ((false, false, Some(false)), false),
+            // A file where nothing answers: its device decides, as before.
+            ((false, true, None), true),
+            ((false, false, None), false),
+            // A directory on another device: a mount, or a btrfs subvolume.
+            ((true, true, Some(false)), true),
+            ((true, true, Some(true)), true),
+            ((true, true, None), true),
+            // A directory bound over another of the same device.
+            ((true, false, Some(true)), true),
+            ((true, false, Some(false)), false),
+            ((true, false, None), false),
+        ];
+        for ((dir, other_device, root), expected) in cases {
+            assert_eq!(
+                is_mount_point(dir, other_device, root),
+                expected,
+                "directory {dir}, another device {other_device}, mount root {root:?}"
+            );
+        }
     }
 }

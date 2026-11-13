@@ -293,6 +293,32 @@ pub(crate) fn read_only(_path: &std::path::Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
+/// Whether the entry at `path`, read as `meta`, is a mount point: on Linux
+/// the root of a mount where the system tells one (see
+/// [`linux::mount_point`]).
+#[cfg(target_os = "linux")]
+pub(crate) fn mount_point(path: &std::path::Path, meta: &std::fs::Metadata) -> bool {
+    linux::mount_point(path, meta)
+}
+
+/// Whether the entry at `path`, read as `meta`, is a mount point: when its
+/// device is not its directory's. On macOS every mount has a device of its
+/// own (its `f_fsid`, which its entries' `st_dev` reports) and there are no
+/// bind mounts.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn mount_point(path: &std::path::Path, meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    path.parent()
+        .is_some_and(|parent| other_device(parent, meta.dev()))
+}
+
+/// Whether the directory `dir` is on another device than `dev`; false where
+/// it cannot be read.
+pub(crate) fn other_device(dir: &std::path::Path, dev: u64) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(dir).is_ok_and(|meta| meta.dev() != dev)
+}
+
 /// The mount point nearest `dir` at it or under it, in the mount table read
 /// now.
 #[cfg(target_os = "linux")]
