@@ -16,7 +16,9 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -380,9 +382,9 @@ fn p5_core_09_ctrl_c_while_import_reads_exits_130_and_leaves_nothing() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    // More than a pipe and the reader's buffers hold (64 KiB at most on
-    // both systems): once it is in, the import has read most of it, and is
-    // reading.
+    // More than a pipe and the reader's buffers hold (64 KiB by default on
+    // both systems, 1 MiB on a kernel with 64 KiB pages): once it is in,
+    // the import has read most of it, and is reading.
     let export = ncdu_export(32_768, false);
     assert!(export.len() > 2 << 20, "{}", export.len());
     stdin.write_all(export.as_bytes()).unwrap();
@@ -462,15 +464,35 @@ fn wait_for_the_index(env: &TestEnv, child: &mut Child) -> String {
     }
 }
 
+/// Fills `stderr`, the process's stderr, with empty lines until a write
+/// would block, whatever it holds: in blocks, then a byte at a time, so
+/// that no line of the process fits. Non-blocking only meanwhile, since the
+/// process shares the flag; it writes nothing while its write is held.
+fn fill(stderr: &UnixStream) {
+    stderr.set_nonblocking(true).unwrap();
+    let mut writer = stderr;
+    for block in [&[b'\n'; 4096][..], b"\n"] {
+        loop {
+            match writer.write(block) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) => panic!("cannot fill stderr: {e}"),
+            }
+        }
+    }
+    stderr.set_nonblocking(false).unwrap();
+}
+
 /// Ctrl-C once the import's index has its name: the save is done, and
 /// finishes. The process is held after the rename, where it says `saved as`
-/// (outside JSON) on a stderr pipe the test filled while the write was
-/// held.
+/// (outside JSON) on a stderr the test filled while the write was held: a
+/// socket, which says when it is full, rather than a pipe, whose size
+/// differs between systems and page sizes.
 #[test]
 fn p5_core_09_ctrl_c_after_import_s_rename_keeps_the_scan() {
     let env = TestEnv::new();
     let file = export_file(&env, 300);
-    let (mut stderr, writer) = std::io::pipe().unwrap();
+    let (mut stderr, writer) = UnixStream::pair().unwrap();
     let mut child = env
         .cmd()
         .arg("import")
@@ -478,21 +500,17 @@ fn p5_core_09_ctrl_c_after_import_s_rename_keeps_the_scan() {
         .arg("--plain")
         .env("DUSCOPE_TEST_SLOW_WRITE_MS", "2000")
         .stdout(Stdio::null())
-        .stderr(writer.try_clone().unwrap())
+        .stderr(OwnedFd::from(writer.try_clone().unwrap()))
         .spawn()
         .unwrap();
     wait_for_the_write(&env, &mut child);
-    // Empty lines, a byte at a time, so that the pipe fills to its last
-    // byte (a larger write waits for room for all of it) and the process's
-    // own lines, each one write shorter than PIPE_BUF, stay whole between
-    // them; twice what a pipe holds (64 KiB on both systems), long before
-    // the hold ends.
-    let filler = thread::spawn(move || {
-        let mut writer = writer;
-        for _ in 0..128 << 10 {
-            writer.write_all(b"\n").unwrap();
-        }
-    });
+    fill(&writer);
+    drop(writer);
+    assert!(
+        scans(&env).iter().all(|name| name.contains(".db.tmp-")),
+        "the hold ended while stderr was filled: {:?}",
+        scans(&env)
+    );
     let saved = wait_for_the_index(&env, &mut child);
     thread::sleep(Duration::from_millis(100));
     assert!(
@@ -502,7 +520,6 @@ fn p5_core_09_ctrl_c_after_import_s_rename_keeps_the_scan() {
     interrupt(&child);
     let mut text = Vec::new();
     stderr.read_to_end(&mut text).unwrap();
-    filler.join().unwrap();
     let status = child.wait().unwrap();
     let text = String::from_utf8_lossy(&text);
     let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
