@@ -60,7 +60,7 @@ pub fn run(
     }
     let source = source::source(&args.walk, &args.index, index_dir)?;
     let warnings = source.warnings(&args.walk);
-    let indexed = source.indexed("export", &args.walk, &[], output)?;
+    let indexed = source.indexed("export", &args.walk, &[])?;
     let (index, base) = (&*indexed.index, indexed.base);
     // ncdu, GrandPerspective and QDirStat open a directory's tree.
     let tree = matches!(
