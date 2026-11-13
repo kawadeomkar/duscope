@@ -5,6 +5,11 @@
 //! entries. A saved import is read where `--scan` names it, never as the
 //! newest scan of its path, so `diff` can set it against a scan of this
 //! machine without the list verbs reading it in place of one.
+//!
+//! Ctrl-C stops an import as it stops `scan --save`: while the file is
+//! read, the process ends at once, nothing written; after it, the save
+//! stops and leaves nothing, the output already written standing; both exit
+//! 130. Once the index has its name, the save finishes.
 
 // GrandPerspective is a name, not code.
 #![allow(clippy::doc_markdown)]
@@ -15,6 +20,7 @@ use std::io::{self, Read};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use duscope_core::CoreError;
@@ -27,7 +33,7 @@ use duscope_walk::WalkSummary;
 
 use super::next;
 use super::query::top_envelope;
-use super::scan::{self, Scanned};
+use super::scan::{self, Interrupts, Scanned};
 use super::source::{Source, core_failure, saved_as};
 use super::{Exit, Failure};
 use crate::cli::{AttrsArg, ImportArgs, WalkArgs};
@@ -66,7 +72,26 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         })?;
     let started = Instant::now();
     let shown = args.file.display().to_string();
-    let (imported, root) = read(&args.file, &shown, format)?;
+    // Ctrl-C while the file is read ends the process at once, as during a
+    // scan's walk; after it, Ctrl-C sets the flag alone, which stops the
+    // index write.
+    let interrupts = Interrupts::arm();
+    let stop = Arc::clone(&interrupts.flag);
+    let read = read(&args.file, &shown, format);
+    drop(interrupts);
+    let (imported, root) = match read {
+        // A read that failed once Ctrl-C was pressed was interrupted: the
+        // pipe it read ends when the same Ctrl-C ends the program writing
+        // it, which may beat the watcher to the guard's lock.
+        Err(_) if stop.load(Ordering::SeqCst) => {
+            return Err(Failure::new(
+                Exit::Interrupted,
+                "interrupted",
+                "the import was interrupted",
+            ));
+        }
+        read => read?,
+    };
     let started_ns = imported.scanned_at.unwrap_or_else(clock::now);
     let mut arena = imported.arena;
     let rollup = roll_up(&mut arena);
@@ -96,8 +121,7 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         fallback: None,
         source: imported.format.source(),
         full_disk_access_missing: false,
-        // An import is not stopped: Ctrl-C ends it as it would any process.
-        stop: Arc::default(),
+        stop,
     };
     let id = scan::scan_id(&scanned)?;
     let fresh = Source::Fresh {

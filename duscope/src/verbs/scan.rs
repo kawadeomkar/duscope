@@ -70,9 +70,10 @@ pub struct Scanned {
     /// root that holds the home's protected folders
     /// ([`full_disk_access_missing`]).
     pub full_disk_access_missing: bool,
-    /// The flag that stopped the walk: Ctrl-C's, or under an MCP tool call
-    /// the call's. Set once the walk is over, it stops the index write
-    /// ([`write_index`]), which then leaves nothing.
+    /// The flag that stopped the walk, or `import`'s read of its file:
+    /// Ctrl-C's, or under an MCP tool call the call's. Set once the tree is
+    /// read, it stops the index write ([`write_index`]), which then leaves
+    /// nothing.
     pub stop: Arc<AtomicBool>,
 }
 
@@ -365,7 +366,8 @@ pub(super) fn write_index(
     IndexWriter::write_until(&scanned.arena, &scanned.rollup, &meta, dir, &scanned.stop).map_err(
         |e| match e {
             // Ctrl-C, or the tool call's cancellation or deadline, after the
-            // walk: one line on stderr from a shell, as during the walk.
+            // walk or an import's read: one line on stderr from a shell, as
+            // during the walk.
             CoreError::IndexWriteStopped => Failure::new(
                 Exit::Interrupted,
                 "interrupted",
@@ -1140,22 +1142,25 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
     }
 }
 
-/// Ctrl-C during a walk. While armed, SIGINT sets `flag`, the walk's
-/// cancellation flag, and a watcher thread reports it and ends the process
-/// with exit 130 at once. A scan writes nothing until its walk is over, so
-/// there is nothing to finish first, and waiting for the walk to wind down
-/// took over 200 ms on machines whose timers overshoot. The watcher blocks
-/// until SIGINT or the stand-down, without polling. Dropping the guard once
-/// the walk is over ends the watcher; the two share a lock, so a Ctrl-C
-/// while the output is written lets it finish rather than cut it off from
-/// another thread. The handler stays: a later Ctrl-C still sets the flag,
-/// which the index write reads ([`write_index`]), stopping it and removing
-/// its temporary file before the process exits 130. Where SIGINT was
-/// inherited ignored (a background job), or the watcher cannot be started,
-/// Ctrl-C keeps its usual effect and the flag is never set.
-struct Interrupts {
-    flag: Arc<AtomicBool>,
-    /// Set once the walk is over, under the lock the watcher exits under.
+/// Ctrl-C while a tree is read: a scan's walk, or the file `import` reads.
+/// While armed, SIGINT sets `flag`, the walk's cancellation flag, and a
+/// watcher thread reports it and ends the process with exit 130 at once.
+/// Nothing is written until the tree is read, so there is nothing to finish
+/// first; waiting for the walk to wind down took over 200 ms on machines
+/// whose timers overshoot, and an import's read of a pipe or a terminal,
+/// which the kernel restarts after the handler (`SA_RESTART`), may never
+/// end. The watcher blocks until SIGINT or the stand-down, without polling.
+/// Dropping the guard once the tree is read ends the watcher; the two share
+/// a lock, so a Ctrl-C while the output is written lets it finish rather
+/// than cut it off from another thread. The handler stays: a later Ctrl-C
+/// still sets the flag, which the index write reads ([`write_index`]),
+/// stopping it and removing its temporary file before the process exits
+/// 130. Where SIGINT was inherited ignored (a background job), or the
+/// watcher cannot be started, Ctrl-C keeps its usual effect and the flag is
+/// never set.
+pub(super) struct Interrupts {
+    pub(super) flag: Arc<AtomicBool>,
+    /// Set once the tree is read, under the lock the watcher exits under.
     over: Arc<Mutex<bool>>,
     armed: bool,
 }
@@ -1170,7 +1175,7 @@ impl Interrupts {
         }
     }
 
-    fn arm() -> Interrupts {
+    pub(super) fn arm() -> Interrupts {
         let flag = Arc::new(AtomicBool::new(false));
         let over = Arc::new(Mutex::new(false));
         let armed = matches!(duscope_walk::cancel_on_interrupt(&flag), Ok(true));
