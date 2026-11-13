@@ -217,21 +217,31 @@ directories carry the flag `subvolume`.
 
 ### overlayfs: what the Trash cannot take (Linux)
 
-On an overlayfs mount `clean` plans files and directories as on any volume, and
-the overlay's own `.Trash-<uid>` takes them. A move to the Trash renames the
-item inside the overlay, and overlayfs first copies an item that comes from a
-lower layer up into the upper one ([the kernel's overlayfs
-documentation](https://docs.kernel.org/filesystems/overlayfs.html)). So, for an
-item from a lower layer:
+On an overlayfs mount `clean` plans files and directories as on any volume. The
+Trash that takes them is the overlay's: the home Trash when the home is on the
+overlay, otherwise `.Trash/<uid>` or `.Trash-<uid>` at the overlay's top. A move
+to the Trash renames the item inside the overlay, and overlayfs first copies an
+item that comes from a lower layer up into the upper one ([the kernel's
+overlayfs documentation](https://docs.kernel.org/filesystems/overlayfs.html)).
+So, for an item from a lower layer:
 
-- What it frees is overstated: emptying the Trash deletes the copy in the
-  upper layer, and the lower layer, which is read-only, keeps its bytes.
-- A file with more than one hard link is not moved: after the copy-up it is
-  another inode, so the move is undone and the item fails `path_changed`, left
-  where it was.
+- What it frees is overstated, for the Trash and `--permanent` alike: the lower
+  layer is read-only and keeps the item's bytes. Emptying the Trash deletes the
+  copy in the upper layer, and `--permanent` leaves a whiteout there that hides
+  the item; `freed_bytes` counts the item's blocks either way.
+- A file with more than one hard link is not moved the first time, unless the
+  overlay is mounted with `index=on`: the copy-up makes it another inode, so the
+  move is undone and the item fails `path_changed`, left where it was. It has
+  been copied up by then, so running the same `clean` again moves it.
 - A directory is moved only when the overlay is mounted with `redirect_dir=on`;
   otherwise the rename fails across the layers and the item fails
   `trash_unavailable`, left where it was.
+
+Where the system cannot tell whether a file is the root of a mount (no mount-root
+attribute from `statx` before Linux 5.8, no file handles, and no readable
+`/proc/self/mountinfo`), a file of an overlay whose layers lie on other
+filesystems, which reports another device than its directory, is refused as
+`mount_point`.
 
 ### Paths that are not UTF-8 (Linux)
 
