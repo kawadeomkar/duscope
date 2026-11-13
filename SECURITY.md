@@ -49,8 +49,10 @@ upgrade.
 - **What the scans reveal.** Every path a scan measured, and its sizes and times, stays private
   to the user who ran the scan, and to the MCP clients that user starts `duscope mcp` for,
   within its `--roots`.
-- **The machine.** No input makes duscope run code it does not ship, write outside its index
-  directory and the outputs it is asked for, or use memory and time without bound.
+- **The machine.** No input makes duscope run code it does not ship or write outside its index
+  directory and the outputs it is asked for. Each input's memory and time are bounded by a fixed
+  limit or by the size of the tree or saved scan it asked about, as
+  [Limits on memory and time](#limits-on-memory-and-time) sets out.
 
 ### What is not protected
 
@@ -59,6 +61,32 @@ upgrade.
 - **A filesystem or kernel that misreports metadata.** duscope reports what it is told.
 - **The build chain.** Release builds are reproducible and attested, which is how a build can
   be checked ([RELEASING.md](docs/RELEASING.md)), but this model does not cover the toolchain.
+
+### Limits on memory and time
+
+A fixed limit bounds what a client or a file can make duscope hold or do:
+
+| Input | Limit |
+| --- | --- |
+| An MCP message | 1 MiB; a longer line is refused and skipped. Parsing one holds more than its length while it lasts: about 100 MB for 1 MiB of very small JSON objects (`{"":0}`), the most a single message can cost. With a running call holding such a message, a full queue and another such message being parsed, the server peaked at 232 MB (both measured on arm64 macOS) |
+| Requests waiting behind a running call | 64, holding 32 MiB between them once parsed, ids included; past either a request is answered "busy" and never runs |
+| A path a client names | 4096 bytes, refused before anything resolves it |
+| A running tool call | 10 minutes for `duscope_scan`, 30 seconds for the other tools, counted from before its arguments are checked. The answer comes at the deadline; a verb that reads a saved scan has no point at which to stop and runs to its end, for a time that grows with the scan, and the next call waits for it |
+| SQL | 5 s by default, 60 s at most, and SQLite's heap capped at 256 MiB |
+| git's files, for `explain` | The caps under [The scanned tree](#4-the-scanned-tree) |
+| An index file | The limits under [Index files](#3-index-files) |
+| A compressed import | 1 GiB once decompressed |
+
+Other costs are bounded only by what the user asks duscope to read, and by decision no fixed limit
+applies:
+
+- **A scan** takes memory and time that grow with the tree: no limit on its entries or its depth.
+  duscope reads a tree deeper than `PATH_MAX` whole, so only a cap on depth could bound the time of
+  a deep chain, and there is none. A chain of 20,000 directories took 36 s on macOS; at 3,000
+  levels a walker that builds no paths took as long as duscope, so that time is the kernel's for
+  each open of a deep directory. A scan's memory is about the square of the depth (598 MB at
+  20,000 levels) until P5-WALK-05 makes it linear.
+- **A query or a verb on a saved scan** takes time and memory that grow with the scan.
 
 ### The four untrusted inputs
 
@@ -165,8 +193,9 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
 `import` reads.
 
 - **Names are bytes.** The index stores them as BLOBs. JSON carries invalid UTF-8 as a lossy
-  `name` and the bytes in base64 (`name_raw`). Output for people (tables and the treemap)
-  shows control characters as escapes (`\x1b`), so a file name in it cannot drive the terminal.
+  `name` and the bytes in base64 (`name_raw`). Output for people (tables, the treemap, and
+  messages and logs on stderr) shows control characters as escapes (`\x1b`), so a file name in
+  it cannot drive the terminal.
   SVG output escapes names as XML. Names reach an agent as they are, in JSON: a client should
   read them as data, whatever they say.
 - **Links.** The scanner never follows symbolic links unless `--follow-symlinks` is given. It
@@ -190,6 +219,11 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
   the ignore patterns, parsed, take at most about 45 MB, and the index is held as read, 1 GiB
   at most, or 2 GiB for a split index and the shared index it names. A `.gitignore` that is a
   symbolic link is not followed, as git has not followed one since 2.32.
+
+  A repository's own `core.excludesFile` is honoured even when it names a file outside the
+  server's roots, as git honours it. A tree that sets it learns at most whether that file holds a
+  pattern matching the item, and whether the pattern marks it precious, or, when the file cannot
+  be read, why: its text never comes back.
 - **Imports.** `import` reads ncdu's and gdu's JSON and GrandPerspective's XML with in-tree
   streaming parsers.
   - Gzip is decompressed through a 1 GiB cap.
@@ -200,8 +234,8 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
 ### The MCP server
 
 `duscope mcp` speaks JSON-RPC, one message per line, on its stdin and stdout, and has no other
-transport. Stdout carries protocol messages alone. The log goes to stderr, and escapes the
-control characters in a client's strings.
+transport. Stdout carries protocol messages alone. The log goes to stderr, with control
+characters shown as escapes.
 
 - **Tools.** A tool is its verb's command line, built from arguments checked against its input
   schema and through the roots: an argument the schema does not name is refused, and a value
@@ -213,12 +247,16 @@ control characters in a client's strings.
   deletes one permanently. A root itself is refused, each item needs a handle that verifies and
   the bytes it should free, and a call is a dry run unless it says otherwise. No tool writes
   anywhere else.
-- **Limits.** A message is at most 16 MiB; a longer line is refused and skipped. Calls run one
-  at a time, in the order they came. `duscope_scan` has 10 minutes and the other tools 30 seconds
-  before the call is answered `deadline_exceeded`; `duscope_query`'s statement keeps the
-  sandbox's 5 seconds. A cancelled or expired scan stops within one directory per walk worker.
-  The verbs that read saved scans have no point at which to stop: one runs to its end, and the
-  next call waits for it.
+- **Limits.** A message is at most 1 MiB; a longer line is refused and skipped. Calls run one
+  at a time, in the order they came. At most 64 requests, holding 32 MiB between them once parsed,
+  ids included, wait behind the running call: a request past either is answered at once with the
+  JSON-RPC error `-31000` and never runs, and the server keeps reading, so a client can still
+  cancel. A path is
+  at most 4096 bytes. `duscope_scan` has 10 minutes and the other tools 30 seconds before the call
+  is answered `deadline_exceeded`, counted from before its arguments are checked;
+  `duscope_query`'s statement keeps the sandbox's 5 seconds. A cancelled or expired scan stops
+  within one directory per walk worker. The verbs that read saved scans have no point at which
+  to stop: one runs to its end, and the next call waits for it.
 
 ### No network
 

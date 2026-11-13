@@ -25,6 +25,10 @@ impl Tool for Top {
         include_str!("schemas/duscope_top.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("top")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

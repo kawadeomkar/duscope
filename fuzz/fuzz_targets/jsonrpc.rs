@@ -14,7 +14,7 @@ use duscope_mcp::transport::{self, Handler, Outbox, Reader, Responder};
 use libfuzzer_sys::fuzz_target;
 use serde_json::Value;
 
-/// The longest line read, in place of 16 MiB.
+/// The longest line read, in place of 1 MiB.
 const LIMIT: usize = 512;
 
 #[derive(Clone, Default)]

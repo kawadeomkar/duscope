@@ -310,6 +310,17 @@ fn refused(error: &clap::Error, args: &[OsString]) -> ExitCode {
             | ErrorKind::DisplayVersion
             | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
     );
+    if !shown && !Output::json_requested(&args) {
+        // clap repeats the argument it refused. Built without its `color`
+        // feature, it styles nothing and so strips nothing: a control
+        // character in that argument survives `render().to_string()` as it
+        // is, and text holding one is written as the rest of stderr is.
+        let text = error.render().to_string();
+        if text.chars().any(|c| c.is_control() && c != '\n') {
+            text.trim_end().lines().for_each(out::stderr_line);
+            return ExitCode::from(Exit::Usage.code());
+        }
+    }
     if shown || !Output::json_requested(&args) {
         error.exit();
     }

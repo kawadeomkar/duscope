@@ -53,6 +53,10 @@ impl Tool for Delete {
         include_str!("schemas/duscope_delete.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("clean")
+    }
+
     fn annotations(&self) -> Annotations {
         Annotations {
             read_only: false,

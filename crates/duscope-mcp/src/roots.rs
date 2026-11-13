@@ -7,7 +7,10 @@
 //! included, before it is compared with the roots component by component: a
 //! link inside a root that leads out of it is refused like the path it leads
 //! to. A part of the path that does not exist (a file deleted since the scan)
-//! is taken as written below the deepest part that does.
+//! is taken as written below the deepest part that does. A path longer than
+//! [`MAX_PATH_BYTES`] is refused before any of that: a client's message may
+//! hold hundreds of thousands of components, and each costs the file system
+//! a look.
 //!
 //! A saved scan is named by its id or `latest`, never by an index file, so a
 //! client cannot point a tool at a file outside the index directory. A saved
@@ -22,6 +25,12 @@ use std::path::{Component, Path, PathBuf};
 use duscope_core::index::Index;
 use duscope_core::query::resolve::MIN_PREFIX;
 use duscope_core::query::{TreeView, index_files};
+
+/// The longest path a client may name, in bytes: 4096, Linux's `PATH_MAX`
+/// and four times macOS's. One figure, so that a call means the same on both
+/// platforms. A deeper entry stays readable through the listings of a
+/// directory above it.
+pub const MAX_PATH_BYTES: usize = 4096;
 
 /// A path or scan a client may not reach, and why: the error a tool answers
 /// with in place of running its verb.
@@ -47,6 +56,21 @@ impl Refusal {
                 .to_owned(),
         }
     }
+}
+
+/// The refusal of a path of `bytes` bytes when that is past the limit. The
+/// message does not repeat the path, which may be millions of bytes long.
+fn check_length(bytes: usize) -> Result<(), Refusal> {
+    if bytes <= MAX_PATH_BYTES {
+        return Ok(());
+    }
+    Err(Refusal {
+        code: "refused_path",
+        message: format!(
+            "the path is {bytes} bytes long, past the {MAX_PATH_BYTES} a client may send"
+        ),
+        hint: format!("Name a path of at most {MAX_PATH_BYTES} bytes under one of the roots"),
+    })
 }
 
 impl fmt::Display for Refusal {
@@ -159,6 +183,7 @@ impl Roots {
     /// scan's root), refused when it holds a `..`, is relative with no base,
     /// or resolves outside every root.
     pub fn bound_path(&self, path: &Path, base: Option<&Path>) -> Result<PathBuf, Refusal> {
+        check_length(path.as_os_str().len())?;
         let shown = path.display();
         if path.components().any(|c| c == Component::ParentDir) {
             return Err(Refusal::path(format!(
@@ -174,6 +199,7 @@ impl Roots {
                 "{shown} is relative, and there is no scan root to read it from"
             )));
         };
+        check_length(joined.as_os_str().len())?;
         let resolved = resolve(&joined);
         if self.root_of(&resolved).is_none() {
             let through = if resolved == joined {
@@ -195,6 +221,7 @@ impl Roots {
     /// root itself is refused: a client may remove what lies under a root,
     /// not the root.
     pub fn bound_item(&self, path: &Path) -> Result<(), Refusal> {
+        check_length(path.as_os_str().len())?;
         let shown = path.display();
         if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
             return Err(Refusal::path(format!(
@@ -301,24 +328,29 @@ impl Roots {
 /// `path`, absolute and free of `..`, with its links resolved: the deepest
 /// part that exists canonicalised, and the rest below it as written.
 fn resolve(path: &Path) -> PathBuf {
-    let mut existing = path;
-    let mut rest = Vec::new();
-    loop {
-        if let Ok(canonical) = existing.canonicalize() {
-            return rest
-                .iter()
-                .rev()
-                .fold(canonical, |at, part: &&std::ffi::OsStr| at.join(part));
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name);
-                existing = parent;
-            }
-            // `/` always canonicalises; a path that gets here is not absolute.
-            _ => return path.to_owned(),
+    resolve_with(path, Path::canonicalize)
+}
+
+/// [`resolve`], asking `canonicalize` about each part. A part that resolves
+/// has parts above it that all do, so the deepest is found by bisection, in a
+/// number of calls logarithmic in the path's components: each call walks the
+/// whole part, so a call per component would be quadratic at best. Should
+/// the tree change under the search, the parts above the one it stopped at
+/// are tried in turn; `/` always canonicalises.
+fn resolve_with(
+    path: &Path,
+    mut canonicalize: impl FnMut(&Path) -> io::Result<PathBuf>,
+) -> PathBuf {
+    let parts: Vec<&Path> = path.ancestors().collect();
+    let deepest = parts.partition_point(|part| canonicalize(part).is_err());
+    for part in &parts[deepest..] {
+        if let (Ok(mut resolved), Ok(rest)) = (canonicalize(part), path.strip_prefix(part)) {
+            resolved.extend(rest.components());
+            return resolved;
         }
     }
+    // A path that gets here is not absolute.
+    path.to_owned()
 }
 
 #[cfg(test)]

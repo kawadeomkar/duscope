@@ -1199,11 +1199,14 @@ pub fn warn(warnings: &[Warning]) {
     }
 }
 
-/// Writes one line to stderr. Unlike `eprintln!`, it does not panic when
-/// stderr is a closed pipe (`duscope … 2>&1 | head`): the line is dropped.
+/// Writes one line to stderr, its control characters shown as escapes
+/// (`\x1b`) as the tables show them, since a message repeats file names and
+/// arguments, which must not drive the terminal. Unlike `eprintln!`, it does
+/// not panic when stderr is a closed pipe (`duscope … 2>&1 | head`): the
+/// line is dropped.
 pub fn stderr_line(line: &str) {
     let mut err = std::io::stderr().lock();
-    let _ = writeln!(err, "{line}");
+    let _ = writeln!(err, "{}", printable(line));
 }
 
 /// The conventions' error object of `failure`, as the error envelope holds

@@ -36,6 +36,10 @@ impl Tool for Query {
         include_str!("schemas/duscope_query.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("query")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

@@ -26,6 +26,10 @@ impl Tool for Schema {
         include_str!("schemas/duscope_schema.input.json")
     }
 
+    fn verb(&self) -> Option<&'static str> {
+        Some("schema")
+    }
+
     fn annotations(&self) -> Annotations {
         READ_ONLY
     }

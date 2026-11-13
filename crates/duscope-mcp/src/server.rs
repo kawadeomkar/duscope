@@ -52,7 +52,8 @@ const AT_ONCE: [&str; 3] = ["ping", "server/discover", "tools/list"];
 pub struct Server {
     config: ServerConfig,
     /// The version an `initialize` answered, for the requests that carry
-    /// none.
+    /// none: set once its answer is sent or queued, never by one refused as
+    /// busy, which the client is told did not run.
     session: Option<&'static str>,
     tools: Option<Arc<Tools>>,
     timing: Timing,
@@ -144,11 +145,9 @@ impl Server {
     fn answer(&mut self, request: &Request) -> Answer {
         let params = request.params.as_ref();
         if request.method == "initialize" {
-            let result = legacy::initialize(&self.config, params).and_then(|result| {
-                self.session = Some(discover::LEGACY);
-                debug!("initialized at {}", discover::LEGACY);
-                written(serde_json::value::to_raw_value(&result))
-            });
+            // The session starts once the answer is admitted (`request`).
+            let result = legacy::initialize(&self.config, params)
+                .and_then(|result| written(serde_json::value::to_raw_value(&result)));
             return Answer::Now(result);
         }
         let (revision, version) = match discover::request_version(params) {
@@ -283,12 +282,23 @@ impl Handler for Server {
                     ))),
                 ),
             },
-            Answer::Now(outcome) => match &self.worker {
-                Some(worker) if !AT_ONCE.contains(&request.method.as_str()) => {
-                    worker.answer(responder, outcome);
+            Answer::Now(outcome) => {
+                let initialized = request.method == "initialize" && outcome.is_ok();
+                let admitted = match &self.worker {
+                    Some(worker) if !AT_ONCE.contains(&request.method.as_str()) => {
+                        worker.answer(responder, outcome)
+                    }
+                    _ => {
+                        send(responder, outcome);
+                        true
+                    }
+                };
+                // An `initialize` refused as busy never ran: no session.
+                if initialized && admitted {
+                    self.session = Some(discover::LEGACY);
+                    debug!("initialized at {}", discover::LEGACY);
                 }
-                _ => send(responder, outcome),
-            },
+            }
         }
     }
 

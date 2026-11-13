@@ -340,3 +340,29 @@ fn p3_mcp_03_rmcp_lists_and_calls_a_tool_after_initialize() {
         ProtocolVersion::V_2025_11_25,
     );
 }
+
+#[test]
+fn p5_sec_05_a_path_as_long_as_a_message_allows_is_refused_by_its_tool() {
+    let env = TestEnv::new();
+    // Half a million parts, the most a message holds: resolving them one at
+    // a time would take half a minute.
+    let root = env.work_dir().canonicalize().unwrap();
+    let limit = duscope_mcp::transport::MAX_MESSAGE_BYTES;
+    let path = format!("{}/{}", root.display(), "a/".repeat(limit / 2 - 2048));
+    assert!(path.len() < limit);
+    let lines = serve(
+        server(&env),
+        &[modern(
+            1,
+            "tools/call",
+            &json!({"name": "duscope_echo", "arguments": {"path": path}}),
+        )],
+    );
+    let answered = result(&lines[0]);
+    assert_eq!(answered["isError"], true, "{}", &lines[0][..200]);
+    let error = &answered["structuredContent"]["error"];
+    assert_eq!(error["code"], "refused_path", "{error}");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("bytes long"), "{message}");
+    assert!(lines[0].len() < 2000, "the path is not repeated");
+}

@@ -463,3 +463,69 @@ fn p3_mcp_03_minify_keeps_strings_as_written() {
         r#"{"a b":[1,2],"c":"x \" y"}"#
     );
 }
+
+#[test]
+fn p5_sec_05_each_tool_names_its_verb_before_its_arguments_are_checked() {
+    let env = TestEnv::new();
+    let roots = Roots::new([env.work_dir()]).unwrap();
+    let index_dir = env.index_dir();
+    let context = Context {
+        roots: &roots,
+        index_dir: &index_dir,
+    };
+    for tool in shipped() {
+        let name = tool.name();
+        let expected = match name {
+            "duscope_delete" => "clean".to_owned(),
+            other => other.strip_prefix("duscope_").unwrap().replace('_', "-"),
+        };
+        assert_eq!(tool.verb(), Some(expected.as_str()), "{name}");
+        // Where no argument is needed, the command line says the same.
+        if let Ok(invocation) = tool.invocation(&Map::new(), &context) {
+            assert_eq!(invocation.verb, expected, "{name}");
+        }
+    }
+}
+
+#[test]
+fn p5_sec_05_the_largest_real_requests_fit_in_a_message() {
+    let limit = crate::transport::MAX_MESSAGE_BYTES;
+    let line = |tool: &str, arguments: Value| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": u64::MAX,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {"name": "client", "version": "1.0.0"},
+                },
+                "name": tool,
+                "arguments": arguments,
+            },
+        })
+        .to_string()
+        .len()
+    };
+    // duscope_delete: as many items as its schema allows, each with the
+    // longest handle and the largest size.
+    let schema: Value = serde_json::from_str(delete::Delete.input_schema()).unwrap();
+    let items = &schema["properties"]["items"];
+    let count = usize::try_from(items["maxItems"].as_u64().unwrap()).unwrap();
+    let longest = items["items"]["properties"]["handle"]["maxLength"]
+        .as_u64()
+        .unwrap();
+    let handle = "h".repeat(usize::try_from(longest).unwrap());
+    let item = json!({"handle": handle, "expect_bytes": u64::MAX});
+    let delete = line(
+        "duscope_delete",
+        json!({"items": vec![item; count], "dry_run": false}),
+    );
+    assert!(delete < limit, "duscope_delete: {delete} bytes of {limit}");
+    // duscope_query: the sandbox's longest statement (100,000 bytes, its
+    // SQLITE_LIMIT_SQL_LENGTH), each byte one JSON writes in six.
+    let sql = "\u{1}".repeat(100_000);
+    let query = line("duscope_query", json!({"sql": sql, "scan_id": "latest"}));
+    assert!(query < limit, "duscope_query: {query} bytes of {limit}");
+}

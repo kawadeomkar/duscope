@@ -1435,3 +1435,578 @@ fn p3_mcp_08_under_unwinding_a_panicked_verb_is_answered_and_the_server_goes_on(
         ]
     );
 }
+
+// P5-SEC-05: the queue's limits, and the deadline over a call's argument
+// checks.
+
+/// The busy error, as every refused request carries it.
+fn assert_busy(message: &Value, id: u64) {
+    assert_eq!(message["id"], id, "{message}");
+    assert_eq!(message["error"]["code"], jsonrpc::SERVER_BUSY, "{message}");
+    let data = &message["error"]["data"];
+    assert_eq!(
+        data["max_queued_requests"], MAX_QUEUED_REQUESTS,
+        "{message}"
+    );
+    assert_eq!(data["max_queued_bytes"], MAX_QUEUED_BYTES, "{message}");
+}
+
+#[test]
+fn p5_sec_05_the_busy_code_lies_outside_what_mcp_and_json_rpc_reserve() {
+    assert!(
+        !(-32768..=-32000).contains(&jsonrpc::SERVER_BUSY),
+        "MCP 2026-07-28: new codes lie outside the JSON-RPC reserved range"
+    );
+}
+
+#[test]
+fn p5_sec_05_a_request_past_the_count_limit_is_answered_busy_and_never_runs() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    let queued = u64::try_from(MAX_QUEUED_REQUESTS).unwrap();
+    for id in 2..2 + queued {
+        client.send(&call(id, "test_echo", &format!("queued {id}")));
+    }
+    // Sent in the order of the ids: the reader has read the queued ones
+    // when it answers these, ahead of everything waiting.
+    for id in 2 + queued..2 + queued + 3 {
+        client.send(&call(id, "test_echo", "over"));
+    }
+    for id in 2 + queued..2 + queued + 3 {
+        assert_busy(&client.next(), id);
+    }
+    // The reader still answers what it answers at once.
+    client.send(&request(9000, "ping", &json!({})));
+    assert_eq!(client.ids(1), [9000]);
+    assert_eq!(runner.log(), ["start first"]);
+    runner.latch.open();
+    let answered = client.ids(MAX_QUEUED_REQUESTS + 1);
+    let expected: Vec<Value> = (1..2 + queued).map(|id| json!(id)).collect();
+    assert_eq!(answered, expected, "the ones it kept run in order");
+    assert!(
+        !runner.log().iter().any(|line| line == "start over"),
+        "{:?}",
+        runner.log()
+    );
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_sec_05_a_request_past_the_byte_limit_is_answered_busy() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    // Measured parsed: each is about 240 KB of text and over half the limit
+    // in memory, so the first waits and the second does not.
+    let objects = vec![json!({"a": 0}); 30_000];
+    let heavy = |id| {
+        request(
+            id,
+            "tools/call",
+            &json!({"name": "test_echo", "arguments": {"label": objects}}),
+        )
+    };
+    let held = heavy(2)["params"].as_object().map_or(0, held_by_fields);
+    assert!(
+        held > MAX_QUEUED_BYTES / 2 && held <= MAX_QUEUED_BYTES,
+        "{held}"
+    );
+    assert!(heavy(2).to_string().len() < crate::transport::MAX_MESSAGE_BYTES);
+    client.send(&heavy(2));
+    client.send(&heavy(3));
+    assert_busy(&client.next(), 3);
+    runner.latch.open();
+    assert_eq!(client.ids(2), [1, 2]);
+    assert!(client.close().is_empty());
+}
+
+/// A worker whose call `first` is blocked and running, and responders that
+/// answer on `output`.
+fn blocked_worker(
+    env: &TestEnv,
+    runner: &TestRunner,
+    output: &Recorded,
+) -> (Worker, impl Fn(u64) -> Responder) {
+    let (worker, responder) = worker(env, runner, output);
+    worker.call(
+        tool_request(1, "test_block", "first"),
+        Revision::PerRequest,
+        responder(1),
+    );
+    runner.wait_for("start first");
+    (worker, responder)
+}
+
+/// What the requests waiting hold: how many, and the bytes.
+fn queued(worker: &Worker) -> (usize, usize) {
+    let state = worker.shared.state();
+    (state.queue.len(), state.queued_bytes)
+}
+
+#[test]
+fn p5_sec_05_the_queue_never_holds_more_than_its_limits() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, responder) = blocked_worker(&env, &runner, &output);
+    let label = "x".repeat(1024 * 1024);
+    let sent: u64 = 100;
+    for n in 2..2 + sent {
+        worker.call(
+            tool_request(n, "test_echo", &label),
+            Revision::PerRequest,
+            responder(n),
+        );
+        let (held, bytes) = queued(&worker);
+        assert!(held <= MAX_QUEUED_REQUESTS, "{held} requests");
+        assert!(bytes <= MAX_QUEUED_BYTES, "{bytes} bytes");
+    }
+    // 1 MiB of label each: the bytes are the limit here, a few below 32.
+    let (held, bytes) = queued(&worker);
+    assert!((29..=32).contains(&held), "{held} calls, {bytes} bytes");
+    let refused = usize::try_from(sent).unwrap() - held;
+    let messages = output.messages();
+    assert_eq!(messages.len(), refused);
+    for message in &messages {
+        assert_eq!(message["error"]["code"], jsonrpc::SERVER_BUSY, "{message}");
+    }
+    runner.latch.open();
+    worker.finish();
+    assert_eq!(output.messages().len(), usize::try_from(sent).unwrap() + 1);
+}
+
+#[test]
+fn p5_sec_05_the_count_and_the_bytes_come_back_as_requests_leave() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, responder) = blocked_worker(&env, &runner, &output);
+    for n in 2..6 {
+        worker.call(
+            tool_request(n, "test_echo", &"y".repeat(1024)),
+            Revision::PerRequest,
+            responder(n),
+        );
+    }
+    let (held, four) = queued(&worker);
+    assert_eq!(held, 4);
+    assert!(four > 4 * 1024, "{four} bytes");
+    // A cancelled one gives back what it held.
+    assert!(worker.cancel(&id(3)));
+    let (held, three) = queued(&worker);
+    assert_eq!(held, 3);
+    assert!(three < four, "{three} of {four} bytes");
+    runner.latch.open();
+    // Answered: the running call and three of the queued ones.
+    let started = Instant::now();
+    while output.messages().len() < 4 {
+        assert!(started.elapsed() < PATIENCE, "{:?}", output.messages());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(queued(&worker), (0, 0));
+    worker.finish();
+}
+
+#[test]
+fn p5_sec_05_a_full_queue_still_hears_cancellations() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    let queued = u64::try_from(MAX_QUEUED_REQUESTS).unwrap();
+    for id in 2..2 + queued {
+        client.send(&call(id, "test_echo", "queued"));
+    }
+    client.send(&call(2 + queued, "test_echo", "over"));
+    assert_busy(&client.next(), 2 + queued);
+    // Cancelling one that waits makes room for one more.
+    client.send(&cancel(2));
+    client.send(&request(9000, "ping", &json!({})));
+    assert_eq!(client.ids(1), [9000], "the cancellation was read in turn");
+    client.send(&call(100_000, "test_echo", "room"));
+    // Cancelling the running call is heard behind a full queue.
+    client.send(&cancel(1));
+    runner.wait_for("stopped first");
+    let answered = client.ids(MAX_QUEUED_REQUESTS);
+    assert_eq!(answered.last(), Some(&json!(100_000)), "{answered:?}");
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_sec_05_an_answer_past_the_limit_is_answered_busy() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    let queued = u64::try_from(MAX_QUEUED_REQUESTS).unwrap();
+    for id in 2..2 + queued {
+        // Neither ping, discovery nor tools/list: each waits as an answer.
+        client.send(&request(id, "resources/list", &json!({})));
+    }
+    client.send(&request(2 + queued, "resources/list", &json!({})));
+    assert_busy(&client.next(), 2 + queued);
+    runner.latch.open();
+    let rest: Vec<Value> = (0..=MAX_QUEUED_REQUESTS).map(|_| client.next()).collect();
+    assert_eq!(rest[0]["id"], 1);
+    assert_eq!(rest[1]["error"]["code"], -32601, "{}", rest[1]);
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_sec_05_an_initialize_refused_as_busy_leaves_the_session_unset() {
+    // A 2025-11-25 handshake, without the per-request version.
+    let initialize = |id: u64| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {}},
+        })
+    };
+    let list = |id: u64| json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    client.send(&call(1, "test_block", "first"));
+    runner.wait_for("start first");
+    let queued = u64::try_from(MAX_QUEUED_REQUESTS).unwrap();
+    for id in 2..2 + queued {
+        client.send(&call(id, "test_echo", &format!("queued {id}")));
+    }
+    let refused = 2 + queued;
+    client.send(&initialize(refused));
+    assert_busy(&client.next(), refused);
+    // The client was told it did not run: a request naming no version
+    // still belongs to no session, and is answered at once as one of
+    // 2026-07-28's without its _meta.
+    client.send(&list(refused + 1));
+    let listed = client.next();
+    assert_eq!(listed["id"], refused + 1, "{listed}");
+    assert_eq!(listed["error"]["code"], -32602, "{listed}");
+    runner.latch.open();
+    assert_eq!(
+        client.ids(MAX_QUEUED_REQUESTS + 1).len(),
+        MAX_QUEUED_REQUESTS + 1
+    );
+    // Once there is room, the same handshake starts the session.
+    client.send(&initialize(refused + 2));
+    let answered = client.next();
+    assert_eq!(answered["id"], refused + 2, "{answered}");
+    assert_eq!(answered["result"]["protocolVersion"], "2025-11-25");
+    client.send(&list(refused + 3));
+    let listed = client.next();
+    assert_eq!(listed["id"], refused + 3, "{listed}");
+    assert!(listed["result"]["tools"].is_array(), "{listed}");
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_sec_05_the_measure_counts_what_a_parsed_message_holds() {
+    // A long string costs its length.
+    let label = "x".repeat(1024 * 1024);
+    let string: Value = serde_json::from_str(&format!("[\"{label}\"]")).unwrap();
+    let held = held_bytes(&string);
+    assert!(
+        (1024 * 1024..2 * 1024 * 1024).contains(&held),
+        "{held} bytes"
+    );
+    // Small objects cost far more than the text: `{"a":0},` is 8 bytes of
+    // JSON, and a node, a key and a slot in memory.
+    let count: usize = 10_000;
+    let text = format!("[{}{{\"a\":0}}]", "{\"a\":0},".repeat(count - 1));
+    let objects: Value = serde_json::from_str(&text).unwrap();
+    let held = held_bytes(&objects);
+    assert!(held >= count * 600, "{held} bytes for {count} objects");
+    assert!(
+        held >= text.len() * 60,
+        "{held} bytes for {} of text",
+        text.len()
+    );
+    // Nothing at all costs nothing beyond the slot.
+    assert_eq!(held_bytes(&Value::Null), 0);
+    assert_eq!(held_bytes(&json!({})), 0);
+}
+
+#[test]
+fn p5_sec_05_a_call_s_id_counts_twice_and_an_answer_s_once() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, responder) = blocked_worker(&env, &runner, &output);
+    let outbox = Outbox::new(output.clone());
+    let long: usize = 1024 * 1024;
+
+    worker.call(
+        tool_request(2, "test_echo", "a"),
+        Revision::PerRequest,
+        responder(2),
+    );
+    let (_, plain) = queued(&worker);
+
+    // The call keeps its id, and so does the responder that answers it.
+    let call_id = Id::String("c".repeat(long));
+    let mut with_long_id = tool_request(3, "test_echo", "a");
+    with_long_id.id = call_id.clone();
+    worker.call(
+        with_long_id,
+        Revision::PerRequest,
+        Responder::new(call_id, outbox.clone()),
+    );
+    let (_, two) = queued(&worker);
+    assert_eq!(two, 2 * plain + 2 * long);
+
+    // An answer waiting holds its id once, in its responder.
+    let message = "not here";
+    worker.answer(
+        Responder::new(Id::String("a".repeat(long)), outbox),
+        Err(RpcError::new(jsonrpc::METHOD_NOT_FOUND, message)),
+    );
+    let (held, three) = queued(&worker);
+    assert_eq!(held, 3);
+    assert_eq!(three, two + message.len() + long);
+
+    runner.latch.open();
+    worker.finish();
+    assert_eq!(output.messages().len(), 4);
+}
+
+#[test]
+fn p5_sec_05_requests_with_ids_of_one_mib_stop_at_the_byte_limit() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let output = Recorded::default();
+    let (worker, _responder) = blocked_worker(&env, &runner, &output);
+    let outbox = Outbox::new(output.clone());
+    let sent = MAX_QUEUED_REQUESTS;
+    for n in 0..sent {
+        let long_id = Id::String(format!("{n:08}{}", "i".repeat(1024 * 1024 - 8)));
+        let mut request = tool_request(0, "test_echo", "a");
+        request.id = long_id.clone();
+        worker.call(
+            request,
+            Revision::PerRequest,
+            Responder::new(long_id, outbox.clone()),
+        );
+        let (_, bytes) = queued(&worker);
+        assert!(bytes <= MAX_QUEUED_BYTES, "{bytes} bytes");
+    }
+    // Two copies of 1 MiB each: the bytes stop them, long before the count.
+    let (held, bytes) = queued(&worker);
+    assert_eq!(held, 15, "{held} calls, {bytes} bytes");
+    let messages = output.messages();
+    assert_eq!(messages.len(), sent - held);
+    for message in &messages {
+        assert_eq!(message["error"]["code"], jsonrpc::SERVER_BUSY);
+    }
+    runner.latch.open();
+    worker.finish();
+    assert_eq!(output.messages().len(), sent + 1);
+}
+
+#[test]
+fn p5_sec_05_an_object_past_one_node_counts_the_most_its_map_can_take() {
+    /// A node of the map behind an object of `String` keys and `Value`s:
+    /// eleven of each and its header, then, for a node with children, twelve
+    /// pointers.
+    const LEAF: usize = 632;
+    const BRANCH: usize = 728;
+    /// A short key is the allocator's smallest block.
+    const KEY: usize = 16;
+    let object = |entries: usize| -> Map<String, Value> {
+        (0..entries)
+            .map(|n| (format!("k{n}"), Value::Null))
+            .collect()
+    };
+    assert_eq!(held_by_fields(&object(0)), 0);
+    assert_eq!(held_by_fields(&object(1)), LEAF + KEY);
+    assert_eq!(held_by_fields(&object(11)), LEAF + 11 * KEY);
+    // Twelve entries split the root: two leaves and the branch above them.
+    assert_eq!(held_by_fields(&object(12)), 2 * LEAF + BRANCH + 12 * KEY);
+    // 1,000 entries: at most 1001 / 6 leaves of five entries, one more above
+    // each pair of them, and the branches those need.
+    assert_eq!(
+        held_by_fields(&object(1000)),
+        166 * LEAF + 33 * BRANCH + 1000 * KEY
+    );
+}
+
+#[test]
+fn p5_sec_05_a_request_the_worker_takes_at_once_is_never_busy() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let mut client = Client::start(server(&env, &runner, quick()));
+    // Parsed, this message holds more than the queue allows; nothing runs
+    // or waits, so it is taken, refused by its arguments alone.
+    let count = MAX_QUEUED_BYTES / 600 + 1;
+    let objects = vec![json!({"a": 0}); count];
+    let message = request(
+        1,
+        "tools/call",
+        &json!({"name": "test_echo", "arguments": {"label": objects}}),
+    );
+    assert!(
+        message["params"].as_object().map_or(0, held_by_fields) > MAX_QUEUED_BYTES,
+        "the message is meant to be past the limit"
+    );
+    client.send(&message);
+    let answered = client.next();
+    assert_eq!(answered["id"], 1);
+    assert_eq!(answered["result"]["isError"], true, "{answered}");
+    assert!(client.close().is_empty());
+}
+
+/// A tool whose argument checks wait for a latch, as binding a path to the
+/// roots waits on a slow file system.
+struct SlowChecks {
+    latch: Arc<Latch>,
+    runner: TestRunner,
+}
+
+impl Tool for SlowChecks {
+    fn name(&self) -> &'static str {
+        "test_slow_checks"
+    }
+
+    fn description(&self) -> &'static str {
+        "A tool whose checks wait (a test fixture)."
+    }
+
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"label":{"type":"string"}},"additionalProperties":false}"#
+    }
+
+    fn annotations(&self) -> Annotations {
+        Annotations {
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+        }
+    }
+
+    fn invocation(&self, _: &Map<String, Value>, _: &Context<'_>) -> Result<Invocation, Refusal> {
+        self.runner.note("checking".to_owned());
+        self.latch.wait(|| false);
+        self.runner.note("checked".to_owned());
+        Ok(Invocation {
+            verb: "echo",
+            args: vec!["slow".into()],
+        })
+    }
+
+    fn summary(&self, _: &Value) -> String {
+        "ran".to_owned()
+    }
+}
+
+#[test]
+fn p5_sec_05_the_deadline_covers_the_argument_checks() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let latch = Arc::new(Latch::default());
+    let mut tools = fake_tools(&env, &runner);
+    tools
+        .registry
+        .register(Box::new(SlowChecks {
+            latch: Arc::clone(&latch),
+            runner: runner.clone(),
+        }))
+        .unwrap();
+    let server = Server::new(ServerConfig::new(PLACEHOLDER_INSTRUCTIONS))
+        .with_tools(tools)
+        .with_timing(Timing {
+            progress_every: Duration::from_millis(20),
+            deadline: Some(Duration::from_millis(50)),
+        });
+    let mut client = Client::start(server);
+    client.send(&request(
+        1,
+        "tools/call",
+        &json!({"name": "test_slow_checks", "arguments": {}}),
+    ));
+    runner.wait_for("checking");
+    // Answered while its checks still wait.
+    let answered = client.next();
+    assert_eq!(answered["id"], 1);
+    assert_eq!(answered["result"]["isError"], true, "{answered}");
+    let error = &answered["result"]["structuredContent"]["error"];
+    assert_eq!(error["code"], "deadline_exceeded", "{answered}");
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap()
+            .contains("run duscope in a terminal"),
+        "the verb is not known yet: {answered}"
+    );
+    assert_eq!(runner.log(), ["checking"], "the checks are still running");
+    // The next call waits for them, and the stopped call's verb finds it
+    // stopped.
+    client.send(&call(2, "test_echo", "second"));
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(runner.log(), ["checking"], "the second call waits");
+    latch.open();
+    runner.wait_for("end second");
+    assert_eq!(
+        runner.log(),
+        [
+            "checking",
+            "checked",
+            "start slow",
+            "stopped slow",
+            "start second",
+            "end second"
+        ]
+    );
+    assert_eq!(client.next()["id"], 2);
+    assert!(client.close().is_empty());
+}
+
+#[test]
+fn p5_sec_05_a_call_cancelled_during_its_checks_finds_it_stopped_and_gets_no_answer() {
+    let env = TestEnv::new();
+    let runner = TestRunner::new();
+    let latch = Arc::new(Latch::default());
+    let mut tools = fake_tools(&env, &runner);
+    tools
+        .registry
+        .register(Box::new(SlowChecks {
+            latch: Arc::clone(&latch),
+            runner: runner.clone(),
+        }))
+        .unwrap();
+    let server = Server::new(ServerConfig::new(PLACEHOLDER_INSTRUCTIONS))
+        .with_tools(tools)
+        .with_timing(quick());
+    let mut client = Client::start(server);
+    client.send(&request(
+        1,
+        "tools/call",
+        &json!({"name": "test_slow_checks", "arguments": {}}),
+    ));
+    runner.wait_for("checking");
+    client.send(&cancel(1));
+    client.send(&request(9, "ping", &json!({})));
+    assert_eq!(client.ids(1), [9]);
+    latch.open();
+    runner.wait_for("checked");
+    client.send(&call(2, "test_echo", "second"));
+    assert_eq!(client.ids(1), [2], "the cancelled call is not answered");
+    assert_eq!(
+        runner.log(),
+        [
+            "checking",
+            "checked",
+            "start slow",
+            "stopped slow",
+            "start second",
+            "end second"
+        ]
+    );
+    assert!(client.close().is_empty());
+}

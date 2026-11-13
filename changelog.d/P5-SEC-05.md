@@ -1,0 +1,8 @@
+### Fixed
+- `duscope mcp` no longer grows without limit when a client sends requests faster than they finish: at most 64 requests, holding 32 MiB between them once parsed (their ids included), wait behind the running call, and a request past either is answered at once with the JSON-RPC error `-31000` and never runs. Cancellations, `ping`, `tools/list` and `server/discover` are still handled at once.
+- `duscope mcp` refuses a path longer than 4096 bytes (`refused_path`) before resolving it, and starts a call's deadline before its arguments are checked, so a call whose checks are slow is answered `deadline_exceeded` on time.
+- Messages and logs on stderr, clap's usage errors included, show control characters as escapes (`\x1b`), as tables do, so that a file name or argument cannot drive the terminal.
+
+### Changed
+- A pattern `--regex` cannot compile is reported in one sentence, the pattern and what is wrong with it, where its error drew the pattern over several lines.
+- `duscope mcp` reads messages of at most 1 MiB, down from 16 MiB: a longer line is refused (`-32600`) and skipped. Every tool's largest request fits, and parsing one message now costs at most about 100 MB, where it could cost 1.3 GiB.
