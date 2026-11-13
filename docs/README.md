@@ -12,6 +12,10 @@ ones at the top of the repository.
   table and column by column, with its flags, accounting, `scan_meta` keys, how
   to read it with `sqlite3`, DuckDB or `duscope query --sql`, and what duscope
   refuses to open.
+- [limits.md](limits.md): what duscope cannot measure, or measures only
+  within bounds (clones and reflinks, snapshots, the Full Disk Access probe,
+  FSEvents history, memory, subvolumes, overlayfs, names that are not UTF-8),
+  and why.
 - [manual-checks.md](manual-checks.md): the acceptance checks done by hand
   (GrandPerspective opening an export, browsers drawing `render`'s SVG), with
   the program's version and the last result.
@@ -26,6 +30,8 @@ ones at the top of the repository.
 - [runners.md](runners.md): the two self-hosted machines the nightly benchmarks
   run on, how each is set up and registered, its network and security limits,
   and what to do when one is offline.
+- [troubleshooting.md](troubleshooting.md): every warning and error code,
+  what it means, why it happens and what to do about it.
 
 More documents arrive with the features they describe.
 

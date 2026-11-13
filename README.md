@@ -285,6 +285,10 @@ adds `duscope_delete`, which can only move entries to the Trash.
 - [SECURITY.md](SECURITY.md): the threat model (what duscope treats as untrusted and
   the rule for each), how to report a vulnerability, and the supported versions.
 - [CHANGELOG.md](CHANGELOG.md): what changed in each release.
+- [docs/troubleshooting.md](docs/troubleshooting.md): every warning and error,
+  and what to do about it.
+- [docs/limits.md](docs/limits.md): what duscope cannot measure, or measures
+  only within bounds, and why.
 - [docs/](docs/README.md): the rest of the documentation.
 
 ## Licence
