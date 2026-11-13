@@ -191,20 +191,33 @@ pub fn classify(
             each(&node, class.unwrap_or(Class::Other));
             continue;
         }
-        let class = inherited.unwrap_or_else(|| {
-            let suffix = ext(&view.name(id));
-            if suffix.is_empty() {
-                let executable = node.mode.is_some_and(|mode| mode & 0o111 != 0);
-                if executable {
-                    Class::Binaries
-                } else {
-                    Class::Other
-                }
-            } else {
-                classes.of_ext(&suffix).unwrap_or(Class::Other)
-            }
-        });
+        let class = inherited
+            .unwrap_or_else(|| file_class(classes, &ext(&view.name(id)), executable(node.mode)));
         each(&node, class);
+    }
+}
+
+/// The execute bits of a mode: the owner's, the group's and the others'.
+const EXECUTE: u32 = 0o111;
+
+/// Whether a file of mode `mode` has an execute bit; `false` when the scan
+/// did not collect its mode.
+fn executable(mode: Option<u32>) -> bool {
+    mode.is_some_and(|mode| mode & EXECUTE != 0)
+}
+
+/// The class of a file no directory rule covers, by its extension
+/// `suffix`: the table's; for a file without one, `binaries` when it is
+/// `executable`; else `other`.
+fn file_class(classes: &Classes, suffix: &str, executable: bool) -> Class {
+    if suffix.is_empty() {
+        if executable {
+            Class::Binaries
+        } else {
+            Class::Other
+        }
+    } else {
+        classes.of_ext(suffix).unwrap_or(Class::Other)
     }
 }
 
@@ -244,40 +257,35 @@ fn keep_largest(largest: &mut Vec<(u64, u32)>, examples: usize, size: u64, id: u
 }
 
 /// The tallies of a saved scan read without a filter, from its own tables.
-/// For the whole scan: `type_stats` for each extension's files; the
+/// For the whole scan: `type_stats` for each extension's files; on a scan
+/// with modes, one read of `files` for those without an extension and with
+/// an execute bit, whose tallies move from `other` to `binaries`; the
 /// outermost directories a directory rule matches, read from `dirs` in
-/// pre-order as [`classify`] reads them, their files' tallies moved to the
-/// rule's class; and each class's largest files from one pass down
-/// `files_allocated`, whose order (allocated bytes down, ids up among
-/// equals) is the walk's. For a subtree, whose ids are one range: the
-/// rules' directories from that range of `dirs`, and everything else from
-/// one pass over that range of `files` ([`subtree_tallies`]). `None` where
-/// the walk is needed: a filter, a scan with modes (an extensionless file's
-/// class reads its execute bit), `--sort mtime` (the newest file is not in
-/// the tables), apparent sizes, or, for the whole scan, a class whose
-/// examples would include a file that counts no bytes.
+/// pre-order as [`classify`] reads them, their files' tallies, by
+/// extension and execute bit, moved to the rule's class; and each class's
+/// largest files from one pass down `files_allocated`, whose order
+/// (allocated bytes down, ids up among equals) is the walk's. For a
+/// subtree, whose ids are one range: the rules' directories from that
+/// range of `dirs`, and everything else from one pass over that range of
+/// `files` ([`subtree_tallies`]). A scan's `attrs` says whether its rows
+/// hold modes: a basic scan's are NULL. `None` where the walk is needed: a
+/// filter, `--sort mtime` (the newest file is not in the tables), apparent
+/// sizes, or, for the whole scan, a class whose examples would include a
+/// file that counts no bytes.
 fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Vec<Tally>> {
     let (saved, base) = view.as_index()?;
-    if !q.filters.is_empty()
-        || view.full_attrs()
-        || q.sort == SortKey::Mtime
-        || q.size != SizeKind::Allocated
-    {
+    if !q.filters.is_empty() || q.sort == SortKey::Mtime || q.size != SizeKind::Allocated {
         return None;
     }
+    let modes = view.full_attrs();
     let read = || -> rusqlite::Result<Option<Vec<Tally>>> {
         let db = saved.db();
-        let class_of_ext = |suffix: &str| {
-            if suffix.is_empty() {
-                Class::Other
-            } else {
-                q.classes.of_ext(suffix).unwrap_or(Class::Other)
-            }
-        };
+        let class_of =
+            |suffix: &str, executable: bool| file_class(q.classes, suffix, modes && executable);
         let ranges = rule_ranges(view, q.classes)?;
         if base != 0 {
             let last = view.node(0).last_id;
-            return subtree_tallies(saved, base, last, &ranges, q, class_of_ext).map(Some);
+            return subtree_tallies(saved, base, last, &ranges, q, class_of).map(Some);
         }
         let (_, above) = root_dirs(q.classes, view.root_path());
         let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
@@ -290,36 +298,55 @@ fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Ve
             apply(&mut tally.allocated, allocated);
             apply(&mut tally.apparent, apparent);
         };
+        // Counted as `type_stats` counts: a later link not at all, a
+        // clone's bytes on disk at the member charged with them.
+        let counts = format!(
+            "SUM(flags & {LATER_LINK} = 0), \
+             SUM(CASE WHEN flags & {LATER_LINK} = 0 AND charged THEN allocated ELSE 0 END), \
+             SUM(CASE WHEN flags & {LATER_LINK} = 0 THEN apparent ELSE 0 END)"
+        );
         if above.is_none() {
             let mut stmt = db.prepare("SELECT ext, n, allocated, apparent FROM type_stats")?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let suffix: String = row.get(0)?;
                 add(
-                    class_of_ext(&suffix),
+                    class_of(&suffix, false),
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
                     1,
                 );
             }
+            // `type_stats` is keyed by extension alone, so it counts a
+            // file without one as `other`, though an execute bit makes it
+            // `binaries`.
+            if modes {
+                let (files, allocated, apparent) = db.query_row(
+                    &format!("SELECT {counts} FROM files WHERE ext = '' AND mode & {EXECUTE} != 0"),
+                    [],
+                    |row| {
+                        let n = |i| row.get::<_, Option<i64>>(i).map(Option::unwrap_or_default);
+                        Ok((n(0)?, n(1)?, n(2)?))
+                    },
+                )?;
+                add(Class::Other, files, allocated, apparent, -1);
+                add(Class::Binaries, files, allocated, apparent, 1);
+            }
         }
-        // Counted as `type_stats` counts: a later link not at all, a
-        // clone's bytes on disk at the member charged with them.
         let mut stmt = db.prepare(&format!(
-            "SELECT ext, SUM(flags & {LATER_LINK} = 0), \
-             SUM(CASE WHEN flags & {LATER_LINK} = 0 AND charged THEN allocated ELSE 0 END), \
-             SUM(CASE WHEN flags & {LATER_LINK} = 0 THEN apparent ELSE 0 END) \
-             FROM files WHERE id BETWEEN ?1 AND ?2 GROUP BY ext"
+            "SELECT ext, ext = '' AND mode & {EXECUTE} != 0, {counts} \
+             FROM files WHERE id BETWEEN ?1 AND ?2 GROUP BY 1, 2"
         ))?;
         for &(first, last, class) in &ranges {
             let mut rows = stmt.query([first, last])?;
             while let Some(row) = rows.next()? {
                 let suffix: String = row.get(0)?;
+                let from = class_of(&suffix, row.get::<_, Option<bool>>(1)?.unwrap_or(false));
                 let (files, allocated, apparent): (i64, i64, i64) =
-                    (row.get(1)?, row.get(2)?, row.get(3)?);
+                    (row.get(2)?, row.get(3)?, row.get(4)?);
                 if above.is_none() {
-                    add(class_of_ext(&suffix), files, allocated, apparent, -1);
+                    add(from, files, allocated, apparent, -1);
                 }
                 add(class, files, allocated, apparent, 1);
             }
@@ -327,8 +354,9 @@ fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Ve
         if q.examples == 0 {
             return Ok(Some(tallies));
         }
-        let class_at =
-            |id: u32, suffix: &str| rule_class(&ranges, id).unwrap_or_else(|| class_of_ext(suffix));
+        let class_at = |id: u32, suffix: &str, executable: bool| {
+            rule_class(&ranges, id).unwrap_or_else(|| class_of(suffix, executable))
+        };
         let settled = largest_by_class(saved, q.examples, &mut tallies, class_at)?;
         Ok(settled.then_some(tallies))
     };
@@ -343,21 +371,25 @@ fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Ve
 
 /// The tallies of the subtree at id `base` of a saved scan, `last` ids
 /// long, from one pass over its files in id order: each one's class that
-/// of the rule range (in the subtree's ids) holding it, else its
-/// extension's, counted as the walk counts it (a later link not at all,
-/// allocated bytes only where charged) and ranked among its class's largest
-/// as the walk ranks it.
+/// of the rule range (in the subtree's ids) holding it, else `class_of` its
+/// extension and execute bit, counted as the walk counts it (a later link
+/// not at all, allocated bytes only where charged) and ranked among its
+/// class's largest as the walk ranks it.
 fn subtree_tallies(
     saved: &crate::index::Index,
     base: u32,
     last: u32,
     ranges: &[(u32, u32, Class)],
     q: &ByTypeQuery<'_>,
-    class_of_ext: impl Fn(&str) -> Class,
+    class_of: impl Fn(&str, bool) -> Class,
 ) -> rusqlite::Result<Vec<Tally>> {
     let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
+    // The pass reads every file of the subtree, and a basic scan's modes
+    // are NULL: only a scan with modes selects them.
+    let modes = saved.full_attrs();
+    let mode = if modes { ", mode" } else { "" };
     let mut stmt = saved.db().prepare(&format!(
-        "SELECT id, ext, flags & {LATER_LINK}, charged, allocated, apparent FROM files \
+        "SELECT id, ext, flags & {LATER_LINK}, charged, allocated, apparent{mode} FROM files \
          WHERE id BETWEEN ?1 AND ?2 ORDER BY id"
     ))?;
     let mut rows = stmt.query([base, base.saturating_add(last)])?;
@@ -368,7 +400,7 @@ fn subtree_tallies(
         let id = row.get::<_, u32>(0)?.saturating_sub(base);
         let class = match rule_class(ranges, id) {
             Some(class) => class,
-            None => class_of_ext(row.get_ref(1)?.as_str()?),
+            None => class_of(row.get_ref(1)?.as_str()?, modes && executable(row.get(6)?)),
         };
         let allocated = if row.get::<_, bool>(3)? {
             unsigned(row.get(4)?)
@@ -399,13 +431,13 @@ fn rule_class(ranges: &[(u32, u32, Class)], id: u32) -> Option<Class> {
 /// is full; the files that count no bytes though they count (an uncharged
 /// clone member, a file of `shared_members`) rank after them, by id among
 /// the empty files the pass found. `class_at` gives a file's class from
-/// its id and extension. `false` when the pass did not find what the
-/// tallies count (the walk decides).
+/// its id, extension and execute bit. `false` when the pass did not find
+/// what the tallies count (the walk decides).
 fn largest_by_class(
     saved: &crate::index::Index,
     examples: usize,
     tallies: &mut [Tally],
-    class_at: impl Fn(u32, &str) -> Class,
+    class_at: impl Fn(u32, &str, bool) -> Class,
 ) -> rusqlite::Result<bool> {
     let db = saved.db();
     // Each class's uncharged files, by id.
@@ -413,14 +445,15 @@ fn largest_by_class(
     // CROSS JOIN keeps `shared_members` the outer table: without statistics
     // SQLite would read every file to have them in id order.
     let mut stmt = db.prepare(&format!(
-        "SELECT s.id, f.ext FROM shared_members AS s CROSS JOIN files AS f ON f.id = s.id \
+        "SELECT s.id, f.ext, f.mode FROM shared_members AS s \
+         CROSS JOIN files AS f ON f.id = s.id \
          WHERE NOT f.charged AND f.flags & {LATER_LINK} = 0 ORDER BY s.id"
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let id: u32 = row.get(0)?;
         let suffix: String = row.get(1)?;
-        uncharged[index(class_at(id, &suffix))].push(id);
+        uncharged[index(class_at(id, &suffix, executable(row.get(2)?)))].push(id);
     }
     // A class is full at its examples, or at its every charged file.
     let target = |t: &Tally, uncharged: &[u32]| {
@@ -435,7 +468,7 @@ fn largest_by_class(
     let wanted = targets.iter().filter(|&&n| n > 0).count();
     let mut full = 0;
     let mut stmt = db.prepare(&format!(
-        "SELECT id, allocated, ext FROM files INDEXED BY files_allocated \
+        "SELECT id, allocated, ext, mode FROM files INDEXED BY files_allocated \
          WHERE charged AND flags & {LATER_LINK} = 0 ORDER BY allocated DESC, id"
     ))?;
     let mut rows = stmt.query([])?;
@@ -445,7 +478,7 @@ fn largest_by_class(
         let id: u32 = row.get(0)?;
         let size = unsigned(row.get(1)?);
         let suffix: String = row.get(2)?;
-        let at = index(class_at(id, &suffix));
+        let at = index(class_at(id, &suffix, executable(row.get(3)?)));
         let largest = &mut tallies[at].largest;
         if (largest.len() as u64) < targets[at] {
             largest.push((size, id));
