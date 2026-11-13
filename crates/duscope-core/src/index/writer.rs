@@ -164,10 +164,20 @@ impl IndexWriter {
 }
 
 /// `DUSCOPE_TEST_KILL_BEFORE_RENAME`, in a debug build: the process dies
-/// between the write and the rename, as a kill would.
+/// between the write and the rename, by `SIGKILL`. Not by `abort`, which on
+/// macOS leaves a crash report in the account's own
+/// `~/Library/Logs/DiagnosticReports` whatever `HOME` says; a test must not
+/// write there. `kill(1)` sends the signal, since this crate forbids the
+/// `unsafe` a direct call needs. Should it not arrive, the process still ends
+/// here, and the test reads the status as a failure.
 fn kill_before_rename() {
     if cfg!(debug_assertions) && std::env::var_os("DUSCOPE_TEST_KILL_BEFORE_RENAME").is_some() {
-        std::process::abort();
+        let pid = std::process::id().to_string();
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status();
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        std::process::exit(1);
     }
 }
 

@@ -359,7 +359,7 @@ fn compare(chunk: &mut Vec<Pending>, follow_symlinks: bool, found: &mut Sweep) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, Permissions};
+    use std::fs::{self, File, FileTimes, Permissions};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -430,6 +430,19 @@ mod tests {
     /// a tick (a few milliseconds), and the scan of a small tree takes less.
     fn settle() {
         std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    /// Moves `dir`'s modification time a day ahead of the clock, so that the
+    /// next change to it reads as one however coarse the clock: the change
+    /// sets the time to the present. Ahead, not back: the sweep compares the
+    /// later of a directory's two times, and setting the modification time
+    /// also sets the status-change time, which nothing can set back, to now.
+    fn ahead(dir: &Path) {
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(86_400);
+        File::open(dir)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(later))
+            .unwrap();
     }
 
     /// A tree of eight directories and a file.
@@ -517,8 +530,14 @@ mod tests {
         // save then adds its file there.
         let dir = root.join("e/index");
         fs::create_dir(&dir).unwrap();
+        // The save adds `scans/` to `dir` only a walk after `create_dir`:
+        // within one clock tick on a kernel with coarse timestamps, which a
+        // scan dated at the epoch has no touched-while-it-ran window to
+        // catch. A time ahead of the clock makes that change tell, and the
+        // later one in `e`.
+        ahead(&dir);
+        ahead(&root.join("e"));
         let index = save(&root, &dir);
-        settle();
         let found = sweep(&index, std::slice::from_ref(&dir)).unwrap();
         assert!(!found.stale(), "{found:?}");
         // The index directory and its scans/ are not read.
