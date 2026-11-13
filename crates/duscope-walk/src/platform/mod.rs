@@ -128,6 +128,12 @@ pub(crate) fn stand_down_interrupt() {
     posix::signal::stand_down();
 }
 
+/// Gives SIGINT back the action the handler replaced.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn restore_interrupt() -> std::io::Result<()> {
+    posix::signal::restore()
+}
+
 /// Blocks until SIGINT arrives: never here.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn wait_for_interrupt() -> bool {
@@ -137,6 +143,14 @@ pub(crate) fn wait_for_interrupt() -> bool {
 /// Wakes the thread waiting for SIGINT: none here.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn stand_down_interrupt() {}
+
+/// Gives SIGINT back the action the handler replaced: none is installed
+/// here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[allow(clippy::unnecessary_wraps)] // an error where the platform installs one
+pub(crate) fn restore_interrupt() -> std::io::Result<()> {
+    Ok(())
+}
 
 /// The size of the terminal on stdout.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

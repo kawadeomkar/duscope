@@ -1155,9 +1155,11 @@ fn walk_failure(root: &Path, error: WalkError) -> Failure {
 /// than cut it off from another thread. The handler stays: a later Ctrl-C
 /// still sets the flag, which the index write reads ([`write_index`]),
 /// stopping it and removing its temporary file before the process exits
-/// 130. Where SIGINT was inherited ignored (a background job), or the
-/// watcher cannot be started, Ctrl-C keeps its usual effect and the flag is
-/// never set.
+/// 130; an output waiting on a full pipe goes on waiting, since the kernel
+/// restarts its write after the handler, and the save stops once the pipe
+/// drains. Where SIGINT was inherited ignored (a background job), nothing is
+/// installed; where the watcher cannot be started, SIGINT gets back the
+/// action the handler replaced. Either way Ctrl-C keeps its usual effect.
 pub(super) struct Interrupts {
     pub(super) flag: Arc<AtomicBool>,
     /// Set once the tree is read, under the lock the watcher exits under.
@@ -1195,7 +1197,11 @@ impl Interrupts {
                     }
                 });
             if watcher.is_err() {
-                duscope_walk::stand_down_interrupt();
+                // No thread would end the process, and a read of a pipe or
+                // a terminal, which the kernel restarts after the handler,
+                // might never end: SIGINT gets its earlier action back, one
+                // sigaction(2) returned and so does not refuse.
+                let _ = duscope_walk::restore_interrupt();
                 return Interrupts {
                     flag,
                     over,
