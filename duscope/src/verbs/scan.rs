@@ -1169,7 +1169,7 @@ pub(super) struct Interrupts {
 
 impl Interrupts {
     /// The walk's flag, `flag`, which Ctrl-C does not set.
-    fn unarmed(flag: Arc<AtomicBool>) -> Interrupts {
+    pub(super) fn unarmed(flag: Arc<AtomicBool>) -> Interrupts {
         Interrupts {
             flag,
             over: Arc::default(),

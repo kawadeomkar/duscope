@@ -20,7 +20,7 @@ use std::io::{self, Read};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use duscope_core::CoreError;
@@ -74,24 +74,17 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
     let shown = args.file.display().to_string();
     // Ctrl-C while the file is read ends the process at once, as during a
     // scan's walk; after it, Ctrl-C sets the flag alone, which stops the
-    // index write.
-    let interrupts = Interrupts::arm();
+    // index write. Under an MCP tool call, as for `scan`, the call's
+    // cancellation and deadline set the flag instead, and Ctrl-C is left to
+    // end the server.
+    let interrupts = match super::mcp::running_call() {
+        Some(call) => Interrupts::unarmed(call.cancel),
+        None => Interrupts::arm(),
+    };
     let stop = Arc::clone(&interrupts.flag);
     let read = read(&args.file, &shown, format);
     drop(interrupts);
-    let (imported, root) = match read {
-        // A read that failed once Ctrl-C was pressed was interrupted: the
-        // pipe it read ends when the same Ctrl-C ends the program writing
-        // it, which may beat the watcher to the guard's lock.
-        Err(_) if stop.load(Ordering::SeqCst) => {
-            return Err(Failure::new(
-                Exit::Interrupted,
-                "interrupted",
-                "the import was interrupted",
-            ));
-        }
-        read => read?,
-    };
+    let (imported, root) = unless_stopped(read, &stop)?;
     let started_ns = imported.scanned_at.unwrap_or_else(clock::now);
     let mut arena = imported.arena;
     let rollup = roll_up(&mut arena);
@@ -142,6 +135,21 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         return Ok(());
     };
     scan::save(&scanned, &walk, &[], &id, Some(&dir), output, true)
+}
+
+/// `read`'s result, or `interrupted` for a read that failed once `stop` was
+/// set: the pipe it read ends when the same Ctrl-C ends the program writing
+/// it, which may beat the watcher to the guard's lock. A read that
+/// succeeded stands; the flag then stops the save.
+fn unless_stopped<T>(read: Result<T, Failure>, stop: &AtomicBool) -> Result<T, Failure> {
+    match read {
+        Err(_) if stop.load(Ordering::SeqCst) => Err(Failure::new(
+            Exit::Interrupted,
+            "interrupted",
+            "the import was interrupted",
+        )),
+        read => read,
+    }
 }
 
 /// The tree in `file` (`-` for stdin), and its root, absolute: one the
@@ -202,5 +210,60 @@ fn walk(root: &Path) -> WalkArgs {
         config_excludes: Vec::new(),
         classes_extra: None,
         caches_extra: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+
+    use duscope_testkit::TestEnv;
+
+    use super::{read, unless_stopped};
+    use crate::verbs::Exit;
+
+    /// An ncdu export of `/srv/imported` and one file, cut after the file
+    /// when `whole` is false, as a pipe leaves it when Ctrl-C ends ncdu.
+    fn export(whole: bool) -> String {
+        let mut export = String::from(
+            "[1,2,{\"progname\":\"ncdu\",\"progver\":\"2.4\",\"timestamp\":2114380800},\n\
+             [{\"name\":\"/srv/imported\",\"asize\":4096,\"dsize\":4096},\n\
+             {\"name\":\"a\",\"asize\":1,\"dsize\":4096}",
+        );
+        if whole {
+            export.push_str("]]\n");
+        }
+        export
+    }
+
+    /// The read of a file cut short is the import's usage error without
+    /// Ctrl-C, and `interrupted`, exit 130, once the flag is set; a read
+    /// that succeeded stands with the flag set, which then stops the save.
+    #[test]
+    fn p5_core_09_a_read_that_fails_once_the_flag_is_set_is_interrupted() {
+        let env = TestEnv::new();
+        let cut = env.work_dir().join("cut.json");
+        std::fs::write(&cut, export(false)).unwrap();
+        let whole = env.work_dir().join("whole.json");
+        std::fs::write(&whole, export(true)).unwrap();
+        let unset = AtomicBool::new(false);
+        let set = AtomicBool::new(true);
+
+        let failure = unless_stopped(read(&cut, "cut.json", None), &unset).unwrap_err();
+        assert_eq!((failure.exit, failure.code), (Exit::Usage, "usage"));
+        assert!(failure.message.contains("cut.json"), "{failure:?}");
+
+        let failure = unless_stopped(read(&cut, "cut.json", None), &set).unwrap_err();
+        assert_eq!(
+            (failure.exit, failure.code),
+            (Exit::Interrupted, "interrupted")
+        );
+        assert_eq!(failure.message, "the import was interrupted");
+        assert_eq!(failure.hint, None);
+
+        let (imported, root) = unless_stopped(read(&whole, "whole.json", None), &set).unwrap();
+        assert_eq!(root, Path::new("/srv/imported"));
+        assert_eq!(imported.arena.len(), 2);
     }
 }
