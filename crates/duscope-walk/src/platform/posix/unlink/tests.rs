@@ -632,3 +632,363 @@ impl Drop for Detach<'_> {
             .output();
     }
 }
+
+/// P5-CORE-05: the Trash's move on Linux, through descriptors, into a
+/// `files` directory of the test's own beside the tree, never a real Trash.
+#[cfg(target_os = "linux")]
+mod rename {
+    use std::ffi::{OsStr, OsString};
+    use std::fs;
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::{Path, PathBuf};
+
+    use duscope_testkit::TestEnv;
+
+    use super::{ident, outside_intact, swap_for_link, tree};
+    use crate::RemoveError;
+    use crate::platform::posix::system::effective_uid;
+    use crate::platform::posix::unlink::{
+        CheckedDir, RenameError, hook, remove_dir_checked, rename_checked, unlink_checked,
+    };
+
+    /// The tree's own `trash/files`, open as a directory.
+    fn files(root: &Path) -> fs::File {
+        let dir = root.join("trash/files");
+        fs::create_dir_all(&dir).unwrap();
+        fs::File::open(dir).unwrap()
+    }
+
+    /// The names in the directory `dir`, sorted.
+    fn names(dir: &Path) -> Vec<OsString> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Runs `test` with `renameat2` taking `RENAME_NOREPLACE`, then with it
+    /// refused as NFS or a FUSE server without `RENAME2` refuses it, each
+    /// on a tree of its own.
+    fn both_ways(test: impl Fn(&Path)) {
+        for refused in [false, true] {
+            let env = TestEnv::new();
+            let root = tree(&env);
+            let _refused = refused.then(hook::without_noreplace);
+            test(&root);
+        }
+    }
+
+    /// Gives each directory its mode back when dropped, so that the test's
+    /// temporary directory can be removed however the test ends.
+    struct Modes(Vec<(PathBuf, u32)>);
+
+    impl Drop for Modes {
+        fn drop(&mut self) {
+            for (dir, mode) in &self.0 {
+                let _ = fs::set_permissions(dir, fs::Permissions::from_mode(*mode));
+            }
+        }
+    }
+
+    #[test]
+    fn p5_core_05_linux_a_directory_that_can_be_searched_but_not_read_is_passed_through() {
+        // Root is held to no directory's mode: there the test shows nothing.
+        if effective_uid() == 0 {
+            eprintln!("skipped: root reads a directory whatever its mode");
+            return;
+        }
+        let env = TestEnv::new();
+        let root = tree(&env);
+        // On the way, a directory that may only be searched (0111); in it,
+        // the entries' own directory, which may be searched and written but
+        // not read (0311). A lookup by path passes both, and so must the
+        // descriptors: a move to the Trash, a deletion of a file and one of
+        // a directory with what is under it.
+        let locked = root.join("locked");
+        let parent = locked.join("parent");
+        fs::create_dir_all(parent.join("dir/sub")).unwrap();
+        fs::write(parent.join("a.bin"), b"to the Trash").unwrap();
+        fs::write(parent.join("b.bin"), b"deleted").unwrap();
+        fs::write(parent.join("dir/sub/c.bin"), vec![3u8; 9000]).unwrap();
+        let files = files(&root);
+        let (a, b, dir) = (
+            ident(&parent.join("a.bin")),
+            ident(&parent.join("b.bin")),
+            ident(&parent.join("dir")),
+        );
+        let _modes = Modes(vec![(locked.clone(), 0o755), (parent.clone(), 0o755)]);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o311)).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o111)).unwrap();
+        assert!(fs::read_dir(&locked).is_err() && fs::read_dir(&parent).is_err());
+        let checked = CheckedDir::open(&parent).unwrap();
+        rename_checked(
+            &checked,
+            OsStr::new("a.bin"),
+            a,
+            files.as_fd(),
+            OsStr::new("a.bin"),
+        )
+        .unwrap();
+        let mut freed = 0;
+        unlink_checked(&checked, OsStr::new("b.bin"), b, &mut freed).unwrap();
+        remove_dir_checked(&checked, OsStr::new("dir"), dir, &mut freed).unwrap();
+        assert!(freed > 0);
+        assert_eq!(
+            fs::read(root.join("trash/files/a.bin")).unwrap(),
+            b"to the Trash"
+        );
+        for name in ["a.bin", "b.bin", "dir"] {
+            assert!(fs::symlink_metadata(parent.join(name)).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn p5_core_05_linux_a_parent_swapped_for_a_symlink_moves_nothing() {
+        both_ways(|root| {
+            let item = root.join("item");
+            let outside = root.join("outside");
+            // Outside, a link of the very file the plan saw: through a
+            // symbolic link in place of its directory the path leads to the
+            // same device and inode, so only the way there tells them apart.
+            fs::hard_link(item.join("a.bin"), outside.join("a.bin")).unwrap();
+            let expect = ident(&item.join("a.bin"));
+            let files = files(root);
+            // As the way to the entry is opened: its directory goes, and a
+            // link to the outside directory takes its place.
+            let (at, away, to) = (item.clone(), root.join("item.away"), outside.clone());
+            let hook = hook::on_step(move |path| {
+                if path == at {
+                    swap_for_link(&at, &away, &to);
+                }
+            });
+            let err = CheckedDir::open(&item).unwrap_err();
+            assert!(
+                matches!(&err, RemoveError::Changed { path } if *path == item),
+                "{err:?}"
+            );
+            drop(hook);
+            // Nor does a rename through the link's directory take the file
+            // outside: the parent is opened afresh, and refused again.
+            assert!(matches!(
+                CheckedDir::open(&item),
+                Err(RemoveError::Changed { .. })
+            ));
+            // The link outside stays where it was, and the directory the
+            // swap moved holds the file the plan saw: nothing moved.
+            assert!(names(&root.join("trash/files")).is_empty());
+            assert_eq!(fs::read(outside.join("a.bin")).unwrap(), [1u8; 9000]);
+            assert_eq!(fs::read(root.join("item.away/a.bin")).unwrap(), [1u8; 9000]);
+            outside_intact(root);
+            // An entry swapped for a symbolic link to it is another entry:
+            // the link is not moved, and the file it names stays.
+            let parent = CheckedDir::open(&root.join("item.away")).unwrap();
+            fs::rename(root.join("item.away/a.bin"), root.join("a.away")).unwrap();
+            symlink(outside.join("a.bin"), root.join("item.away/a.bin")).unwrap();
+            let err = rename_checked(
+                &parent,
+                OsStr::new("a.bin"),
+                expect,
+                files.as_fd(),
+                OsStr::new("a.bin"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, RenameError::Entry(RemoveError::Changed { .. })),
+                "{err:?}"
+            );
+            assert!(names(&root.join("trash/files")).is_empty());
+            assert_eq!(fs::read(outside.join("a.bin")).unwrap(), [1u8; 9000]);
+        });
+    }
+
+    #[test]
+    fn p5_core_05_linux_a_parent_swapped_after_it_is_opened_moves_only_the_planned_entry() {
+        both_ways(|root| {
+            let item = root.join("item");
+            let outside = root.join("outside");
+            fs::write(outside.join("a.bin"), b"outside").unwrap();
+            let expect = ident(&item.join("a.bin"));
+            let files = files(root);
+            let parent = CheckedDir::open(&item).unwrap();
+            // Once its directory is open, just before the rename: the
+            // directory goes, a link to the outside one in its place.
+            let (at, dir, away, to) = (
+                item.join("a.bin"),
+                item.clone(),
+                root.join("item.away"),
+                outside.clone(),
+            );
+            let _hook = hook::on_step(move |path| {
+                if path == at {
+                    swap_for_link(&dir, &away, &to);
+                }
+            });
+            rename_checked(
+                &parent,
+                OsStr::new("a.bin"),
+                expect,
+                files.as_fd(),
+                OsStr::new("a.bin"),
+            )
+            .unwrap();
+            // The rename went through the directory's descriptor: the
+            // planned file moved, from where its directory now is, and the
+            // file of the same name outside stayed.
+            assert_eq!(
+                fs::read(root.join("trash/files/a.bin")).unwrap(),
+                [1u8; 9000]
+            );
+            assert!(fs::symlink_metadata(root.join("item.away/a.bin")).is_err());
+            assert_eq!(fs::read(outside.join("a.bin")).unwrap(), b"outside");
+            outside_intact(root);
+        });
+    }
+
+    #[test]
+    fn p5_core_05_linux_an_entry_swapped_before_the_rename_is_moved_back() {
+        both_ways(|root| {
+            let item = root.join("item");
+            let file = item.join("a.bin");
+            let expect = ident(&file);
+            let files = files(root);
+            // After the check, just before the rename: the file goes, and
+            // another takes its name.
+            let (at, away) = (file.clone(), root.join("a.away"));
+            let _hook = hook::on_step(move |path| {
+                if path == at {
+                    fs::rename(&at, &away).unwrap();
+                    fs::write(&at, b"swapped in").unwrap();
+                }
+            });
+            let parent = CheckedDir::open(&item).unwrap();
+            let err = rename_checked(
+                &parent,
+                OsStr::new("a.bin"),
+                expect,
+                files.as_fd(),
+                OsStr::new("a.bin"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, RenameError::Entry(RemoveError::Changed { path }) if *path == file),
+                "{err:?}"
+            );
+            // What was moved is back at its name, the Trash is empty, and
+            // the file the plan saw is where the swap put it.
+            assert_eq!(fs::read(&file).unwrap(), b"swapped in");
+            assert!(names(&root.join("trash/files")).is_empty());
+            assert_eq!(fs::read(root.join("a.away")).unwrap(), [1u8; 9000]);
+        });
+    }
+
+    #[test]
+    fn p5_core_05_linux_a_swapped_entry_whose_name_is_taken_again_stays_in_the_trash() {
+        both_ways(|root| {
+            let item = root.join("item");
+            let file = item.join("a.bin");
+            let expect = ident(&file);
+            let files = files(root);
+            // Another file at the name before the rename, and a third once
+            // the second has been moved: the second cannot go back.
+            let (at, away) = (file.clone(), root.join("a.away"));
+            let _hook = hook::on_step(move |path| {
+                if path == at {
+                    fs::rename(&at, &away).unwrap();
+                    fs::write(&at, b"second").unwrap();
+                }
+            });
+            let parent = CheckedDir::open(&item).unwrap();
+            let taken = item.join("a.bin");
+            let _again = hook::on_moved(move || fs::write(&taken, b"third").unwrap());
+            let err = rename_checked(
+                &parent,
+                OsStr::new("a.bin"),
+                expect,
+                files.as_fd(),
+                OsStr::new("a.bin"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, RenameError::Stranded(e) if e.raw_os_error() == Some(libc::EEXIST)),
+                "{err:?}"
+            );
+            // Nothing was replaced: the third file holds the name, the
+            // second waits in the Trash, the first is where the swap put it.
+            assert_eq!(fs::read(&file).unwrap(), b"third");
+            assert_eq!(fs::read(root.join("trash/files/a.bin")).unwrap(), b"second");
+            assert_eq!(fs::read(root.join("a.away")).unwrap(), [1u8; 9000]);
+        });
+    }
+
+    #[test]
+    fn p5_core_05_linux_a_taken_name_is_never_replaced() {
+        both_ways(|root| {
+            let item = root.join("item");
+            let files = files(root);
+            fs::write(root.join("trash/files/a.bin"), b"trashed before").unwrap();
+            fs::create_dir(root.join("trash/files/sub")).unwrap();
+            let parent = CheckedDir::open(&item).unwrap();
+            for (name, kind) in [("a.bin", "file"), ("sub", "directory")] {
+                let expect = ident(&item.join(name));
+                let err = rename_checked(
+                    &parent,
+                    OsStr::new(name),
+                    expect,
+                    files.as_fd(),
+                    OsStr::new(name),
+                )
+                .unwrap_err();
+                assert!(matches!(err, RenameError::Taken), "{kind}: {err:?}");
+                assert_eq!(ident(&item.join(name)), expect, "{kind}");
+            }
+            assert_eq!(
+                fs::read(root.join("trash/files/a.bin")).unwrap(),
+                b"trashed before"
+            );
+            assert!(names(&root.join("trash/files/sub")).is_empty());
+            // Under a free name each moves whole: a file, a directory with
+            // what is under it, and a symbolic link itself, never what it
+            // names.
+            for name in ["a.bin", "sub", "to-file"] {
+                let expect = ident(&item.join(name));
+                let moved = format!("{name}.2");
+                rename_checked(
+                    &parent,
+                    OsStr::new(name),
+                    expect,
+                    files.as_fd(),
+                    OsStr::new(&moved),
+                )
+                .unwrap();
+                assert!(fs::symlink_metadata(item.join(name)).is_err(), "{name}");
+                assert_eq!(ident(&root.join("trash/files").join(&moved)), expect);
+            }
+            assert_eq!(
+                fs::read(root.join("trash/files/sub.2/deep/c.bin")).unwrap(),
+                vec![3u8; 70_000]
+            );
+            outside_intact(root);
+            // A name that is not one name in its directory reaches nowhere.
+            let expect = ident(&item.join("kept.bin"));
+            for target in ["../kept.bin", "..", ".", ""] {
+                assert!(
+                    matches!(
+                        rename_checked(
+                            &parent,
+                            OsStr::new("kept.bin"),
+                            expect,
+                            files.as_fd(),
+                            OsStr::new(target),
+                        ),
+                        Err(RenameError::Io(_))
+                    ),
+                    "{target:?}"
+                );
+            }
+            assert_eq!(ident(&item.join("kept.bin")), expect);
+        });
+    }
+}

@@ -1149,33 +1149,31 @@ pub fn clean_execute(plan: &mut Plan) -> CleanOutcome {
     outcome
 }
 
-/// Moves `item` to the Trash when its path still holds `ident` and, for a
-/// directory, the mount table, read again, lists no mount point in it: one
-/// mounted since the plan would go with it.
+/// Moves `item` to the Trash when, for a directory, the mount table, read
+/// again, lists no mount point in it (one mounted since the plan would go
+/// with it), and its path still holds `ident`: `duscope-walk` checks that
+/// as it moves the item, through descriptors on Linux.
 fn trash(item: &PlanItem, ident: (u64, u64)) -> Result<(), ErrorObject> {
     let path = Path::new(OsStr::from_bytes(&item.path_bytes));
-    match std::fs::symlink_metadata(path).map(|m| (m.dev(), m.ino())) {
-        Ok(now) if now == ident => {
-            if item.kind == "dir" {
-                no_mount_in(path)?;
-            }
-            duscope_walk::move_to_trash(path).map_err(|e| match e {
-                TrashError::Unavailable(message) => error_object(
-                    "trash_unavailable",
-                    message,
-                    Some(
-                        "Rerun duscope clean with --permanent to delete it: its volume has no \
-                         Trash",
-                    ),
-                    false,
-                    "user",
-                ),
-                TrashError::Failed(message) => {
-                    error_object("io_error", message, None, false, "user")
-                }
-            })
-        }
-        _ => Err(changed(&item.path)),
+    if item.kind == "dir" {
+        no_mount_in(path)?;
+    }
+    duscope_walk::move_to_trash(path, ident).map_err(|e| trash_error(&item.path, e))
+}
+
+/// The error object of a move of the item at `path` to the Trash that
+/// failed with `error`.
+fn trash_error(path: &str, error: TrashError) -> ErrorObject {
+    match error {
+        TrashError::Changed { .. } => changed(path),
+        TrashError::Unavailable(message) => error_object(
+            "trash_unavailable",
+            message,
+            Some("Rerun duscope clean with --permanent to delete it: its volume has no Trash"),
+            false,
+            "user",
+        ),
+        TrashError::Failed(message) => error_object("io_error", message, None, false, "user"),
     }
 }
 

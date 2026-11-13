@@ -5,7 +5,10 @@
 //! - **The way there.** [`CheckedDir::open`] opens `/`, then each component
 //!   of the path relative to the one above with `O_NOFOLLOW | O_DIRECTORY`:
 //!   a component replaced by a symbolic link fails the open rather than
-//!   leading elsewhere.
+//!   leading elsewhere. On Linux each is opened as a path only (`O_PATH`),
+//!   which needs search permission alone, as a lookup by path does, so a
+//!   directory that may be searched but not listed (mode 0711) is passed
+//!   through; only a directory to be emptied is opened to read.
 //! - **The entry.** [`unlink_checked`] and [`remove_dir_checked`] read the
 //!   entry's device and inode through the parent's descriptor, without
 //!   following a link, and remove nothing unless they are the expected ones.
@@ -26,6 +29,13 @@
 //!
 //! The first failure stops a removal; what was removed before it stays
 //! removed.
+//!
+//! - **The Trash, on Linux.** [`rename_checked`] moves an entry the same
+//!   way: through the descriptor of a directory [`CheckedDir::open`]
+//!   reached, only when the entry is the expected one, into a directory
+//!   open on a descriptor of its own, never replacing what is there.
+//!   Linux renames by name only, so what was moved is read again at its
+//!   new name and moved back when it is not the entry expected.
 
 use std::ffi::{CStr, OsStr};
 use std::io;
@@ -49,8 +59,9 @@ pub struct CheckedDir {
 impl CheckedDir {
     /// Opens the directory `path`, absolute and without `..`: `/`, then
     /// each component relative to the one above with `O_NOFOLLOW |
-    /// O_DIRECTORY`. Mounts on the way are crossed: it is the removal below
-    /// that never crosses one.
+    /// O_DIRECTORY`, on Linux as a path only (`O_PATH`), so that a directory
+    /// on the way needs only search permission. Mounts on the way are
+    /// crossed: it is the removal below that never crosses one.
     ///
     /// # Errors
     ///
@@ -74,16 +85,18 @@ impl CheckedDir {
         // a walk raises, raised.
         super::raise_nofile_limit();
         let mut reached = PathBuf::from("/");
-        let mut fd = super::open_dir(&reached).map_err(|source| RemoveError::Io {
-            path: reached.clone(),
-            source,
-        })?;
+        let mut fd =
+            super::open_with(None, c"/", ON_THE_WAY).map_err(|source| RemoveError::Io {
+                path: reached.clone(),
+                source,
+            })?;
         for component in components {
             let Component::Normal(name) = component else {
                 return Err(invalid());
             };
             reached.push(name);
-            fd = open_child(fd.as_fd(), name.as_bytes(), &reached)?;
+            fd = open_at(fd.as_fd(), name.as_bytes(), &reached, ON_THE_WAY)
+                .map_err(|e| classify(e, &reached))?;
         }
         let dev = stat_fd(fd.as_fd())
             .map_err(|source| RemoveError::Io {
@@ -101,6 +114,13 @@ impl CheckedDir {
     /// The directory's path, as opened.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The directory's device, read through its descriptor when it was
+    /// opened.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn dev(&self) -> u64 {
+        self.dev
     }
 }
 
@@ -188,6 +208,226 @@ pub fn remove_dir_checked(
     Ok(())
 }
 
+/// Whether `name` in `parent` is the entry `expect`, read through
+/// `parent`'s descriptor without following a link.
+///
+/// # Errors
+///
+/// [`RemoveError::Changed`] when the entry is gone or is another device and
+/// inode; [`RemoveError::Io`] when it cannot be read, or `name` is not one
+/// name in the directory.
+#[cfg(target_os = "linux")]
+pub(crate) fn check_entry(
+    parent: &CheckedDir,
+    name: &OsStr,
+    expect: (u64, u64),
+) -> Result<(), RemoveError> {
+    let path = child_path(parent, name)?;
+    checked(parent.fd.as_fd(), name.as_bytes(), &path, expect).map(|_| ())
+}
+
+/// Why [`rename_checked`] did not move an entry.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) enum RenameError {
+    /// The entry is gone or is not the one expected
+    /// ([`RemoveError::Changed`]), or cannot be read, or its name is not
+    /// one name in its directory ([`RemoveError::Io`]): nothing was moved,
+    /// or what was moved in its place has been moved back.
+    Entry(RemoveError),
+    /// Something is at the target name: nothing was moved.
+    Taken,
+    /// What was moved was not the entry expected, and moving it back
+    /// failed (its name taken again, most likely): it is at the target
+    /// name.
+    Stranded(io::Error),
+    /// The system refused the rename, or the target name is not one name
+    /// in its directory: nothing was moved.
+    Io(io::Error),
+}
+
+/// Moves `name`, any entry (a symbolic link itself, never what it leads
+/// to), from `parent` to `target_name` in the directory open on `target`,
+/// when its device and inode are `expect`, never replacing what is at
+/// `target_name`. Linux renames by name only, so another entry may take the
+/// name between the check and the rename: what was moved is read again at
+/// its new name through `target` and, when it is not the entry expected,
+/// moved back, again replacing nothing.
+///
+/// The rename is `renameat2(2)` with `RENAME_NOREPLACE`. Where the
+/// filesystem refuses the flag (`EINVAL`: NFS, 9p and Ceph always, FUSE
+/// where the server has no `RENAME2`) or the kernel has no `renameat2`
+/// (`ENOSYS`, before 3.15), the name is first read through `target` and,
+/// when nothing is there, `renameat(2)` follows, as gnulib's `renameatu`
+/// (coreutils' `mv -n`) and systemd's `rename_noreplace` do: a name taken
+/// between the two is replaced, which only a writer of that directory can
+/// bring about.
+///
+/// # Errors
+///
+/// [`RenameError::Entry`] when the entry is gone or is not `expect`:
+/// nothing moved, or what moved was moved back; [`RenameError::Taken`]
+/// when something is at `target_name`; [`RenameError::Stranded`] when what
+/// moved was not `expect` and could not be moved back; [`RenameError::Io`]
+/// when the system refuses the rename.
+#[cfg(target_os = "linux")]
+pub(crate) fn rename_checked(
+    parent: &CheckedDir,
+    name: &OsStr,
+    expect: (u64, u64),
+    target: BorrowedFd<'_>,
+    target_name: &OsStr,
+) -> Result<(), RenameError> {
+    let path = child_path(parent, name).map_err(RenameError::Entry)?;
+    if !one_name(target_name.as_bytes()) {
+        return Err(RenameError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not one name in the directory",
+        )));
+    }
+    let from = (parent.fd.as_fd(), name.as_bytes());
+    let to = (target, target_name.as_bytes());
+    checked(from.0, from.1, &path, expect).map_err(RenameError::Entry)?;
+    #[cfg(test)]
+    hook::step(&path);
+    match rename_noreplace(from, to) {
+        Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(libc::EEXIST) => return Err(RenameError::Taken),
+        // The entry gone, or the target's directory: the entry says which.
+        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+            return Err(match checked(from.0, from.1, &path, expect) {
+                Ok(_) => RenameError::Io(e),
+                Err(changed) => RenameError::Entry(changed),
+            });
+        }
+        Err(e) => return Err(RenameError::Io(e)),
+    }
+    #[cfg(test)]
+    hook::moved();
+    let moved = super::with_c_name(to.1, |c_name| stat_at(to.0, c_name));
+    if moved.is_ok_and(|stat| stat.ident() == expect) {
+        return Ok(());
+    }
+    match rename_noreplace(to, from) {
+        Ok(()) => Err(RenameError::Entry(RemoveError::Changed { path })),
+        Err(e) => Err(RenameError::Stranded(e)),
+    }
+}
+
+/// Renames `from` to `to`, each the descriptor of a directory and a name in
+/// it, never replacing what is at `to`; see [`rename_checked`].
+#[cfg(target_os = "linux")]
+fn rename_noreplace(from: (BorrowedFd<'_>, &[u8]), to: (BorrowedFd<'_>, &[u8])) -> io::Result<()> {
+    super::with_c_name(from.1, |old| {
+        super::with_c_name(to.1, |new| {
+            match renameat2_noreplace(from.0, old, to.0, new) {
+                Err(e)
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+                    ) =>
+                {
+                    match super::lstat_at(to.0, new) {
+                        Ok(_) => Err(io::Error::from_raw_os_error(libc::EEXIST)),
+                        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+                            renameat(from.0, old, to.0, new)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                renamed => renamed,
+            }
+        })
+    })
+}
+
+/// `renameat2(2)` of `old` in the directory open on `from` to `new` in the
+/// one open on `to`, with `RENAME_NOREPLACE`.
+#[cfg(target_os = "linux")]
+fn renameat2_noreplace(
+    from: BorrowedFd<'_>,
+    old: &CStr,
+    to: BorrowedFd<'_>,
+    new: &CStr,
+) -> io::Result<()> {
+    #[cfg(test)]
+    if hook::no_noreplace() {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    super::retry(|| {
+        // The system call itself, as for statx: the musl that release
+        // builds link statically may have no wrapper.
+        // SAFETY: both descriptors are open for their borrows and both
+        // names are NUL-terminated; the arguments are the system call's,
+        // in its order.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                from.as_raw_fd(),
+                old.as_ptr(),
+                to.as_raw_fd(),
+                new.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 { 0 } else { -1 }
+    })
+}
+
+/// `renameat(2)` of `old` in the directory open on `from` to `new` in the
+/// one open on `to`, replacing what is at `new`.
+#[cfg(target_os = "linux")]
+fn renameat(from: BorrowedFd<'_>, old: &CStr, to: BorrowedFd<'_>, new: &CStr) -> io::Result<()> {
+    // SAFETY: both descriptors are open for their borrows and both names
+    // are NUL-terminated.
+    super::retry(|| unsafe {
+        libc::renameat(from.as_raw_fd(), old.as_ptr(), to.as_raw_fd(), new.as_ptr())
+    })
+}
+
+/// The mode a file [`create_at`] makes is given before the umask: read and
+/// write for all, as `std::fs::File::create` asks.
+#[cfg(target_os = "linux")]
+const CREATE_MODE: libc::c_uint = 0o666;
+
+/// The directory `name` in the directory open on `dir`, made with mode 0700
+/// when missing, opened never through a symbolic link.
+#[cfg(target_os = "linux")]
+pub(crate) fn make_dir_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
+    // SAFETY: `dir` is open for the borrow and `name` is NUL-terminated.
+    match super::retry(|| unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) }) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    super::open_at(Some(dir), name)
+}
+
+/// Creates the file `name` in the directory open on `dir`, to write it:
+/// only where nothing is at the name, not even a symbolic link
+/// (`O_CREAT | O_EXCL`), so the name is this caller's alone.
+#[cfg(target_os = "linux")]
+pub(crate) fn create_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<std::fs::File> {
+    super::with_c_name(name.as_bytes(), |c_name| {
+        // SAFETY: `dir` is open for the borrow and `c_name` is
+        // NUL-terminated; with O_CREAT the mode is the third argument.
+        super::parked(|| unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+                CREATE_MODE,
+            )
+        })
+    })
+    .map(std::fs::File::from)
+}
+
+/// Removes `name`, not a directory, from the directory open on `dir`.
+#[cfg(target_os = "linux")]
+pub(crate) fn unlink_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
+    super::with_c_name(name.as_bytes(), |c_name| remove_at(dir, c_name, 0))
+}
+
 /// A directory being emptied: its descriptor, its device, its mount id
 /// once read ([`MountCheck`]), the names left to remove, and its own name
 /// in the directory above (none for the directory [`remove_dir_checked`]
@@ -264,7 +504,7 @@ fn empty(
             if stat.mount == Some(true) || stat.dev != level.dev {
                 return Err(RemoveError::Mount { path: child });
             }
-            let fd = match open_at(level.fd.as_fd(), name.as_bytes(), &child) {
+            let fd = match open_at(level.fd.as_fd(), name.as_bytes(), &child, super::OPEN_DIR) {
                 Ok(fd) => fd,
                 // Removed meanwhile by someone else: gone either way.
                 Err(e) if e.raw_os_error() == Some(libc::ENOENT) => continue,
@@ -317,14 +557,19 @@ fn list(fd: BorrowedFd<'_>, path: &Path) -> Result<Vec<NameRef>, RemoveError> {
 /// `parent`'s path joined with `name`, which must be one component: a name
 /// with a `/`, or `.` or `..`, would reach past `parent`.
 fn child_path(parent: &CheckedDir, name: &OsStr) -> Result<PathBuf, RemoveError> {
-    let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
+    if !one_name(name.as_bytes()) {
         return Err(RemoveError::Io {
             path: parent.path.join(name),
             source: io::Error::new(io::ErrorKind::InvalidInput, "not one name in the directory"),
         });
     }
     Ok(parent.path.join(name))
+}
+
+/// Whether `name` is one name in a directory: not empty, not `.` or `..`,
+/// and without a `/`.
+fn one_name(name: &[u8]) -> bool {
+    !name.is_empty() && name != b"." && name != b".." && !name.contains(&b'/')
 }
 
 /// What is at `name` in the directory open on `dir`, read without
@@ -345,20 +590,38 @@ fn checked(
     Ok(stat)
 }
 
+/// How [`CheckedDir::open`] opens each directory on the way to an entry:
+/// never through a symbolic link, and on Linux as a path only (`O_PATH`).
+/// Such a descriptor asks for search permission on the directory above and
+/// none on the directory itself, as a lookup by path does, so a directory
+/// that may be searched but not listed (mode 0711) is passed through. It
+/// serves only as the directory of `*at` calls (`openat`, `fstatat` and
+/// `statx`, `renameat2`, `unlinkat`), `statx` and `fstat` of itself, and
+/// `name_to_handle_at` with `AT_EMPTY_PATH`, which all take one; a
+/// directory to be emptied is opened to read ([`open_child`]).
+#[cfg(target_os = "linux")]
+const ON_THE_WAY: c_int = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+/// How [`CheckedDir::open`] opens each directory on the way to an entry:
+/// to read, never through a symbolic link, so on macOS a directory on the
+/// way needs read permission.
+#[cfg(not(target_os = "linux"))]
+const ON_THE_WAY: c_int = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
 /// Opens the directory `name`, at `path`, in the directory open on `dir`,
-/// never through a symbolic link.
+/// to read it, never through a symbolic link.
 fn open_child(dir: BorrowedFd<'_>, name: &[u8], path: &Path) -> Result<OwnedFd, RemoveError> {
-    open_at(dir, name, path).map_err(|e| classify(e, path))
+    open_at(dir, name, path, super::OPEN_DIR).map_err(|e| classify(e, path))
 }
 
 /// Opens the directory `name`, at `path`, in the directory open on `dir`
-/// with `O_NOFOLLOW | O_DIRECTORY`.
-fn open_at(dir: BorrowedFd<'_>, name: &[u8], path: &Path) -> io::Result<OwnedFd> {
+/// with `flags`, which hold `O_NOFOLLOW | O_DIRECTORY`.
+fn open_at(dir: BorrowedFd<'_>, name: &[u8], path: &Path, flags: c_int) -> io::Result<OwnedFd> {
     #[cfg(test)]
     hook::step(path);
     #[cfg(not(test))]
     let _ = path;
-    super::with_c_name(name, |c_name| super::open_at(Some(dir), c_name))
+    super::with_c_name(name, |c_name| super::open_with(Some(dir), c_name, flags))
 }
 
 /// An error at `path`: [`RemoveError::Changed`] when what is there is gone
@@ -712,9 +975,10 @@ fn mount_point_under(dir: &Path) -> io::Result<Option<PathBuf>> {
     crate::platform::linux::mount_point_under(dir)
 }
 
-/// A test's hook into a removal, called with each path just before it is
-/// opened or unlinked, so a test can change the tree at that moment: the
-/// race a removal guards against, made to happen every time.
+/// A test's hook into a removal or a move to the Trash, called with each
+/// path just before it is opened, unlinked or renamed (and, on Linux, just
+/// after a rename), so a test can change the tree at that moment: the race
+/// they guard against, made to happen every time.
 #[cfg(test)]
 pub(crate) mod hook {
     use std::cell::RefCell;
@@ -748,6 +1012,69 @@ pub(crate) mod hook {
                 step(path);
             }
         });
+    }
+
+    #[cfg(target_os = "linux")]
+    type Moved = Box<dyn FnMut()>;
+
+    #[cfg(target_os = "linux")]
+    thread_local! {
+        static MOVED: RefCell<Option<Moved>> = const { RefCell::new(None) };
+        static NO_NOREPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Calls `moved` on this thread just after a rename into the Trash has
+    /// moved an entry, before what moved is read again, until the returned
+    /// guard drops.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn on_moved(moved: impl FnMut() + 'static) -> MovedGuard {
+        MOVED.with(|m| *m.borrow_mut() = Some(Box::new(moved)));
+        MovedGuard
+    }
+
+    /// Takes the hook away when dropped.
+    #[cfg(target_os = "linux")]
+    pub(crate) struct MovedGuard;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for MovedGuard {
+        fn drop(&mut self) {
+            MOVED.with(|m| *m.borrow_mut() = None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn moved() {
+        MOVED.with(|m| {
+            if let Some(moved) = m.borrow_mut().as_mut() {
+                moved();
+            }
+        });
+    }
+
+    /// Makes `renameat2` refuse `RENAME_NOREPLACE` with `EINVAL` on this
+    /// thread, as NFS, or FUSE without `RENAME2`, does, until the returned
+    /// guard drops.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn without_noreplace() -> NoreplaceGuard {
+        NO_NOREPLACE.with(|n| n.set(true));
+        NoreplaceGuard
+    }
+
+    /// Gives `renameat2` its flag back when dropped.
+    #[cfg(target_os = "linux")]
+    pub(crate) struct NoreplaceGuard;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for NoreplaceGuard {
+        fn drop(&mut self) {
+            NO_NOREPLACE.with(|n| n.set(false));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn no_noreplace() -> bool {
+        NO_NOREPLACE.with(std::cell::Cell::get)
     }
 
     /// What the kernel answers a removal, as a test makes it: an older or

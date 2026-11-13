@@ -214,21 +214,21 @@ fn trash_guarded() -> bool {
     cfg!(debug_assertions) && std::env::var_os("DUSCOPE_TEST_TRASH").is_some()
 }
 
-/// Moves `path` to the Trash.
+/// Moves `path` to the Trash when its device and inode are `expect`.
 #[cfg(target_os = "macos")]
-pub(crate) fn trash(path: &std::path::Path) -> Result<(), crate::TrashError> {
-    macos::trash::trash(path, trash_guarded())
+pub(crate) fn trash(path: &std::path::Path, expect: (u64, u64)) -> Result<(), crate::TrashError> {
+    macos::trash::trash(path, expect, trash_guarded())
 }
 
-/// Moves `path` to the Trash.
+/// Moves `path` to the Trash when its device and inode are `expect`.
 #[cfg(target_os = "linux")]
-pub(crate) fn trash(path: &std::path::Path) -> Result<(), crate::TrashError> {
-    linux::trash::trash(path, trash_guarded())
+pub(crate) fn trash(path: &std::path::Path, expect: (u64, u64)) -> Result<(), crate::TrashError> {
+    linux::trash::trash(path, expect, trash_guarded())
 }
 
 /// Moves `path` to the Trash: there is none on this platform.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn trash(_path: &std::path::Path) -> Result<(), crate::TrashError> {
+pub(crate) fn trash(_path: &std::path::Path, _expect: (u64, u64)) -> Result<(), crate::TrashError> {
     let _ = trash_guarded();
     Err(crate::TrashError::Unavailable(
         "duscope has no Trash on this platform".to_owned(),

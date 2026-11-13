@@ -30,15 +30,27 @@ pub enum WalkError {
     TooManyDirectories,
 }
 
-/// Why an item was not moved to the Trash. Nothing was moved or removed.
+/// Why an item was not moved to the Trash. Nothing was removed, and the
+/// item was not moved.
 #[derive(Debug, thiserror::Error)]
 pub enum TrashError {
+    /// The item is not what the plan saw: gone, another device and inode,
+    /// or, on Linux, a directory on the way to it replaced by a symbolic
+    /// link or a file. Nothing was moved, or what was moved in its place has
+    /// been moved back.
+    #[error("{} is not what the plan saw: it has gone or been replaced", path.display())]
+    Changed {
+        /// The item's path, or one on the way to it.
+        path: PathBuf,
+    },
     /// The item's volume has no Trash this platform can move it into (a
     /// network mount, a read-only volume, some removable media), or the
     /// system refused the move.
     #[error("{0}")]
     Unavailable(String),
-    /// The item could not be read or moved.
+    /// The item could not be read or moved. On Linux, rarely, an entry that
+    /// took the item's place while it was being moved went to the Trash in
+    /// its stead and could not be moved back, as the message says.
     #[error("{0}")]
     Failed(String),
 }

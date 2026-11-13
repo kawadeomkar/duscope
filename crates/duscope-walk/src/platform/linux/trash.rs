@@ -12,26 +12,49 @@
 //! falls back to copying an item across filesystems into the home Trash and
 //! then removing it, so Linux does not use it.)
 
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::{ErrorKind, Write as _};
+use std::io::{self, ErrorKind, Write as _};
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{
+    DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+};
 use std::path::{Path, PathBuf};
 
-use crate::TrashError;
 use crate::platform::posix;
+use crate::platform::posix::unlink::{self, CheckedDir, RenameError};
+use crate::{RemoveError, TrashError};
 
 /// The sticky bit of a directory's mode.
 const STICKY: u32 = 0o1000;
 
-/// Moves `path`, absolute, to the Trash. In a test run (`guarded`) only an
-/// item on the filesystem of the test's `$XDG_DATA_HOME` is moved, into the
-/// test's own home Trash.
-pub(in crate::platform) fn trash(path: &Path, guarded: bool) -> Result<(), TrashError> {
-    let failed =
-        |e: std::io::Error| TrashError::Failed(format!("cannot read {}: {e}", path.display()));
-    let dev = fs::symlink_metadata(path).map_err(failed)?.dev();
+/// Moves `path`, absolute, to the Trash when its device and inode are
+/// `expect`: its directory opened from `/` one component at a time without
+/// following a link, the entry read and renamed through that directory's
+/// descriptor. In a test run (`guarded`) only an item on the filesystem of
+/// the test's `$XDG_DATA_HOME` is moved, into the test's own home Trash.
+pub(in crate::platform) fn trash(
+    path: &Path,
+    expect: (u64, u64),
+    guarded: bool,
+) -> Result<(), TrashError> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(TrashError::Failed(format!(
+            "{} has no name",
+            path.display()
+        )));
+    };
+    let parent = CheckedDir::open(dir).map_err(|e| not_moved(path, e))?;
+    unlink::check_entry(&parent, name, expect).map_err(|e| not_moved(path, e))?;
+    // The Trash is chosen by the device of the item's directory, read
+    // through its descriptor: a rename never leaves that directory's mount,
+    // and on overlayfs only a directory reports the overlay's device, a
+    // file the device of the layer under it (glib reads the parent's for
+    // the same reason).
+    let dev = parent.dev();
+    let failed = |e: io::Error| TrashError::Failed(format!("cannot read {}: {e}", path.display()));
     let home = home_trash(guarded).ok_or_else(|| {
         TrashError::Unavailable(if guarded {
             "the test environment sets no XDG_DATA_HOME: there is no test Trash".to_owned()
@@ -58,7 +81,20 @@ pub(in crate::platform) fn trash(path: &Path, guarded: bool) -> Result<(), Trash
         })?;
         (trash, Some(top))
     };
-    move_into(path, &trash, top.as_deref())
+    move_into(path, &parent, name, expect, &trash, top.as_deref())
+}
+
+/// The Trash's error for a failure on the way to `path`, or at it.
+fn not_moved(path: &Path, error: RemoveError) -> TrashError {
+    match error {
+        RemoveError::Changed { path } => TrashError::Changed { path },
+        RemoveError::Io { path: at, source } => TrashError::Failed(format!(
+            "cannot move {}: cannot read {}: {source}",
+            path.display(),
+            at.display()
+        )),
+        other => TrashError::Failed(format!("cannot move {}: {other}", path.display())),
+    }
 }
 
 /// The home Trash; in a test run (`guarded`) only the one under the test's
@@ -134,20 +170,62 @@ fn usable(dir: &Path) -> bool {
     })
 }
 
-/// Renames `path` into `trash` under a name of its own, writing its
-/// `.trashinfo` first: the name is taken by creating that file, which only
-/// one mover can. `top` is the volume's top directory for a volume's own
-/// Trash, whose `Path` is relative to it.
-fn move_into(path: &Path, trash: &Path, top: Option<&Path>) -> Result<(), TrashError> {
-    let failed =
-        |e: std::io::Error| TrashError::Failed(format!("cannot move {}: {e}", path.display()));
-    let mut builder = DirBuilder::new();
-    builder.recursive(true).mode(0o700);
-    builder.create(trash.join("files")).map_err(failed)?;
-    builder.create(trash.join("info")).map_err(failed)?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| TrashError::Failed(format!("{} has no name", path.display())))?;
+/// A Trash's `files` and `info` directories, open.
+struct Dirs {
+    files: OwnedFd,
+    info: OwnedFd,
+}
+
+impl Dirs {
+    /// Opens the Trash `trash` and its `files` and `info` directories, each
+    /// made with mode 0700 if missing and opened through the Trash's
+    /// descriptor, never through a symbolic link. A volume's Trash (`own`)
+    /// is opened without following a link too, and must be this user's;
+    /// the home Trash is made if need be, and is the directory its path
+    /// leads to, since `$XDG_DATA_HOME` may be a link.
+    fn open(trash: &Path, own: bool) -> io::Result<Dirs> {
+        let mut flags = libc::O_DIRECTORY;
+        if own {
+            flags |= libc::O_NOFOLLOW;
+        } else {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(trash)?;
+        }
+        let dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(flags)
+            .open(trash)?;
+        if own && dir.metadata()?.uid() != posix::system::effective_uid() {
+            return Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                format!("{} is another user's", trash.display()),
+            ));
+        }
+        Ok(Dirs {
+            files: unlink::make_dir_at(dir.as_fd(), c"files")?,
+            info: unlink::make_dir_at(dir.as_fd(), c"info")?,
+        })
+    }
+}
+
+/// Renames `name`, the entry `expect` in `parent` (at `path`), into
+/// `trash` under a name of its own, writing its `.trashinfo` first: the
+/// name is taken by creating that file, which only one mover can, and the
+/// rename never replaces an entry already at it in `files`. `top` is the
+/// volume's top directory for a volume's own Trash, whose `Path` is
+/// relative to it.
+fn move_into(
+    path: &Path,
+    parent: &CheckedDir,
+    name: &OsStr,
+    expect: (u64, u64),
+    trash: &Path,
+    top: Option<&Path>,
+) -> Result<(), TrashError> {
+    let failed = |e: io::Error| TrashError::Failed(format!("cannot move {}: {e}", path.display()));
+    let dirs = Dirs::open(trash, top.is_some()).map_err(failed)?;
     let recorded = match top {
         Some(top) => path.strip_prefix(top).unwrap_or(path),
         None => path,
@@ -164,42 +242,55 @@ fn move_into(path: &Path, trash: &Path, top: Option<&Path>) -> Result<(), TrashE
         }
         let mut info_name = taken.clone();
         info_name.push(".trashinfo");
-        let info = trash.join("info").join(&info_name);
-        let file = OpenOptions::new().write(true).create_new(true).open(&info);
-        let mut file = match file {
+        let mut file = match unlink::create_at(dirs.info.as_fd(), &info_name) {
             Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(failed(e)),
         };
-        let target = trash.join("files").join(&taken);
-        // rename(2) replaces an existing file: a name whose info file went
-        // missing is passed over too.
-        if fs::symlink_metadata(&target).is_ok() {
-            let _ = fs::remove_file(&info);
-            continue;
-        }
+        let forget = || {
+            let _ = unlink::unlink_at(dirs.info.as_fd(), &info_name);
+        };
         if let Err(e) = file
             .write_all(record.as_bytes())
             .and_then(|()| file.sync_all())
         {
-            let _ = fs::remove_file(&info);
+            forget();
             return Err(failed(e));
         }
-        return match fs::rename(path, &target) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = fs::remove_file(&info);
-                if e.kind() == ErrorKind::CrossesDevices {
-                    Err(TrashError::Unavailable(format!(
+        drop(file);
+        match unlink::rename_checked(parent, name, expect, dirs.files.as_fd(), &taken) {
+            Ok(()) => return Ok(()),
+            // An entry in `files` whose info file went missing: its name is
+            // passed over too.
+            Err(RenameError::Taken) => forget(),
+            Err(RenameError::Entry(e)) => {
+                forget();
+                return Err(not_moved(path, e));
+            }
+            // What took the item's place went to the Trash and could not be
+            // moved back: its info file, which says where it was, stays.
+            Err(RenameError::Stranded(e)) => {
+                return Err(TrashError::Failed(format!(
+                    "{} changed while it was being moved to the Trash: what was there in its \
+                     place was moved to {} and could not be moved back ({e}), and the item was \
+                     not moved",
+                    path.display(),
+                    trash.join("files").join(&taken).display()
+                )));
+            }
+            Err(RenameError::Io(e)) => {
+                forget();
+                return Err(if e.kind() == ErrorKind::CrossesDevices {
+                    TrashError::Unavailable(format!(
                         "{} is on another filesystem than its Trash, {}",
                         path.display(),
                         trash.display()
-                    )))
+                    ))
                 } else {
-                    Err(failed(e))
-                }
+                    failed(e)
+                });
             }
-        };
+        }
     }
     Err(TrashError::Failed(format!(
         "no free name for {} in {}",
@@ -224,7 +315,16 @@ fn escape(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::escape;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt as _, symlink};
+    use std::path::{Path, PathBuf};
+
+    use duscope_testkit::TestEnv;
+
+    use super::{escape, move_into};
+    use crate::TrashError;
+    use crate::platform::posix::unlink::{CheckedDir, hook};
 
     #[test]
     fn p4_core_01_a_trashinfo_path_is_escaped_as_a_uri() {
@@ -232,5 +332,132 @@ mod tests {
             escape(b"/home/a b/caf\xc3\xa9%"),
             "/home/a%20b/caf%C3%A9%25"
         );
+    }
+
+    /// `dir/item/a.bin` to move, and `dir/trash` for a Trash of the test's
+    /// own: never a real one.
+    fn setup(env: &TestEnv) -> (PathBuf, PathBuf) {
+        let dir = fs::canonicalize(env.tmp_dir()).unwrap();
+        fs::create_dir_all(dir.join("item")).unwrap();
+        fs::write(dir.join("item/a.bin"), b"planned").unwrap();
+        (dir.join("item/a.bin"), dir.join("trash"))
+    }
+
+    /// `path`'s device and inode, as a plan records them.
+    fn ident(path: &Path) -> (u64, u64) {
+        let meta = fs::symlink_metadata(path).unwrap();
+        (meta.dev(), meta.ino())
+    }
+
+    /// Moves `path` into `trash` as `clean` does.
+    fn move_to(path: &Path, expect: (u64, u64), trash: &Path) -> Result<(), TrashError> {
+        let parent = CheckedDir::open(path.parent().unwrap()).unwrap();
+        move_into(
+            path,
+            &parent,
+            path.file_name().unwrap(),
+            expect,
+            trash,
+            None,
+        )
+    }
+
+    /// The names in the directory `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn p5_core_05_linux_a_name_taken_in_files_is_passed_over_and_its_info_file_removed() {
+        let env = TestEnv::new();
+        let (file, trash) = setup(&env);
+        // An entry in `files` whose info file went missing: the move passes
+        // its name over, and leaves no info file of its own for that name.
+        fs::create_dir_all(trash.join("files")).unwrap();
+        fs::write(trash.join("files/a.bin"), b"trashed before").unwrap();
+        move_to(&file, ident(&file), &trash).unwrap();
+        assert_eq!(names(&trash.join("files")), ["a.bin", "a.bin.2"]);
+        assert_eq!(names(&trash.join("info")), ["a.bin.2.trashinfo"]);
+        assert_eq!(fs::read(trash.join("files/a.bin.2")).unwrap(), b"planned");
+        assert_eq!(
+            fs::read(trash.join("files/a.bin")).unwrap(),
+            b"trashed before"
+        );
+        let info = fs::read_to_string(trash.join("info/a.bin.2.trashinfo")).unwrap();
+        assert!(
+            info.contains(&format!(
+                "\nPath={}\n",
+                escape(file.as_os_str().as_encoded_bytes())
+            )),
+            "{info}"
+        );
+    }
+
+    #[test]
+    fn p5_core_05_linux_a_changed_item_leaves_the_trash_as_it_was() {
+        let env = TestEnv::new();
+        let (file, trash) = setup(&env);
+        let expect = ident(&file);
+        // Gone before the move: nothing in the Trash.
+        fs::rename(&file, file.with_file_name("a.away")).unwrap();
+        fs::write(&file, b"another").unwrap();
+        let err = move_to(&file, expect, &trash).unwrap_err();
+        assert!(
+            matches!(&err, TrashError::Changed { path } if *path == file),
+            "{err:?}"
+        );
+        // Swapped between the check and the rename: what moved comes back,
+        // and its info file goes.
+        fs::remove_file(&file).unwrap();
+        fs::rename(file.with_file_name("a.away"), &file).unwrap();
+        let (at, away) = (file.clone(), file.with_file_name("a.away"));
+        let _hook = hook::on_step(move |path| {
+            if path == at {
+                fs::rename(&at, &away).unwrap();
+                fs::write(&at, b"swapped in").unwrap();
+            }
+        });
+        let err = move_to(&file, expect, &trash).unwrap_err();
+        assert!(matches!(err, TrashError::Changed { .. }), "{err:?}");
+        assert_eq!(fs::read(&file).unwrap(), b"swapped in");
+        assert!(names(&trash.join("files")).is_empty());
+        assert!(names(&trash.join("info")).is_empty());
+    }
+
+    #[test]
+    fn p5_core_05_linux_a_trash_reached_through_links_moves_nothing_through_them() {
+        let env = TestEnv::new();
+        let (file, trash) = setup(&env);
+        let elsewhere = file.parent().unwrap().parent().unwrap().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        // `files` a link to another directory: never followed.
+        fs::create_dir_all(&trash).unwrap();
+        symlink(&elsewhere, trash.join("files")).unwrap();
+        let err = move_to(&file, ident(&file), &trash).unwrap_err();
+        assert!(matches!(err, TrashError::Failed(_)), "{err:?}");
+        assert!(names(&elsewhere).is_empty());
+        assert_eq!(fs::read(&file).unwrap(), b"planned");
+        // A volume's Trash that is itself a link: never used.
+        let volume = file.parent().unwrap().parent().unwrap().join(".Trash-1000");
+        symlink(&elsewhere, &volume).unwrap();
+        let parent = CheckedDir::open(file.parent().unwrap()).unwrap();
+        let top = volume.parent().unwrap().to_owned();
+        let err = move_into(
+            &file,
+            &parent,
+            OsStr::new("a.bin"),
+            ident(&file),
+            &volume,
+            Some(&top),
+        )
+        .unwrap_err();
+        assert!(matches!(err, TrashError::Failed(_)), "{err:?}");
+        assert!(names(&elsewhere).is_empty());
+        assert_eq!(fs::read(&file).unwrap(), b"planned");
     }
 }
