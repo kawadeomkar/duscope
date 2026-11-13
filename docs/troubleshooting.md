@@ -32,10 +32,11 @@ hint: Check the path, or run duscope scan in the directory to measure
 
 In JSON, stdout gets `"ok": false` and an `error` object: `code`, `message`,
 `hint`, `retryable` (whether running the same command again may succeed) and
-`fixable_by` (`user`, `agent` or `none`). On the command line three failures
-write no error envelope, [`interrupted`](#interrupted),
-[`index_write_failed`](#index_write_failed) and [`index_stale`](#index_stale):
-their entries say what stdout holds then. The exit statuses:
+`fixable_by` (`user`, `agent` or `none`). On the command line
+[`interrupted`](#interrupted) and [`index_stale`](#index_stale) write no error
+envelope, and neither does [`index_write_failed`](#index_write_failed) after a
+result was printed: their entries say what stdout holds then. The exit
+statuses:
 
 | Status | Meaning |
 | --- | --- |
@@ -369,19 +370,22 @@ What to do: run the command again.
 
 Exit 1, and running the command again may succeed. A scan could not be saved:
 the index directory cannot be written (permissions, a full disk), or there is
-none, since neither `HOME` nor `XDG_CACHE_HOME` is set. On the command line the
-error goes to stderr alone, never as an envelope, and what came before it
+none, since neither `HOME` nor `XDG_CACHE_HOME` is set. What came before it
 depends on the verb:
 
 - `scan --save`, `rescan`, `import`, and a list verb, `summary` or `render`
   that scanned because no saved scan held the path, save after they print: the
-  result was printed, and the scan id in it names no file.
-- `query` and `export` save the scan they ran before they answer from it, and
-  `view` before it takes the terminal: nothing was printed, under `--json` too.
-- With no index directory, `scan --save` fails this way after printing and
-  `import` before it reads the file; `rescan` fails `scan_not_found`, with no
-  saved scan to renew; and a verb that scans when no saved scan holds the path
-  saves nothing, with no error.
+  result was printed, and the scan id in it names no file. On the command line
+  the error goes to stderr alone, never as a second envelope.
+- `query` and `export` save the scan they ran before they answer from it:
+  nothing was printed, and the error is the answer, the error envelope under
+  `--json` and `--format ndjson` and two lines on stderr otherwise; an `-o`
+  file is left as it was. `view` saves before it takes the terminal, and the
+  error goes to stderr.
+- With no index directory, `scan --save` fails this way after printing, and
+  `import` before it reads the file (under `--json`, the error envelope);
+  `rescan` fails `scan_not_found`, with no saved scan to renew; and a verb that
+  scans when no saved scan holds the path saves nothing, with no error.
 
 Under `duscope mcp` the error replaces the result, so a client never holds an
 id that names nothing.
