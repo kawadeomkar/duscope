@@ -8,9 +8,10 @@
 //!
 //! The item is only ever renamed into the Trash, never copied: a volume
 //! whose Trash cannot be used or made is [`TrashError::Unavailable`], and
-//! nothing is removed in its place. (The `trash` crate, which macOS uses,
+//! nothing is removed in its place. (The `trash` crate's freedesktop backend
 //! falls back to copying an item across filesystems into the home Trash and
-//! then removing it, so Linux does not use it.)
+//! then removing it, so the Trash is in-tree here; macOS calls
+//! `NSFileManager` itself.)
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
