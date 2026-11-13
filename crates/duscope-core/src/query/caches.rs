@@ -12,12 +12,20 @@
 //! Markers above the root are asked of the caller; a tag's signature is
 //! read from the filesystem.
 //!
+//! The pass reads every directory, and of the files only those it looks
+//! at: a `CACHEDIR.TAG` and the rules' markers, the names taken from the
+//! same rules that judge. Of a saved scan it reads the two from their own
+//! tables, each in id order, and merges them (`Index::dirs_in`,
+//! `Index::files_named`), so that no other file's row is read whole; past
+//! a confirmed cache, both reads start again after its subtree.
+//!
 //! Under `loose`, a name without its marker is a row, but the pass goes on
 //! inside it: a confirmed cache inside it shows the name was not a cache
 //! (a `build` directory of tools, one of them with its `node_modules`), and
 //! the row gives way to what is inside. Otherwise what is inside is part of
 //! it.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::ffi::OsStr;
@@ -31,6 +39,7 @@ use super::{
     remain, timegrammar::iso8601,
 };
 use crate::envelope::{CacheEntry, ProjectEntry, name_fields};
+use crate::index::reader::{DirRow, FileRow, Paged};
 use crate::rules::{Caches, Confirm};
 
 /// `caches`' default `--min-size`: 10 MiB.
@@ -258,6 +267,8 @@ struct Open {
     last: u32,
     /// Its path's length in the pass's path buffer.
     len: usize,
+    /// Where its name starts in that path.
+    name_at: usize,
     /// The markers among its own files, by their index in the pass's list.
     markers: Vec<usize>,
     /// Whether its own files include a `CACHEDIR.TAG`.
@@ -265,6 +276,47 @@ struct Open {
     judged: bool,
     /// The unconfirmed row it is, or the nearest one above it.
     loose: Option<usize>,
+}
+
+impl Open {
+    /// The directory `entry`, whose own files and subtree end at `ids`,
+    /// entered from `parent`, the innermost directory open, its path put in
+    /// the pass's path buffer `path`.
+    fn enter(entry: &Item<'_>, ids: (u32, u32), parent: Option<&Open>, path: &mut Vec<u8>) -> Open {
+        let mut name_at = path.len();
+        if let Some(parent) = parent {
+            path.truncate(parent.len);
+            if path.last() != Some(&b'/') {
+                path.push(b'/');
+            }
+            name_at = path.len();
+            path.extend_from_slice(&entry.name);
+        }
+        Open {
+            id: entry.id,
+            files_end: ids.0,
+            last: ids.1,
+            len: path.len(),
+            name_at,
+            markers: Vec::new(),
+            tag: false,
+            judged: false,
+            loose: parent.and_then(|o| o.loose),
+        }
+    }
+
+    /// Notes that the directory holds a file `name`: the tag, or one of
+    /// `markers`.
+    fn holds(&mut self, name: &[u8], markers: &[&str]) {
+        if name == TAG {
+            self.tag = true;
+        }
+        if let Some(i) = markers.iter().position(|m| m.as_bytes() == name)
+            && !self.markers.contains(&i)
+        {
+            self.markers.push(i);
+        }
+    }
 }
 
 /// What every directory of the pass is judged with.
@@ -278,15 +330,10 @@ struct Judge<'a> {
     above: Above<'a>,
 }
 
-/// Every cache under the root, outermost only, in pre-order.
-fn find(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Vec<Found> {
-    let mut found: Vec<Found> = Vec::new();
-    if view.is_empty() || !view.node(0).is_dir() {
-        return found;
-    }
+/// The marker names of the rules, each once, in the rules' order.
+fn rule_markers(caches: &Caches) -> Vec<&str> {
     let mut markers: Vec<&str> = Vec::new();
-    let mut names = GlobSetBuilder::new();
-    for rule in q.caches.rules() {
+    for rule in caches.rules() {
         if let Confirm::Markers(ms) = &rule.confirm {
             for m in ms {
                 if !markers.contains(&m.as_str()) {
@@ -294,6 +341,27 @@ fn find(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Vec<Found> {
                 }
             }
         }
+    }
+    markers
+}
+
+/// The names of the only files the pass reads: the tag, and `markers`.
+fn looked_for<'a>(markers: &[&'a str]) -> Vec<&'a [u8]> {
+    let mut names: Vec<&[u8]> = vec![TAG];
+    names.extend(markers.iter().map(|m| m.as_bytes()).filter(|&m| m != TAG));
+    names
+}
+
+/// Every cache under the root, outermost only, in pre-order.
+fn find(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Vec<Found> {
+    let mut found: Vec<Found> = Vec::new();
+    if view.is_empty() || !view.node(0).is_dir() {
+        return found;
+    }
+    let markers = rule_markers(q.caches);
+    let wanted = looked_for(&markers);
+    let mut names = GlobSetBuilder::new();
+    for rule in q.caches.rules() {
         if let Some(glob) = rule.name.as_deref().and_then(|n| Glob::new(n).ok()) {
             names.add(glob);
         }
@@ -308,8 +376,17 @@ fn find(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Vec<Found> {
     let last = view.node(0).last_id;
     let mut path: Vec<u8> = view.root_path().as_os_str().as_bytes().to_vec();
     let mut open: Vec<Open> = Vec::new();
-    let mut id = 0u32;
+    let mut entries = Entries::new(view, last, &wanted);
+    let mut next = entries.next();
+    // The first id not passed: the entries before it are read, or inside a
+    // cache passed over.
+    let mut passed = 0;
     loop {
+        // The id of the entry read next; past the last once none is left.
+        let mut id = next
+            .as_ref()
+            .map_or(last.saturating_add(1), |e| e.id)
+            .max(passed);
         // Settle the directories `id` is past: judge each once its own
         // files are read, close each once its subtree is. An unjudged
         // directory is the innermost one open, and the path buffer holds
@@ -342,42 +419,189 @@ fn find(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Vec<Found> {
                 break;
             }
         }
+        passed = id;
         if id > last || failed(view) {
             break;
         }
-        let node = view.node(id);
-        let name = view.name(id);
-        if node.is_dir() {
-            if let Some(parent) = open.last() {
-                path.truncate(parent.len);
-                if path.last() != Some(&b'/') {
-                    path.push(b'/');
+        let Some(entry) = next.take() else {
+            break;
+        };
+        if entry.id < id {
+            // Inside a cache confirmed: read on from past it.
+            entries.skip_to(id);
+            next = entries.next();
+            continue;
+        }
+        match entry.dir {
+            Some(ids) => {
+                let dir = Open::enter(&entry, ids, open.last(), &mut path);
+                open.push(dir);
+            }
+            None => {
+                if let Some(parent) = open.last_mut() {
+                    parent.holds(&entry.name, &judge.markers);
                 }
-                path.extend_from_slice(&name);
-            }
-            open.push(Open {
-                id,
-                files_end: node.files_end,
-                last: node.last_id,
-                len: path.len(),
-                markers: Vec::new(),
-                tag: false,
-                judged: false,
-                loose: open.last().and_then(|o| o.loose),
-            });
-        } else if let Some(parent) = open.last_mut() {
-            if *name == *TAG {
-                parent.tag = true;
-            }
-            if let Some(i) = judge.markers.iter().position(|m| m.as_bytes() == &*name)
-                && !parent.markers.contains(&i)
-            {
-                parent.markers.push(i);
             }
         }
-        id += 1;
+        next = entries.next();
     }
     standing(found)
+}
+
+/// An entry the pass reads: a directory, with the last ids of its own files
+/// and of its subtree, or a file it looks for.
+struct Item<'v> {
+    id: u32,
+    dir: Option<(u32, u32)>,
+    name: Cow<'v, [u8]>,
+}
+
+/// The entries the pass reads, in id order: every directory, and the files
+/// whose name is one of those it looks for. A file's only part in the pass
+/// is to tell its directory that it holds a tag or a marker, so the other
+/// files change nothing. A saved scan's entries are read from its two tables
+/// apart and merged, so that the other files' rows are never read whole; the
+/// arena's are every entry.
+enum Entries<'v, V: TreeView + ?Sized> {
+    /// Every id, its node and name, the files not looked for passed over.
+    Every {
+        view: &'v V,
+        /// The id read next; `None` past the last.
+        next: Option<u32>,
+        last: u32,
+        wanted: &'v [&'v [u8]],
+    },
+    /// A saved scan's directories and files looked for.
+    Saved(Box<Saved<'v>>),
+}
+
+/// A saved scan's directories, and its files looked for, by id, each
+/// table's next row held. The files are read no further than the
+/// directories have been, so that the files of a cache passed over are not
+/// read, as the walk does not read them.
+struct Saved<'v> {
+    /// The view's id 0 in the scan.
+    base: u32,
+    dirs: Paged<'v, DirRow>,
+    files: Paged<'v, FileRow>,
+    dir: Option<DirRow>,
+    file: Option<FileRow>,
+}
+
+impl<'v, V: TreeView + ?Sized> Entries<'v, V> {
+    /// The entries of `view` from its root to `last`, the files among them
+    /// only those named in `wanted`.
+    fn new(view: &'v V, last: u32, wanted: &'v [&'v [u8]]) -> Entries<'v, V> {
+        if let Some((index, base)) = view.as_index() {
+            let end = base.saturating_add(last);
+            if let Some(files) = index.files_named(base, end, wanted) {
+                let mut dirs = index.dirs_in(base, end);
+                return Entries::Saved(Box::new(Saved {
+                    base,
+                    dir: dirs.next(),
+                    file: None,
+                    dirs,
+                    files,
+                }));
+            }
+        }
+        Entries::Every {
+            view,
+            next: Some(0),
+            last,
+            wanted,
+        }
+    }
+
+    /// The next entry, in id order.
+    fn next(&mut self) -> Option<Item<'v>> {
+        match self {
+            Entries::Every {
+                view,
+                next,
+                last,
+                wanted,
+            } => {
+                while let Some(id) = next.filter(|id| id <= last) {
+                    if failed(*view) {
+                        break;
+                    }
+                    *next = id.checked_add(1);
+                    let node = view.node(id);
+                    let name = view.name(id);
+                    if node.is_dir() {
+                        let dir = Some((node.files_end, node.last_id));
+                        return Some(Item { id, dir, name });
+                    }
+                    if wanted.contains(&&*name) {
+                        let dir = None;
+                        return Some(Item { id, dir, name });
+                    }
+                }
+                *next = None;
+                None
+            }
+            Entries::Saved(saved) => saved.next(),
+        }
+    }
+
+    /// Passes over the entries before id `id`.
+    fn skip_to(&mut self, id: u32) {
+        match self {
+            Entries::Every { next, .. } => *next = next.map(|n| n.max(id)),
+            Entries::Saved(saved) => saved.skip_to(id),
+        }
+    }
+}
+
+impl<'v> Saved<'v> {
+    /// The next entry, in the view's ids; a directory before a file of the
+    /// same id, which only a damaged index holds.
+    fn next(&mut self) -> Option<Item<'v>> {
+        if self.file.is_none() {
+            // Up to the last directory read; to the end once every one is.
+            let upto = self
+                .dir
+                .as_ref()
+                .map_or(u32::MAX, |d| self.dirs.reach().unwrap_or(d.id));
+            self.file = self.files.next_upto(upto);
+        }
+        let take_dir = match (&self.dir, &self.file) {
+            (Some(d), Some(f)) => d.id <= f.id,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        let base = self.base;
+        if take_dir {
+            let row = std::mem::replace(&mut self.dir, self.dirs.next())?;
+            let ids = (row.files_end, row.last_id);
+            Some(Item {
+                id: row.id.saturating_sub(base),
+                dir: Some((ids.0.saturating_sub(base), ids.1.saturating_sub(base))),
+                name: Cow::Owned(row.name),
+            })
+        } else {
+            let row = self.file.take()?;
+            Some(Item {
+                id: row.id.saturating_sub(base),
+                dir: None,
+                name: Cow::Owned(row.name),
+            })
+        }
+    }
+
+    /// Passes over the entries before the view's id `id`.
+    fn skip_to(&mut self, id: u32) {
+        let id = self.base.saturating_add(id);
+        if self.dir.as_ref().is_some_and(|d| d.id < id) {
+            self.dirs.skip_to(id);
+            self.dir = self.dirs.next();
+        }
+        if self.file.as_ref().is_none_or(|f| f.id < id) {
+            self.file = None;
+            self.files.skip_to(id);
+        }
+    }
 }
 
 /// The rows that stand: every confirmed cache, and each unconfirmed row
@@ -449,7 +673,13 @@ impl Judge<'_> {
         outer: &[Open],
         path: &[u8],
     ) -> Option<Found> {
-        let name = view.name(dir.id);
+        // The root's name as the view gives it; any other's is the end of
+        // its path.
+        let name = if dir.id == 0 {
+            view.name(0)
+        } else {
+            Cow::Borrowed(path.get(dir.name_at..).unwrap_or_default())
+        };
         let named = self
             .names
             .as_ref()
