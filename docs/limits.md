@@ -98,9 +98,10 @@ On macOS, `rescan` reads again only the directories the volume's FSEvents
 history reports changed since the saved scan. macOS keeps that history for a
 time it does not document, and says nothing when the history no longer reaches
 back to a given point. So duscope checks the history before it trusts it, and
-again before it saves. A check that fails makes it read the whole tree, or, for
-a volume mounted below the scan's root, that volume's part, and
-`scan.fallback_reason` names the check:
+again before it saves. A check that fails makes it read the whole tree, and
+`scan.fallback_reason` names the check; for a volume mounted below the scan's
+root, it reads that volume's part whole instead and records no reason. The
+checks:
 
 - `index_too_old`: the saved scan is older than `--max-age` (7 days by
   default), or, taken with `--attrs full`, was itself an incremental rescan.
@@ -186,9 +187,9 @@ most 64 requests, or 32 MiB of them, waiting behind the running call, past
 which a request is answered `-31000` ("the server is busy"); a statement of
 `query --sql` within its `--timeout` (5 seconds by default, 60 at most) and
 256 MiB of SQLite's heap; and a compressed file `import` reads, 1 GiB once
-decompressed. A scan has no such limit: neither its entries nor its depth is
-capped, and the time a chain of very deep directories takes grows faster than
-its depth.
+decompressed. A scan has no such limit: nothing caps its depth, nor its
+entries short of what the arena holds (above), and the time a chain of very
+deep directories takes grows faster than its depth.
 
 ## Filesystems
 
@@ -236,9 +237,10 @@ lossy, among them `scan.root`, `scan.excluded[].path`, `query.path`, `via`,
 `mount_point`, the commands in `next`, and the paths `scans` lists.
 
 Over MCP such a path cannot be passed back: a tool takes a path as a JSON
-string, which holds text only, so no tool can be asked about an entry whose
-path is not UTF-8. A tool can still be asked about a directory above it whose
-path is.
+string, which holds text only, and the one tool that takes a handle instead,
+`duscope_delete`, takes it from `duscope_explain`, which takes a path. So no
+tool can be asked about an entry whose path is not UTF-8. A tool can still be
+asked about a directory above it whose path is.
 
 ## Output
 
@@ -253,9 +255,11 @@ so `--limit 2` writes all of them. Read only the lines needed, or leave out
 
 With `--format ndjson` or `--plain`, `top` and `stale` write each row as they
 read it from the saved scan. A read that fails after rows were written (the
-file damaged, or overwritten while it is read: `index_corrupt`) ends the
-output where it is: `ndjson` has no `end` line, and the error envelope follows
-on stdout; `--plain`, which has no trailer, writes the error on stderr. The
+file damaged, or overwritten while it is read: `index_corrupt`) does not stop
+the rows: every row after it is still written, empty (its `path` the scan's
+root, its `name` empty, its sizes 0), and only then does the output end:
+`ndjson` has no `end` line, and the error envelope follows on stdout;
+`--plain`, which has no trailer, writes the error on stderr. The
 warnings go with it: `ndjson` carries them only in its `end` line, and
 `--plain` writes them on stderr after the rows. Act on streamed rows only once
 the `end` line has come, or, for `--plain`, once the command has exited 0.

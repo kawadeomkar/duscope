@@ -3,10 +3,11 @@
 //! has (`duscope_core::envelope::WARNING_CODES` and `ERROR_CODES`), and none
 //! for a code it does not have; the lists of `clean`'s refusal reasons, of a
 //! volume's reasons and of a rescan's fall-back reasons are the envelope's
-//! (`duscope_core::envelope::values`); and the relative links of it and
-//! `docs/limits.md` lead to a file, and to a heading of it where they name
-//! one. The docs job's lychee checks the links too, but only this test sees
-//! a code or a reason added without an entry.
+//! (`duscope_core::envelope::values`), the refusals as `clean.rs` writes
+//! them and a volume's reasons apart from a directory's; and the relative
+//! links of it, `docs/limits.md` and `README.md` lead to a file, and to a
+//! heading of it where they name one. The docs job's lychee checks the links
+//! too, but only this test sees a code or a reason added without an entry.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -19,8 +20,19 @@ use duscope_core::envelope::{ERROR_CODES, WARNING_CODES, values};
 /// The documents this package wrote.
 const DOCUMENTS: [&str; 2] = ["limits.md", "troubleshooting.md"];
 
+/// The reasons no volume carries, a directory's: an exclude pattern's and
+/// `--skip-containers`'s, which leave a mount point among the directories
+/// `scan.excluded` names, and macOS's way into the Data volume, which the
+/// walk gives no volume row (`Walker::decide`).
+const DIRECTORY_REASONS: [&str; 3] = ["excluded", "skipped_containers", "firmlinked"];
+
 fn docs() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs")
+}
+
+/// The repository's top directory.
+fn top() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
 fn read(path: &Path) -> String {
@@ -270,6 +282,54 @@ fn table_reasons<'t>(lines: &[&'t str]) -> Vec<&'t str> {
         .collect()
 }
 
+/// Which of `names` the lines of `lines` outside its table name, each in
+/// backticks.
+fn named_beside_the_table<'n>(lines: &[&str], names: &[&'n str]) -> Vec<&'n str> {
+    let words: String = lines
+        .iter()
+        .filter(|line| !line.starts_with('|'))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    names
+        .iter()
+        .copied()
+        .filter(|name| words.contains(&format!("`{name}`")))
+        .collect()
+}
+
+/// The reasons `clean`'s plan refuses an item for, as `source` (its
+/// `clean.rs`) writes them, each once: what `fn refusal` returns
+/// (`return Some("…")`), what a caller sets in its place (`(Some("…"), …)`),
+/// and `UNEXPECTED`.
+fn refusals_in(source: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut in_refusal = false;
+    for line in source.lines() {
+        if line.starts_with("fn refusal(") {
+            in_refusal = true;
+        } else if line == "}" {
+            in_refusal = false;
+        }
+        let mut patterns = vec!["(Some(\"", "UNEXPECTED: &str = \""];
+        if in_refusal {
+            patterns.push("return Some(\"");
+        }
+        for pattern in patterns {
+            let mut rest = line;
+            while let Some(at) = rest.find(pattern) {
+                rest = &rest[at + pattern.len()..];
+                let end = rest.find('"').unwrap_or(rest.len());
+                found.push(&rest[..end]);
+                rest = &rest[end..];
+            }
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
 #[test]
 fn p5_doc_02_every_warning_code_has_an_entry() {
     let text = read(&docs().join("troubleshooting.md"));
@@ -383,31 +443,44 @@ fn p5_doc_02_the_refusal_reasons_are_clean_s() {
 }
 
 #[test]
+fn p5_doc_02_the_refusal_list_is_what_clean_writes() {
+    let source = read(&top().join("crates/duscope-core/src/clean.rs"));
+    let written = refusals_in(&source);
+    let wrong = against(&written, &values::REFUSALS);
+    assert!(
+        wrong.is_empty(),
+        "values::REFUSALS against the reasons clean.rs refuses an item for: {wrong:#?}"
+    );
+}
+
+#[test]
 fn p5_doc_02_the_volume_reasons_are_the_scan_s() {
+    assert!(
+        DIRECTORY_REASONS
+            .iter()
+            .all(|reason| values::SKIP_REASONS.contains(reason)),
+        "{DIRECTORY_REASONS:?} against {:?}",
+        values::SKIP_REASONS
+    );
+    let volume_reasons: Vec<&str> = values::SKIP_REASONS
+        .into_iter()
+        .filter(|reason| !DIRECTORY_REASONS.contains(reason))
+        .collect();
     let text = read(&docs().join("troubleshooting.md"));
     let entry = section(&text, "`mounts_excluded`");
+    // A volume's reasons are the table's rows, and only those.
     let table = table_reasons(&entry);
-    assert!(!table.is_empty(), "mounts_excluded has no table of reasons");
-    let unknown: Vec<&str> = table
-        .iter()
-        .copied()
-        .filter(|reason| !values::SKIP_REASONS.contains(reason))
-        .collect();
+    let wrong = against(&table, &volume_reasons);
     assert!(
-        unknown.is_empty(),
-        "docs/troubleshooting.md, mounts_excluded: reasons the code does not have: {unknown:?}"
+        wrong.is_empty(),
+        "docs/troubleshooting.md, mounts_excluded's table: {wrong:#?}"
     );
-    assert!(repeated(&table).is_empty(), "{table:?}");
-    // The reasons no volume carries, a directory's, are named beside the
-    // table.
-    let words = entry.join(" ");
-    let missing: Vec<&str> = values::SKIP_REASONS
-        .into_iter()
-        .filter(|reason| !words.contains(&format!("`{reason}`")))
-        .collect();
+    // A directory's are named beside the table, and only those.
+    let beside = named_beside_the_table(&entry, &values::SKIP_REASONS);
+    let wrong = against(&beside, &DIRECTORY_REASONS);
     assert!(
-        missing.is_empty(),
-        "docs/troubleshooting.md, mounts_excluded: reasons it does not name: {missing:?}"
+        wrong.is_empty(),
+        "docs/troubleshooting.md, mounts_excluded, beside the table: {wrong:#?}"
     );
 }
 
@@ -448,6 +521,23 @@ fn p5_doc_02_the_checks_find_an_empty_entry_and_a_wrong_list() {
         ]
     );
     assert_eq!(table_reasons(&entry), ["p"]);
+    let entry = [
+        "| `p` | q |",
+        "Beside it, `r` and `s`, not `t`.",
+        "| `t` | u |",
+    ];
+    assert_eq!(
+        named_beside_the_table(&entry, &["p", "r", "s", "t", "v"]),
+        ["r", "s", "t"]
+    );
+    let source = "pub const UNEXPECTED: &str = \"c\";\n\
+                  fn refusal(x: u8) -> Option<&'static str> {\n    \
+                  if x == 0 {\n        return Some(\"a\");\n    }\n    \
+                  None\n}\n\
+                  fn judged() {\n    let r = (Some(\"b\"), 1);\n    \
+                  return Some(\"elsewhere\");\n}\n\
+                  fn other() {\n    let r = (Some(\"a\"), 2);\n}\n";
+    assert_eq!(refusals_in(source), ["a", "b", "c"]);
 }
 
 #[test]
@@ -456,6 +546,19 @@ fn p5_doc_02_the_relative_links_resolve() {
         let file = docs().join(name);
         let broken = broken_links(&file, &read(&file));
         assert!(broken.is_empty(), "docs/{name}: {broken:#?}");
+    }
+    // The README leads to both.
+    let readme = top().join("README.md");
+    let text = read(&readme);
+    let broken = broken_links(&readme, &text);
+    assert!(broken.is_empty(), "README.md: {broken:#?}");
+    for name in DOCUMENTS {
+        assert!(
+            links(&text)
+                .iter()
+                .any(|link| link == &format!("docs/{name}")),
+            "README.md has no link to docs/{name}"
+        );
     }
 }
 

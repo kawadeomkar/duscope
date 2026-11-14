@@ -32,10 +32,10 @@ hint: Check the path, or run duscope scan in the directory to measure
 
 In JSON, stdout gets `"ok": false` and an `error` object: `code`, `message`,
 `hint`, `retryable` (whether running the same command again may succeed) and
-`fixable_by` (`user`, `agent` or `none`). On the command line two failures
-write no error envelope, [`interrupted`](#interrupted) and
-[`index_write_failed`](#index_write_failed): their entries say what stdout
-holds then. The exit statuses:
+`fixable_by` (`user`, `agent` or `none`). On the command line three failures
+write no error envelope, [`interrupted`](#interrupted),
+[`index_write_failed`](#index_write_failed) and [`index_stale`](#index_stale):
+their entries say what stdout holds then. The exit statuses:
 
 | Status | Meaning |
 | --- | --- |
@@ -288,8 +288,8 @@ flag of this release is deprecated, so no command gives it.
 
 Exit 2. The command line is wrong: an unknown flag or verb, a missing or bad
 value (`m` in a duration, which could be minutes or months), flags that
-conflict, or a `--limit` above 100 without `-o FILE`, `--all` or
-`--format ndjson`. The message says which.
+conflict (`--limit` beside `--all`, for one), or a `--limit` above 100
+without `-o FILE` or `--format ndjson`. The message says which.
 
 `duscope view` and `duscope scan -i` give it too, before any scan, when the
 viewer cannot start: stdout is not a terminal (a pipe, a file, `-o`); the
@@ -404,8 +404,10 @@ for the newest saved scan it passes over a file it cannot open, and
 `duscope scans` names such a file on stderr.
 
 `top` and `stale` under `--format ndjson` or `--plain` write each row as they
-read it, so a read that fails after the first rows ends the output there, with
-no `end` line ([limits.md](limits.md#a-stream-cut-short-has-no-end-line)).
+read it. A read that fails after the first rows does not stop them: every row
+after it is still written, empty and naming the scan's root, and the output
+then ends with no `end` line
+([limits.md](limits.md#a-stream-cut-short-has-no-end-line)).
 
 What to do: remove the file (`scans/<id>.db` in the index directory) and scan
 the tree again, `duscope scan --save PATH`.
@@ -433,8 +435,10 @@ What to do: if you trust the file, run the command again with
 
 Exit 1, from `duscope scans --check` only: a directory of the tree changed since
 the saved scan was taken (an entry added, removed or renamed in it, for one),
-and the line on stderr names the first. The file itself is sound. What the
-check sees and misses is in
+and the line on stderr names the first. The file itself is sound. Stdout holds
+the check's row (`structurally_stale: true`), under `--json` in an envelope
+with `"ok": false` and no `error` object; the error and its hint go to stderr.
+What the check sees and misses is in
 [limits.md](limits.md#scans---check-sees-structure-not-contents).
 
 What to do: the command in the hint, `duscope rescan`, or for an import
