@@ -2238,6 +2238,24 @@ fn nested(fanout: usize, depth: usize, files: usize) -> (Arena, RollUp) {
     (arena, rollup)
 }
 
+/// Root tiles of equal size, which the folder legend ranks in id order:
+/// `z.bin` before `d1` (a folder's files come before its folders), though
+/// `d1` comes first by name.
+fn tied() -> (Arena, RollUp) {
+    let mut arena = import(
+        br#"[1,2,{"progname":"ncdu"},[{"name":"/tied"},
+            {"name":"z.bin","asize":4096,"dsize":4096},
+            [{"name":"d0"},{"name":"x.mp4","asize":8192,"dsize":8192}],
+            [{"name":"d1"},{"name":"y.db","asize":4096,"dsize":4096}]]]"#
+            .as_slice(),
+        Some(ImportFormat::Ncdu),
+    )
+    .unwrap()
+    .arena;
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
 #[test]
 fn p4_tui_09_the_viewer_opens_on_one_pass_over_the_scan() {
     use duscope_core::query::children;
@@ -2422,26 +2440,13 @@ fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
         ],
     };
     let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
-    let (mockup, nested) = (mockup(), nested(4, 4, 3));
-    // Root tiles of equal size, which the folder legend ranks in id order:
-    // `z.bin` before `d1` (a folder's files come before its folders), though
-    // `d1` comes first by name.
-    let mut tied = import(
-        br#"[1,2,{"progname":"ncdu"},[{"name":"/tied"},
-            {"name":"z.bin","asize":4096,"dsize":4096},
-            [{"name":"d0"},{"name":"x.mp4","asize":8192,"dsize":8192}],
-            [{"name":"d1"},{"name":"y.db","asize":4096,"dsize":4096}]]]"#
-            .as_slice(),
-        Some(ImportFormat::Ncdu),
-    )
-    .unwrap()
-    .arena;
-    let tied_rollup = roll_up(&mut tied);
+    let (mockup, nested, tied) = (mockup(), nested(4, 4, 3), tied());
     let views = [
         mockup_view(&mockup),
         ArenaView::new(&nested.0, &nested.1, PathBuf::from("/nested")),
-        ArenaView::new(&tied, &tied_rollup, PathBuf::from("/tied")),
+        ArenaView::new(&tied.0, &tied.1, PathBuf::from("/tied")),
     ];
+    assert_tied(&views[2]);
     for view in &views {
         for color_by in [
             ColorBy::Type,
@@ -2525,6 +2530,26 @@ fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
             }
         }
     }
+}
+
+/// The tie [`tied`] makes: `z.bin` and `d1` count the same bytes, by either
+/// size.
+fn assert_tied(view: &dyn TreeView) {
+    use duscope_core::query::SizeKind;
+
+    for size in [SizeKind::Allocated, SizeKind::Apparent] {
+        let bytes = |name| root_tile_bytes(view, name, size);
+        assert_eq!(bytes("z.bin"), bytes("d1"), "{size:?}");
+    }
+}
+
+/// The bytes the root tile `name` of `view` counts by `size`.
+fn root_tile_bytes(view: &dyn TreeView, name: &str, size: duscope_core::query::SizeKind) -> u64 {
+    (1..view.len())
+        .map(|id| view.node(id))
+        .find(|n| n.parent == 0 && String::from_utf8_lossy(&view.name(n.id)) == name)
+        .unwrap_or_else(|| panic!("no root tile {name}"))
+        .counted(size)
 }
 
 /// The folder legend's rows read alone: the root's children, each its own
