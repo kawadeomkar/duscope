@@ -138,16 +138,27 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
 }
 
 /// `scan --reuse`, when a saved scan answers: its rows, as a scan of the
-/// tree would print them, and nothing saved.
+/// tree would print them, and nothing saved. They are read and written as
+/// `top`'s are ([`write_ranked`]), so a failed read of the saved scan ends
+/// them there and fails `index_corrupt`.
 fn reused(saved: Source, args: &ScanArgs, output: &Output) -> Result<(), Failure> {
-    let file = saved.index_file();
     if let Some(id) = saved.scan_id() {
         log::info!("printing the saved scan {id} in place of a scan");
     }
-    let (mut envelope, footer, _) =
-        top_envelope(saved, &args.walk, None, "scan", false, true, None, output)?;
-    envelope.next = next::list(&envelope, file.as_deref(), args.walk.path.as_deref());
-    output.list(&envelope, &footer)
+    let asked = top_asked(saved, &args.walk, None, "scan", false, true, None, output)?;
+    let rows = query::top_rows(&*asked.prepared.source.view(), &asked.q);
+    write_ranked(
+        asked.prepared,
+        &args.walk,
+        "scan",
+        asked.listed,
+        &rows,
+        Vec::new(),
+        None,
+        output,
+        output.streams(),
+    )?;
+    Ok(())
 }
 
 /// `top`.
