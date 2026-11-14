@@ -280,23 +280,22 @@ so `--limit 2` writes all of them. Read only the lines needed, or leave out
 
 ### A stream cut short has no `end` line
 
-With `--format ndjson` or `--plain`, `top`, `stale` and `scan --reuse` write
-each row as they read it from the saved scan. A read that fails after rows were
-written (the file damaged, or overwritten while it is read: `index_corrupt`,
-exit 5) ends the rows there: those already written were read whole, and the row
-whose read failed is not written, nor any after it. `ndjson` then has no `end`
-line: the error envelope follows on stdout in its place. `--plain` has no
-trailer, so nothing on stdout marks the cut: the output ends with the last row
-read, the error goes to stderr, and the exit status is the only sign a script
-can test. The warnings are lost too: `ndjson` carries them only in its `end`
-line, and `--plain` writes them on stderr only after the last row. Act on
-streamed rows only once the `end` line has come, or, for `--plain`, once the
-command has exited 0.
+With `--format ndjson` or `--plain`, the list verbs (`top`, `tree`, `by-type`,
+`stale`, `caches`), `scan --reuse` and `diff` write each row as they read it
+from the saved scan. A read that fails after rows were written (the file
+damaged, or overwritten while it is read: `index_corrupt`, exit 5) ends the rows
+there: those already written were read whole, and the row whose read failed is
+not written, nor any after it. `ndjson` then has no `end` line: the error
+envelope follows on stdout in its place. `--plain` has no trailer, so nothing on
+stdout marks the cut: the output ends with the last row read, the error goes to
+stderr, and the exit status is the only sign a script can test. The warnings
+are lost too: `ndjson` carries them only in its `end` line, and `--plain` writes
+them on stderr only after the last row. Act on streamed rows only once the `end`
+line has come, or, for `--plain`, once the command has exited 0.
 
-`tree`, `by-type`, `caches` and `diff`, and `top`, `stale` and `scan --reuse`
-in the other formats, hold their rows until the last is read, so a failed read
-writes none of them: the error envelope alone under `--json` and `ndjson`, and
-nothing on stdout under `--plain`.
+Under `--json`, and in a table, they hold their rows until the last is read,
+so a failed read writes none of them: the error envelope alone under `--json`,
+and nothing on stdout in a table.
 
 ## Deleting
 
