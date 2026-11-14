@@ -6,18 +6,24 @@
 
 use std::cell::Cell;
 use std::fs;
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
 
 use duscope_testkit::TestEnv;
 use duscope_walk::fsevents::Replay;
 use duscope_walk::{
-    Attrs, FsEventsError, FsEventsMark, ScanEvent, WalkOptions, WalkSummary, provider, walk_with,
+    Attrs, DirHandle, Entry, FsEventsError, FsEventsMark, Provider, ScanError, ScanEvent,
+    VolumeInfo, WalkOptions, WalkSummary, provider, walk_with,
 };
 use rusqlite::types::Value;
 
-use super::{Changes, Checks, Fallback, History, MAX_AGE_NS, Merged, Stop, merge, plan, sample};
+use super::{
+    Changes, Checks, Fallback, History, MAX_AGE_NS, Merged, Pruning, Stop, merge, plan, sample,
+};
 use crate::CoreError;
 use crate::arena::Arena;
 use crate::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
@@ -996,4 +1002,70 @@ fn p5_sec_04_a_merged_index_keeps_the_layout() {
     crate::check::rows_keep_the_layout(&merged).unwrap();
     let saved = super::Saved::load(&merged).unwrap();
     assert_eq!(saved.dirs.len() as u64, merged.node(0).dir_count);
+}
+
+/// The platform's provider, which reads a directory named `auto` as an
+/// automount point not yet triggered.
+struct Automounts(Box<dyn Provider>);
+
+impl Provider for Automounts {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        self.0.read_dir(dir, opts, out, errs)
+    }
+
+    fn untriggered_automount(&self, entry: &Entry) -> bool {
+        entry.name.as_bytes() == b"auto"
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.0.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.0.root(path, opts)
+    }
+}
+
+#[test]
+fn p5_walk_06_an_incremental_rescan_asks_its_provider_for_automount_points() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    file(&root.join("auto/inside"), 10);
+    file(&root.join("plain/inside"), 10);
+    let (parent, _) = full(
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        now_ns(),
+        "{}",
+    );
+    let quiet = |under: &Path| Ok(reporting(under, &[]));
+    let history = script(&quiet);
+    let checks = Checks {
+        now_ns: parent.meta().started_at + 3_600_000_000_000,
+        max_age_ns: MAX_AGE_NS,
+        tool_version: "0.0.0",
+    };
+    let planned = plan(&parent, &checks, &history).unwrap();
+    let inner = Automounts(provider(&opts()).unwrap());
+    let pruning = Pruning {
+        inner: &inner,
+        plan: &planned,
+        decisions: Mutex::default(),
+        reading: Mutex::default(),
+        grafts: Mutex::default(),
+        reads: AtomicU64::new(0),
+    };
+    // The walk asks the rescan's provider, which only the platform's under
+    // it can answer.
+    for (name, automount) in [("auto", true), ("plain", false)] {
+        let entry = pruning.root(&root.join(name), &opts()).unwrap();
+        assert_eq!(pruning.untriggered_automount(&entry), automount, "{name}");
+    }
 }

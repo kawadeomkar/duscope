@@ -1133,6 +1133,10 @@ impl Provider for Pruning<'_> {
         self.inner.skip(dir, entry, opts)
     }
 
+    fn untriggered_automount(&self, entry: &Entry) -> bool {
+        self.inner.untriggered_automount(entry)
+    }
+
     fn clones_unavailable(&self, opts: &WalkOptions) -> bool {
         self.inner.clones_unavailable(opts)
     }
