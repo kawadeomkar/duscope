@@ -91,7 +91,9 @@ than they finish meets these limits:
   `tools/list`, `server/discover` and cancellations are read and handled at once, even then.
 - A path is at most 4096 bytes; a longer one is refused with `refused_path`.
 - `duscope_scan` has 10 minutes and the other tools 30 seconds, counted from before the call's
-  arguments are checked; a call past its deadline is answered `deadline_exceeded`.
+  arguments are checked; a call past its deadline is answered `deadline_exceeded`. A scan past
+  its deadline, or cancelled (`notifications/cancelled`, which gets no answer), stops whether it
+  is reading the tree or saving the scan, and saves nothing.
 
 ## If the server stops
 

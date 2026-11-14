@@ -14,6 +14,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use duscope_core::CoreError;
@@ -95,6 +96,8 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
         fallback: None,
         source: imported.format.source(),
         full_disk_access_missing: false,
+        // An import is not stopped: Ctrl-C ends it as it would any process.
+        stop: Arc::default(),
     };
     let id = scan::scan_id(&scanned)?;
     let fresh = Source::Fresh {
