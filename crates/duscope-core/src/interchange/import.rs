@@ -379,7 +379,11 @@ impl Builder {
                     Skip::Excluded | Skip::ExcludedCache => self.excluded += 1,
                     _ => self.mounts_excluded += 1,
                 }
-                self.push(ScanEvent::Skipped { dir, reason })?;
+                self.push(ScanEvent::Skipped {
+                    dir,
+                    reason,
+                    automount: false,
+                })?;
             }
             if unreadable {
                 self.unreadable_dirs += 1;

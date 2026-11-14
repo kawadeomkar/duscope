@@ -613,6 +613,7 @@ impl TreeView for MockupView {
             flags: Flags::empty(),
             upper_bound: false,
             unreadable: false,
+            automount: false,
             files_end: if id == 0 { 0 } else { last_id },
             last_id,
         }

@@ -91,7 +91,7 @@ pub mod values {
     /// Why a directory was excluded.
     pub const EXCLUDE_REASONS: [&str; 3] = ["excluded", "excluded_cache", "skipped_containers"];
     /// A row's `flags`.
-    pub const FLAGS: [&str; 11] = [
+    pub const FLAGS: [&str; 12] = [
         "sparse",
         "compressed",
         "dataless",
@@ -103,6 +103,7 @@ pub mod values {
         "upper_bound",
         "unreadable",
         "uncharged",
+        "automount",
     ];
     /// `diff`'s `change`.
     pub const CHANGES: [&str; 5] = ["added", "removed", "grown", "shrunk", "kind_changed"];
@@ -1964,6 +1965,7 @@ mod tests {
             flags: Flags::all(),
             upper_bound: true,
             unreadable: true,
+            automount: true,
             files_end: 1,
             last_id: 1,
         };

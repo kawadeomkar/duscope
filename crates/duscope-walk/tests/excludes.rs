@@ -35,7 +35,7 @@ fn walked(
             }
             entries.push(path.to_string_lossy().into_owned());
         }
-        ScanEvent::Skipped { dir, reason } => {
+        ScanEvent::Skipped { dir, reason, .. } => {
             skipped.insert(dirs[&dir].to_string_lossy().into_owned(), reason);
         }
         _ => {}

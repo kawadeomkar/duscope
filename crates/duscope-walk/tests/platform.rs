@@ -35,12 +35,16 @@ struct Seen {
     entries: BTreeMap<PathBuf, Entry>,
     volumes: Vec<VolumeInfo>,
     skipped: BTreeMap<PathBuf, Skip>,
+    /// The directories skipped as automount points not yet triggered.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    automounts: Vec<PathBuf>,
     summary: WalkSummary,
 }
 
 fn walk_root(root: &Path, opts: &WalkOptions) -> Seen {
     let mut dirs: BTreeMap<DirId, PathBuf> = BTreeMap::new();
     let (mut paths, mut volumes, mut skipped) = (Vec::new(), Vec::new(), BTreeMap::new());
+    let mut automounts = Vec::new();
     let mut entries = BTreeMap::new();
     let summary = walk(root, opts, |event| match event {
         ScanEvent::Entry(entry) => {
@@ -56,8 +60,15 @@ fn walk_root(root: &Path, opts: &WalkOptions) -> Seen {
             entries.insert(path, entry);
         }
         ScanEvent::Volume(volume) => volumes.push(volume),
-        ScanEvent::Skipped { dir, reason } => {
+        ScanEvent::Skipped {
+            dir,
+            reason,
+            automount,
+        } => {
             skipped.insert(dirs[&dir].clone(), reason);
+            if automount {
+                automounts.push(dirs[&dir].clone());
+            }
         }
         _ => {}
     })
@@ -67,6 +78,7 @@ fn walk_root(root: &Path, opts: &WalkOptions) -> Seen {
         entries,
         volumes,
         skipped,
+        automounts,
         summary,
     }
 }
@@ -489,8 +501,10 @@ fn p5_walk_06_linux_an_untriggered_automount_is_not_entered() {
             "{flags}: the walk mounted tracefs"
         );
         // No volume row: the mount it carries is the root's, reported once.
+        // The point's event says what it is, for the mounts_excluded warning.
         assert_eq!(seen.volumes.len(), 1, "{flags}: {:?}", seen.volumes);
         assert_eq!(seen.summary.mounts_excluded, 0, "{flags}");
+        assert_eq!(seen.automounts, std::slice::from_ref(&tracing), "{flags}");
     }
     // Asked to, the walk enters it, which mounts tracefs on it.
     let opts = WalkOptions {
@@ -499,6 +513,7 @@ fn p5_walk_06_linux_an_untriggered_automount_is_not_entered() {
     };
     let seen = walk_root(&root, &opts);
     assert_eq!(seen.skipped.get(&tracing), None);
+    assert!(seen.automounts.is_empty());
     assert_eq!(mounted_at(&tracing), ["tracefs"]);
     assert!(
         seen.paths.iter().any(|p| p.parent() == Some(&tracing)),
@@ -590,6 +605,7 @@ fn p5_walk_06_linux_a_systemd_automount_is_not_triggered() {
                 .flags
                 .contains(duscope_walk::Flags::MOUNT_ROOT)
         );
+        assert!(seen.automounts.is_empty(), "{flags}: it has a volume row");
         let volume = seen
             .volumes
             .iter()

@@ -231,7 +231,7 @@ fn p2_idx_06_a_file_holding_the_two_dropped_indexes_answers_alike() {
     let file = write(&env.tmp_dir(), 1_700_000_000_000_000_000);
     let older = changed(
         &file,
-        "seven.db",
+        "eight.db",
         "CREATE INDEX dirs_cum_allocated ON dirs (cum_allocated DESC); \
          CREATE INDEX files_mtime ON files (mtime);",
     );
@@ -245,9 +245,9 @@ fn p2_idx_06_a_file_holding_the_two_dropped_indexes_answers_alike() {
             )
             .unwrap()
     };
-    assert_eq!((indexes(&file), indexes(&older)), (5, 7));
-    let with_five = Index::open(&file).unwrap();
-    let with_seven = Index::open(&older).unwrap();
+    assert_eq!((indexes(&file), indexes(&older)), (6, 8));
+    let with_six = Index::open(&file).unwrap();
+    let with_eight = Index::open(&older).unwrap();
     let tops = |index: &Index| {
         (
             query::top(index, &TopQuery::default()),
@@ -260,7 +260,7 @@ fn p2_idx_06_a_file_holding_the_two_dropped_indexes_answers_alike() {
             ),
         )
     };
-    assert_eq!(tops(&with_seven), tops(&with_five));
+    assert_eq!(tops(&with_eight), tops(&with_six));
     let stale = |index: &Index| {
         query::stale(
             index,
@@ -272,8 +272,8 @@ fn p2_idx_06_a_file_holding_the_two_dropped_indexes_answers_alike() {
         )
         .unwrap()
     };
-    assert_eq!(stale(&with_seven), stale(&with_five));
-    assert!(!stale(&with_five).entries.is_empty());
+    assert_eq!(stale(&with_eight), stale(&with_six));
+    assert!(!stale(&with_six).entries.is_empty());
     let classes = Classes::vendored();
     let by_type = |index: &Index| {
         query::by_type(
@@ -289,9 +289,9 @@ fn p2_idx_06_a_file_holding_the_two_dropped_indexes_answers_alike() {
             },
         )
     };
-    assert_eq!(by_type(&with_seven), by_type(&with_five));
-    assert!(with_five.failure().is_none(), "{:?}", with_five.failure());
-    assert!(with_seven.failure().is_none(), "{:?}", with_seven.failure());
+    assert_eq!(by_type(&with_eight), by_type(&with_six));
+    assert!(with_six.failure().is_none(), "{:?}", with_six.failure());
+    assert!(with_eight.failure().is_none(), "{:?}", with_eight.failure());
 }
 
 #[test]

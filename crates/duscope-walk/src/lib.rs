@@ -166,7 +166,8 @@ pub trait Provider: Send + Sync {
     /// Whether `entry`, a directory just read, is an automount point not yet
     /// triggered: it still carries its parent's mount, and opening it would
     /// mount another filesystem on it. The walk enters one only under
-    /// `--include-network` without `-x`, and reads no mount table for it. A
+    /// `--include-network` without `-x`, reads no mount table for it, and
+    /// marks the [`ScanEvent::Skipped`] of one it does not enter. A
     /// provider that wraps another forwards it. The default: never.
     fn untriggered_automount(&self, entry: &Entry) -> bool {
         let _ = entry;
@@ -1135,8 +1136,9 @@ struct Batch {
     excluded: u64,
     /// Volumes first met among `entries`.
     volumes: Vec<VolumeInfo>,
-    /// Directories among `entries` the walk does not enter.
-    skipped: Vec<(DirId, Skip)>,
+    /// Directories among `entries` the walk does not enter, why, and
+    /// whether each is an automount point not yet triggered.
+    skipped: Vec<(DirId, Skip, bool)>,
     /// Whether this is the directory's last batch.
     closes: bool,
     /// Why the directory could not be read; only on a closing batch.
@@ -1176,8 +1178,9 @@ struct Walk<'a, P: ?Sized> {
 struct Adopted {
     /// Volumes first met.
     volumes: Vec<VolumeInfo>,
-    /// Directories listed but not entered, and why.
-    skipped: Vec<(DirId, Skip)>,
+    /// Directories listed but not entered, why, and whether each is an
+    /// automount point not yet triggered.
+    skipped: Vec<(DirId, Skip, bool)>,
     /// Names that vanished after they were listed.
     vanished: Vec<NameRef>,
     /// Entries left out or not entered by the excludes.
@@ -1352,8 +1355,12 @@ fn deliver(batch: Batch, summary: &mut WalkSummary, sink: &mut impl FnMut(ScanEv
         sink(ScanEvent::Volume(volume));
     }
     summary.skipped_dirs += batch.skipped.len() as u64;
-    for (dir, reason) in batch.skipped {
-        sink(ScanEvent::Skipped { dir, reason });
+    for (dir, reason, automount) in batch.skipped {
+        sink(ScanEvent::Skipped {
+            dir,
+            reason,
+            automount,
+        });
         sink(ScanEvent::DirClosed { dir, errno: None });
     }
     if batch.closes {
@@ -1769,7 +1776,13 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
                 }
                 drop(path);
                 if let Some(reason) = skip {
-                    adopted.skipped.push((id, reason));
+                    // An automount point not entered for a mount's reason
+                    // has no volume to report it: its event says what it is.
+                    let automount = matches!(
+                        reason,
+                        Skip::Network | Skip::OneFileSystem | Skip::BindCycle
+                    ) && self.provider.untriggered_automount(entry);
+                    adopted.skipped.push((id, reason, automount));
                     continue;
                 }
                 let parent_fd = if target.is_none() {

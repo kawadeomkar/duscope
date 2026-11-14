@@ -101,8 +101,11 @@ which `scan.excluded` names instead; `firmlinked` marks, on macOS, the way into
 the Data volume a scan does not take (its mount point, or its firmlinks), left
 out so that nothing counts twice.
 
-On Linux an automount point the kernel has not mounted yet is not counted here,
-and reads as an empty directory ([limits.md](limits.md#automount-points-linux)).
+On Linux `count` also takes in each automount point the kernel had not mounted
+yet, which the scan listed and did not enter, since entering it would have
+mounted it ([limits.md](limits.md#automount-points-linux)). Such a point has no
+row in `scan.volumes`; the message counts it apart, and its row carries the
+flag `automount`. The same flags enter it: `--include-network`, without `-x`.
 
 What to do: nothing, when the volume is not part of the question. Otherwise
 scan again with the flag the table gives.

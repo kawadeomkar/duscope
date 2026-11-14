@@ -314,7 +314,7 @@ fn p2_idx_07_a_sort_file_that_fails_builds_the_file_again_in_memory() {
     let files = count(&db, "SELECT count(*) FROM files");
     assert_eq!(usize::try_from(dirs + files).unwrap(), rollup.len());
     let indexes = "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND sql IS NOT NULL";
-    assert_eq!(count(&db, indexes), 5);
+    assert_eq!(count(&db, indexes), 6);
     let ok: String = db
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .unwrap();

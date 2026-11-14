@@ -59,7 +59,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::scanid::ScanId;
 use super::writer::{
-    EXCLUDED, EXCLUDED_CACHE, LATER_LINK, SKIPPED_CONTAINERS, ScanMeta, UPPER_BOUND,
+    AUTOMOUNT, EXCLUDED, EXCLUDED_CACHE, LATER_LINK, SKIPPED_CONTAINERS, ScanMeta, UPPER_BOUND,
 };
 use crate::CoreError;
 use crate::query::{Dataless, Node, TreeView, abs_path};
@@ -652,13 +652,13 @@ impl Index {
 
     /// Whether the scan read the entry `id`: not a directory it listed but
     /// kept out of (an exclude, a cache rule), could not read, or a mount
-    /// point it did not enter.
+    /// point or automount point it did not enter.
     pub fn entered(&self, id: u32) -> bool {
         let skipped = self
             .db
             .query_row(
                 "SELECT flags & ?2 != 0 OR errors IS NOT NULL FROM dirs WHERE id = ?1",
-                [id, EXCLUDED | EXCLUDED_CACHE],
+                [id, EXCLUDED | EXCLUDED_CACHE | AUTOMOUNT],
                 |row| row.get::<_, bool>(0),
             )
             .optional();
@@ -1007,6 +1007,26 @@ impl TreeView for Index {
             self.fail(&e);
             Vec::new()
         })
+    }
+
+    /// Through the partial index `dirs_automount`, whose condition the query
+    /// spells as it is.
+    fn automount_points(&self, dir: u32) -> u64 {
+        const _: () = assert!(AUTOMOUNT == 16384);
+        let last = self.node(dir).last_id;
+        self.db
+            .query_row(
+                "SELECT COUNT(*) FROM dirs WHERE id BETWEEN ?1 AND ?2 AND flags & 16384 != 0",
+                [dir, last],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_or_else(
+                |e| {
+                    self.fail(&e);
+                    0
+                },
+                unsigned,
+            )
     }
 
     /// Through the partial index `files_dataless`, whose condition the query
@@ -1393,6 +1413,7 @@ fn dir_from_row(id: u32, row: &Row<'_>, len: u32) -> rusqlite::Result<Node> {
         flags: Flags::from_bits_truncate(flags),
         upper_bound: flags & UPPER_BOUND != 0,
         unreadable: row.get(13)?,
+        automount: flags & AUTOMOUNT != 0,
         files_end,
         last_id,
     })
@@ -1439,6 +1460,7 @@ fn file_from_row(id: u32, row: &Row<'_>) -> rusqlite::Result<Node> {
         flags: Flags::from_bits_truncate(flags),
         upper_bound: false,
         unreadable: false,
+        automount: false,
         files_end: id,
         last_id: id,
     })
@@ -1601,6 +1623,7 @@ fn empty(id: u32) -> Node {
         flags: Flags::empty(),
         upper_bound: false,
         unreadable: false,
+        automount: false,
         files_end: id,
         last_id: id,
     }

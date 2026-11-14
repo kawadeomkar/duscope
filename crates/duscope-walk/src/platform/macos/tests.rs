@@ -1084,7 +1084,7 @@ fn p1_walk_07_a_scan_of_slash_counts_users_once() {
                     under_data += 1;
                 }
             }
-            ScanEvent::Skipped { dir, reason } => skipped.push((dirs[&dir].clone(), reason)),
+            ScanEvent::Skipped { dir, reason, .. } => skipped.push((dirs[&dir].clone(), reason)),
             _ => {}
         },
     )

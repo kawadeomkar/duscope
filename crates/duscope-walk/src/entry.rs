@@ -457,6 +457,12 @@ pub enum ScanEvent {
         dir: DirId,
         /// Why it was not entered.
         reason: Skip,
+        /// Whether `dir` is an automount point not yet triggered
+        /// ([`Provider::untriggered_automount`](crate::Provider::untriggered_automount)),
+        /// not entered for a mount's reason ([`Skip::Network`],
+        /// [`Skip::OneFileSystem`], [`Skip::BindCycle`]). It has no volume of
+        /// its own: no [`ScanEvent::Volume`] reports it.
+        automount: bool,
     },
 }
 

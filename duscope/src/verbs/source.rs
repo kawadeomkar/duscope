@@ -536,7 +536,8 @@ impl Source {
             } => {
                 // What a scan of the path would have met: of the volumes
                 // within it, as `scan.volumes` names them, those not entered
-                // (each mounted at or under it); the directories in it.
+                // (each mounted at or under it), and the automount points
+                // under it; the directories in it.
                 let view = self.view();
                 let volumes = index.volumes();
                 let within = volumes_within(index, &volumes, &[*base]);
@@ -545,9 +546,13 @@ impl Source {
                     .zip(&within)
                     .filter(|&(v, &kept)| kept && !v.entered)
                     .count() as u64;
+                let mounts = scan::Mounts {
+                    volumes: mounts_excluded,
+                    automount_points: view.automount_points(0),
+                };
                 let mut warnings = scan::quality_warnings(
                     self.unreadable_dirs(),
-                    mounts_excluded,
+                    mounts,
                     index.meta().vanished_count,
                 );
                 warnings.extend(scan::clones_unavailable(
