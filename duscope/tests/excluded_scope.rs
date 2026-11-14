@@ -7,13 +7,14 @@
 //! `summary`'s shares name every volume holding bytes under the path. Over
 //! MCP, where a scan rooted above a root is read at the root, a result names
 //! no path outside it but the scan's root and the mount point of the volume
-//! the root lies on.
+//! the root lies on. P5-CLI-05: `export --format gpscan` records the volume
+//! its path lies on by the same device rule.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -806,6 +807,113 @@ fn p5_cli_02_summary_shares_out_a_volume_reached_below_the_path() {
         .map(|v| v["allocated_bytes"].as_u64().unwrap())
         .sum();
     assert_eq!(shares, result["allocated_bytes"].as_u64().unwrap());
+}
+
+/// Gives each volume of [`firmlinked`]'s scan in `env` a size and a free
+/// space of its own, so that a reader can tell which it took: mount `i`
+/// holds `i` GB, `i` MB of them free.
+fn sized(env: &TestEnv, id: &str) {
+    let file = env.index_dir().join("scans").join(format!("{id}.db"));
+    Connection::open(file)
+        .unwrap()
+        .execute(
+            "UPDATE scan_volumes SET total_bytes = mnt_id * 1000000000, \
+             free_bytes = mnt_id * 1000000",
+            [],
+        )
+        .unwrap();
+}
+
+/// What `export --format gpscan` of `path` in the saved scan `id` records:
+/// its `ScanInfo`'s `volumePath`, `volumeSize` and `freeSpace`, and its top
+/// folder's name.
+fn scan_info(env: &TestEnv, id: &str, path: &Path) -> (String, u64, u64, String) {
+    let file = env.tmp_dir().join("export.gpscan");
+    let out = env
+        .cmd()
+        .args(["export", "--scan", id, "--format", "gpscan", "-o"])
+        .arg(&file)
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut xml = String::new();
+    flate2::read::GzDecoder::new(fs::File::open(&file).unwrap())
+        .read_to_string(&mut xml)
+        .unwrap();
+    let attribute = |element: &str, name: &str| -> String {
+        let at = xml.find(&format!("<{element} ")).unwrap();
+        let key = format!(" {name}=\"");
+        let start = at + xml[at..].find(&key).unwrap() + key.len();
+        let end = start + xml[start..].find('"').unwrap();
+        xml[start..end].to_owned()
+    };
+    (
+        attribute("ScanInfo", "volumePath"),
+        attribute("ScanInfo", "volumeSize").parse().unwrap(),
+        attribute("ScanInfo", "freeSpace").parse().unwrap(),
+        attribute("Folder", "name"),
+    )
+}
+
+#[test]
+fn p5_cli_05_a_gpscan_records_the_volume_its_root_lies_on() {
+    let env = TestEnv::new();
+    let (root, id) = firmlinked(&env);
+    sized(&env, &id);
+    let at = |dir: &str| {
+        if dir.is_empty() {
+            root.clone()
+        } else {
+            root.join(dir)
+        }
+    };
+    let below = |dir: &str| at(dir).strip_prefix("/").unwrap().display().to_string();
+    let path = |dir: &str| at(dir).display().to_string();
+    let system = ("/".to_owned(), 1_000_000_000, 1_000_000);
+    let data = ("/".to_owned(), 2_000_000_000, 2_000_000);
+    // Below the firmlink, and through the firmlink below sys/usr: the Data
+    // volume, by its device, though `/` is the one mount point above the
+    // path. Its mount point is on no path under it, so the volume is
+    // recorded at `/`, as a scan rooted there would record it, and the top
+    // folder is named by its path below `/`.
+    for dir in ["data/proj", "data/proj/src", "sys/usr/local"] {
+        let (volume, size, free, name) = scan_info(&env, &id, &at(dir));
+        assert_eq!((volume, size, free), data, "{dir}");
+        assert_eq!(name, below(dir), "{dir}");
+    }
+    // On the System volume.
+    for dir in ["", "sys", "sys/usr/bin"] {
+        let (volume, size, free, name) = scan_info(&env, &id, &at(dir));
+        assert_eq!((volume, size, free), system, "{dir}");
+        assert_eq!(name, below(dir), "{dir}");
+    }
+    // At a mount point: its own volume, a mount the scan did not enter, and
+    // the bind mount of the Data volume beside it, each at its mount point.
+    let nas = scan_info(&env, &id, &at("data/proj/nas"));
+    assert_eq!(
+        nas,
+        (
+            path("data/proj/nas"),
+            3_000_000_000,
+            3_000_000,
+            "nas".to_owned()
+        )
+    );
+    let bound = scan_info(&env, &id, &at("data/loop"));
+    assert_eq!(
+        bound,
+        (
+            path("data/loop"),
+            4_000_000_000,
+            4_000_000,
+            "loop".to_owned()
+        )
+    );
 }
 
 /// The lines of a gitignore file that leaves out every entry of `/` but
