@@ -13,7 +13,7 @@ use duscope_core::query::{
 use duscope_core::resolve::{resolve_in_index, resolve_path};
 
 use super::next::Hints;
-use super::source::{core_failure, saved_block, scanned};
+use super::source::{self, LISTED_EXCLUDED, core_failure, read_block, scanned};
 use super::{Exit, Failure};
 use crate::cli::{self, DiffArgs};
 use crate::out::{Format, Output, thousands};
@@ -88,6 +88,10 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         filters.push(format!("--under={}", path.display()));
     }
     let returned_count = page.entries.len() as u64;
+    let block = read_block(&new, &[new_base], size, Some(LISTED_EXCLUDED));
+    let warnings = source::excluded_truncated(&block, Some(&path))
+        .into_iter()
+        .collect();
     let ids = (
         query::short_id(&dir, &totals.old_scan),
         query::short_id(&dir, &totals.new_scan),
@@ -97,7 +101,7 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         ok: true,
         schema_version: SCHEMA_VERSION,
         tool: Tool::CURRENT,
-        scan: saved_block(&new, size),
+        scan: block,
         query: QueryBlock {
             command: "diff",
             path,
@@ -111,7 +115,7 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         total_count: page.total_count,
         truncated: page.truncated,
         next_cursor: None,
-        warnings: Vec::new(),
+        warnings,
         next: Vec::new(),
     };
     envelope.next = next(&envelope, new.file());

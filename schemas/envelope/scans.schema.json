@@ -251,7 +251,8 @@
                 "spilled",
                 "deprecated_flag",
                 "tz_unavailable",
-                "changed_since_scan"
+                "changed_since_scan",
+                "excluded_truncated"
               ]
             },
             {

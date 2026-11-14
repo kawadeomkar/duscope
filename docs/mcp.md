@@ -20,6 +20,10 @@ directories the client may reach, and it can be given several:
   the roots, so a link inside a root that leads out of it is refused too.
 - A saved scan of a directory under a root is visible as it is; one of a
   directory above a root is read at that root; any other is invisible.
+- A result read at a path names the excluded directories (`scan.excluded`) and
+  the volumes (`scan.volumes`) within that path alone, so a scan read at a root
+  names none outside it; the scan's root, above the root, and its totals stay
+  whole.
 
 ## Register it
 

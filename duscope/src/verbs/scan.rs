@@ -140,13 +140,20 @@ pub fn size_kind(args: &WalkArgs) -> SizeKind {
     }
 }
 
-/// The scan block: the root, the scan's options, times and totals, and
-/// the volumes it met.
-pub fn scan_block(scanned: &Scanned, walk_args: &WalkArgs, size: SizeKind) -> ScanBlock {
+/// The scan block: the root, the scan's options, times and totals, the
+/// volumes it met, and the directories the excludes kept it out of, the
+/// first `listed` of them when set (a list verb's).
+pub fn scan_block(
+    scanned: &Scanned,
+    walk_args: &WalkArgs,
+    size: SizeKind,
+    listed: Option<usize>,
+) -> ScanBlock {
     let arena = &scanned.arena;
     let summary = &scanned.summary;
     let view = scanned.view();
     let root = view.node(0);
+    let (excluded, excluded_unlisted) = excluded(arena, view.root_path(), listed);
     ScanBlock {
         id: None,
         root: view.root_path().to_string_lossy().into_owned(),
@@ -187,12 +194,15 @@ pub fn scan_block(scanned: &Scanned, walk_args: &WalkArgs, size: SizeKind) -> Sc
             })
             .collect(),
         excluded_count: summary.excluded,
-        excluded: excluded(arena, view.root_path()),
+        excluded,
+        excluded_unlisted,
     }
 }
 
-/// The directories the excludes kept the scan out of, path bytewise.
-fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
+/// The directories the excludes kept the scan out of, path bytewise: the
+/// first `listed` in the scan's order when set, as a saved scan's ids order
+/// them (pre-order, siblings bytewise), and how many that leaves out.
+fn excluded(arena: &Arena, root: &Path, listed: Option<usize>) -> (Vec<ExcludedEntry>, u64) {
     let skipped: Vec<(DirId, &'static str)> = arena
         .skipped()
         .iter()
@@ -205,14 +215,16 @@ fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
         .map(|(&dir, reason)| (dir, reason.as_str()))
         .collect();
     if skipped.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     // Each directory's name and parent, to spell the paths.
     let dirs: HashMap<DirId, (&[u8], DirId)> = arena
         .entries()
         .filter_map(|view| view.dir.map(|dir| (dir, (view.name, view.parent))))
         .collect();
-    let path_of = |dir: DirId| {
+    // Each directory's names below the root, outermost first: compared as
+    // lists, they order the directories as the index numbers them.
+    let names_of = |dir: DirId| {
         let mut names = Vec::new();
         let mut at = dir;
         while at != DirId::ROOT {
@@ -220,8 +232,12 @@ fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
             names.push(name);
             at = parent;
         }
+        names.reverse();
+        names
+    };
+    let path_of = |names: &[&[u8]]| {
         let mut path = root.as_os_str().as_bytes().to_vec();
-        for name in names.iter().rev() {
+        for name in names {
             if path.last() != Some(&b'/') {
                 path.push(b'/');
             }
@@ -229,17 +245,26 @@ fn excluded(arena: &Arena, root: &Path) -> Vec<ExcludedEntry> {
         }
         path
     };
-    let mut rows: Vec<(Vec<u8>, &'static str)> = skipped
+    let mut ordered: Vec<(Vec<&[u8]>, &'static str)> = skipped
         .into_iter()
-        .map(|(dir, reason)| (path_of(dir), reason))
+        .map(|(dir, reason)| (names_of(dir), reason))
+        .collect();
+    ordered.sort();
+    let shown = listed.map_or(ordered.len(), |cap| cap.min(ordered.len()));
+    let unlisted = (ordered.len() - shown) as u64;
+    let mut rows: Vec<(Vec<u8>, &'static str)> = ordered[..shown]
+        .iter()
+        .map(|(names, reason)| (path_of(names), *reason))
         .collect();
     rows.sort();
-    rows.into_iter()
+    let rows = rows
+        .into_iter()
         .map(|(path, reason)| ExcludedEntry {
             path: String::from_utf8_lossy(&path).into_owned(),
             reason,
         })
-        .collect()
+        .collect();
+    (rows, unlisted)
 }
 
 /// The id a saved scan will have, chosen before its output is written so the
@@ -1260,7 +1285,8 @@ mod tests {
         let rollup = roll_up(&mut arena);
         // What a scan run now says.
         assert_eq!(
-            excluded(&arena, Path::new("/"))
+            excluded(&arena, Path::new("/"), None)
+                .0
                 .iter()
                 .map(|row| row.path.as_str())
                 .collect::<Vec<_>>(),
@@ -1318,7 +1344,8 @@ mod tests {
             panic!("not scan");
         };
         let block = |scanned: &Scanned| {
-            serde_json::to_value(scan_block(scanned, &args.walk, SizeKind::Allocated)).unwrap()
+            serde_json::to_value(scan_block(scanned, &args.walk, SizeKind::Allocated, None))
+                .unwrap()
         };
         assert_eq!(block(&scanned(true))["fs_type"], "mem");
         assert_eq!(block(&scanned(false))["fs_type"], serde_json::Value::Null);

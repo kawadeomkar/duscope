@@ -27,7 +27,7 @@ use duscope_walk::WalkSummary;
 use super::next;
 use super::query::top_envelope;
 use super::scan::{self, Scanned};
-use super::source::{Source, core_failure};
+use super::source::{Source, core_failure, saved_as};
 use super::{Exit, Failure};
 use crate::cli::{AttrsArg, ImportArgs, WalkArgs};
 use crate::out::{FormatArg, Output};
@@ -103,7 +103,7 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
     };
     let (mut envelope, footer, fresh) =
         top_envelope(fresh, &walk, None, "import", false, true, None, output)?;
-    envelope.scan.id = Some(id.to_string());
+    saved_as(&mut envelope, id.to_string());
     let file = index_path(&dir, &id);
     envelope.next = next::list(&envelope, Some(&file), None);
     let footer = format!(

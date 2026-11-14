@@ -25,8 +25,8 @@ pub fn run(args: &SqlArgs, index_dir: Option<&Path>, output: &Output) -> Result<
         .map_or(sql::DEFAULT_TIMEOUT, Duration::from_secs);
     let source = source::source(&args.walk, &args.index, index_dir)?;
     let size = scan::size_kind(&args.walk);
-    let block = source.scan_block(&args.walk, size);
-    let warnings = source.warnings(&args.walk);
+    let block = source.scan_block(&args.walk, size, Some(source::LISTED_EXCLUDED));
+    let mut warnings = source.warnings(&args.walk);
     // A statement reads an index file: a scan run for the verb is saved
     // first, where it is kept, or to a directory removed afterwards.
     let indexed = source.indexed("query", &args.walk, &[], output)?;
@@ -39,6 +39,7 @@ pub fn run(args: &SqlArgs, index_dir: Option<&Path>, output: &Output) -> Result<
     };
     let answer = query::sql(index, &q);
     let path = String::from_utf8_lossy(&abs_path(index, root_id)).into_owned();
+    warnings.extend(source::excluded_truncated(&block, Some(&path)));
     let checked = check(index);
     let result = answer.map_err(core_failure)?;
     checked?;

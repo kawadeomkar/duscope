@@ -19,7 +19,9 @@ use duscope_core::query::{
 use duscope_core::resolve::resolve_path;
 
 use super::next::Hints;
-use super::source::{Lookup, core_failure, saved_block, stale_index};
+use super::source::{
+    LISTED_EXCLUDED, Lookup, core_failure, excluded_truncated, read_block, stale_index,
+};
 use super::{Exit, Failure, scan};
 use crate::cli::ExplainArgs;
 use crate::out::{Output, thousands};
@@ -76,7 +78,9 @@ pub fn run(args: &ExplainArgs, index_dir: Option<&Path>, output: &Output) -> Res
         };
         let file = r.index.file().to_owned();
         (
-            Some(saved_block(&r.index, size)),
+            // Every excluded directory under the path: an answer of one
+            // object lists them all.
+            Some(read_block(&r.index, &[r.base], size, None)),
             Some(file),
             facts,
             warnings,
@@ -332,7 +336,10 @@ fn errors(index: &Index, output: &Output) -> Result<(), Failure> {
         })
         .collect();
     entries.sort_by(|a, b| a.path_bytes.cmp(&b.path_bytes));
-    let block = saved_block(index, SizeKind::Allocated);
+    let block = read_block(index, &[0], SizeKind::Allocated, Some(LISTED_EXCLUDED));
+    let warnings = excluded_truncated(&block, Some(&block.root))
+        .into_iter()
+        .collect();
     let count = entries.len() as u64;
     let footer = format!(
         "{} unreadable · saved scan {}",
@@ -357,7 +364,7 @@ fn errors(index: &Index, output: &Output) -> Result<(), Failure> {
         total_count: count,
         truncated: false,
         next_cursor: None,
-        warnings: Vec::new(),
+        warnings,
         next: Vec::new(),
     };
     output.list(&envelope, &footer)

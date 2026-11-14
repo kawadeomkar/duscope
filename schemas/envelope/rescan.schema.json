@@ -109,14 +109,14 @@
           "type": "integer"
         },
         "excluded": {
-          "description": "Each directory the excludes kept the scan out of, path bytewise.",
+          "description": "The directories the excludes kept the scan out of within the path\nread (at the scan's root, every one), path bytewise. A list verb's\nenvelope names the first 20 of them in the scan's order (pre-order,\nsiblings bytewise), and the warning `excluded_truncated` counts the\nothers; `summary` and `explain` name every one.",
           "items": {
             "$ref": "#/$defs/ExcludedEntry"
           },
           "type": "array"
         },
         "excluded_count": {
-          "description": "Files left out and directories not entered by the excludes\n(`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`,\n`--skip-containers`). An incremental rescan counts the files as the\nscan it renews counted them.",
+          "description": "Files left out and directories not entered by the excludes\n(`--exclude`, `--exclude-from`, `--ignore-from`, `--exclude-caches`,\n`--skip-containers`), in the whole scan. An incremental rescan counts\nthe files as the scan it renews counted them.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -246,7 +246,7 @@
           "type": "integer"
         },
         "volumes": {
-          "description": "Every volume the scan met, entered or not.",
+          "description": "The volumes the scan met within the path read, entered or not: the\none the path lies on, and those mounted at or under it; at the scan's\nroot, every one.",
           "items": {
             "$ref": "#/$defs/VolumeEntry"
           },
@@ -516,7 +516,8 @@
                 "spilled",
                 "deprecated_flag",
                 "tz_unavailable",
-                "changed_since_scan"
+                "changed_since_scan",
+                "excluded_truncated"
               ]
             },
             {

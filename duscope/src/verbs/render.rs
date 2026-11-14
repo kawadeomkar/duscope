@@ -40,7 +40,7 @@ pub fn run(
     let source = source::source(&args.walk, &args.index, index_dir)?;
     let warnings = source.warnings(&args.walk);
     let size = scan::size_kind(&args.walk);
-    let block = source.scan_block(&args.walk, size);
+    let block = source.scan_block(&args.walk, size, Some(source::LISTED_EXCLUDED));
     let summary = source.footer(&block, output);
     let view = source.view();
     let opts = PictureOpts {

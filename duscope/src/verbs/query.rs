@@ -107,7 +107,9 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         };
         let (mut envelope, footer, fresh) =
             top_envelope(fresh, &args.walk, None, "scan", false, true, None, output)?;
-        envelope.scan.id = id.as_ref().map(ToString::to_string);
+        if let Some(id) = &id {
+            source::saved_as(&mut envelope, id.to_string());
+        }
         let file = id.as_ref().and_then(|id| {
             index_dir
                 .map(Path::to_owned)
@@ -1004,7 +1006,7 @@ fn envelope<T: Hinted>(
         warnings: flag_warnings,
         ..
     } = prepared;
-    let block = source.scan_block(walk, size);
+    let block = source.scan_block(walk, size, Some(source::LISTED_EXCLUDED));
     let footer = source.footer(&block, output);
     let mut warnings = source.warnings(walk);
     warnings.extend(flag_warnings);
@@ -1027,6 +1029,7 @@ fn envelope<T: Hinted>(
     // The path the rows are under: the scan's root, or the path inside a
     // saved scan's root.
     let path = source.view().root_path().to_string_lossy().into_owned();
+    warnings.extend(source::excluded_truncated(&block, Some(&path)));
     let mut envelope = Envelope {
         ok: true,
         schema_version: SCHEMA_VERSION,
