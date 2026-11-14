@@ -356,9 +356,12 @@ impl Ranked for StaleRows {
 
 /// Writes a verb's ranked `rows` and gives the source back. With `stream`
 /// (a format that [`Output::streams`]), each row is built as it is written
-/// and none is held, the saved scan checked before the first and after the
-/// last; otherwise every row is built first, as the envelope's entries
-/// (which the hints read), and the scan checked before they are written.
+/// and none is held: the saved scan is checked before the first row, and
+/// each row once built ([`Source::failed`]). A row built from a failed read
+/// is empty, as is every row after it, so the rows end before it, and the
+/// failure is returned (`ndjson` has no trailer). Otherwise every row is
+/// built first, as the envelope's entries (which the hints read), and the
+/// scan checked before they are written.
 // The parts of an envelope, each from where the verb has it.
 #[allow(clippy::too_many_arguments)]
 fn write_ranked<R: Ranked>(
@@ -388,7 +391,11 @@ fn write_ranked<R: Ranked>(
     envelope.returned_count = rows.ids().len() as u64;
     source.check()?;
     let view = source.view();
-    let built = rows.ids().iter().map(|&id| rows.row(&*view, id));
+    let built = rows
+        .ids()
+        .iter()
+        .map(|&id| rows.row(&*view, id))
+        .take_while(|_| !source.failed());
     output.list_rows(&envelope, built, || source.check(), &footer)?;
     drop(view);
     Ok(source)

@@ -1007,10 +1007,11 @@ impl Output {
     /// per row, the trailer) or `--plain`, each row cut to `--fields`
     /// alone. `envelope` gives the header and the trailer; its entries are
     /// not read. `settle` answers for the rows once the last is written
-    /// (a saved scan's read that failed while they were built): its
+    /// (a saved scan's read that failed while they were built, which the
+    /// caller ends `rows` at, before the first row built from it): its
     /// failure ends the output there, without `ndjson`'s trailer, and is
     /// returned. In another format the rows are collected and written as
-    /// [`Output::list`] writes them.
+    /// [`Output::list`] writes them, unless `settle` fails first.
     pub fn list_rows<T: Row>(
         &self,
         envelope: &Envelope<T>,
