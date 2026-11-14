@@ -1,7 +1,7 @@
 //! P0-TEST-03: the testkit's `hdiutil` helper tries a `detach` six times
 //! over about half a minute, so a disk busy for longer than the first few
 //! seconds is detached all the same, and a `detach` that still fails says
-//! what holds the image open.
+//! what holds the image open and what state the disks are in.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![cfg(target_os = "macos")]
@@ -9,10 +9,23 @@
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use duscope_testkit::TestEnv;
+
+/// One of the two tests at a time. The testkit runs one `hdiutil` at a time,
+/// so while the other test tried its detach for half a minute, this one's six
+/// seconds would pass waiting for its own first try, which would then
+/// succeed: the tries it exists to make would not be made.
+static TURN: Mutex<()> = Mutex::new(());
+
+/// This test's turn, held until it returns; a test that panicked in its own
+/// turn does not end the other's.
+fn turn() -> MutexGuard<'static, ()> {
+    TURN.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// An image attached without Finder at a mount point under the test's
 /// temporary directory, with a file on it: the mount point and the file.
@@ -51,6 +64,7 @@ fn platform() -> bool {
 #[test]
 #[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
 fn p0_test_03_macos_a_detach_busy_for_six_seconds_succeeds() {
+    let _turn = turn();
     let env = TestEnv::new();
     if !platform() {
         return;
@@ -78,10 +92,14 @@ fn p0_test_03_macos_a_detach_busy_for_six_seconds_succeeds() {
 
 /// A file held open on the volume throughout and no `-force`: every try is
 /// "Resource busy", six of them, and the message names this process as
-/// what holds the volume, as `lsof` lists it.
+/// what holds the volume, as `lsof` lists it, then gives the disks' state:
+/// the images attached, the volumes mounted, the image's whole disk, the
+/// processes at work on disks, and `diskutil eject` naming this process as
+/// the one that refuses the eject.
 #[test]
 #[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
 fn p0_test_03_macos_a_detach_that_stays_busy_names_what_holds_it() {
+    let _turn = turn();
     let env = TestEnv::new();
     if !platform() {
         return;
@@ -96,6 +114,8 @@ fn p0_test_03_macos_a_detach_that_stays_busy_names_what_holds_it() {
         .downcast::<String>()
         .unwrap();
     let pid = format!(" {} ", std::process::id());
+    let dissenter = format!("dissented by PID {} ", std::process::id());
+    let mounted = format!(" on {} (", mount.display());
     for each in [
         "failed 6 times",
         "try 6 on /dev/disk",
@@ -103,6 +123,16 @@ fn p0_test_03_macos_a_detach_that_stays_busy_names_what_holds_it() {
         "held open, as lsof lists /dev/disk",
         pid.as_str(),
         "/held",
+        "\n--- hdiutil info:\n",
+        "image-path",
+        "\n--- mount:\n",
+        mounted.as_str(),
+        "\n--- diskutil info:\n",
+        "Device Node:",
+        "\n--- processes at work on disks:\n",
+        "diskarbitrationd",
+        "\n--- diskutil eject:\n",
+        dissenter.as_str(),
     ] {
         assert!(message.contains(each), "{each:?} not in: {message}");
     }

@@ -36,10 +36,12 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, Permissions};
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 pub use mktree::{CaseRecord, Plan, Record, Status};
 use mktree::{Manifest, OutDir};
@@ -342,6 +344,81 @@ pub fn replace_values(text: &mut String, key: &str, end: char, placeholder: &str
 /// six tries over 30 seconds, for a disk still busy after the first few.
 const DETACH_WAITS: [u64; 5] = [1, 2, 4, 8, 15];
 
+/// Held through every [`TestEnv::hdiutil`] call, so that a test binary, whose
+/// tests run on threads of one process, creates, attaches and detaches one
+/// image at a time.
+static HDIUTIL: Mutex<()> = Mutex::new(());
+
+/// The lines a failed `detach` keeps of each part of the disks' state, the
+/// last ones.
+const STATE_LINES: usize = 100;
+
+/// The processes a failed `detach` lists, by the start of their program's
+/// name: those that attach images, arbitrate disks, check volumes and index
+/// them.
+const DISK_WORKERS: [&str; 6] = [
+    "hdiutil",
+    "diskimages",
+    "diskarbitrationd",
+    "fsck",
+    "mds",
+    "mdworker",
+];
+
+/// What `cmd` prints on stdout and stderr when it ends within `limit`; it is
+/// killed after that, and its output given up. The error says why there is
+/// no output.
+fn output_within(mut cmd: Command, limit: Duration) -> Result<String, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run: {e}"))?;
+    // Read on threads of their own, so a full pipe cannot stop the program,
+    // and left behind if it is killed: a child of its own may keep a pipe open.
+    let readers = [
+        child
+            .stdout
+            .take()
+            .map(|out| Box::new(out) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|err| Box::new(err) as Box<dyn Read + Send>),
+    ]
+    .map(|pipe| {
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut text);
+            }
+            text
+        })
+    });
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("killed after {} s", limit.as_secs()));
+            }
+            Err(e) => return Err(format!("could not be waited for: {e}")),
+        }
+    }
+    let mut text = String::new();
+    for reader in readers {
+        let out = reader.join().unwrap_or_default();
+        text.push_str(&String::from_utf8_lossy(&out));
+    }
+    Ok(text)
+}
+
 /// A test's private environment. Dropping it removes its temporary
 /// directory (restoring permissions first) and releases the fixture tree.
 #[derive(Debug)]
@@ -535,13 +612,22 @@ impl TestEnv {
     /// try of a `detach -force` over four seconds has met "couldn't eject ... -
     /// Resource busy". So a `detach` is tried six times over about half a
     /// minute (`DETACH_WAITS`), and one that still fails says what `lsof`
-    /// finds holding the image's `/dev` nodes and mount points open.
+    /// finds holding the image's `/dev` nodes and mount points open, and the
+    /// state of the disks then.
+    ///
+    /// Six tries have not outlasted the hold either, and in those failures
+    /// `lsof`, run as root, named nothing holding the image: the hold is on
+    /// the disk, not a file. Every failure was in a test binary attaching
+    /// images in tests running at once, so every call holds one lock
+    /// (`HDIUTIL`) and a binary's images are made, attached and detached one
+    /// at a time.
     ///
     /// # Panics
     ///
     /// When every try fails, with each try's output, and for a `detach` what
     /// holds the image.
     pub fn hdiutil(&self, args: &[&dyn AsRef<OsStr>]) {
+        let _one = HDIUTIL.lock().unwrap_or_else(PoisonError::into_inner);
         let shown: Vec<String> = args
             .iter()
             .map(|a| a.as_ref().to_string_lossy().into_owned())
@@ -605,7 +691,9 @@ impl TestEnv {
             }
         }
         let held = match &detaching {
-            Some(Some(Some((_, places)))) => self.holders(places),
+            Some(Some(Some((_, places)))) => {
+                format!("{}{}", self.holders(places), self.disk_state(places))
+            }
             _ => String::new(),
         };
         panic!(
@@ -621,22 +709,74 @@ impl TestEnv {
     /// as the last lines of a failed `detach`'s message.
     fn holders(&self, places: &[PathBuf]) -> String {
         let shown: Vec<String> = places.iter().map(|p| p.display().to_string()).collect();
-        match self
-            .command("lsof")
-            .args(["-n", "-P", "-w"])
-            .args(places)
-            .output()
-        {
-            Err(e) => format!("\nlsof could not run: {e}"),
-            Ok(out) if out.stdout.iter().all(u8::is_ascii_whitespace) => {
+        let mut lsof = self.command("lsof");
+        lsof.args(["-n", "-P", "-w"]).args(places);
+        match output_within(lsof, Duration::from_secs(20)) {
+            Err(e) => format!("\nlsof {e}"),
+            Ok(out) if out.trim().is_empty() => {
                 format!("\nlsof lists nothing holding {} open", shown.join(" "))
             }
             Ok(out) => format!(
                 "\nheld open, as lsof lists {}:\n{}",
                 shown.join(" "),
-                String::from_utf8_lossy(&out.stdout).trim_end()
+                out.trim_end()
             ),
         }
+    }
+
+    /// The disks' state when a `detach` of the image at `places` (its whole
+    /// disk first) has failed every try: the images attached, the volumes
+    /// mounted, the whole disk as `diskutil` reads it, the processes at work
+    /// on disks ([`DISK_WORKERS`]), and what `diskutil eject` of the whole
+    /// disk answers. Each part is cut short after its time limit.
+    fn disk_state(&self, places: &[PathBuf]) -> String {
+        let mut info = self.command("hdiutil");
+        info.arg("info");
+        let mut parts = vec![
+            ("hdiutil info", info, None),
+            ("mount", self.command("mount"), None),
+        ];
+        if let Some(disk) = places.first() {
+            let mut diskutil = self.command("diskutil");
+            diskutil.arg("info").arg(disk);
+            parts.push(("diskutil info", diskutil, None));
+        }
+        let mut ps = self.command("ps");
+        ps.args(["-axo", "pid,ppid,etime,command"]);
+        parts.push(("processes at work on disks", ps, Some(&DISK_WORKERS[..])));
+        // Disk Arbitration's eject names the process that refuses it ("dissented
+        // by PID"), where hdiutil says "Resource busy" alone. Last, as it may
+        // eject the disk after all.
+        if let Some(disk) = places.first() {
+            let mut eject = self.command("diskutil");
+            eject.arg("eject").arg(disk);
+            parts.push(("diskutil eject", eject, None));
+        }
+        let mut state = Vec::new();
+        for (title, cmd, only) in parts {
+            let text = match output_within(cmd, Duration::from_secs(30)) {
+                Err(e) => e,
+                Ok(out) => {
+                    // `ps`'s header, and its lines whose program, the fourth
+                    // column, is one of `only`.
+                    let lines: Vec<&str> = out
+                        .lines()
+                        .enumerate()
+                        .filter(|(n, line)| {
+                            only.is_none_or(|names: &[&str]| {
+                                let program = line.split_whitespace().nth(3).unwrap_or_default();
+                                let program = program.rsplit('/').next().unwrap_or_default();
+                                *n == 0 || names.iter().any(|name| program.starts_with(name))
+                            })
+                        })
+                        .map(|(_, line)| line)
+                        .collect();
+                    lines[lines.len().saturating_sub(STATE_LINES)..].join("\n")
+                }
+            };
+            state.push(format!("\n--- {title}:\n{text}"));
+        }
+        state.concat()
     }
 
     /// The images `hdiutil info` lists: each one's `image-path`, with the
