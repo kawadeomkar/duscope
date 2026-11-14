@@ -297,6 +297,17 @@ Under `--json`, and in a table, they hold their rows until the last is read,
 so a failed read writes none of them: the error envelope alone under `--json`,
 and nothing on stdout in a table.
 
+### `scan.volumes` and a firmlink below the path (macOS)
+
+A result read at a path names the volumes within it (`scan.volumes`): the one
+the path lies on, found by the device of the directory read, and those
+mounted at or under it. A volume reached through a firmlink below the path and
+mounted elsewhere is not named: macOS's Data volume holds `/usr/local`, below
+`/usr` on the System volume, so a read of `/usr` names the System volume
+alone. Naming it would take a pass over every directory under the path, on
+every list verb. `summary` gives each volume's share of the path's bytes there
+(`result.volumes`), the Data volume's among them.
+
 ## Deleting
 
 ### A btrfs subvolume is a mount point to `clean` (Linux)
