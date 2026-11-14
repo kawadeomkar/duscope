@@ -47,8 +47,9 @@ The design is fixed by two documents; read the parts a task cites before writing
   Cargo.toml [workspace.lints]; CI runs clippy::all as errors, pedantic as warnings.
 - `#![forbid(unsafe_code)]` in every crate except duscope-walk, whose `src/platform/` modules
   (macos/, linux/, posix/) hold the only `unsafe` blocks, each with a `// SAFETY:` comment.
-- Errors: one `thiserror` enum per crate; `anyhow` only in the duscope binary; every error
-  that reaches a user maps to an exit code and an error `code` from the conventions appendix.
+- Errors: one `thiserror` enum per crate; the binary turns each into its `Failure`; every
+  error that reaches a user maps to an exit code and an error `code` from the conventions
+  appendix.
 - No `unwrap`/`expect` outside tests (`#![cfg_attr(test, allow(clippy::unwrap_used,
   clippy::expect_used))]` at each crate root); no `println!` outside duscope/src/out/
   (the only module with `#![allow(clippy::print_stdout)]`); logging via the `log` facade.
