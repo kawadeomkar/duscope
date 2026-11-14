@@ -98,7 +98,8 @@ check-full: check
 # The ignored platform tests, named here: an #[ignore]d test joins them (and CI's platform
 # job) only when it is listed. They mount filesystems, attach images and scan /, need root
 # and skip without it; CI runs each test binary under `sudo -E`. Built in release for the
-# scan of /. The system-tree du parity and the RSS budget run in nightly-bench.yml.
+# scan of /, and for the test that a release build ignores the test variables (P5-SEC-06).
+# The system-tree du parity and the RSS budget run in nightly-bench.yml.
 platform-tests:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -148,10 +149,11 @@ platform-tests:
       p5_walk_06_linux_a_skipped_automount_point_counts_in_mounts_excluded
       p5_core_10_linux_an_overlays_files_go_to_its_trash_and_its_mounts_stay
       platform::posix::unlink::tests::p5_core_10_linux_a_bound_file_is_a_mount_point_and_an_overlays_file_is_not
+      p5_sec_06_a_release_build_ignores_the_test_variables
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Twenty-three are built on Linux and twenty-two on macOS; a renamed test must not drop out unnoticed.
-    expected=$([[ $(uname -s) == Darwin ]] && echo 22 || echo 23)
+    # Twenty-four are built on Linux and twenty-three on macOS; a renamed test must not drop out unnoticed.
+    expected=$([[ $(uname -s) == Darwin ]] && echo 23 || echo 24)
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
     [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
     cargo_test -- --ignored --exact "${tests[@]}"
