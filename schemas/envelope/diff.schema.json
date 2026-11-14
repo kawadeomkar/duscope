@@ -70,6 +70,14 @@
         "path": {
           "description": "The entry's path, absolute: in the new scan, or the old one for\n`removed`.",
           "type": "string"
+        },
+        "path_raw": {
+          "description": "The path's bytes in base64, only when they are not valid UTF-8 (its\nown name's, or an ancestor's): the path to pass back.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
         }
       },
       "required": [

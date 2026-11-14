@@ -1,0 +1,9 @@
+### Added
+
+- `path_raw`: every row and object with a `path` (`top`, `tree`, `stale`, `by-type`'s
+  largest files, `caches`, `diff`, `explain`, `explain --errors`, `summary` and its
+  subvolumes, `clean`'s plan items) carries the path's bytes in base64 when they are not
+  valid UTF-8, as `name_raw` does for a name. A path under a directory whose name is not
+  UTF-8 reached JSON as lossy text that names no file; decoded, `path_raw` is the path to
+  pass back. `caches` and `caches --by-project` carry `project_root_raw` the same way. Both
+  fields are absent for a path that is UTF-8, and come last in `--fields` and `--detail`.

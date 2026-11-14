@@ -356,6 +356,14 @@
           "description": "The path, absolute, as lossy UTF-8.",
           "type": "string"
         },
+        "path_raw": {
+          "description": "The path's bytes in base64, only when they are not valid UTF-8 (its\nown name's, or an ancestor's): the path to pass back.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
+        },
         "regenerable_by": {
           "anyOf": [
             {
@@ -804,6 +812,14 @@
         "path": {
           "description": "Its path, absolute, as lossy UTF-8.",
           "type": "string"
+        },
+        "path_raw": {
+          "description": "The path's bytes in base64, only when they are not valid UTF-8 (its\nown name's, or an ancestor's): the path to pass back.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-since": "0.3"
         }
       },
       "required": [

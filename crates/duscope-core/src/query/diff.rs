@@ -17,7 +17,7 @@
 use std::cmp::Ordering;
 
 use super::{Node, Page, SizeKind, TreeView, abs_path, kind_name, remain};
-use crate::envelope::{DiffEntry, DiffTotals, name_fields};
+use crate::envelope::{DiffEntry, DiffTotals, name_fields, path_fields};
 
 /// `diff`'s default `--min-delta`: 1 MiB.
 pub const DEFAULT_MIN_DELTA: u64 = 1 << 20;
@@ -98,8 +98,9 @@ pub fn diff(
                 Side::New => (new.node(c.id), new.name(c.id).into_owned()),
             };
             let (name, name_raw) = name_fields(&name);
+            let (path, path_raw) = path_fields(&path_bytes);
             DiffEntry {
-                path: String::from_utf8_lossy(&path_bytes).into_owned(),
+                path,
                 path_bytes,
                 name,
                 name_raw,
@@ -109,6 +110,7 @@ pub fn diff(
                 new_bytes: c.new_bytes,
                 delta_bytes: i64::try_from(c.delta()).unwrap_or(i64::MAX),
                 collapsed_count: c.collapsed,
+                path_raw,
             }
         })
         .collect();
