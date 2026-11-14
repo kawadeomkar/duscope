@@ -530,3 +530,47 @@ fn p5_walk_01_linux_keeps_no_fsevents_history() {
     // No check failed: a rescan here is a full scan without a reason.
     assert_eq!(error.fallback(), None);
 }
+
+/// P5-CORE-10: `clean`'s mount points on the test's own entries and on
+/// `/proc`, whatever the kernel answers: with `statx`'s mount-root
+/// attribute, with neither it nor file handles (the mount table), and with
+/// nothing at all, where the device decides.
+#[test]
+fn p5_core_10_linux_a_plain_entry_is_no_mount_point_and_proc_is_one() {
+    use crate::platform::posix::unlink::hook;
+
+    let env = TestEnv::new();
+    let dir = fs::canonicalize(env.tmp_dir()).unwrap();
+    fs::create_dir(dir.join("sub")).unwrap();
+    fs::write(dir.join("file"), b"x").unwrap();
+    let kernels = [
+        hook::Kernel::default(),
+        hook::Kernel {
+            no_mount_root: true,
+            no_handles: true,
+            ..hook::Kernel::default()
+        },
+        hook::Kernel {
+            no_mount_root: true,
+            no_handles: true,
+            no_mount_table: true,
+            ..hook::Kernel::default()
+        },
+    ];
+    for kernel in kernels {
+        let _kernel = hook::as_kernel(kernel);
+        for (path, expected) in [
+            (dir.join("sub"), false),
+            (dir.join("file"), false),
+            (PathBuf::from("/proc"), true),
+        ] {
+            let meta = fs::symlink_metadata(&path).unwrap();
+            assert_eq!(
+                super::mount_point(&path, &meta),
+                expected,
+                "{kernel:?}: {}",
+                path.display()
+            );
+        }
+    }
+}

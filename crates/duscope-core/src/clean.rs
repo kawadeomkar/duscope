@@ -48,6 +48,13 @@
 //! (`--yes`, the prompt) is the binary's to decide, which calls
 //! [`clean_execute`] only then.
 //!
+//! A mount point is what [`duscope_walk::is_mount_point`] says is one. On
+//! Linux that is a directory on another device than its parent, or the
+//! root of a mount (a file bind mount too), and a file on another device
+//! than its directory only where the system cannot tell whether it is a
+//! mount's root: overlayfs reports the files of a merged directory on the
+//! devices of the layers under it.
+//!
 //! A plan's [`Method`] is the Trash or `--permanent`. [`clean_execute`]
 //! moves each item to the Trash through `duscope-walk`, after checking that
 //! what is at its path is still what the plan saw (its device and inode),
@@ -924,10 +931,6 @@ fn refusal(
     if meta.file_type().is_symlink() {
         return Some("symlink");
     }
-    let parent_dev = path
-        .parent()
-        .and_then(|parent| std::fs::metadata(parent).ok())
-        .map(|parent| parent.dev());
     let flags: u32 = match id {
         Some(id) if index.node(id).is_dir() => index
             .db()
@@ -942,7 +945,10 @@ fn refusal(
     if duscope_walk::is_firmlink(path) || flags & FIRMLINK != 0 {
         return Some("firmlink");
     }
-    if parent_dev.is_some_and(|dev| dev != meta.dev()) || flags & Flags::MOUNT_ROOT.bits() != 0 {
+    // As the system tells a mount point: on Linux a directory on another
+    // device than its parent, or the root of a mount, and not a file whose
+    // device alone is another, as overlayfs reports a merged directory's.
+    if duscope_walk::is_mount_point(path, meta) || flags & Flags::MOUNT_ROOT.bits() != 0 {
         return Some("mount_point");
     }
     if path.parent().is_none() || id == Some(0) {

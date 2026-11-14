@@ -1878,3 +1878,280 @@ fn p5_core_04_linux_a_folder_holding_a_mount_stays_out_of_the_trash() {
     assert!(!env.xdg_data_home().join("Trash/files/b").exists());
     drop(mounted);
 }
+
+/// Runs `mount` with `args`, its mount point last, and keeps the point in
+/// `mounted` to unmount it; false when it fails, the reason on stderr.
+#[cfg(target_os = "linux")]
+fn mounted_with(mounted: &mut Mounted<'_>, args: &[&str]) -> bool {
+    let out = mounted.env.command("mount").args(args).output().unwrap();
+    if !out.status.success() {
+        eprintln!("mount {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        return false;
+    }
+    mounted.points.push(PathBuf::from(args[args.len() - 1]));
+    true
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts two tmpfs layers, an overlay of them and mounts inside it; root; \
+            DUSCOPE_TEST_PLATFORM=1"]
+fn p5_core_10_linux_an_overlays_files_go_to_its_trash_and_its_mounts_stay() {
+    use std::os::unix::fs::MetadataExt;
+
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    if !is_root(&env) {
+        duscope_testkit::skip("mounting needs root");
+        return;
+    }
+    let layers = fs::canonicalize(env.tmp_dir()).unwrap().join("layers");
+    let (lower, upper) = (layers.join("lower"), layers.join("upper"));
+    for dir in [&lower, &upper] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    // Each layer on a filesystem of its own, so that without xino the
+    // overlay reports a file on its layer's device.
+    for layer in [&lower, &upper] {
+        let point = s(layer);
+        assert!(mounted_with(
+            &mut mounted,
+            &["-t", "tmpfs", "-o", "size=4m", "tmpfs", point]
+        ));
+    }
+    for dir in ["merged/dir", "volume"] {
+        fs::create_dir_all(lower.join(dir)).unwrap();
+    }
+    fs::write(lower.join("merged/lower.bin"), vec![1u8; 3000]).unwrap();
+    fs::write(lower.join("merged/dir/in.bin"), vec![7u8; 2000]).unwrap();
+    fs::write(lower.join("merged/perm.bin"), vec![8u8; 2000]).unwrap();
+    for dir in ["data/merged", "work", "volume/data", "volume/work"] {
+        fs::create_dir_all(upper.join(dir)).unwrap();
+    }
+    fs::write(upper.join("data/merged/upper.bin"), vec![2u8; 5000]).unwrap();
+    // The overlay is the test's XDG_DATA_HOME: the home Trash, which takes
+    // an item on its own filesystem, is then the overlay's, in a debug
+    // build (whose test guard moves only such items) as in a release one.
+    let overlay = env.xdg_data_home();
+    let options = format!(
+        "lowerdir={},upperdir={},workdir={},xino=off,redirect_dir=off",
+        s(&lower),
+        s(&upper.join("data")),
+        s(&upper.join("work"))
+    );
+    if !mounted_with(
+        &mut mounted,
+        &["-t", "overlay", "-o", &options, "overlay", s(&overlay)],
+    ) {
+        duscope_testkit::skip_fs("overlay", "an overlay could not be mounted");
+        return;
+    }
+    let merged = overlay.join("merged");
+    let dev = |path: &Path| fs::symlink_metadata(path).unwrap().dev();
+    // What the device rule misread: a merged directory on the overlay's
+    // device, its files on their layers'.
+    let (upper_file, lower_file) = (merged.join("upper.bin"), merged.join("lower.bin"));
+    assert_ne!(dev(&upper_file), dev(&merged));
+    assert_ne!(dev(&lower_file), dev(&merged));
+    assert_ne!(dev(&upper_file), dev(&lower_file));
+    // Real mounts in the overlay: a tmpfs, a folder holding one, a file of
+    // the overlay bound over another (on the upper layer's device, as the
+    // overlay's own files are), and a folder bound over another (on the
+    // overlay's device, as its folder is).
+    for dir in ["tmpfs", "holder/inner", "plain", "bound"] {
+        fs::create_dir_all(overlay.join(dir)).unwrap();
+    }
+    fs::write(overlay.join("source.bin"), vec![3u8; 1000]).unwrap();
+    fs::write(merged.join("bound.bin"), vec![4u8; 1000]).unwrap();
+    fs::write(overlay.join("plain/kept.bin"), vec![5u8; 1000]).unwrap();
+    let (tmpfs, holder, bound_file, bound_dir) = (
+        overlay.join("tmpfs"),
+        overlay.join("holder"),
+        merged.join("bound.bin"),
+        overlay.join("bound"),
+    );
+    for args in [
+        vec!["-t", "tmpfs", "-o", "size=1m", "tmpfs", s(&tmpfs)],
+        vec![
+            "-t",
+            "tmpfs",
+            "-o",
+            "size=1m",
+            "tmpfs",
+            s(&holder.join("inner")),
+        ],
+        vec!["--bind", s(&overlay.join("source.bin")), s(&bound_file)],
+        vec!["--bind", s(&overlay.join("plain")), s(&bound_dir)],
+    ] {
+        assert!(mounted_with(&mut mounted, &args));
+    }
+    fs::write(tmpfs.join("on-tmpfs.bin"), vec![6u8; 1000]).unwrap();
+    assert_eq!(dev(&bound_file), dev(&upper_file));
+    assert_eq!(dev(&bound_dir), dev(&overlay));
+    let id = save(&env, &overlay);
+
+    // The two files are planned for the Trash, and --yes moves them there.
+    let files = [s(&upper_file), s(&lower_file)];
+    let value = failed(
+        &run(
+            &env,
+            &["clean", files[0], files[1], "--scan", &id, "--json"],
+        ),
+        1,
+        "confirmation_required",
+    );
+    assert_eq!(actions(&value), ["trash:", "trash:"], "{value}");
+    let value = ok(&run(
+        &env,
+        &[
+            "clean", files[0], files[1], "--scan", &id, "--yes", "--json",
+        ],
+    ));
+    assert_eq!(actions(&value), ["trash:", "trash:"], "{value}");
+    assert_eq!(value["result"]["trashed_count"], 2, "{value}");
+    for item in value["result"]["plan"]["items"].as_array().unwrap() {
+        assert_eq!(item["outcome"], "trashed", "{value}");
+    }
+    assert!(fs::symlink_metadata(&upper_file).is_err());
+    assert!(fs::symlink_metadata(&lower_file).is_err());
+    let trash = overlay.join("Trash");
+    assert_eq!(
+        fs::read(trash.join("files/upper.bin")).unwrap(),
+        [2u8; 5000]
+    );
+    assert_eq!(
+        fs::read(trash.join("files/lower.bin")).unwrap(),
+        [1u8; 3000]
+    );
+    for name in ["upper.bin", "lower.bin"] {
+        let info = fs::read_to_string(trash.join(format!("info/{name}.trashinfo"))).unwrap();
+        assert!(
+            info.contains(&format!("Path={}", s(&merged.join(name)))),
+            "{info}"
+        );
+    }
+    // The lower layer is never written: its file is hidden, not moved.
+    assert_eq!(
+        fs::read(lower.join("merged/lower.bin")).unwrap(),
+        [1u8; 3000]
+    );
+
+    // Each real mount stays where it is, planned or with --yes, for the
+    // Trash, and a mount point planned for --permanent too.
+    for item in [&tmpfs, &holder, &bound_file, &bound_dir] {
+        let value = failed(
+            &run(&env, &["clean", s(item), "--scan", &id, "--yes", "--json"]),
+            1,
+            "refused_path",
+        );
+        assert_eq!(
+            actions(&value),
+            ["refused:mount_point"],
+            "{}: {value}",
+            item.display()
+        );
+        assert_eq!(value["result"]["trashed_count"], 0);
+    }
+    for item in [&tmpfs, &bound_file, &bound_dir] {
+        let value = failed(
+            &run(
+                &env,
+                &["clean", s(item), "--scan", &id, "--permanent", "--json"],
+            ),
+            1,
+            "refused_path",
+        );
+        assert_eq!(
+            actions(&value),
+            ["refused:mount_point"],
+            "{}: {value}",
+            item.display()
+        );
+    }
+    assert_eq!(fs::read(tmpfs.join("on-tmpfs.bin")).unwrap(), [6u8; 1000]);
+    assert!(holder.join("inner").is_dir());
+    assert_eq!(fs::read(&bound_file).unwrap(), [3u8; 1000]);
+    assert_eq!(fs::read(bound_dir.join("kept.bin")).unwrap(), [5u8; 1000]);
+    for name in ["tmpfs", "holder", "bound.bin", "bound"] {
+        assert!(!trash.join("files").join(name).exists(), "{name}");
+    }
+
+    // A directory from the lower layer moves only with redirect_dir: here
+    // the rename fails across the layers and it stays where it was.
+    let lower_dir = merged.join("dir");
+    let value = failed(
+        &run(
+            &env,
+            &["clean", s(&lower_dir), "--scan", &id, "--yes", "--json"],
+        ),
+        1,
+        "trash_unavailable",
+    );
+    assert_eq!(actions(&value), ["trash:"], "{value}");
+    assert_eq!(fs::read(lower_dir.join("in.bin")).unwrap(), [7u8; 2000]);
+    // --permanent deletes a file of the lower layer, which is read-only and
+    // keeps its blocks; freed_bytes counts them all the same.
+    let gone = merged.join("perm.bin");
+    let value = ok(&run(
+        &env,
+        &[
+            "clean",
+            s(&gone),
+            "--scan",
+            &id,
+            "--permanent",
+            "--yes",
+            "--json",
+        ],
+    ));
+    assert_eq!(actions(&value), ["permanent:"], "{value}");
+    let kept = lower.join("merged/perm.bin");
+    assert_eq!(
+        value["result"]["freed_bytes"],
+        fs::metadata(&kept).unwrap().blocks() * 512,
+        "{value}"
+    );
+    assert!(fs::symlink_metadata(&gone).is_err());
+    assert_eq!(fs::read(&kept).unwrap(), [8u8; 2000]);
+
+    // An overlay that does not hold the home: its file goes to the
+    // overlay's own .Trash-<uid> at its top. A debug build's test guard
+    // refuses every Trash but the test's.
+    let volume = fs::canonicalize(env.tmp_dir()).unwrap().join("volume");
+    fs::create_dir_all(&volume).unwrap();
+    let options = format!(
+        "lowerdir={},upperdir={},workdir={},xino=off",
+        s(&lower.join("volume")),
+        s(&upper.join("volume/data")),
+        s(&upper.join("volume/work"))
+    );
+    assert!(mounted_with(
+        &mut mounted,
+        &["-t", "overlay", "-o", &options, "overlay", s(&volume)]
+    ));
+    let file = volume.join("file.bin");
+    fs::write(&file, vec![9u8; 1000]).unwrap();
+    let id = save(&env, &volume);
+    let out = run(&env, &["clean", s(&file), "--scan", &id, "--yes", "--json"]);
+    if cfg!(debug_assertions) {
+        failed(&out, 1, "trash_unavailable");
+        assert!(file.exists());
+    } else {
+        let value = ok(&out);
+        assert_eq!(value["result"]["trashed_count"], 1, "{value}");
+        assert!(fs::symlink_metadata(&file).is_err());
+        let trash = volume.join(".Trash-0");
+        assert_eq!(fs::read(trash.join("files/file.bin")).unwrap(), [9u8; 1000]);
+        let info = fs::read_to_string(trash.join("info/file.bin.trashinfo")).unwrap();
+        // A volume Trash names its items relative to the volume's top.
+        assert!(info.contains("Path=file.bin"), "{info}");
+    }
+    drop(mounted);
+}

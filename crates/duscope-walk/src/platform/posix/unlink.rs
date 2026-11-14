@@ -122,6 +122,35 @@ impl CheckedDir {
     pub(crate) fn dev(&self) -> u64 {
         self.dev
     }
+
+    /// Whether `name` in this directory is the root of a mount, or an
+    /// automount point (the root of one once triggered), as the system
+    /// tells it through this directory's descriptor: `statx`'s mount-root
+    /// attribute, read without following a link or triggering an automount
+    /// (Linux 5.8); else the entry's mount id against this directory's,
+    /// from `name_to_handle_at` (2.6.39), as [`MountCheck`] compares two
+    /// directories'; else the mount table, read now, which lists a mount
+    /// point by its path. `None` where none of them answers, or the entry
+    /// cannot be read.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mount_root(&self, name: &OsStr) -> Option<bool> {
+        let path = child_path(self, name).ok()?;
+        let up = self.fd.as_fd();
+        let stat = super::with_c_name(name.as_bytes(), |c_name| stat_at(up, c_name)).ok()?;
+        if let Some(mount) = stat.mount {
+            return Some(mount);
+        }
+        let ids = mount_id(up).and_then(|up_id| {
+            super::with_c_name(name.as_bytes(), |c_name| mount_id_at(up, c_name, 0))
+                .map(|id| (up_id, id))
+        });
+        if let Ok((up_id, id)) = ids {
+            return Some(id != up_id);
+        }
+        mount_point_under(&path)
+            .ok()
+            .map(|point| point.as_deref() == Some(path.as_path()))
+    }
 }
 
 /// Removes `name`, any entry but a directory (a symbolic link itself, never
@@ -914,6 +943,15 @@ impl MountCheck {
 /// has no file handles (`EOPNOTSUPP`, before Linux 6.5).
 #[cfg(target_os = "linux")]
 fn mount_id(fd: BorrowedFd<'_>) -> io::Result<u64> {
+    mount_id_at(fd, c"", libc::AT_EMPTY_PATH)
+}
+
+/// The id of the mount `name` in the directory open on `dir` is on, as
+/// [`mount_id`] reads it, with `flags`: `AT_EMPTY_PATH` and an empty name
+/// for `dir` itself; none for an entry in it, which is then read without
+/// following a final symbolic link or triggering an automount.
+#[cfg(target_os = "linux")]
+fn mount_id_at(dir: BorrowedFd<'_>, name: &CStr, flags: c_int) -> io::Result<u64> {
     /// `struct file_handle` with room for the longest handle,
     /// `MAX_HANDLE_SZ`.
     #[repr(C)]
@@ -936,18 +974,18 @@ fn mount_id(fd: BorrowedFd<'_>) -> io::Result<u64> {
     loop {
         // The system call itself, as for statx: the musl that release
         // builds link statically may have no wrapper.
-        // SAFETY: `fd` is open for the borrow, the empty name is
-        // NUL-terminated, `handle` is writable for a `struct file_handle`
-        // with the `bytes` of handle it declares, and `id` for one int; the
-        // arguments are the system call's, in its order.
+        // SAFETY: `dir` is open for the borrow, `name` is NUL-terminated,
+        // `handle` is writable for a `struct file_handle` with the `bytes`
+        // of handle it declares, and `id` for one int; the arguments are
+        // the system call's, in its order.
         let rc = unsafe {
             libc::syscall(
                 libc::SYS_name_to_handle_at,
-                fd.as_raw_fd(),
-                c"".as_ptr(),
+                dir.as_raw_fd(),
+                name.as_ptr(),
                 &raw mut handle,
                 &raw mut id,
-                libc::AT_EMPTY_PATH,
+                flags,
             )
         };
         if rc != 0 {

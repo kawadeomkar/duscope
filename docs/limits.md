@@ -215,16 +215,37 @@ No flag keeps a scan inside one subvolume. `summary` gives the bytes on each
 subvolume under the path in `subvolumes[]`, and the rows of their top
 directories carry the flag `subvolume`.
 
-### overlayfs without `xino`: `clean` refuses files as mount points (Linux)
+### overlayfs: what the Trash cannot take (Linux)
 
-On an overlayfs mount whose layers lie on different filesystems, a file reports
-the device of the layer it comes from, not the overlay's, unless the overlay
-uses `xino` and the file's inode number fits it ([the kernel's overlayfs
-documentation](https://docs.kernel.org/filesystems/overlayfs.html)). `clean`
-tells a mount point by a device other than its directory's, so it refuses such
-a file, named as an item, as `mount_point`. A directory reports the overlay's
-device, so a directory there is not refused, and moving or deleting it takes
-its files with it.
+On an overlayfs mount `clean` plans files and directories as on any volume. The
+Trash that takes them is the overlay's: the home Trash when the home is on the
+overlay, otherwise `.Trash/<uid>` or `.Trash-<uid>` at the overlay's top. A move
+to the Trash renames the item inside the overlay, and overlayfs first copies an
+item that comes from a lower layer up into the upper one ([the kernel's
+overlayfs documentation](https://docs.kernel.org/filesystems/overlayfs.html)).
+So, for an item from a lower layer:
+
+- What it frees is overstated, for the Trash and `--permanent` alike: the lower
+  layer is read-only and keeps the item's bytes. Emptying the Trash deletes the
+  copy in the upper layer, and `--permanent` leaves a whiteout there that hides
+  the item. The plan's `frees_bytes` counts the item's blocks either way, and
+  so does `trashed_bytes` after a move to the Trash, or `freed_bytes` after
+  `--permanent` (for the Trash `freed_bytes` is 0, as on any volume).
+- A file with more than one hard link is not moved the first time, unless the
+  overlay is mounted with `index=on`: the copy-up makes it another inode, so the
+  move is undone and the item fails `path_changed`, left where it was. It has
+  been copied up by then, so running the same `clean` again on its path moves
+  it; a `--from` handle still names the inode it had, so it needs a new one
+  (`duscope rescan`, then `duscope explain --json`).
+- A directory is moved only when the overlay is mounted with `redirect_dir=on`;
+  otherwise the rename fails across the layers and the item fails
+  `trash_unavailable`, left where it was.
+
+Where the system cannot tell whether a file is the root of a mount (no mount-root
+attribute from `statx` before Linux 5.8, no file handles, and no readable
+`/proc/self/mountinfo`), a file of an overlay whose layers lie on other
+filesystems, which reports another device than its directory, is refused as
+`mount_point`.
 
 ### Paths that are not UTF-8 (Linux)
 
@@ -269,7 +290,8 @@ the `end` line has come, or, for `--plain`, once the command has exited 0.
 ### A btrfs subvolume is a mount point to `clean` (Linux)
 
 A btrfs subvolume reports a device of its own, another than its parent
-directory's, and `clean` tells a mount point by its device: a subvolume named
+directory's, and `clean` tells a directory that is a mount point by its device
+(a file, by whether it is a mount's root): a subvolume named
 as an item is refused as `mount_point`, and `--permanent` stops at one under an
 item (`refused_path`). The hint's `umount` does not apply to a subvolume that
 is not mounted on its own; `btrfs subvolume delete` deletes one.

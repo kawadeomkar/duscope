@@ -142,10 +142,12 @@ platform-tests:
       p5_cli_02_macos_a_scan_of_slash_names_the_data_volume_below_private
       p5_walk_06_linux_an_untriggered_automount_is_not_entered
       p5_walk_06_linux_a_systemd_automount_is_not_triggered
+      p5_core_10_linux_an_overlays_files_go_to_its_trash_and_its_mounts_stay
+      platform::posix::unlink::tests::p5_core_10_linux_a_bound_file_is_a_mount_point_and_an_overlays_file_is_not
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Eighteen are built on Linux and twenty-one on macOS; a renamed test must not drop out unnoticed.
-    expected=$([[ $(uname -s) == Darwin ]] && echo 21 || echo 18)
+    # Twenty are built on Linux and twenty-one on macOS; a renamed test must not drop out unnoticed.
+    expected=$([[ $(uname -s) == Darwin ]] && echo 21 || echo 20)
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
     [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
     cargo_test -- --ignored --exact "${tests[@]}"

@@ -550,6 +550,147 @@ fn p5_core_03_linux_where_nothing_tells_a_mount_point_nothing_is_removed() {
     assert!(fs::symlink_metadata(&item).is_err());
 }
 
+/// P5-CORE-10: what `clean`'s plan asks of an entry, each kernel answering
+/// by what it has: a file and a directory of the test's tree are no mount's
+/// root, `/proc` is one, and where nothing answers nothing is said.
+#[cfg(target_os = "linux")]
+#[test]
+fn p5_core_10_linux_an_entry_is_a_mount_root_by_whatever_the_kernel_tells() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let item = CheckedDir::open(&root.join("item")).unwrap();
+    let slash = CheckedDir::open(Path::new("/")).unwrap();
+    let mut kernels = vec![hook::Kernel::default()];
+    kernels.extend(old_kernels());
+    for kernel in kernels {
+        let _kernel = hook::as_kernel(kernel);
+        for name in ["a.bin", "sub", "empty"] {
+            assert_eq!(
+                item.mount_root(OsStr::new(name)),
+                Some(false),
+                "{kernel:?}: {name}"
+            );
+        }
+        assert_eq!(
+            slash.mount_root(OsStr::new("proc")),
+            Some(true),
+            "{kernel:?}"
+        );
+    }
+    for kernel in nothing_tells() {
+        let _kernel = hook::as_kernel(kernel);
+        assert_eq!(item.mount_root(OsStr::new("a.bin")), None, "{kernel:?}");
+        assert_eq!(slash.mount_root(OsStr::new("proc")), None, "{kernel:?}");
+    }
+    // An entry that is not there says nothing either.
+    assert_eq!(item.mount_root(OsStr::new("gone")), None);
+}
+
+/// P5-CORE-10's rule on real mounts, however the kernel tells a mount
+/// root: a file bound over another, from another device or the same one,
+/// is a mount point; an overlay's files, each on its layer's device, are
+/// not; and where nothing answers, the device decides.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts two tmpfs layers, an overlay of them and two file binds; root; \
+            DUSCOPE_TEST_PLATFORM=1"]
+fn p5_core_10_linux_a_bound_file_is_a_mount_point_and_an_overlays_file_is_not() {
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1")
+        || crate::effective_uid() != 0
+    {
+        eprintln!("skipped: run as root with DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    let root = fs::canonicalize(env.tmp_dir()).unwrap();
+    let (lower, upper, overlay, plain) = (
+        root.join("lower"),
+        root.join("upper"),
+        root.join("overlay"),
+        root.join("plain"),
+    );
+    for dir in [&lower, &upper, &overlay, &plain] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    // Each layer a tmpfs of its own, so that without xino the overlay
+    // reports a file on its layer's device.
+    mount(
+        &env,
+        &["-t", "tmpfs", "-o", "size=4m", "tmpfs", path(&lower)],
+    );
+    let _lower = Unmount(&env, lower.clone());
+    mount(
+        &env,
+        &["-t", "tmpfs", "-o", "size=4m", "tmpfs", path(&upper)],
+    );
+    let _upper = Unmount(&env, upper.clone());
+    fs::write(lower.join("lower.bin"), b"lower").unwrap();
+    for dir in ["data", "work"] {
+        fs::create_dir_all(upper.join(dir)).unwrap();
+    }
+    fs::write(upper.join("data/upper.bin"), b"upper").unwrap();
+    let options = format!(
+        "lowerdir={},upperdir={},workdir={},xino=off",
+        path(&lower),
+        path(&upper.join("data")),
+        path(&upper.join("work"))
+    );
+    mount(
+        &env,
+        &["-t", "overlay", "-o", &options, "overlay", path(&overlay)],
+    );
+    let _overlay = Unmount(&env, overlay.clone());
+    // Two files bound over files of the test's directory: one from a
+    // layer's tmpfs, one from that directory's own device.
+    for name in ["other.bin", "same.bin", "source.bin"] {
+        fs::write(plain.join(name), b"plain").unwrap();
+    }
+    let (other, same) = (plain.join("other.bin"), plain.join("same.bin"));
+    mount(
+        &env,
+        &["--bind", path(&lower.join("lower.bin")), path(&other)],
+    );
+    let _other = Unmount(&env, other.clone());
+    mount(
+        &env,
+        &["--bind", path(&plain.join("source.bin")), path(&same)],
+    );
+    let _same = Unmount(&env, same.clone());
+
+    let meta = |p: &Path| fs::symlink_metadata(p).unwrap();
+    let mount_point = |p: &Path| crate::platform::linux::mount_point(p, &meta(p));
+    let overlays = [overlay.join("lower.bin"), overlay.join("upper.bin")];
+    // What the device alone would say: the file bound from a layer is on
+    // another device, the one bound from the same device is not, and the
+    // overlay's files are on their layers'.
+    assert_ne!(meta(&other).dev(), meta(&plain).dev());
+    assert_eq!(meta(&same).dev(), meta(&plain).dev());
+    for file in &overlays {
+        assert_ne!(meta(file).dev(), meta(&overlay).dev(), "{file:?}");
+    }
+    // The kernel the tests run on, then each kernel that does not flag a
+    // mount root: the entry's mount id tells it, else the mount table.
+    let mut kernels = vec![hook::Kernel::default()];
+    kernels.extend(old_kernels());
+    for kernel in kernels {
+        let _kernel = hook::as_kernel(kernel);
+        assert!(mount_point(&other), "{kernel:?}");
+        assert!(mount_point(&same), "{kernel:?}");
+        for file in &overlays {
+            assert!(!mount_point(file), "{kernel:?}: {file:?}");
+        }
+    }
+    // Where nothing answers, a file on another device is a mount point,
+    // the overlay's too; the bind from the same device cannot be told.
+    for kernel in nothing_tells() {
+        let _kernel = hook::as_kernel(kernel);
+        assert!(mount_point(&other), "{kernel:?}");
+        for file in &overlays {
+            assert!(mount_point(file), "{kernel:?}: {file:?}");
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn path(p: &Path) -> &str {
     p.to_str().unwrap()

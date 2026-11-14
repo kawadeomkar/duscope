@@ -1709,3 +1709,23 @@ fn p5_walk_05_globs_below_a_followed_link_match_the_path_it_was_reached_by() {
     }
     assert!(!paths.contains(&PathBuf::from("/t/via/sub/drop/a")));
 }
+
+/// P5-CORE-10: what `clean` asks of each item. The test's own file and
+/// folder are no mount point; `/dev` is one on both systems (devfs,
+/// devtmpfs); `/`, which has no directory, is the caller's to judge.
+#[test]
+fn p5_core_10_a_plain_entry_is_no_mount_point_and_dev_is_one() {
+    let env = duscope_testkit::TestEnv::new();
+    let dir = std::fs::canonicalize(env.tmp_dir()).unwrap();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("file"), b"x").unwrap();
+    for (path, expected) in [
+        (dir.join("sub"), false),
+        (dir.join("file"), false),
+        (PathBuf::from("/dev"), true),
+        (PathBuf::from("/"), false),
+    ] {
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(is_mount_point(&path, &meta), expected, "{}", path.display());
+    }
+}
