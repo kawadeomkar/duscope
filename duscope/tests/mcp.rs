@@ -2073,3 +2073,65 @@ fn p3_mcp_09_the_flag_and_the_variable_come_before_the_configured_index_director
     assert_eq!(saved_in(&configured), 0);
     assert_eq!(saved_ids(&env).len(), 1);
 }
+
+/// P3-MCP-10: a `partial_read` warning's hint offers `--strict`, and the
+/// list tools take it as `strict`: the call then fails as the verb does,
+/// its envelope `top --strict --json`'s.
+#[test]
+fn p3_mcp_10_strict_fails_a_list_tool_over_a_partial_scan() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::new();
+    if !env.fixtures().unreadable_effective() {
+        eprintln!("skipped: running as root, a mode-000 directory is readable");
+        return;
+    }
+    let base = small_tree(&env);
+    let root = base.join("root");
+    let closed = root.join("closed");
+    std::fs::create_dir_all(closed.join("inside")).unwrap();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let saved = env
+        .cmd()
+        .arg("scan")
+        .arg(&root)
+        .args(["--save", "--json"])
+        .output()
+        .unwrap();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[
+            call(1, "duscope_top", &json!({})),
+            call(2, "duscope_top", &json!({"strict": true})),
+        ],
+    );
+    let lenient = served.result(1);
+    assert_ne!(lenient["isError"], true, "{lenient}");
+    let warning = lenient["structuredContent"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "partial_read")
+        .unwrap_or_else(|| panic!("no partial_read: {lenient}"));
+    assert!(
+        warning["hint"].as_str().unwrap().contains("--strict"),
+        "{warning}"
+    );
+    let strict = served.result(2);
+    assert_eq!(strict["isError"], true, "{strict}");
+    assert_eq!(
+        strict["structuredContent"]["error"]["code"],
+        "permission_denied"
+    );
+    assert_eq!(
+        structured_content(served.line(2)),
+        cli_json(&env, &args(&[&"top", &"--no-scan", &"--strict", &root]))
+    );
+}
