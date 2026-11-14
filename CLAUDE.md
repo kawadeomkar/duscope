@@ -23,8 +23,7 @@ The design is fixed by two documents; read the parts a task cites before writing
 - In --json, --plain and mcp modes nothing but the payload reaches stdout; humans get stderr.
 - clean is a dry run unless --yes; trash by default; --permanent re-checks (dev, ino) first.
 - The binary opens no network socket. No telemetry, no update checks, no HTTP crates.
-- One binary, one package: no component feature flags. The only Cargo features are
-  `system-sqlite` and `pixels`.
+- One binary, one package: no component feature flags. The only Cargo feature is `pixels`.
 - A new dependency needs a row in DEPENDENCIES.md, a cargo deny pass, and the size budget
   (<= 10 MB stripped) and build budget (<= 120 s) to hold. Never add: rmcp or tokio to the
   binary, resvg, jaq-core, objc2-core-services, catppuccin, supports-color, terminal_size.

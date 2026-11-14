@@ -14,9 +14,8 @@ targets = [
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
 ]
-# Both Cargo features (`system-sqlite`, `pixels`) are configurations people
-# build, so their trees are checked too, though no shipped build turns `pixels`
-# on (P4-TUI-07).
+# The one Cargo feature, `pixels`, is a configuration people build, so its tree
+# is checked too, though no shipped build turns it on (P4-TUI-07).
 all-features = true
 # Dev-dependencies stay in the graph, so the licence, source and advisory
 # checks hold test-only crates too: their build scripts and proc-macros run on
