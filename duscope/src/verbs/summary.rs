@@ -54,12 +54,18 @@ pub fn run(args: &SummaryArgs, index_dir: Option<&Path>, output: &Output) -> Res
         shared.push(dev);
         share
     };
-    let listed: Vec<(&VolumeEntry, query::VolumeBytes)> = block
-        .volumes
+    // Of every volume the scan met, those mounted at or under the path and
+    // those entered that hold bytes under it: below a saved scan's root,
+    // more than `scan.volumes` names where a firmlink below the path leads
+    // to a volume mounted elsewhere (macOS's Data volume holds /usr/local,
+    // below /usr on the System volume).
+    let every = source.every_volume();
+    let met = every.as_deref().unwrap_or(&block.volumes);
+    let listed: Vec<(&VolumeEntry, query::VolumeBytes)> = met
         .iter()
         .filter(|v| {
             source.at_root()
-                || bytes.volumes.iter().any(|b| b.dev == v.dev)
+                || (v.entered && bytes.volumes.iter().any(|b| b.dev == v.dev))
                 || Path::new(&v.mount_point).starts_with(&root_path)
         })
         .map(|v| (v, found(v.dev)))

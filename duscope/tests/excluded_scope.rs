@@ -3,9 +3,10 @@
 //! subtree its result was read at; a list names the first 20 of them, in
 //! the scan's order, and the warning `excluded_truncated` counts the rest;
 //! `summary` and `explain` name them all. Of the volumes, a verb names the
-//! one the path lies on, by its device, and those mounted at or under it.
-//! Over MCP, where a scan rooted above a root is read at the root, a result
-//! names no excluded directory outside it, and the volume the root lies on.
+//! one the path lies on, by its device, and those mounted at or under it;
+//! `summary`'s shares name every volume holding bytes under the path. Over
+//! MCP, where a scan rooted above a root is read at the root, a result names
+//! no excluded directory outside it, and the volume the root lies on.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -713,6 +714,45 @@ fn p5_cli_02_a_tool_names_the_volume_its_root_lies_on() {
         [data.as_str(), nas.as_str()],
         "{summary}"
     );
+}
+
+#[test]
+fn p5_cli_02_summary_shares_out_a_volume_reached_below_the_path() {
+    let env = TestEnv::new();
+    let (root, id) = firmlinked(&env);
+    let data = root.join("sys/Volumes/Data").display().to_string();
+    let summary = |path: &Path| {
+        run(
+            &env,
+            &[
+                os("summary"),
+                os("--scan"),
+                os(&id),
+                os("--json"),
+                path.as_os_str(),
+            ],
+        )
+    };
+    let usr = summary(&root.join("sys/usr"));
+    // The path's own volume: the Data volume holds sys/usr/local through a
+    // firmlink below the path, and is mounted elsewhere.
+    assert_eq!(mount_points(&usr["scan"]), ["/"], "{usr}");
+    // Each volume's share of the bytes under the path names it all the
+    // same, with the bytes found on it, and the shares add up to the total.
+    let result = &usr["result"];
+    assert_eq!(mount_points(result), ["/", data.as_str()], "{usr}");
+    let local = summary(&root.join("sys/usr/local"));
+    assert_eq!(
+        result["volumes"][1]["allocated_bytes"],
+        local["result"]["allocated_bytes"]
+    );
+    let shares: u64 = result["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["allocated_bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(shares, result["allocated_bytes"].as_u64().unwrap());
 }
 
 /// The lines of a gitignore file that leaves out every entry of `/` but

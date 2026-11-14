@@ -468,6 +468,18 @@ impl Source {
         }
     }
 
+    /// Every volume the scan met, as `scan.volumes` names them, where the
+    /// scan block names only those within the path read: a saved scan read
+    /// below its root. `None` where the block names every one.
+    pub fn every_volume(&self) -> Option<Vec<VolumeEntry>> {
+        match self {
+            Source::Saved { index, base, .. } if *base != 0 => {
+                Some(index.volumes().iter().map(volume_entry).collect())
+            }
+            _ => None,
+        }
+    }
+
     /// The one line for people: the total under the path, its counts, and
     /// how the scan was had: run now (and the id it is saved as), or read
     /// from a saved scan.
@@ -824,6 +836,7 @@ fn device_of(index: &Index, id: u32) -> Option<u64> {
 /// them, which would take a pass over every one: a volume reached through
 /// a firmlink below the path and mounted elsewhere (the Data volume holds
 /// `/usr/local`, below `/usr` on the System volume) is not within `/usr`.
+/// `summary` names it all the same, by the bytes it finds on it.
 fn volume_within(mount: &Path, dev: u64, entered: bool, at: &[PathBuf], on: &[u64]) -> bool {
     (entered && on.contains(&dev)) || at.iter().any(|at| mount.starts_with(at))
 }
