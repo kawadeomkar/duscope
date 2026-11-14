@@ -9,10 +9,23 @@
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use duscope_testkit::TestEnv;
+
+/// One of the two tests at a time. The testkit runs one `hdiutil` at a time,
+/// so while the other test tried its detach for half a minute, this one's six
+/// seconds would pass waiting for its own first try, which would then
+/// succeed: the tries it exists to make would not be made.
+static TURN: Mutex<()> = Mutex::new(());
+
+/// This test's turn, held until it returns; a test that panicked in its own
+/// turn does not end the other's.
+fn turn() -> MutexGuard<'static, ()> {
+    TURN.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// An image attached without Finder at a mount point under the test's
 /// temporary directory, with a file on it: the mount point and the file.
@@ -51,6 +64,7 @@ fn platform() -> bool {
 #[test]
 #[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
 fn p0_test_03_macos_a_detach_busy_for_six_seconds_succeeds() {
+    let _turn = turn();
     let env = TestEnv::new();
     if !platform() {
         return;
@@ -85,6 +99,7 @@ fn p0_test_03_macos_a_detach_busy_for_six_seconds_succeeds() {
 #[test]
 #[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
 fn p0_test_03_macos_a_detach_that_stays_busy_names_what_holds_it() {
+    let _turn = turn();
     let env = TestEnv::new();
     if !platform() {
         return;
