@@ -1,6 +1,8 @@
 //! P1-MAP-02: the static treemap: buffer snapshots on the fixture tree at
 //! 80×24 and 120×40 in Mocha, `no-color` and ASCII; and from the command
-//! line, no SGR under `NO_COLOR`, the pixels refusal and themes.
+//! line, no SGR under `NO_COLOR`, the pixels refusal and themes. P4-TUI-09:
+//! the one pass that classifies a scan and finds every folder's dominant
+//! classes, against the walk of each folder.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -18,7 +20,11 @@ use duscope_core::rules::{Class, Classes};
 use duscope_testkit::{TestEnv, golden};
 use duscope_treemap::cells::Color;
 use duscope_treemap::packs::Pack;
-use duscope_treemap::paint::{ColorBy, Footer, Glyphs, LsColors, PaintOpts, frame};
+use duscope_treemap::paint::{
+    Base, ColorBy, Footer, Glyphs, LsColors, PaintOpts, Worked, classes_of, classify_scan,
+    dominant, dominants, frame, paint_viewer, paint_viewer_labelled, paint_viewer_worked,
+};
+use duscope_treemap::pixels::Picture;
 use duscope_walk::{Attrs, Flags, Kind, WalkOptions, walk};
 
 fn duscope(env: &TestEnv) -> Command {
@@ -727,4 +733,122 @@ fn p1_map_02_depth_1_paints_the_mockups_eleven_titled_boxes() {
         ..opts.clone()
     };
     assert_eq!(duscope_treemap::paint::paint(&view, &zero, w, h), buffer);
+}
+
+#[test]
+fn p4_tui_09_one_pass_finds_every_folders_dominant_classes() {
+    use duscope_core::index::Index;
+    use duscope_core::query::index_files;
+
+    // Each folder's dominant classes, tallied bottom-up in the pass that
+    // classifies the scan, are what `dominant` finds walking the folder:
+    // for every folder of the fixture tree, walked and saved, by either
+    // size, of its whole subtree and of its own files.
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let classes = Classes::vendored();
+    let (arena, rollup) = scan_tree(&root);
+    let walked = ArenaView::new(&arena, &rollup, root.clone());
+    let out = duscope(&env)
+        .args(["scan", "--save", "--treemap", "never", "--json"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let index = Index::open(&index_files(&env.index_dir())[0].1).unwrap();
+    for (what, view) in [("walked", &walked as &dyn TreeView), ("saved", &index)] {
+        for size in [SizeKind::Allocated, SizeKind::Apparent] {
+            let mut next = 0;
+            let classified = classify_scan(view, &classes, size, |node, _| {
+                assert_eq!(node.id, next, "{what}: in id order");
+                next += 1;
+            });
+            assert_eq!(next, view.len(), "{what}: every entry");
+            let class_of = &classified.class_of;
+            assert_eq!(*class_of, classes_of(view, &classes), "{what}");
+            let dirs: Vec<u32> = (0..view.len())
+                .filter(|&id| view.node(id).is_dir())
+                .collect();
+            assert_eq!(classified.dominant.len(), dirs.len(), "{what}");
+            let mut seen = std::collections::BTreeSet::new();
+            for &id in &dirs {
+                let path = String::from_utf8_lossy(&view.path(id)).into_owned();
+                let found = classified.dominant[&id];
+                assert_eq!(
+                    found.tree,
+                    dominant(view, class_of, size, id, false),
+                    "{what} {size:?} {path}"
+                );
+                assert_eq!(
+                    found.own,
+                    dominant(view, class_of, size, id, true),
+                    "{what} {size:?} {path}: own files"
+                );
+                assert_eq!(found, dominants(view, class_of, size, id), "{what} {path}");
+                seen.insert(found.tree.as_str());
+                seen.insert(found.own.as_str());
+            }
+            // The tree holds folders of most classes.
+            assert!(seen.len() >= 5, "{what} {size:?}: {seen:?}");
+        }
+    }
+}
+
+#[test]
+fn p4_tui_09_maps_painted_with_the_worked_classes_are_the_maps_walked() {
+    // The viewer paints with the dominant classes the one pass found, in
+    // cells and in pixels: every cell, tile and pixel as the map that walks
+    // each folder for its colour, at three sizes, with and without labels,
+    // `--pool-files` and a `--depth` cap.
+    let env = TestEnv::new();
+    let root = env.fixtures().root();
+    let (arena, rollup) = scan_tree(&root);
+    let view = ArenaView::new(&arena, &rollup, root.clone());
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
+    let classified = classify_scan(&view, &classes, SizeKind::Apparent, |_, _| {});
+    let known = |id: u32| classified.dominant.get(&id).copied();
+    let worked = Worked {
+        class_of: &classified.class_of,
+        dominant: &known,
+    };
+    for (pool_files, depth) in [
+        (false, None),
+        (true, None),
+        (false, Some(2)),
+        (true, Some(1)),
+    ] {
+        let mut paint = opts(&mocha, &classes, Glyphs::Unicode);
+        paint.pool_files = pool_files;
+        paint.depth = depth;
+        for (w, h) in [(80, 24), (120, 40), (200, 60)] {
+            let what = format!("{w}×{h}, pool {pool_files}, depth {depth:?}");
+            let base = Base::default();
+            for labelled in [false, true] {
+                let walked = if labelled {
+                    paint_viewer_labelled(&view, &paint, w, h, &classified.class_of, base)
+                } else {
+                    paint_viewer(&view, &paint, w, h, &classified.class_of, base)
+                };
+                let painted = paint_viewer_worked(&view, &paint, w, h, worked, base, labelled);
+                assert!(walked == painted, "{what}, labels {labelled}");
+            }
+            let walked = Picture::draw(
+                &view,
+                &paint,
+                w,
+                h,
+                (8, 16),
+                Some(&classified.class_of),
+                base,
+            )
+            .unwrap();
+            let painted = Picture::draw_worked(&view, &paint, w, h, (8, 16), worked, base).unwrap();
+            assert!(walked.raster() == painted.raster(), "{what}: the picture");
+            assert_eq!(walked.tiles(), painted.tiles(), "{what}: the picture");
+        }
+    }
 }

@@ -3,13 +3,17 @@
 //! rest, or all eight where there are eight. The rows are worked out when
 //! the viewer opens and when `c` or `p` change the colours. `⇥` focuses
 //! it: the arrows then pick a row, and `⏎` keeps that row's tiles on the
-//! map ([`crate::mask`]). A row counts files by [`legend_label`].
+//! map ([`crate::mask`]). A row counts files by [`legend_label`]. The
+//! viewer's first rows are tallied in the pass that classifies the scan
+//! ([`Tally`]), the rows of a colour mode or pack chosen later in a pass of
+//! their own ([`legend_rows`]).
 
 use std::cmp::Reverse;
 
 use duscope_core::query::{Node, TreeView, children};
+use duscope_core::rules::Class;
 use duscope_treemap::cells::Color;
-use duscope_treemap::paint::{ColorBy, LsColors, PaintOpts, age_step, compact, dominant};
+use duscope_treemap::paint::{ColorBy, LsColors, PaintOpts, age_step, compact};
 use ratatui_core::layout::Rect;
 
 use super::{Context, LegendRow, Ranks};
@@ -90,87 +94,209 @@ pub fn shown_rows(count: usize, room: usize) -> usize {
 /// colours (the class colour where it gives none) for `lscolors`; the root's
 /// tiles' bytes for `folder`; the bytes at each depth for `level` and at
 /// each age for `age`, a file below the `--depth` cap counted with the
-/// folder the map draws whole.
+/// folder the map draws whole. One pass over the scan, but for `folder`.
 pub fn legend_rows(ctx: &Context<'_>) -> (&'static str, Vec<LegendRow>) {
+    let title = legend_title(ctx.opts);
+    if matches!(ctx.opts.color_by, ColorBy::Folder) {
+        return (title, largest_first(folder_rows(ctx)));
+    }
     let view = ctx.view;
-    let size = ctx.opts.size;
-    let title = match &ctx.opts.color_by {
+    let mut tally = Tally::new(view, ctx.opts);
+    for id in 0..view.len() {
+        let node = view.node(id);
+        // A folder's own class is not counted: the tally reads folders
+        // only to know which a file is in.
+        let class = if node.is_dir() {
+            Class::Other
+        } else {
+            ctx.class(&node)
+        };
+        tally.add(&node, class);
+    }
+    (title, tally.rows())
+}
+
+/// The legend's title for the colours `opts` paints with.
+#[must_use]
+pub fn legend_title(opts: &PaintOpts<'_>) -> &'static str {
+    match &opts.color_by {
         ColorBy::Type => "by type",
         ColorBy::LsColors(_) => "by LS_COLORS",
         ColorBy::Folder => "by top folder",
         ColorBy::Level => "by depth",
         ColorBy::Age => "by age",
-    };
-    // Bytes by label, in the order labels first appear.
-    let mut tally: Vec<LegendRow> = Vec::new();
-    if matches!(ctx.opts.color_by, ColorBy::Folder) {
-        tally = folder_rows(ctx);
-    } else {
-        for node in (0..view.len())
-            .map(|id| view.node(id))
-            .filter(|n| !n.is_dir())
-        {
-            let Some((label, color)) = entry(ctx, &node) else {
-                continue;
-            };
-            let bytes = node.counted(size);
-            if let Some(row) = tally.iter_mut().find(|r| r.label == label) {
-                row.bytes += bytes;
-            } else {
-                tally.push(LegendRow {
-                    label,
-                    bytes,
-                    color,
-                });
-            }
-        }
     }
-    let mut rows: Vec<LegendRow> = tally.into_iter().filter(|r| r.bytes > 0).collect();
-    // Stable: equal sizes keep their order.
-    rows.sort_by_key(|row| Reverse(row.bytes));
-    (title, rows)
 }
 
-/// The legend row file `node` counts under, by the colours `ctx.opts`
-/// paints with: the row's label and colour. `None` under `--color-by
-/// folder`, whose rows are the root's tiles ([`legend_label`]).
-fn entry(ctx: &Context<'_>, node: &Node) -> Option<(String, Color)> {
-    let (pack, view) = (ctx.opts.pack, ctx.view);
-    // The entry whose tile holds the file: the file, or above the `--depth`
-    // cap the folder drawn as one tile.
-    let shown = |node: &Node| {
-        let cap = ctx.opts.depth.map(|d| d.max(1));
-        let mut at = *node;
-        while cap.is_some_and(|cap| at.depth > cap) {
-            at = view.node(at.parent);
+/// The legend's rows, tallied as the scan's entries are read in id order,
+/// each with its class: the bytes of each row, in the order rows first
+/// appear, as [`legend_rows`] counts them. The viewer feeds it from the
+/// pass that classifies the scan, so that its first legend reads nothing
+/// more. Under `--color-by folder` it counts nothing: those rows are the
+/// root's tiles ([`legend_rows`]).
+pub struct Tally<'t> {
+    view: &'t dyn TreeView,
+    opts: &'t PaintOpts<'t>,
+    /// The folders above the entry read last, the root first: where the
+    /// `--depth` cap cuts a file's path, read without a lookup.
+    open: Vec<Node>,
+    /// Each row's key, bytes and colour, in the order rows first appear.
+    rows: Vec<(Key, u64, Color)>,
+}
+
+impl std::fmt::Debug for Tally<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tally")
+            .field("rows", &self.rows.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'t> Tally<'t> {
+    /// An empty tally for the colours `opts` paints `view` with.
+    #[must_use]
+    pub fn new(view: &'t dyn TreeView, opts: &'t PaintOpts<'t>) -> Tally<'t> {
+        Tally {
+            view,
+            opts,
+            open: Vec::new(),
+            rows: Vec::new(),
         }
-        at
-    };
-    Some(match &ctx.opts.color_by {
+    }
+
+    /// Counts the next entry, `class` its class; the entries come in id
+    /// order, folders included.
+    pub fn add(&mut self, node: &Node, class: Class) {
+        while self.open.last().is_some_and(|dir| dir.last_id < node.id) {
+            self.open.pop();
+        }
+        if node.is_dir() {
+            self.open.push(*node);
+            return;
+        }
+        let Some((key, color)) = entry(self.view, self.opts, node, || class, || self.shown(node))
+        else {
+            return;
+        };
+        let bytes = node.counted(self.opts.size);
+        if let Some(row) = self.rows.iter_mut().find(|row| row.0 == key) {
+            row.1 += bytes;
+        } else {
+            self.rows.push((key, bytes, color));
+        }
+    }
+
+    /// The rows counted, largest first, those of no bytes left out.
+    #[must_use]
+    pub fn rows(self) -> Vec<LegendRow> {
+        largest_first(
+            self.rows
+                .into_iter()
+                .map(|(key, bytes, color)| LegendRow {
+                    label: key.label(),
+                    bytes,
+                    color,
+                })
+                .collect(),
+        )
+    }
+
+    /// The entry whose tile holds file `node`: the file, or below the
+    /// `--depth` cap the folder at the cap, drawn whole.
+    fn shown(&self, node: &Node) -> Node {
+        match self.opts.depth.map(|d| d.max(1)) {
+            Some(cap) if node.depth > cap => self
+                .open
+                .iter()
+                .find(|dir| dir.depth == cap)
+                .copied()
+                .unwrap_or_else(|| climb(self.view, cap, node)),
+            _ => *node,
+        }
+    }
+}
+
+/// `rows` with bytes, largest first; equal sizes keep their order.
+fn largest_first(rows: Vec<LegendRow>) -> Vec<LegendRow> {
+    let mut rows: Vec<LegendRow> = rows.into_iter().filter(|r| r.bytes > 0).collect();
+    rows.sort_by_key(|row| Reverse(row.bytes));
+    rows
+}
+
+/// What a legend row stands for: the label it is shown with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Key {
+    /// A class (`type`, and `lscolors` where `LS_COLORS` gives no colour).
+    Class(Class),
+    /// An `LS_COLORS` entry, as it is shown: `executable` or `*suffix`.
+    Ls(String),
+    /// A depth (`level`).
+    Depth(u32),
+    /// An age step (`age`).
+    Age(usize),
+}
+
+impl Key {
+    /// The row's label.
+    fn label(&self) -> String {
+        const AGES: [&str; 5] = ["< 1 day", "< 1 week", "< 1 month", "< 1 year", "older"];
+        match self {
+            Key::Class(class) => class.as_str().to_owned(),
+            Key::Ls(label) => label.clone(),
+            Key::Depth(depth) => format!("depth {depth}"),
+            Key::Age(step) => AGES[*step].to_owned(),
+        }
+    }
+}
+
+/// The legend row file `node` counts under, by the colours `opts` paints
+/// `view` with, given its `class` and the entry whose tile holds it
+/// (`shown`): the row's key and colour. `None` under `--color-by folder`,
+/// whose rows are the root's tiles ([`legend_label`]).
+fn entry(
+    view: &dyn TreeView,
+    opts: &PaintOpts<'_>,
+    node: &Node,
+    class: impl FnOnce() -> Class,
+    shown: impl FnOnce() -> Node,
+) -> Option<(Key, Color)> {
+    let pack = opts.pack;
+    Some(match &opts.color_by {
         ColorBy::Type => {
-            let class = ctx.class(node);
-            (class.as_str().to_owned(), pack.class(class))
+            let class = class();
+            (Key::Class(class), pack.class(class))
         }
         ColorBy::LsColors(table) => {
-            ls_key(table, &view.name(node.id), node.mode).unwrap_or_else(|| {
-                let class = ctx.class(node);
-                (class.as_str().to_owned(), pack.class(class))
-            })
+            if let Some((label, color)) = ls_key(table, &view.name(node.id), node.mode) {
+                (Key::Ls(label), color)
+            } else {
+                let class = class();
+                (Key::Class(class), pack.class(class))
+            }
         }
         ColorBy::Level => {
-            let depth = shown(node).depth;
+            let depth = shown().depth;
             (
-                format!("depth {depth}"),
+                Key::Depth(depth),
                 pack.cycle[depth as usize % pack.cycle.len()],
             )
         }
         ColorBy::Age => {
-            const AGES: [&str; 5] = ["< 1 day", "< 1 week", "< 1 month", "< 1 year", "older"];
-            let step = age_step(ctx.opts.now, shown(node).max_mtime_ns);
-            (AGES[step].to_owned(), pack.age[step])
+            let step = age_step(opts.now, shown().max_mtime_ns);
+            (Key::Age(step), pack.age[step])
         }
         ColorBy::Folder => return None,
     })
+}
+
+/// The ancestor of `node` at depth `cap` (or the first one at or above
+/// it), read up its path.
+fn climb(view: &dyn TreeView, cap: u32, node: &Node) -> Node {
+    let mut at = *node;
+    while at.depth > cap {
+        at = view.node(at.parent);
+    }
+    at
 }
 
 /// The label of the legend row file `node` counts under, by the colours
@@ -178,8 +304,12 @@ fn entry(ctx: &Context<'_>, node: &Node) -> Option<(String, Color)> {
 /// name, or `files` for the root's files pooled under `--pool-files`.
 #[must_use]
 pub fn legend_label(ctx: &Context<'_>, node: &Node) -> String {
-    if let Some((label, _)) = entry(ctx, node) {
-        return label;
+    let shown = || match ctx.opts.depth.map(|d| d.max(1)) {
+        Some(cap) => climb(ctx.view, cap, node),
+        None => *node,
+    };
+    if let Some((key, _)) = entry(ctx.view, ctx.opts, node, || ctx.class(node), shown) {
+        return key.label();
     }
     let view = ctx.view;
     let mut top = *node;
@@ -220,7 +350,7 @@ fn folder_rows(ctx: &Context<'_>) -> Vec<LegendRow> {
         }
     }
     if let Some(rank) = ctx.ranks.files {
-        let class = dominant(view, ctx.class_of, size, 0, true);
+        let class = ctx.dominants(0).own;
         ranked.push((
             rank,
             LegendRow {

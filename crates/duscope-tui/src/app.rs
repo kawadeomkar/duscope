@@ -63,7 +63,9 @@ use duscope_core::rules::Class;
 use duscope_treemap::Rect as Px;
 use duscope_treemap::cells::{CellBuffer, Color, Depth};
 use duscope_treemap::packs::Pack;
-use duscope_treemap::paint::{ColorBy, Glyphs, LsColors, PaintOpts, classes_of, compact};
+use duscope_treemap::paint::{
+    ColorBy, Dominant, Glyphs, LsColors, PaintOpts, Worked, classify_scan, compact,
+};
 use duscope_treemap::pixels::{Picture, PixelMap, Pixels};
 use ratatui_core::backend::Backend;
 use ratatui_core::buffer::{Buffer, CellDiffOption};
@@ -241,8 +243,8 @@ pub struct App<'a> {
     root_parent: String,
     /// Each entry's class, by id.
     class_of: Vec<Class>,
-    /// The class of most of each folder's bytes, as the panes meet them.
-    dominant: RefCell<HashMap<u32, Class>>,
+    /// Each folder's dominant classes, worked out with the classes.
+    dominant: RefCell<HashMap<u32, Dominant>>,
     /// The `--color-by folder` places of the root's tiles.
     ranks: Ranks,
     /// The legend's title and rows.
@@ -403,23 +405,38 @@ impl<'a> App<'a> {
         summary: String,
         warning: Option<String>,
     ) -> App<'a> {
-        let class_of = classes_of(view, opts.classes);
+        // One pass over the scan: each entry's class, each folder's
+        // dominant classes, which the map's folders drawn as one tile are
+        // painted with, and the legend's rows (but for `--color-by folder`,
+        // whose rows are the root's tiles).
+        let by_folder = matches!(opts.color_by, ColorBy::Folder);
+        let mut tally = panes::Tally::new(view, &opts);
+        let classified = classify_scan(view, opts.classes, opts.size, |node, class| {
+            if !by_folder {
+                tally.add(node, class);
+            }
+        });
+        let class_of = classified.class_of;
+        let dominant = RefCell::new(classified.dominant);
         let ranks = panes::ranks(view, &opts);
         let root = root_label(view.root_path(), home);
         let root_parent = view
             .root_path()
             .parent()
             .map_or_else(|| root.clone(), |parent| root_label(parent, home));
-        let dominant = RefCell::new(HashMap::new());
-        let legend = panes::legend_rows(&Context {
-            view,
-            opts: &opts,
-            class_of: &class_of,
-            dominant: &dominant,
-            ranks: &ranks,
-            root: &root,
-            root_parent: &root_parent,
-        });
+        let legend = if by_folder {
+            panes::legend_rows(&Context {
+                view,
+                opts: &opts,
+                class_of: &class_of,
+                dominant: &dominant,
+                ranks: &ranks,
+                root: &root,
+                root_parent: &root_parent,
+            })
+        } else {
+            (panes::legend_title(&opts), tally.rows())
+        };
         App {
             view,
             cursor: Cursor::new(Selection::largest(view, opts.size)),
@@ -701,6 +718,12 @@ impl<'a> App<'a> {
         self.cursor.jump(self.view, id);
     }
 
+    /// The legend's title and rows, as the viewer worked them out.
+    #[cfg(test)]
+    pub(crate) fn legend(&self) -> &(&'static str, Vec<panes::LegendRow>) {
+        &self.legend
+    }
+
     /// The scan, how it is painted and what the viewer worked out once:
     /// what the panes and the cursor read.
     fn context(&self) -> Context<'_> {
@@ -843,21 +866,28 @@ impl<'a> App<'a> {
         let root = self.cursor.zoom().root();
         pixels.pictures.borrow_mut().get(root, w, h, || {
             let base = zoom::base(&self.context(), root);
+            // The folders' dominant classes worked out, by the scan's ids.
+            let known = self.dominant.borrow();
+            let dominant = |id: u32| known.get(&(id + root)).copied();
             let drawn = if root == 0 || self.view.is_empty() {
-                Picture::draw(
-                    self.view,
-                    &self.opts,
-                    w,
-                    h,
-                    pixels.cell,
-                    Some(&self.class_of),
-                    base,
-                )
+                let worked = Worked {
+                    class_of: &self.class_of,
+                    dominant: &dominant,
+                };
+                Picture::draw_worked(self.view, &self.opts, w, h, pixels.cell, worked, base)
             } else {
                 let last = self.view.node(root).last_id;
-                let classes = self.class_of.get(root as usize..=last as usize);
                 let sub = Subtree::new(self.view, root);
-                Picture::draw(&sub, &self.opts, w, h, pixels.cell, classes, base)
+                match self.class_of.get(root as usize..=last as usize) {
+                    Some(class_of) => {
+                        let worked = Worked {
+                            class_of,
+                            dominant: &dominant,
+                        };
+                        Picture::draw_worked(&sub, &self.opts, w, h, pixels.cell, worked, base)
+                    }
+                    None => Picture::draw(&sub, &self.opts, w, h, pixels.cell, None, base),
+                }
             };
             drawn.ok().map(|picture| {
                 let tiles = Map::of(

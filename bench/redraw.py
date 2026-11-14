@@ -35,6 +35,12 @@ and the command then exits 1.
 built nor verified: the one case a run on a checkout's bench/.trees wants when
 it must not risk rebuilding it. Nothing else needs it.
 
+T3, one folder of a million empty files, has kinds of its own (`TREE_KEYS`):
+its map draws no tile, so the cursor moves in the siblings pane, through the
+folder's million entries, and there is no folder under the root to zoom into;
+the resize is measured as on every tree. The gates are read from T2 all the
+same.
+
 Standard library only; runs on Python 3.9 and later, on Linux and macOS.
 """
 
@@ -110,6 +116,17 @@ KEYS: Sequence[Tuple[str, Sequence[bytes], Sequence[bytes]]] = (
     ("views", (), (b"2", b"1", b"3", b"1", b"4", b"1")),
 )
 
+# The kinds of a tree whose shape the ones above do not fit, by its name. T3 is
+# one folder of a million empty files: the map draws no tile, so the arrows move
+# in the siblings pane, focused first, along the folder's whole list (a page at
+# a time too); there is no folder below the root to zoom into or descend to.
+TREE_KEYS: Dict[str, Sequence[Tuple[str, Sequence[bytes], Sequence[bytes]]]] = {
+    "T3": (
+        ("move", (b"\t",), (b"j", b"k")),
+        ("page", (b"\t",), (b"\x1b[6~", b"\x1b[5~")),
+    ),
+}
+
 # A resize: the two sizes the terminal alternates between.
 RESIZES: Sequence[Tuple[int, int]] = ((100, 30), (COLUMNS, ROWS))
 
@@ -120,7 +137,7 @@ LIMITS_MS: Dict[str, float] = {"navigation": BUDGET_MS, "recompute": CEILING_MS}
 # The keys that show a table.
 TABLES: Sequence[bytes] = (b"2", b"3", b"4")
 # The keys a key line names in words.
-KEY_NAMES: Dict[bytes, str] = {b"\x7f": "backspace", b"\r": "enter", b"\t": "tab"}
+KEY_NAMES: Dict[bytes, str] = {b"\x7f": "backspace", b"\r": "enter", b"\t": "tab", b"\x1b[6~": "pagedown", b"\x1b[5~": "pageup"}
 
 
 class Press(NamedTuple):
@@ -318,6 +335,11 @@ def measure_resizes(viewer: Viewer, rounds: int) -> List[Press]:
     return presses
 
 
+def kinds(tree: str) -> Sequence[Tuple[str, Sequence[bytes], Sequence[bytes]]]:
+    """The kinds measured on the tree named `tree`, the resize apart."""
+    return TREE_KEYS.get(tree, KEYS)
+
+
 def frame_class(kind: str, first: bool) -> str:
     """The class of a frame of `kind`."""
     return "recompute" if first or kind in RECOMPUTE_KINDS else "navigation"
@@ -417,7 +439,7 @@ def measure_tree(duscope: str, index_dir: str, tree: str, name: str, rounds: int
         finally:
             viewer.close()
 
-    for kind, setup, keys in KEYS:
+    for kind, setup, keys in kinds(name):
         session(kind, lambda v, kd=kind, s=setup, k=keys: measure_keys(v, kd, s, k, rounds))
     session("resize", lambda v: measure_resizes(v, rounds))
     return rows, sessions

@@ -115,6 +115,23 @@ class Classes(unittest.TestCase):
         self.assertEqual(viewer.pressed, [b"\x7f", b"l"])
         self.assertEqual([p.key for p in presses], ["l"])
 
+    def test_p4_tui_09_t3_moves_in_the_siblings_pane_and_keeps_the_resize(self):
+        # T3's map draws no tile: its kinds move in the siblings pane,
+        # focused first and never measured; every other tree keeps the kinds
+        # the gates are read from.
+        self.assertEqual(redraw.kinds("T2"), redraw.KEYS)
+        self.assertEqual(redraw.kinds("T1"), redraw.KEYS)
+        names = [kind for kind, _, _ in redraw.kinds("T3")]
+        self.assertEqual(names, ["move", "page"])
+        for kind, setup, keys in redraw.kinds("T3"):
+            self.assertEqual(setup, (b"\t",), kind)
+            viewer = Scripted([(0.001, 100)] * (len(setup) + len(keys)))
+            presses = redraw.measure_keys(viewer, kind, setup, keys, 1)
+            self.assertEqual(viewer.pressed, list(setup) + list(keys), kind)
+            self.assertEqual(len(presses), len(keys), kind)
+            self.assertEqual([r["class"] for r in redraw.rows_of("T3", kind, presses)], ["navigation"], kind)
+        self.assertEqual([p.key for p in redraw.measure_keys(Scripted([(0.001, 100)] * 2), "page", (), (b"\x1b[6~", b"\x1b[5~"), 1)], ["pagedown", "pageup"])
+
     def test_p4_test_01_keys_are_named_as_the_key_line_reads(self):
         viewer = Scripted([(0.001, 100)] * 3)
         presses = redraw.measure_keys(viewer, "descend", (), (b"\x7f", b"\r", b"\t"), 1)

@@ -46,7 +46,7 @@ use std::fmt::Write as _;
 use duscope_core::query::TreeView;
 use duscope_core::rules::Class;
 
-use crate::paint::{Base, Drawn, PaintOpts};
+use crate::paint::{Base, Drawn, PaintOpts, Worked};
 use crate::picture::{MAX_SIDE, Metrics, PictureOpts, Rgb, Within, rgb_of};
 use crate::{Algorithm, Rect, TreemapError, png};
 
@@ -292,6 +292,50 @@ impl Picture {
         class_of: Option<&[Class]>,
         base: Base,
     ) -> Result<Picture, TreemapError> {
+        let within = Within {
+            base,
+            class_of,
+            dominant: None,
+            note: true,
+        };
+        Picture::drawn(view, paint, columns, rows, cell, &within)
+    }
+
+    /// The picture [`Picture::draw`] draws, with the classes the viewer
+    /// worked out: each entry's, and each folder's dominant ones where it
+    /// knows them, so that a folder drawn as one tile is not walked.
+    ///
+    /// # Errors
+    ///
+    /// As [`Picture::draw`]'s.
+    pub fn draw_worked(
+        view: &dyn TreeView,
+        paint: &PaintOpts<'_>,
+        columns: u16,
+        rows: u16,
+        cell: (u16, u16),
+        worked: Worked<'_>,
+        base: Base,
+    ) -> Result<Picture, TreemapError> {
+        let within = Within {
+            base,
+            class_of: Some(worked.class_of),
+            dominant: Some(worked.dominant),
+            note: true,
+        };
+        Picture::drawn(view, paint, columns, rows, cell, &within)
+    }
+
+    /// The picture of `view` in `columns` × `rows` cells of `cell` pixels,
+    /// drawn `within` the scan.
+    fn drawn(
+        view: &dyn TreeView,
+        paint: &PaintOpts<'_>,
+        columns: u16,
+        rows: u16,
+        cell: (u16, u16),
+        within: &Within<'_>,
+    ) -> Result<Picture, TreemapError> {
         let (cell_w, cell_h) = cell;
         let side = |cells: u16, cell: u16| {
             u16::try_from(u32::from(cells) * u32::from(cell))
@@ -313,12 +357,7 @@ impl Picture {
             legend: Vec::new(),
             summary: String::new(),
         };
-        let within = Within {
-            base,
-            class_of,
-            note: true,
-        };
-        let (canvas, drawing) = png::raster(view, &opts, metrics(&opts, cell_h), &within)
+        let (canvas, drawing) = png::raster(view, &opts, metrics(&opts, cell_h), within)
             .map_err(|e| TreemapError::PixelsEncode(e.to_string()))?;
         let roles = paint.pack.roles;
         Ok(Picture {

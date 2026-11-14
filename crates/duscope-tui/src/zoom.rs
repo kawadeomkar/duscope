@@ -23,9 +23,7 @@ use std::rc::Rc;
 use duscope_core::query::{Subtree, TreeView};
 use duscope_treemap::Rect;
 use duscope_treemap::cells::CellBuffer;
-use duscope_treemap::paint::{
-    Base, Drawn, DrawnKind, classes_of, paint_viewer, paint_viewer_labelled,
-};
+use duscope_treemap::paint::{Base, Drawn, DrawnKind, Worked, classes_of, paint_viewer_worked};
 
 use crate::panes::Context;
 
@@ -146,12 +144,16 @@ impl Map {
     pub fn paint(ctx: &Context<'_>, root: u32, w: u16, h: u16, labelled: bool) -> Map {
         let view = ctx.view;
         let base = base(ctx, root);
+        // The folders' dominant classes the viewer worked out, by the
+        // scan's ids: a zoomed map's are its root's and below.
+        let known = ctx.dominant.borrow();
+        let dominant = |id: u32| known.get(&(id + root)).copied();
         let (cells, drawn) = if root == 0 || view.is_empty() {
-            if labelled {
-                paint_viewer_labelled(view, ctx.opts, w, h, ctx.class_of, base)
-            } else {
-                paint_viewer(view, ctx.opts, w, h, ctx.class_of, base)
-            }
+            let worked = Worked {
+                class_of: ctx.class_of,
+                dominant: &dominant,
+            };
+            paint_viewer_worked(view, ctx.opts, w, h, worked, base, labelled)
         } else {
             let node = view.node(root);
             let sub = Subtree::new(view, root);
@@ -163,11 +165,11 @@ impl Map {
                 classes = classes_of(&sub, ctx.opts.classes);
                 &classes
             };
-            if labelled {
-                paint_viewer_labelled(&sub, ctx.opts, w, h, class_of, base)
-            } else {
-                paint_viewer(&sub, ctx.opts, w, h, class_of, base)
-            }
+            let worked = Worked {
+                class_of,
+                dominant: &dominant,
+            };
+            paint_viewer_worked(&sub, ctx.opts, w, h, worked, base, labelled)
         };
         let area = Rect::new(0, 0, cells.width(), cells.height() * 2);
         Map::of(root, cells, area, drawn)

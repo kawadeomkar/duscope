@@ -1862,10 +1862,12 @@ fn p4_tui_05_a_folder_of_a_million_files_on_t3() {
 // P4-TUI-08: a wide folder's children are read once for the siblings pane
 // and the moves and clicks that walk them, not once per frame or click.
 
-/// A view of `view` that counts the reads of each entry through it.
+/// A view of `view` that counts the reads of each entry through it, and
+/// apart how many of them read a name.
 struct PerEntry<'a> {
     view: &'a ArenaView<'a>,
     reads: RefCell<Vec<u32>>,
+    names: std::cell::Cell<u32>,
 }
 
 impl<'a> PerEntry<'a> {
@@ -1873,6 +1875,7 @@ impl<'a> PerEntry<'a> {
         PerEntry {
             view,
             reads: RefCell::new(vec![0; usize::try_from(view.len()).unwrap()]),
+            names: std::cell::Cell::new(0),
         }
     }
 
@@ -1908,6 +1911,7 @@ impl TreeView for PerEntry<'_> {
     }
     fn name(&self, id: u32) -> std::borrow::Cow<'_, [u8]> {
         self.note(id);
+        self.names.set(self.names.get() + 1);
         self.view.name(id)
     }
 }
@@ -2062,4 +2066,287 @@ fn p4_tui_08_ten_clicks_on_a_wide_folders_pool_read_its_children_once() {
     let tiles = u32::try_from(map.tiles().len()).unwrap();
     assert!(read >= N, "{read} reads of {N} children");
     assert!(read <= N + 10 * tiles + 64, "{read} reads of {N} children");
+}
+
+// P4-TUI-09: the viewer opens on one pass over the scan.
+
+/// A tree shaped as T2 is, many small folders deep: `fanout` folders in
+/// each folder down to depth `depth`, each of those holding `files` files of
+/// several classes and sizes.
+fn nested(fanout: usize, depth: usize, files: usize) -> (Arena, RollUp) {
+    fn folder(
+        json: &mut String,
+        at: usize,
+        fanout: usize,
+        depth: usize,
+        files: usize,
+        n: &mut usize,
+    ) {
+        const EXTS: [&str; 6] = ["rs", "mp4", "zip", "db", "pdf", "txt"];
+        if at == depth {
+            for f in 0..files {
+                *n += 1;
+                let size = (*n * 7919 % 10_007 + 1) * 64;
+                let ext = EXTS[*n * 31 % EXTS.len()];
+                let _ = write!(
+                    json,
+                    r#",{{"name":"f{f}.{ext}","asize":{size},"dsize":{size}}}"#
+                );
+            }
+            return;
+        }
+        for d in 0..fanout {
+            let _ = write!(json, r#",[{{"name":"d{d}"}}"#);
+            folder(json, at + 1, fanout, depth, files, n);
+            json.push(']');
+        }
+    }
+    let mut json = String::from(r#"[1,2,{"progname":"ncdu"},[{"name":"/nested"}"#);
+    folder(&mut json, 0, fanout, depth, files, &mut 0);
+    json.push_str("]]");
+    let mut arena = import(json.as_bytes(), Some(ImportFormat::Ncdu))
+        .unwrap()
+        .arena;
+    let rollup = roll_up(&mut arena);
+    (arena, rollup)
+}
+
+#[test]
+fn p4_tui_09_the_viewer_opens_on_one_pass_over_the_scan() {
+    use duscope_core::query::children;
+    use duscope_treemap::paint::DrawnKind;
+
+    // The viewer's start reads each entry once, to classify it, which also
+    // finds each folder's dominant classes and the legend's rows; its
+    // first frame then reads the children of the folders the map opens to
+    // lay them out, and what the panes show. Before, the legend read every
+    // entry again, and the first frame walked each folder the map drew as
+    // one tile, a deep subtree each here, for its colour.
+    let tree = nested(6, 6, 2);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/nested"));
+    let entries = view.len();
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    for color_by in [ColorBy::Type, ColorBy::Level, ColorBy::Age, ColorBy::Folder] {
+        let reads = PerEntry::new(&view);
+        let app = App::new(
+            &reads,
+            opts(&mocha, &classes, color_by.clone()),
+            Depth::TrueColor,
+            None,
+            String::new(),
+            None,
+        );
+        let nodes = |reads: &PerEntry<'_>| {
+            let (all, _) = reads.take(0..entries);
+            all - reads.names.replace(0)
+        };
+        // The pass, the root's children for the folder colours, and the
+        // path down to the largest file.
+        let start = nodes(&reads);
+        assert!(
+            (entries..=entries + 256).contains(&start),
+            "{color_by:?}: {start} node reads to start, for {entries} entries"
+        );
+        let terminal = first_frame(&app, 120, 40);
+        let frame = nodes(&reads);
+        let text = text_of(terminal.backend().buffer());
+        assert!(text.contains("d0"), "{text}");
+        // What the frame lays out: the children of the root and of every
+        // folder opened on the map; and a few reads for each tile and pane.
+        let map = app.map();
+        let opened: u32 = std::iter::once(0)
+            .chain(map.tiles().iter().filter_map(|t| match t.kind {
+                DrawnKind::Box { open: true } | DrawnKind::Gutter => Some(t.id),
+                _ => None,
+            }))
+            .map(|id| u32::try_from(children(&view, &view.node(id)).count()).unwrap())
+            .sum();
+        let tiles = u32::try_from(map.tiles().len()).unwrap();
+        assert!(
+            frame <= opened + 4 * tiles + 256,
+            "{color_by:?}: {frame} node reads for the first frame, {opened} children laid out, {tiles} tiles"
+        );
+    }
+}
+
+#[test]
+fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
+    use std::cell::RefCell;
+
+    use crate::panes::{Context, legend_label, legend_rows, ranks};
+
+    // The legend the viewer opens with, tallied in the pass that classifies
+    // the scan, is the one read entry by entry: each file's row its
+    // `legend_label`, read up its path, the bytes added in the order rows
+    // first appear, the largest first; and what `c` and `p` read again on
+    // their own. In every colour mode, with and without a `--depth` cap.
+    let ls = LsColors {
+        executable: None,
+        suffixes: vec![
+            (".mp4".to_owned(), Color::Rgb(255, 0, 0)),
+            (".db".to_owned(), Color::Rgb(0, 255, 0)),
+        ],
+    };
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mockup, nested) = (mockup(), nested(4, 4, 3));
+    let views = [
+        mockup_view(&mockup),
+        ArenaView::new(&nested.0, &nested.1, PathBuf::from("/nested")),
+    ];
+    for view in &views {
+        for color_by in [
+            ColorBy::Type,
+            ColorBy::LsColors(ls.clone()),
+            ColorBy::Level,
+            ColorBy::Age,
+            ColorBy::Folder,
+        ] {
+            for depth in [None, Some(1), Some(2)] {
+                let mut paint = opts(&mocha, &classes, color_by.clone());
+                paint.depth = depth;
+                paint.now = 2_000_000_000 * 1_000_000_000;
+                let app = App::new(
+                    view,
+                    paint.clone(),
+                    Depth::TrueColor,
+                    None,
+                    String::new(),
+                    None,
+                );
+                let class_of = duscope_treemap::paint::classes_of(view, &classes);
+                let dominant = RefCell::default();
+                let ranks = ranks(view, &paint);
+                let ctx = Context {
+                    view,
+                    opts: &paint,
+                    class_of: &class_of,
+                    dominant: &dominant,
+                    ranks: &ranks,
+                    root: "/",
+                    root_parent: "/",
+                };
+                let what = format!("{} {color_by:?} {depth:?}", view.root_path().display());
+                let alone = legend_rows(&ctx);
+                assert_eq!(*app.legend(), alone, "{what}");
+                assert!(!alone.1.is_empty(), "{what}");
+                if color_by == ColorBy::Folder {
+                    continue;
+                }
+                let mut read: Vec<(String, u64)> = Vec::new();
+                for node in (0..view.len())
+                    .map(|id| view.node(id))
+                    .filter(|n| !n.is_dir())
+                {
+                    let label = legend_label(&ctx, &node);
+                    let bytes = node.counted(paint.size);
+                    match read.iter_mut().find(|(l, _)| *l == label) {
+                        Some(row) => row.1 += bytes,
+                        None => read.push((label, bytes)),
+                    }
+                }
+                read.retain(|&(_, bytes)| bytes > 0);
+                read.sort_by_key(|&(_, bytes)| std::cmp::Reverse(bytes));
+                let tallied: Vec<(String, u64)> = alone
+                    .1
+                    .iter()
+                    .map(|row| (row.label.clone(), row.bytes))
+                    .collect();
+                assert_eq!(tallied, read, "{what}");
+            }
+        }
+    }
+}
+
+/// A view of `view` that counts the entries and the names read through
+/// it, and forwards the index's own queries (a folder's subfolders, the
+/// saved scan) as they are.
+struct Counted<'a> {
+    view: &'a dyn TreeView,
+    nodes: std::cell::Cell<u64>,
+    names: std::cell::Cell<u64>,
+}
+
+impl Counted<'_> {
+    /// The entries and the names read since the last call.
+    fn take(&self) -> (u64, u64) {
+        (self.nodes.replace(0), self.names.replace(0))
+    }
+}
+
+impl TreeView for Counted<'_> {
+    fn len(&self) -> u32 {
+        self.view.len()
+    }
+    fn node(&self, id: u32) -> duscope_core::query::Node {
+        self.nodes.set(self.nodes.get() + 1);
+        self.view.node(id)
+    }
+    fn root_path(&self) -> &Path {
+        self.view.root_path()
+    }
+    fn full_attrs(&self) -> bool {
+        self.view.full_attrs()
+    }
+    fn name(&self, id: u32) -> std::borrow::Cow<'_, [u8]> {
+        self.names.set(self.names.get() + 1);
+        self.view.name(id)
+    }
+    fn child_dirs(&self, dir: u32) -> Vec<(u32, u32)> {
+        self.view.child_dirs(dir)
+    }
+    fn as_index(&self) -> Option<(&duscope_core::index::Index, u32)> {
+        self.view.as_index()
+    }
+}
+
+/// The viewer's start on a saved scan of T2 (a million entries): the
+/// entries it reads to open and to draw its first frame, and how long each
+/// takes. Asserted for the reads, reported for the time.
+#[test]
+#[ignore = "needs bench/.trees/T2 and the release binary; DUSCOPE_TEST_PLATFORM=1"]
+fn p4_tui_09_the_viewer_opens_on_one_pass_over_t2() {
+    use std::time::Instant;
+
+    use duscope_core::rules::Classes;
+    use duscope_testkit::TestEnv;
+
+    use crate::cursor::tests::t2;
+
+    let env = TestEnv::new();
+    let Some(index) = t2(&env) else {
+        return;
+    };
+    let entries = u64::from(index.len());
+    let counted = Counted {
+        view: &index,
+        nodes: std::cell::Cell::new(0),
+        names: std::cell::Cell::new(0),
+    };
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), Classes::vendored());
+    let start = Instant::now();
+    let app = App::new(
+        &counted,
+        opts(&mocha, &classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let opened = start.elapsed();
+    let (nodes, names) = counted.take();
+    let start = Instant::now();
+    let _terminal = first_frame(&app, 120, 40);
+    let drawn = start.elapsed();
+    let (frame_nodes, frame_names) = counted.take();
+    eprintln!(
+        "T2, {entries} entries: the start read {nodes} entries and {names} names in {} ms; \
+         the first frame {frame_nodes} entries and {frame_names} names in {} ms",
+        opened.as_millis(),
+        drawn.as_millis()
+    );
+    assert!(nodes <= entries + 1024, "{nodes} entries read to start");
+    assert!(
+        frame_nodes <= entries / 10,
+        "{frame_nodes} entries read for the first frame"
+    );
 }

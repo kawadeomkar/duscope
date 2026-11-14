@@ -24,7 +24,7 @@ use duscope_core::query::timegrammar::iso8601;
 use duscope_core::query::{Node, TreeView};
 use duscope_core::rules::Class;
 use duscope_treemap::cells::Color;
-use duscope_treemap::paint::{PaintOpts, dominant, tile_color};
+use duscope_treemap::paint::{Dominant, PaintOpts, dominants, tile_color};
 use ratatui_core::layout::Rect;
 
 use crate::widgets::{Canvas, Span};
@@ -35,7 +35,7 @@ mod selected;
 mod siblings;
 
 pub use facts::{Facts, ScanFacts, Sources};
-pub use legend::{legend, legend_label, legend_rows, ranks, shown_rows};
+pub use legend::{Tally, legend, legend_label, legend_rows, legend_title, ranks, shown_rows};
 #[cfg(test)]
 use selected::mode_text;
 pub use selected::{folded, selected};
@@ -52,9 +52,12 @@ pub struct Context<'a> {
     pub opts: &'a PaintOpts<'a>,
     /// Each entry's class, by id.
     pub class_of: &'a [Class],
-    /// The class of most of each folder's bytes, worked out the first time
-    /// a pane shows the folder: the scan does not change.
-    pub dominant: &'a RefCell<HashMap<u32, Class>>,
+    /// Each folder's dominant classes ([`Dominant`]): the viewer works them
+    /// all out in the pass that classifies the scan
+    /// ([`duscope_treemap::paint::classify_scan`]); one missing is worked
+    /// out the first time it is asked for, and kept: the scan does not
+    /// change.
+    pub dominant: &'a RefCell<HashMap<u32, Dominant>>,
     /// The `--color-by folder` places of the root's tiles.
     pub ranks: &'a Ranks,
     /// The root's path as the header shows it (`~/Library`).
@@ -93,19 +96,23 @@ impl Context<'_> {
     /// A file's class, or the class of most of a folder's bytes.
     pub fn class(&self, node: &Node) -> Class {
         if node.is_dir() {
-            *self
-                .dominant
-                .borrow_mut()
-                .entry(node.id)
-                .or_insert_with(|| {
-                    dominant(self.view, self.class_of, self.opts.size, node.id, false)
-                })
+            self.dominants(node.id).tree
         } else {
             self.class_of
                 .get(node.id as usize)
                 .copied()
                 .unwrap_or(Class::Other)
         }
+    }
+
+    /// Folder `id`'s dominant classes: of all its bytes and of its own
+    /// files'.
+    pub(crate) fn dominants(&self, id: u32) -> Dominant {
+        *self
+            .dominant
+            .borrow_mut()
+            .entry(id)
+            .or_insert_with(|| dominants(self.view, self.class_of, self.opts.size, id))
     }
 
     /// The colour of `node`'s tile, as the map paints it untinted.
