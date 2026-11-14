@@ -16,6 +16,7 @@ use std::path::Path;
 use clap::ValueEnum;
 
 use duscope_core::CoreError;
+use duscope_core::index::IndexVolume;
 use duscope_core::interchange::{flat, gpscan, ncdu, qdirstat};
 use duscope_core::query::TreeView;
 use duscope_walk::Attrs;
@@ -178,10 +179,16 @@ pub(super) fn whole(
     })
 }
 
-/// What `ScanInfo` says: the exported entry's volume at the scan's start
-/// (the one with the longest mount point above it; else, where the path
-/// reaches its volume by other means, as macOS's firmlinks do, the root's
-/// volume, at `/`), and the measure.
+/// What `ScanInfo` says: the volume the exported entry lies on at the
+/// scan's start, and the measure. The volume is the one on the device of
+/// the entry's directory (`dirs.dev`), as `scan.volumes` finds it
+/// ([`source::device_of`]): of those on that device (a device mounted
+/// twice has two), the one mounted deepest at or above the path, at its
+/// mount point; else, where the path reaches the volume by other means, as
+/// macOS's firmlinks do (on a scan of `/`, the Data volume holds `/Users`,
+/// outside its mount point `/System/Volumes/Data`), the first, at `/`.
+/// Where no volume is on that device (an import's), the one with the
+/// longest mount point above the path, else the root's, at `/`.
 fn gpscan_opts(
     index: &duscope_core::index::Index,
     base: u32,
@@ -190,18 +197,16 @@ fn gpscan_opts(
 ) -> gpscan::GpscanOpts {
     let path = duscope_core::query::abs_path(index, base);
     let volumes = index.volumes();
-    let holding = volumes
-        .iter()
-        .filter(|v| {
-            path.starts_with(&v.mount_point)
-                && (path.len() == v.mount_point.len()
-                    || v.mount_point.ends_with(b"/")
-                    || path.get(v.mount_point.len()) == Some(&b'/'))
-        })
-        .max_by_key(|v| v.mount_point.len());
-    let (volume_path, volume) = match holding {
-        Some(v) => (v.mount_point.clone(), Some(v)),
-        None => (b"/".to_vec(), volumes.first()),
+    let dev = source::device_of(index, base);
+    let on: Vec<&IndexVolume> = volumes.iter().filter(|v| Some(v.dev) == dev).collect();
+    let every: Vec<&IndexVolume> = volumes.iter().collect();
+    let (volume_path, volume) = match (deepest_above(&on, &path), on.first()) {
+        (Some(v), _) => (v.mount_point.clone(), Some(v)),
+        (None, Some(&v)) => (b"/".to_vec(), Some(v)),
+        (None, None) => match deepest_above(&every, &path) {
+            Some(v) => (v.mount_point.clone(), Some(v)),
+            None => (b"/".to_vec(), volumes.first()),
+        },
     };
     let apparent = super::scan::size_kind(walk) == duscope_core::query::SizeKind::Apparent;
     gpscan::GpscanOpts {
@@ -212,4 +217,17 @@ fn gpscan_opts(
         scan_time_ns: index.meta().started_at,
         app_version: version,
     }
+}
+
+/// Of the volumes `of`, the one mounted deepest at or above `path`.
+fn deepest_above<'v>(of: &[&'v IndexVolume], path: &[u8]) -> Option<&'v IndexVolume> {
+    of.iter()
+        .copied()
+        .filter(|v| {
+            path.starts_with(&v.mount_point)
+                && (path.len() == v.mount_point.len()
+                    || v.mount_point.ends_with(b"/")
+                    || path.get(v.mount_point.len()) == Some(&b'/'))
+        })
+        .max_by_key(|v| v.mount_point.len())
 }
