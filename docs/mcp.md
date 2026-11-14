@@ -65,6 +65,13 @@ The server lists them in this order; a test holds this list to its `tools/list`.
 - `duscope_summary`: Totals under a path in a saved scan: bytes on disk and apparent, files, directories, errors, the volumes, and the bytes no entry accounts for.
 - `duscope_top`: The largest directories, or files, under a path in a saved scan, largest first; narrowed by depth, size and glob, and paged with cursor.
 
+A result is its verb's `--json` envelope byte for byte, so its hints (a warning's or the
+error's `hint`, and `next`) name the command a person would type. A tool takes each flag it
+exposes as the parameter of the same name in snake case, `--min-size` as `min_size`;
+[`schemas/mcp/MAPPING.md`](../schemas/mcp/MAPPING.md) lists each tool's, and the flags it leaves
+out with the reason. The `--strict` that a `partial_read` warning's hint offers is `strict` in
+`duscope_top`, `duscope_by_type`, `duscope_stale` and `duscope_caches`.
+
 `duscope mcp` is read-only unless started with `--allow-delete`, which adds one tool,
 `duscope_delete`. It moves entries under `--roots` to the Trash, never deletes them permanently,
 and cannot move a root itself. Each item names a `handle` from `duscope_explain` and

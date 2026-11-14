@@ -1124,13 +1124,15 @@ impl<'a> CommandLine<'a> {
             .unwrap_or_default()
     }
 
-    /// The shared parameters of the list tools: `size`, `fields`, `limit`
-    /// and, for a verb that pages, `cursor`.
+    /// The shared parameters of the list tools: `size`, `fields`, `limit`,
+    /// for a verb that pages `cursor`, and `strict`, which a `partial_read`
+    /// warning's hint offers as `--strict`.
     fn list(&mut self) -> &mut Self {
         self.value("size", "--size")
             .joined("fields", "--fields")
             .value("limit", "--limit")
             .value("cursor", "--cursor")
+            .switch("strict", "--strict")
     }
 
     fn invocation(self, verb: &'static str) -> Invocation {

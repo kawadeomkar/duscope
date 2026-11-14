@@ -54,6 +54,10 @@
       "minimum": 1,
       "maximum": 100,
       "description": "Rows to return. Default: 25"
+    },
+    "strict": {
+      "type": "boolean",
+      "description": "Fail with permission_denied when the scan could not read some directories, instead of answering with a partial_read warning. Default: false"
     }
   },
   "additionalProperties": false
