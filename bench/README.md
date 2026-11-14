@@ -393,7 +393,8 @@ on scaled trees). It holds:
   `query_targets`, `shapes` (each shape's row, as `results` holds a query's, with `kind`
   `shape` and its `total_count`) and `speedups`;
 - `gates`: each line of the targets with the value measured, its limit, the platform it binds,
-  and whether it holds, read from T2 (`gates_tree`; the first tree when T2 was not measured).
+  and whether it holds, read from T2 (`gates_tree`); without T2, `gates_tree` and the values
+  are null and the run says each line is not judged.
 
 The gates follow the targets:
 
