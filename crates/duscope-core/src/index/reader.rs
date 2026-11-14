@@ -949,8 +949,15 @@ impl TreeView for Index {
     }
 
     /// From `dirs.dev`: a directory on another device than its parent's.
+    /// A file is its own one root, on its directory's device.
     fn volume_roots(&self, dir: u32) -> Vec<crate::query::VolumeRoot> {
-        let last = self.node(dir).last_id;
+        let node = self.node(dir);
+        if !node.is_dir() {
+            return crate::query::file_root(&node, self.dir_dev(node.parent))
+                .into_iter()
+                .collect();
+        }
+        let last = node.last_id;
         let read = || -> rusqlite::Result<Vec<crate::query::VolumeRoot>> {
             let mut stmt = self.db.prepare(
                 "SELECT d.id, d.last_id, d.dev, d.cum_allocated, d.cum_apparent, \

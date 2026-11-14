@@ -57,8 +57,8 @@ pub use resolve::{
 pub use sql::{SqlQuery, human_size, sql};
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, StaleRows, stale, stale_rows};
 pub use summary::{
-    SubvolumeBytes, SummaryBytes, VolumeBytes, VolumeRoot, VolumeUse, referenced, shares,
-    subvolume_shares, summary, unaccounted,
+    SubvolumeBytes, SummaryBytes, VolumeBytes, VolumeRoot, VolumeUse, file_root, referenced,
+    shares, subvolume_shares, summary, unaccounted,
 };
 pub use top::{TopQuery, TopRows, top, top_rows};
 pub use tree::{TreeQuery, tree};
@@ -210,7 +210,8 @@ pub trait TreeView {
     }
 
     /// The directories under `dir` (itself first) where a volume starts,
-    /// in id order, with their totals. A view that knows no volumes has
+    /// in id order, with their totals; for a file, the file, on its
+    /// directory's device ([`file_root`]). A view that knows no volumes has
     /// one, starting at `dir`, whose device is 0 and whose bytes as `du`
     /// counts them are its allocated ones.
     fn volume_roots(&self, dir: u32) -> Vec<VolumeRoot> {
@@ -424,12 +425,17 @@ impl TreeView for ArenaView<'_> {
             .collect();
         crossings.sort_unstable();
         // The device of `dir` itself: that of the innermost crossing at or
-        // above it, else the root's.
+        // above it, else the root's. A crossing is a directory, so a file's
+        // is its directory's.
         let dev = crossings
             .iter()
             .filter(|&&(id, _)| id <= dir && self.node(id).last_id >= dir)
             .max_by_key(|&&(id, _)| id)
             .map_or(self.arena.root_volume().0, |&(_, dev)| dev);
+        let node = self.node(dir);
+        if !node.is_dir() {
+            return file_root(&node, Some(dev)).into_iter().collect();
+        }
         let mut roots: Vec<VolumeRoot> = root(dir, dev).into_iter().collect();
         roots.extend(
             crossings

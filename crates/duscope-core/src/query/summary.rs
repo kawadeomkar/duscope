@@ -10,13 +10,15 @@
 //!
 //! The sidebar of subvolumes (btrfs subvolumes, ZFS datasets) counts each
 //! the same way: its totals, less those of the subvolumes and the volumes
-//! that start below it.
+//! that start below it. A file read alone starts nothing: its bytes lie on
+//! its directory's volume.
 
 use std::path::Path;
 
-use super::TreeView;
+use super::{Node, TreeView};
 
-/// A directory where a volume starts, with its subtree's totals.
+/// A directory where a volume starts, with its subtree's totals; or a file
+/// read alone ([`file_root`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VolumeRoot {
     /// Its id in the view.
@@ -31,6 +33,20 @@ pub struct VolumeRoot {
     pub apparent: u64,
     /// Bytes on disk as `du` counts them: hard links once, clones each.
     pub du_compatible: u64,
+}
+
+/// The volume root of `file` when it is the root of a view: the file
+/// itself, on its directory's device `dev`, its bytes as `du` counts them
+/// its allocated ones. `None` when the device could not be read.
+pub fn file_root(file: &Node, dev: Option<u64>) -> Option<VolumeRoot> {
+    dev.map(|dev| VolumeRoot {
+        id: file.id,
+        last: file.id,
+        dev,
+        allocated: file.allocated,
+        apparent: file.apparent,
+        du_compatible: file.allocated,
+    })
 }
 
 /// The bytes one volume holds under the root.
