@@ -75,8 +75,9 @@ The design is fixed by two documents; read the parts a task cites before writing
 ## Working beside other agents
 - You have one package; the author claimed it in the Tracker (Owner, In progress) before this
   session. Other packages are in flight at the same time.
-- Touch only the files in your row (a new file inside them is fine). If you need a file that
-  belongs to another in-flight package, stop and ask in your PR; never edit it.
+- Touch only the crates in your row; a file in them that your row does not list is fine unless
+  another in-flight package lists it. If you need such a file, or another crate, stop and ask
+  in your PR; never edit it.
 - Branch `<id>-<slug>` from main; rebase onto main, never merge, when main moves. There is no
   merge queue: branch protection requires the branch to be up to date with main, and CI must
   pass on the up-to-date branch before it merges.
