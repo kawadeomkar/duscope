@@ -11,9 +11,9 @@ use duscope_core::envelope::{
     TopEntry, TreeEntry, Warning,
 };
 use duscope_core::query::{
-    self, After, ByTypeQuery, CachesQuery, Cursor, DEFAULT_MIN_SIZE, Filters, Page, Regex,
-    SizeKind, StaleQuery, StaleRows, TimeField, TopQuery, TopRows, TreeQuery, TreeView, query_hash,
-    timegrammar,
+    self, After, ByTypeQuery, ByTypeRows, CacheRows, CachesQuery, Cursor, DEFAULT_MIN_SIZE,
+    Filters, Page, ProjectRows, Regex, SizeKind, StaleQuery, StaleRows, TimeField, TopQuery,
+    TopRows, TreeQuery, TreeRows, TreeView, query_hash, timegrammar,
 };
 use duscope_core::rules::Classes;
 use duscope_walk::VolumeInfo;
@@ -311,57 +311,122 @@ fn top_asked(
     })
 }
 
-/// A verb's rows, ranked, and built one at a time from their ids.
+/// A verb's rows, ranked, and built one at a time.
 trait Ranked {
     /// The row a list writes.
     type Row: Row + Hinted;
-    /// The rows' ids, in order.
-    fn ids(&self) -> &[u32];
-    /// The row of `id`.
-    fn row(&self, view: &dyn TreeView, id: u32) -> Self::Row;
+    /// How many rows there are.
+    fn len(&self) -> usize;
+    /// The row at `at`, counted from 0.
+    fn row(&self, view: &dyn TreeView, at: usize) -> Self::Row;
     /// The page with no row built: its count, cursor and truncation.
     fn head(&self) -> Page<Self::Row>;
+}
+
+/// A page of no rows, saying `total_count`, `next` and `truncated`.
+fn head<T>(total_count: u64, next: Option<After>, truncated: bool) -> Page<T> {
+    Page {
+        entries: Vec::new(),
+        total_count,
+        next,
+        truncated,
+    }
 }
 
 impl Ranked for TopRows {
     type Row = TopEntry;
 
-    fn ids(&self) -> &[u32] {
-        &self.ids
+    fn len(&self) -> usize {
+        self.ids.len()
     }
 
-    fn row(&self, view: &dyn TreeView, id: u32) -> TopEntry {
-        TopRows::row(self, view, id)
+    fn row(&self, view: &dyn TreeView, at: usize) -> TopEntry {
+        TopRows::row(self, view, self.ids[at])
     }
 
     fn head(&self) -> Page<TopEntry> {
-        Page {
-            entries: Vec::new(),
-            total_count: self.total_count,
-            next: self.next,
-            truncated: self.truncated,
-        }
+        head(self.total_count, self.next, self.truncated)
     }
 }
 
 impl Ranked for StaleRows {
     type Row = StaleEntry;
 
-    fn ids(&self) -> &[u32] {
-        &self.ids
+    fn len(&self) -> usize {
+        self.ids.len()
     }
 
-    fn row(&self, view: &dyn TreeView, id: u32) -> StaleEntry {
-        StaleRows::row(self, view, id)
+    fn row(&self, view: &dyn TreeView, at: usize) -> StaleEntry {
+        StaleRows::row(self, view, self.ids[at])
     }
 
     fn head(&self) -> Page<StaleEntry> {
-        Page {
-            entries: Vec::new(),
-            total_count: self.total_count,
-            next: self.next,
-            truncated: self.truncated,
-        }
+        head(self.total_count, self.next, self.truncated)
+    }
+}
+
+impl Ranked for TreeRows {
+    type Row = TreeEntry;
+
+    fn len(&self) -> usize {
+        TreeRows::len(self)
+    }
+
+    fn row(&self, view: &dyn TreeView, at: usize) -> TreeEntry {
+        TreeRows::row(self, view, at)
+    }
+
+    fn head(&self) -> Page<TreeEntry> {
+        head(self.total_count, None, self.truncated)
+    }
+}
+
+impl Ranked for ByTypeRows {
+    type Row = ByTypeEntry;
+
+    fn len(&self) -> usize {
+        ByTypeRows::len(self)
+    }
+
+    fn row(&self, view: &dyn TreeView, at: usize) -> ByTypeEntry {
+        ByTypeRows::row(self, view, at)
+    }
+
+    fn head(&self) -> Page<ByTypeEntry> {
+        head(self.total_count, None, self.truncated)
+    }
+}
+
+impl Ranked for CacheRows {
+    type Row = CacheEntry;
+
+    fn len(&self) -> usize {
+        CacheRows::len(self)
+    }
+
+    fn row(&self, view: &dyn TreeView, at: usize) -> CacheEntry {
+        CacheRows::row(self, view, at)
+    }
+
+    fn head(&self) -> Page<CacheEntry> {
+        head(self.total_count, self.next, self.truncated)
+    }
+}
+
+/// A project's row reads nothing more of the scan.
+impl Ranked for ProjectRows {
+    type Row = ProjectEntry;
+
+    fn len(&self) -> usize {
+        ProjectRows::len(self)
+    }
+
+    fn row(&self, _view: &dyn TreeView, at: usize) -> ProjectEntry {
+        ProjectRows::row(self, at)
+    }
+
+    fn head(&self) -> Page<ProjectEntry> {
+        head(self.total_count, None, self.truncated)
     }
 }
 
@@ -389,7 +454,7 @@ fn write_ranked<R: Ranked>(
     let mut page = rows.head();
     if !stream {
         let view = prepared.source.view();
-        page.entries = rows.ids().iter().map(|&id| rows.row(&*view, id)).collect();
+        page.entries = (0..rows.len()).map(|at| rows.row(&*view, at)).collect();
         drop(view);
         let (envelope, footer, source) =
             envelope(prepared, walk, verb, depth, page, extra, hash, output);
@@ -399,13 +464,11 @@ fn write_ranked<R: Ranked>(
     }
     let (mut envelope, footer, source) =
         envelope(prepared, walk, verb, depth, page, extra, hash, output);
-    envelope.returned_count = rows.ids().len() as u64;
+    envelope.returned_count = rows.len() as u64;
     source.check()?;
     let view = source.view();
-    let built = rows
-        .ids()
-        .iter()
-        .map(|&id| rows.row(&*view, id))
+    let built = (0..rows.len())
+        .map(|at| rows.row(&*view, at))
         .take_while(|_| !source.failed());
     output.list_rows(&envelope, built, || source.check(), &footer)?;
     drop(view);
@@ -414,6 +477,16 @@ fn write_ranked<R: Ranked>(
 
 /// `tree`.
 pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    tree_written(args, index_dir, output, output.streams())
+}
+
+/// `tree`, its rows streamed when `stream` ([`write_ranked`]).
+fn tree_written(
+    args: &TreeArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+    stream: bool,
+) -> Result<(), Failure> {
     if output.fields_first::<TreeEntry>("tree")? {
         return Ok(());
     }
@@ -437,20 +510,19 @@ pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         limit: prepared.limit,
         size: prepared.size,
     };
-    let page = query::tree(&*prepared.source.view(), &q);
+    let rows = query::tree_rows(&*prepared.source.view(), &q);
     let depth = Some(args.query.depth.unwrap_or(2));
-    let (envelope, footer, source) = envelope(
+    let source = write_ranked(
         prepared,
         &args.walk,
         "tree",
         depth,
-        page,
+        &rows,
         Vec::new(),
         None,
         output,
-    );
-    source.check()?;
-    output.list(&envelope, &footer)?;
+        stream,
+    )?;
     source.finish(&args.walk, output)
 }
 
@@ -477,6 +549,16 @@ pub fn by_type(
     args: &ByTypeArgs,
     index_dir: Option<&Path>,
     output: &Output,
+) -> Result<(), Failure> {
+    by_type_written(args, index_dir, output, output.streams())
+}
+
+/// `by-type`, its rows streamed when `stream` ([`write_ranked`]).
+fn by_type_written(
+    args: &ByTypeArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+    stream: bool,
 ) -> Result<(), Failure> {
     // --classes, else the configuration's [classes] extra.
     let label = if args.classes == args.walk.classes_extra {
@@ -508,19 +590,18 @@ pub fn by_type(
         sort: prepared.sort,
         reverse: prepared.reverse,
     };
-    let page: Page<ByTypeEntry> = query::by_type(&*prepared.source.view(), &q);
-    let (envelope, footer, source) = envelope(
+    let rows = query::by_type_rows(&*prepared.source.view(), &q);
+    let source = write_ranked(
         prepared,
         &args.walk,
         "by-type",
         args.query.depth,
-        page,
+        &rows,
         Vec::new(),
         None,
         output,
-    );
-    source.check()?;
-    output.list(&envelope, &footer)?;
+        stream,
+    )?;
     source.finish(&args.walk, output)
 }
 
@@ -622,6 +703,16 @@ fn stale_written(
 
 /// `caches`: each cache by default, each project's with `--by-project`.
 pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    caches_written(args, index_dir, output, output.streams())
+}
+
+/// `caches`, its rows streamed when `stream` ([`write_ranked`]).
+fn caches_written(
+    args: &CachesArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+    stream: bool,
+) -> Result<(), Failure> {
     // A scan that leaves the caches out holds none of their bytes.
     if args.walk.exclude_caches {
         return Err(Failure::new(
@@ -700,45 +791,26 @@ pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> R
         size: prepared.size,
         after,
     };
-    if args.by_project {
-        let page: Page<ProjectEntry> = query::projects(&*source.view(), &q);
-        write(prepared, &args.walk, verb, &args.query, page, None, output)
+    let (walk, depth, extra) = (&args.walk, args.query.depth, Vec::new());
+    let source = if args.by_project {
+        let rows = query::project_rows(&*source.view(), &q);
+        write_ranked(
+            prepared, walk, verb, depth, &rows, extra, None, output, stream,
+        )?
     } else {
-        let page: Page<CacheEntry> = query::caches(&*source.view(), &q);
-        write(
+        let rows = query::cache_rows(&*source.view(), &q);
+        write_ranked(
             prepared,
-            &args.walk,
+            walk,
             verb,
-            &args.query,
-            page,
+            depth,
+            &rows,
+            extra,
             Some(&hash),
             output,
-        )
-    }
-}
-
-/// Writes a verb's page as its envelope, and saves a scan run for it.
-fn write<T: Row + Hinted>(
-    prepared: Prepared,
-    walk: &WalkArgs,
-    verb: &'static str,
-    query: &QueryArgs,
-    page: Page<T>,
-    hash: Option<&str>,
-    output: &Output,
-) -> Result<(), Failure> {
-    let (envelope, footer, source) = envelope(
-        prepared,
-        walk,
-        verb,
-        query.depth,
-        page,
-        Vec::new(),
-        hash,
-        output,
-    );
-    source.check()?;
-    output.list(&envelope, &footer)?;
+            stream,
+        )?
+    };
     source.finish(walk, output)
 }
 

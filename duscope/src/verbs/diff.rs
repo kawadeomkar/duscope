@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use duscope_core::envelope::{DiffEntry, DiffTotals, Envelope, QueryBlock, SCHEMA_VERSION, Tool};
 use duscope_core::index::Index;
 use duscope_core::query::{
-    self, DEFAULT_MIN_DELTA, DiffQuery, ScanQuery, ScanSelector, SizeKind, Subtree, TreeView,
-    clock, resolve_scan,
+    self, DEFAULT_MIN_DELTA, DiffQuery, DiffRows, Page, ScanQuery, ScanSelector, SizeKind, Subtree,
+    TreeView, clock, resolve_scan,
 };
 use duscope_core::resolve::{resolve_in_index, resolve_path};
 
@@ -24,6 +24,52 @@ const MAX_LIMIT: usize = 100;
 
 /// `diff`.
 pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    written(args, index_dir, output, output.streams())
+}
+
+/// `diff`, its rows streamed when `stream` ([`write()`]).
+fn written(
+    args: &DiffArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+    stream: bool,
+) -> Result<(), Failure> {
+    let compared = compare(args, index_dir, output)?;
+    let (old_view, new_view) = compared.views();
+    let (rows, totals) = query::diff_rows(&old_view, &new_view, &compared.q);
+    drop((old_view, new_view));
+    write(&compared, &rows, totals, output, stream)
+}
+
+/// The two saved scans `diff` compares, and what it asks of them.
+struct Compared {
+    old: Index,
+    new: Index,
+    /// The entry each scan compares from: the root, or the path both hold.
+    bases: (u32, u32),
+    /// `--under`, resolved.
+    under: Option<PathBuf>,
+    /// The index directory the scans were looked for in.
+    dir: PathBuf,
+    q: DiffQuery,
+}
+
+impl Compared {
+    /// Each scan from the entry it compares from.
+    fn views(&self) -> (Subtree<'_, Index>, Subtree<'_, Index>) {
+        (
+            Subtree::new(&self.old, self.bases.0),
+            Subtree::new(&self.new, self.bases.1),
+        )
+    }
+}
+
+/// The scans `args` names, opened, and the query of them.
+fn compare(
+    args: &DiffArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+) -> Result<Compared, Failure> {
     let limit = row_limit(args, output)?;
     let cwd = std::env::current_dir().map_err(|e| {
         Failure::new(
@@ -51,7 +97,7 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
     let old = open(&args.old, &dir, &cwd, under.as_deref(), &args.trust)?;
     let new = open(&args.new, &dir, &cwd, under.as_deref(), &args.trust)?;
     // The entry each scan compares from: the root, or the path both hold.
-    let (old_base, new_base) = match &under {
+    let bases = match &under {
         Some(path) => {
             let (Some(a), Some(b)) = (resolve_in_index(&old, path), resolve_in_index(&new, path))
             else {
@@ -69,32 +115,100 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         Some(cli::SizeKind::Apparent) => SizeKind::Apparent,
         _ => SizeKind::Allocated,
     };
-    let min_delta = args.min_delta.unwrap_or(DEFAULT_MIN_DELTA);
     let q = DiffQuery {
-        min_delta,
+        min_delta: args.min_delta.unwrap_or(DEFAULT_MIN_DELTA),
         depth: args.depth,
         size,
         limit,
     };
-    let old_view = Subtree::new(&old, old_base);
-    let new_view = Subtree::new(&new, new_base);
-    let (page, mut totals) = query::diff(&old_view, &new_view, &q);
+    Ok(Compared {
+        old,
+        new,
+        bases,
+        under,
+        dir,
+        q,
+    })
+}
+
+/// `diff`'s rows, ranked, and built one at a time from the two scans.
+trait Changes {
+    /// How many rows there are.
+    fn len(&self) -> usize;
+    /// The row at `at`, counted from 0.
+    fn row(&self, old: &dyn TreeView, new: &dyn TreeView, at: usize) -> DiffEntry;
+    /// The page with no row built: its count and truncation.
+    fn head(&self) -> Page<DiffEntry>;
+}
+
+impl Changes for DiffRows {
+    fn len(&self) -> usize {
+        DiffRows::len(self)
+    }
+
+    fn row(&self, old: &dyn TreeView, new: &dyn TreeView, at: usize) -> DiffEntry {
+        DiffRows::row(self, old, new, at)
+    }
+
+    fn head(&self) -> Page<DiffEntry> {
+        Page {
+            entries: Vec::new(),
+            total_count: self.total_count,
+            next: None,
+            truncated: self.truncated,
+        }
+    }
+}
+
+/// Writes the `rows` of `compared` with their `totals`. With `stream` (a
+/// format that [`Output::streams`]), each row is built as it is written
+/// and none is held: both scans are checked before the first row, and
+/// after each row is built ([`Index::failed`]); the rows end before the
+/// first built from a failed read, and the failure is returned (`ndjson`
+/// has no trailer). Otherwise every row is built first, as the
+/// envelope's entries (which the hints read), and the scans checked
+/// before they are written.
+fn write<C: Changes>(
+    compared: &Compared,
+    rows: &C,
+    mut totals: DiffTotals,
+    output: &Output,
+    stream: bool,
+) -> Result<(), Failure> {
+    let Compared {
+        old,
+        new,
+        bases,
+        under,
+        dir,
+        q,
+    } = compared;
+    let (old_view, new_view) = compared.views();
     totals.old_scan = old.meta().scan_id.to_string();
     totals.new_scan = new.meta().scan_id.to_string();
     let path = new_view.root_path().to_string_lossy().into_owned();
-    drop((old_view, new_view));
-    let mut filters = vec![format!("--min-delta={min_delta}")];
-    if let Some(path) = &under {
+    let mut page = rows.head();
+    if !stream {
+        page.entries = (0..rows.len())
+            .map(|at| rows.row(&old_view, &new_view, at))
+            .collect();
+    }
+    let mut filters = vec![format!("--min-delta={}", q.min_delta)];
+    if let Some(path) = under {
         filters.push(format!("--under={}", path.display()));
     }
-    let returned_count = page.entries.len() as u64;
-    let block = read_block(&new, &[new_base], size, Some(LISTED_EXCLUDED));
+    let returned_count = if stream {
+        rows.len()
+    } else {
+        page.entries.len()
+    } as u64;
+    let block = read_block(new, &[bases.1], q.size, Some(LISTED_EXCLUDED));
     let warnings = source::excluded_truncated(&block, Some(&path))
         .into_iter()
         .collect();
     let ids = (
-        query::short_id(&dir, &totals.old_scan),
-        query::short_id(&dir, &totals.new_scan),
+        query::short_id(dir, &totals.old_scan),
+        query::short_id(dir, &totals.new_scan),
     );
     let footer = footer(&totals, &ids, output);
     let mut envelope = Envelope {
@@ -105,8 +219,8 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         query: QueryBlock {
             command: "diff",
             path,
-            depth: args.depth,
-            limit: limit.map(|l| l as u64),
+            depth: q.depth,
+            limit: q.limit.map(|l| l as u64),
             sort: "abs_delta_desc".to_owned(),
             filters,
         },
@@ -119,9 +233,23 @@ pub fn run(args: &DiffArgs, index_dir: Option<&Path>, output: &Output) -> Result
         next: Vec::new(),
     };
     envelope.next = next(&envelope, new.file());
-    check(&old)?;
-    check(&new)?;
-    output.list_diff(&envelope, &totals, &footer)
+    check(old)?;
+    check(new)?;
+    if !stream {
+        return output.list_diff(&envelope, &totals, &footer);
+    }
+    let built = (0..rows.len())
+        .map(|at| rows.row(&old_view, &new_view, at))
+        .take_while(|_| !old.failed() && !new.failed());
+    output.list_rows(
+        &envelope,
+        built,
+        || {
+            check(old)?;
+            check(new)
+        },
+        &footer,
+    )
 }
 
 /// The rows to return: `--limit`, 25 by default and 100 at most unless
