@@ -25,9 +25,11 @@ once, in parallel, and:
   (v0.3).
 
 Its sizes are what deleting would free: hard links count once on every
-filesystem, and it accounts for APFS clones and firmlinks on macOS and for btrfs
-and XFS reflinks, subvolumes and bind mounts on Linux. Linux and macOS are both
-first-class, with one binary, one set of commands and one JSON format.
+filesystem, and it accounts for APFS clones and firmlinks on macOS and for
+subvolumes and bind mounts on Linux. On Linux a scan counts each btrfs or XFS
+reflinked copy in full, as `du` does, and `duscope explain --clones` measures
+what they share ([limits](docs/limits.md#reflinks-on-linux)). Linux and macOS
+are both first-class, with one binary, one set of commands and one JSON format.
 
 ## Install
 
@@ -285,6 +287,10 @@ adds `duscope_delete`, which can only move entries to the Trash.
 - [SECURITY.md](SECURITY.md): the threat model (what duscope treats as untrusted and
   the rule for each), how to report a vulnerability, and the supported versions.
 - [CHANGELOG.md](CHANGELOG.md): what changed in each release.
+- [docs/troubleshooting.md](docs/troubleshooting.md): every warning and error,
+  and what to do about it.
+- [docs/limits.md](docs/limits.md): what duscope cannot measure, or measures
+  only within bounds, and why.
 - [docs/](docs/README.md): the rest of the documentation.
 
 ## Licence
