@@ -471,7 +471,7 @@ fn p5_cli_02_a_tool_names_no_excluded_directory_outside_the_roots() {
         // `result.volumes`) wherever it is mounted.
         let mut texts = Vec::new();
         strings("", result, &mut texts);
-        for (at, path) in named_paths(&texts) {
+        for (at, path) in named_paths(&texts, root.to_str().unwrap()) {
             let within = Path::new(path).starts_with(&inside);
             let scan_root = matches!(
                 at,
@@ -497,21 +497,61 @@ fn p5_cli_02_a_tool_names_no_excluded_directory_outside_the_roots() {
 /// The paths among `texts` (from [`strings`]), each with its pointer: a
 /// string of the envelope that starts with `/`, and in any other string (the
 /// text block, a hint, a message) each word that does, less a trailing `,`,
-/// `:` or `;`. The test's paths hold no space.
-fn named_paths<'t>(texts: &'t [(String, &'t str)]) -> Vec<(&'t str, &'t str)> {
+/// `:` or `;`. A path there that starts with `base` runs to the first blank
+/// after it: `base`, the test's directory, may hold spaces (a home or a
+/// temporary directory named so), and the test's names under it hold none.
+fn named_paths<'t>(texts: &'t [(String, &'t str)], base: &str) -> Vec<(&'t str, &'t str)> {
     let mut paths = Vec::new();
     for (at, text) in texts {
         if at.starts_with("/structuredContent/") && text.starts_with('/') {
             paths.push((at.as_str(), *text));
-        } else {
-            paths.extend(
-                text.split_whitespace()
-                    .filter(|word| word.starts_with('/'))
-                    .map(|word| (at.as_str(), word.trim_end_matches([',', ':', ';']))),
-            );
+            continue;
+        }
+        let mut from = 0;
+        while let Some(start) = text[from..].find('/').map(|i| from + i) {
+            if !text[..start].is_empty() && !text[..start].ends_with(char::is_whitespace) {
+                from = start + 1;
+                continue;
+            }
+            let after = if text[start..].starts_with(base) {
+                start + base.len()
+            } else {
+                start
+            };
+            let end = text[after..]
+                .find(char::is_whitespace)
+                .map_or(text.len(), |i| after + i);
+            paths.push((
+                at.as_str(),
+                text[start..end].trim_end_matches([',', ':', ';']),
+            ));
+            from = end;
         }
     }
     paths
+}
+
+/// [`named_paths`] reads a path whose leading directories hold spaces as
+/// one, where it begins with the test's directory.
+#[test]
+fn p5_cli_02_named_paths_reads_the_tests_directory_with_spaces_whole() {
+    let texts = [
+        (
+            "/content/0/text".to_owned(),
+            "2 directories under /tmp/a b/root/in: /tmp/a b/root/in/d0, /etc; and a/b /x",
+        ),
+        ("/structuredContent/scan/root".to_owned(), "/tmp/a b/root"),
+    ];
+    assert_eq!(
+        named_paths(&texts, "/tmp/a b/root"),
+        [
+            ("/content/0/text", "/tmp/a b/root/in"),
+            ("/content/0/text", "/tmp/a b/root/in/d0"),
+            ("/content/0/text", "/etc"),
+            ("/content/0/text", "/x"),
+            ("/structuredContent/scan/root", "/tmp/a b/root"),
+        ]
+    );
 }
 
 /// Whether `at` points at a volume's mount point: `scan.volumes[i]`'s, or
