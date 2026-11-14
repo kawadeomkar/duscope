@@ -182,10 +182,12 @@ fn execute(mut cli: Cli, matches: &ArgMatches, capture: Option<&Capture>) -> u8 
             output.failure(&failure);
             failure.exit.code()
         }
-        // On the command line the index is written after the output, which
-        // stands, and clean's plan carries its own error: the failure goes
-        // to stderr, never as a second envelope.
-        Err(failure) if failure.code == "index_write_failed" || failure.reported => {
+        // On the command line an answer written already stands (a scan's
+        // output, whose save failed after it; clean's plan, which carries
+        // its own error): the failure goes to stderr, never as a second
+        // envelope. A save before any output (query --sql, export) fails
+        // as anything else does.
+        Err(failure) if failure.reported => {
             out::to_stderr(&failure);
             failure.exit.code()
         }

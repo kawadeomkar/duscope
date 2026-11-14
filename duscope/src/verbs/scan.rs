@@ -293,7 +293,8 @@ pub fn scan_id(scanned: &Scanned) -> Result<ScanId, Failure> {
 /// `--save`: the scan's index, written under the index directory once the
 /// output is out, then, when `announce`, its id on stderr for people (the
 /// envelope carries it already). A failure is `index_write_failed` (exit 1),
-/// which `main` reports on stderr alone: the output already written stands.
+/// [reported](Failure::reported), which `main` writes on stderr alone: the
+/// output already written stands.
 pub fn save(
     scanned: &Scanned,
     walk: &WalkArgs,
@@ -308,10 +309,19 @@ pub fn save(
         None => {
             duscope_core::index::default_dir(|name| std::env::var_os(name)).ok_or_else(|| {
                 save_failed("no index directory: neither HOME nor XDG_CACHE_HOME is set".to_owned())
+                    .reported()
             })?
         }
     };
-    write_index(scanned, walk, excludes, id, &dir)?;
+    // Ctrl-C, or a tool call's cancellation, stays unreported: `main` then
+    // replaces a tool's envelope, whose scan id names no file (P3-MCP-09).
+    write_index(scanned, walk, excludes, id, &dir).map_err(|failure| {
+        if failure.code == "index_write_failed" {
+            failure.reported()
+        } else {
+            failure
+        }
+    })?;
     if announce && !output.is_json() {
         crate::out::stderr_line(&format!(
             "saved as {id} ({})",

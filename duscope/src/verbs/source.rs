@@ -578,10 +578,8 @@ impl Source {
             save: Some((id, dir)),
         } = self
         {
-            scan::save(scanned, walk, &[], id, Some(dir), output, false).map_err(|failure| {
-                failure
-                    .hint("Rerun with --no-save, or with --index-dir naming a writable directory")
-            })?;
+            scan::save(scanned, walk, &[], id, Some(dir), output, false)
+                .map_err(|failure| failure.hint(SAVE_HINT))?;
         }
         Ok(())
     }
@@ -617,16 +615,25 @@ impl Drop for Scratch {
     }
 }
 
+/// The hint of a scan run for a verb that cannot be saved in the index
+/// directory.
+const SAVE_HINT: &str = "Rerun with --no-save, or with --index-dir naming a writable directory";
+
+/// The hint of a scan run for a verb that cannot be written to a scratch
+/// directory.
+const SCRATCH_HINT: &str = "Rerun without --no-save, or with --index-dir";
+
 impl Source {
     /// The source as an index (see [`Indexed`]); `walk` and `excludes`
     /// are the fresh scan's, for its saved options, and `verb` names the
-    /// directory of an index not kept.
+    /// directory of an index not kept. A fresh scan is written before the
+    /// verb prints anything, so a failed save is the verb's failure, as any
+    /// other: `index_write_failed`, with the error envelope under `--json`.
     pub fn indexed(
         self,
         verb: &str,
         walk: &WalkArgs,
         excludes: &[String],
-        output: &Output,
     ) -> Result<Indexed, Failure> {
         match self {
             Source::Saved { index, base, .. } => {
@@ -641,16 +648,19 @@ impl Source {
                 })
             }
             Source::Fresh { scanned, save } => {
-                let (id, dir, label, scratch) = if let Some((id, dir)) = save {
+                let (id, dir, label, scratch, hint) = if let Some((id, dir)) = save {
                     let label = format!("saved as {}", short_id(&dir, id.as_str()));
-                    (id, dir, label, Scratch(None))
+                    (id, dir, label, Scratch(None), SAVE_HINT)
                 } else {
                     let id = scan::scan_id(&scanned)?;
                     let dir = scratch_dir(verb)?;
-                    (id, dir.clone(), "not saved".to_owned(), Scratch(Some(dir)))
+                    let label = "not saved".to_owned();
+                    (id, dir.clone(), label, Scratch(Some(dir)), SCRATCH_HINT)
                 };
+                // Not scan::save, whose failure comes after the output.
                 // On a failure below, `scratch` goes, and its directory.
-                scan::save(&scanned, walk, excludes, &id, Some(&dir), output, false)?;
+                scan::write_index(&scanned, walk, excludes, &id, &dir)
+                    .map_err(|failure| failure.hint(hint))?;
                 let index = Index::open(&index_path(&dir, &id)).map_err(core_failure)?;
                 Ok(Indexed {
                     index: Box::new(index),
@@ -679,7 +689,7 @@ fn scratch_dir(verb: &str) -> Result<PathBuf, Failure> {
                     "io_error",
                     format!("cannot make a directory for the scan's index: {e}"),
                 )
-                .hint("Rerun without --no-save, or with --index-dir"));
+                .hint(SCRATCH_HINT));
             }
         }
     }

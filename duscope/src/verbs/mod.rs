@@ -66,8 +66,9 @@ pub struct Failure {
     pub message: String,
     /// One imperative sentence naming a command, where one helps.
     pub hint: Option<String>,
-    /// Whether the verb wrote its answer already, the failure in it
-    /// (`clean`'s plan with its error): it then goes to stderr alone.
+    /// Whether the verb wrote its answer already: `clean`'s plan with its
+    /// error, `scans --check`'s rows, or the output of a scan whose save
+    /// failed after it. The failure then goes to stderr alone.
     pub reported: bool,
 }
 
