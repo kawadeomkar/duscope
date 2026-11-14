@@ -276,14 +276,21 @@ so `--limit 2` writes all of them. Read only the lines needed, or leave out
 
 With `--format ndjson` or `--plain`, `top` and `stale` write each row as they
 read it from the saved scan. A read that fails after rows were written (the
-file damaged, or overwritten while it is read: `index_corrupt`) does not stop
-the rows: every row after it is still written, empty (its `path` the scan's
-root, its `name` empty, its sizes 0), and only then does the output end:
-`ndjson` has no `end` line, and the error envelope follows on stdout;
-`--plain`, which has no trailer, writes the error on stderr. The
-warnings go with it: `ndjson` carries them only in its `end` line, and
-`--plain` writes them on stderr after the rows. Act on streamed rows only once
-the `end` line has come, or, for `--plain`, once the command has exited 0.
+file damaged, or overwritten while it is read: `index_corrupt`, exit 5) ends
+the rows there: those already written were read whole, and the row whose read
+failed is not written, nor any after it. `ndjson` then has no `end` line: the
+error envelope follows on stdout in its place. `--plain` has no trailer, so
+nothing on stdout marks the cut: the output ends with the last row read, the
+error goes to stderr, and the exit status is the only sign a script can test.
+The warnings are lost too: `ndjson` carries them only in its `end` line, and
+`--plain` writes them on stderr only after the last row. Act on streamed rows
+only once the `end` line has come, or, for `--plain`, once the command has
+exited 0.
+
+`tree`, `by-type`, `caches` and `diff`, and `top` and `stale` in the other
+formats, hold their rows until the last is read, so a failed read writes none
+of them: the error envelope alone under `--json` and `ndjson`, and nothing on
+stdout under `--plain`.
 
 ## Deleting
 

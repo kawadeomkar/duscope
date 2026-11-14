@@ -18,10 +18,14 @@ pub struct OutputArgs {
     pub json: bool,
 
     /// One tab-separated record per line, sizes in bytes (--format plain)
+    ///
+    /// No trailer: rows cut short by a failed read (exit 5) end with no mark
     #[arg(long, global = true)]
     pub plain: bool,
 
     /// The output format
+    ///
+    /// ndjson ends with an end line, which a failed read (exit 5) leaves out
     #[arg(long, global = true, value_enum, value_name = "FORMAT")]
     pub format: Option<FormatArg>,
 
