@@ -2427,7 +2427,7 @@ impl TreeView for Counted<'_> {
 /// entries it reads to open and to draw its first frame, and how long each
 /// takes. Asserted for the reads, reported for the time.
 #[test]
-#[ignore = "needs bench/.trees/T2 and the release binary; DUSCOPE_TEST_PLATFORM=1"]
+#[ignore = "needs bench/.trees/T2 and the release binary; DUSCOPE_TEST_PLATFORM=1, run by nightly-bench.yml"]
 fn p4_tui_09_the_viewer_opens_on_one_pass_over_t2() {
     use std::time::Instant;
 
@@ -2469,8 +2469,12 @@ fn p4_tui_09_the_viewer_opens_on_one_pass_over_t2() {
         drawn.as_millis()
     );
     assert!(nodes <= entries + 1024, "{nodes} entries read to start");
+    // 2,417 on macOS: the children of the folders the map opens, and a few
+    // reads for each tile and pane. Four times that leaves room for a
+    // layout that opens other folders; a walk of any one of T2's top-level
+    // folders reads 37,200 entries or more.
     assert!(
-        frame_nodes <= entries / 10,
+        frame_nodes <= 10_000,
         "{frame_nodes} entries read for the first frame"
     );
 }

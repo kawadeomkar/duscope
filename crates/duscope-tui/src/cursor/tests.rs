@@ -1236,8 +1236,9 @@ pub(crate) fn folders(view: &dyn TreeView, count: usize) -> Vec<u32> {
     folders
 }
 
-/// A saved scan of T2 (`bench/.trees/T2`), in `env`'s index folder, made
-/// by the release binary; `None`, and the test skipped, without
+/// A saved scan of T2 (under `DUSCOPE_BENCH_TREES`, as the nightly names
+/// its trees, else `bench/.trees`), in `env`'s index folder, made by the
+/// release binary; `None`, and the test skipped, without
 /// `DUSCOPE_TEST_PLATFORM=1`. A missing tree fails the test rather than
 /// passing it unmeasured.
 pub(crate) fn t2(env: &duscope_testkit::TestEnv) -> Option<duscope_core::index::Index> {
@@ -1248,7 +1249,11 @@ pub(crate) fn t2(env: &duscope_testkit::TestEnv) -> Option<duscope_core::index::
         eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
         return None;
     }
-    let tree = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/.trees/T2");
+    let trees = std::env::var_os("DUSCOPE_BENCH_TREES").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/.trees"),
+        PathBuf::from,
+    );
+    let tree = trees.join("T2");
     let tree = std::fs::canonicalize(&tree).unwrap_or_else(|e| {
         panic!(
             "T2 is not built at {}: {e}: run `just bench build --trees T2`",
