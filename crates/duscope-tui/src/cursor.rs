@@ -43,8 +43,8 @@ use ratatui_core::layout::Rect as Area;
 
 use crate::mouse;
 use crate::panes::Context;
-use crate::path::{Path, siblings};
-use crate::views::Viewing;
+use crate::path::Path;
+use crate::views::{Sort, Viewing};
 use crate::widgets::{Canvas, Span};
 use crate::zoom::{Layouts, Map, Mark, Zoom};
 
@@ -478,7 +478,7 @@ impl Cursor {
         let Some(to) = beam(from, dir, candidates) else {
             return false;
         };
-        match Self::entry_on(ctx, &map, to) {
+        match Self::entry_on(ctx, viewing, &map, to) {
             Some(id) if id != cursor => {
                 self.path.select(id);
                 true
@@ -489,15 +489,26 @@ impl Cursor {
 
     /// The entry a move or a click on tile `index` of `map` lands on: a
     /// tile of its own is its entry's; a pool's is the largest entry
-    /// marked on it.
-    fn entry_on(ctx: &Context<'_>, map: &Map, index: usize) -> Option<u32> {
+    /// marked on it, those the mask of `viewing` hides left out. The pool's
+    /// folder is listed by size as the siblings pane lists it
+    /// ([`Viewing::listed`]), read once for the folder however often the
+    /// cursor lands there.
+    fn entry_on(ctx: &Context<'_>, viewing: &Viewing<'_>, map: &Map, index: usize) -> Option<u32> {
         let view = ctx.view;
         let tile = map.tiles()[index];
         match tile.kind {
             DrawnKind::Leaf | DrawnKind::Box { .. } | DrawnKind::Gutter => Some(tile.id),
-            DrawnKind::Small | DrawnKind::Files => siblings(view, tile.id, ctx.opts.size)
-                .into_iter()
-                .find(|&id| map.mark(view, id) == Mark::Tile(index)),
+            DrawnKind::Small | DrawnKind::Files => {
+                let by_size = Viewing {
+                    sort: Sort::Size,
+                    ..*viewing
+                };
+                by_size
+                    .children(ctx, tile.id)
+                    .iter()
+                    .copied()
+                    .find(|&id| map.mark(view, id) == Mark::Tile(index))
+            }
         }
     }
 
@@ -528,7 +539,7 @@ impl Cursor {
         });
         let hidden = viewing.mask.map(|mask| mask.hidden_tiles(ctx, &map));
         let index = mouse::tile_at(&map, hidden.as_deref(), x, y, cell)?;
-        match Self::entry_on(ctx, &map, index) {
+        match Self::entry_on(ctx, viewing, &map, index) {
             Some(id) if id != self.path.cursor() => {
                 self.path.jump(view, id);
                 Some(true)

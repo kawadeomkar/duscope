@@ -5,7 +5,9 @@
 //!
 //! [`Tui`] holds the terminal (raw mode, the alternate screen, mouse
 //! capture) and gives it back when dropped; [`restore`] gives it back from a
-//! panic hook. [`App`] is what the viewer shows and how it answers events,
+//! panic hook, and a thread of its own on `SIGTERM` and `SIGHUP`, before the
+//! process ends by the signal. [`next_event`] reads a burst of resizes as
+//! one. [`App`] is what the viewer shows and how it answers events,
 //! and [`run`] drives it until `q` or `Ctrl-C`. [`layout`] places the
 //! header, the panes and the key line, [`widgets`] draws the design
 //! system's components, and the panes' contents come from `panes`. The

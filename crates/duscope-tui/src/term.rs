@@ -1,8 +1,10 @@
 //! The terminal the viewer draws on: raw mode, the alternate screen, mouse
 //! capture and bracketed paste (so that a paste arrives as one event, text
 //! for the filter prompt alone, never as keys), taken on entry and given back on every
-//! way out (a return, an error, a panic through the binary's hook); the
-//! size the viewer checks before it starts; and the background probe.
+//! way out (a return, an error, a panic through the binary's hook, and
+//! `SIGTERM` or `SIGHUP`, after which the process ends by that signal); the
+//! size the viewer checks before it starts; its events, a burst of resizes
+//! read as one; and the background probe.
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -11,7 +13,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Mutex, Once, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -27,6 +29,8 @@ use crossterm::terminal::{
 use duscope_treemap::cells::Color;
 use ratatui_core::terminal::Terminal;
 use ratatui_crossterm::CrosstermBackend;
+use signal_hook::consts::{SIGHUP, SIGTERM};
+use signal_hook::low_level::{self, pipe};
 
 /// The smallest terminal the viewer starts in, columns and rows.
 pub const MIN_SIZE: (u16, u16) = (80, 24);
@@ -41,6 +45,19 @@ static HELD: AtomicBool = AtomicBool::new(false);
 /// Whether the command lines [`open_detached`] started last are still
 /// running: set before the first starts, cleared when the last is done.
 static REVEALING: AtomicBool = AtomicBool::new(false);
+
+/// The event read behind a burst of resizes, which [`next_event`] gives
+/// next.
+static HELD_BACK: Mutex<Option<Event>> = Mutex::new(None);
+
+/// The signals that end the viewer from outside it: `kill`'s default and
+/// a terminal that hung up. In raw mode `Ctrl-C` and `Ctrl-\` are keys, not
+/// `SIGINT` and `SIGQUIT`.
+const ENDING: [libc::c_int; 2] = [SIGTERM, SIGHUP];
+
+/// How long a signal's restore may wait for a terminal that takes no
+/// output before the process ends anyway.
+const RESTORE_WAIT: Duration = Duration::from_secs(1);
 
 /// The terminal's background, as its answer to OSC 11 tells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +87,11 @@ impl Tui {
     /// question, which needs raw mode to read the answer and must come
     /// before the first event read, which would take the answer for keys;
     /// then the alternate screen, mouse capture and bracketed paste. A step
-    /// that fails gives back what the ones before it took.
+    /// that fails gives back what the ones before it took. The first call
+    /// in a process first has `SIGTERM` and `SIGHUP` answered
+    /// (`answer_signals`).
     pub fn enter(probe: bool) -> io::Result<Tui> {
+        answer_signals();
         enable_raw_mode()?;
         HELD.store(true, Ordering::SeqCst);
         let background = if probe { background(PROBE_WAIT) } else { None };
@@ -115,12 +135,18 @@ impl Drop for Tui {
 /// Gives the terminal back if the viewer holds it: bracketed paste and
 /// mouse reporting off, the main screen, the cursor shown, raw mode off. Does nothing otherwise,
 /// so a panic hook can call it whatever was running, and a second call
-/// (the hook, then the unwinding drop) writes nothing.
+/// (the hook, then the unwinding drop) writes nothing. Its callers (a
+/// drop, the panic hook, a signal's thread) take turns, holding stdout: a
+/// second one waits for the first to finish, then finds nothing to do.
 pub fn restore() {
+    if !HELD.load(Ordering::SeqCst) {
+        return;
+    }
+    let mut out = io::stdout().lock();
     if HELD.swap(false, Ordering::SeqCst) {
         // Nothing to do about a failure here: this is the way out.
         let _ = execute!(
-            io::stdout(),
+            out,
             DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen,
@@ -128,6 +154,68 @@ pub fn restore() {
         );
         let _ = disable_raw_mode();
     }
+}
+
+/// Answers `SIGTERM` and `SIGHUP` for the rest of the process, from the
+/// first call on: for each, a thread that waits on a pipe the signal's
+/// handler writes a byte to, then gives the terminal back if the viewer
+/// holds it ([`end_by`]) and ends the process by the signal, as its default
+/// action would. Once the viewer has given the terminal back the thread
+/// only ends the process, so a signal then has its default effect; the
+/// actions stay registered, since signal-hook would leave a signal whose
+/// last action is gone ignored rather than restore its default. Where a
+/// thread or its pipe cannot be had, nothing is registered for its signal,
+/// which keeps its default.
+fn answer_signals() {
+    static ANSWERING: Once = Once::new();
+    ANSWERING.call_once(|| {
+        for signal in ENDING {
+            let (registered, ready) = mpsc::channel();
+            let waiting = thread::Builder::new()
+                .name("duscope-signal".to_owned())
+                .spawn(move || {
+                    // A pipe, not signal-hook's iterator, whose self-pipe is
+                    // a pair of sockets: crossterm's pair is the only socket
+                    // the binary opens (SECURITY.md).
+                    let caught = io::pipe().and_then(|(reader, writer)| {
+                        pipe::register(signal, writer)?;
+                        Ok(reader)
+                    });
+                    let _ = registered.send(());
+                    let mut byte = [0u8];
+                    if let Ok(mut reader) = caught
+                        && reader.read_exact(&mut byte).is_ok()
+                    {
+                        end_by(signal);
+                    }
+                });
+            // Registered before the terminal is taken.
+            if waiting.is_ok() {
+                let _ = ready.recv();
+            }
+        }
+    });
+}
+
+/// Gives the terminal back if the viewer holds it, then ends the process by
+/// `signal`, its default action. Stdout is taken first and held to the
+/// end: a restore already under way (a drop, the panic hook) finishes
+/// before the process ends, and no frame the viewer was drawing reaches
+/// the main screen after it. A terminal that takes no output, whose writes
+/// block, holds that up: [`RESTORE_WAIT`] later the process ends all the
+/// same.
+fn end_by(signal: libc::c_int) {
+    let _ = thread::Builder::new()
+        .name("duscope-signal-wait".to_owned())
+        .spawn(move || {
+            thread::sleep(RESTORE_WAIT);
+            let _ = low_level::emulate_default_handler(signal);
+        });
+    let _held = io::stdout().lock();
+    restore();
+    // Puts the default action back, unblocks the signal and raises it; it
+    // returns only where that failed, after an abort.
+    let _ = low_level::emulate_default_handler(signal);
 }
 
 /// The terminal's size, columns and rows.
@@ -223,14 +311,52 @@ fn start_next(commands: &mut impl Iterator<Item = Vec<OsString>>) -> io::Result<
     Err(failed)
 }
 
-/// Waits for the next key, mouse or resize event.
+/// Waits for the next key, mouse or resize event. A resize stands for the
+/// resizes read with it: those already waiting behind it are read, and the
+/// last size is the one given, so a window dragged through many sizes is
+/// one more frame, at the size it came to.
 pub fn next_event() -> io::Result<Event> {
-    event::read()
+    let mut held = HELD_BACK.lock().unwrap_or_else(PoisonError::into_inner);
+    coalesced(&mut held, event::poll, event::read)
 }
 
-/// Whether an event can be read within `wait`.
+/// Whether an event can be read within `wait`: at once when a burst of
+/// resizes held one back.
 pub fn event_ready(wait: Duration) -> io::Result<bool> {
+    if HELD_BACK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some()
+    {
+        return Ok(true);
+    }
     event::poll(wait)
+}
+
+/// The next event, read with `read`, or the one `held` back last time. A
+/// resize is followed by every event `poll` says is waiting (it is asked
+/// with no wait) as long as they are resizes, and the last of them is
+/// given; the first event after them that is not a resize is held back in
+/// `held`, to be given next.
+pub(crate) fn coalesced(
+    held: &mut Option<Event>,
+    mut poll: impl FnMut(Duration) -> io::Result<bool>,
+    mut read: impl FnMut() -> io::Result<Event>,
+) -> io::Result<Event> {
+    if let Some(event) = held.take() {
+        return Ok(event);
+    }
+    let mut event = read()?;
+    while matches!(event, Event::Resize(..)) && poll(Duration::ZERO)? {
+        match read()? {
+            resize @ Event::Resize(..) => event = resize,
+            other => {
+                *held = Some(other);
+                break;
+            }
+        }
+    }
+    Ok(event)
 }
 
 /// Asks the terminal for its background colour (OSC 11), with a primary
@@ -312,7 +438,8 @@ pub(crate) fn parse_background(bytes: &[u8]) -> Option<Background> {
 #[cfg(test)]
 mod tests {
     //! P4-TUI-05: `o`'s command lines, started detached, each that cannot
-    //! start or fails giving way to the next.
+    //! start or fails giving way to the next. P4-TUI-08: a burst of resizes
+    //! read as one event, and drawn as one frame.
 
     use std::ffi::OsString;
     use std::fs;
@@ -406,5 +533,137 @@ mod tests {
         let last = run_down(vec![record(&log, "last", 0)], &BUSY);
         last.unwrap().unwrap().join().unwrap();
         assert_eq!(fs::read_to_string(&log).unwrap(), "first\nnext\nlast\n");
+    }
+
+    /// A terminal's queued events, read as [`super::coalesced`] reads them:
+    /// `poll` says whether one waits, `read` takes the next.
+    struct Queue {
+        events: std::cell::RefCell<std::collections::VecDeque<crossterm::event::Event>>,
+        reads: std::cell::Cell<usize>,
+        polls: std::cell::Cell<usize>,
+    }
+
+    impl Queue {
+        fn of(events: Vec<crossterm::event::Event>) -> Queue {
+            Queue {
+                events: std::cell::RefCell::new(events.into()),
+                reads: std::cell::Cell::new(0),
+                polls: std::cell::Cell::new(0),
+            }
+        }
+
+        /// The next event, with `held` kept between calls.
+        fn next(
+            &self,
+            held: &mut Option<crossterm::event::Event>,
+        ) -> io::Result<crossterm::event::Event> {
+            super::coalesced(
+                held,
+                |wait| {
+                    assert_eq!(wait, std::time::Duration::ZERO);
+                    self.polls.set(self.polls.get() + 1);
+                    Ok(!self.events.borrow().is_empty())
+                },
+                || {
+                    self.reads.set(self.reads.get() + 1);
+                    Ok(self
+                        .events
+                        .borrow_mut()
+                        .pop_front()
+                        .expect("read with nothing queued"))
+                },
+            )
+        }
+    }
+
+    fn key(c: char) -> crossterm::event::Event {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn p4_tui_08_a_burst_of_resizes_is_read_as_one_event() {
+        use crossterm::event::Event;
+
+        // Three resizes waiting, a key behind them, a resize after it: the
+        // last size of the three, then the key held back, then the resize
+        // alone, as nothing waits behind it.
+        let queue = Queue::of(vec![
+            Event::Resize(81, 24),
+            Event::Resize(90, 30),
+            Event::Resize(120, 40),
+            key('j'),
+            Event::Resize(100, 30),
+        ]);
+        let mut held = None;
+        assert_eq!(queue.next(&mut held).unwrap(), Event::Resize(120, 40));
+        assert_eq!(held, Some(key('j')));
+        assert_eq!(queue.reads.get(), 4);
+        assert_eq!(queue.next(&mut held).unwrap(), key('j'));
+        assert_eq!(queue.reads.get(), 4);
+        assert_eq!(queue.next(&mut held).unwrap(), Event::Resize(100, 30));
+        assert_eq!(held, None);
+        // Polled behind each resize: three found one waiting, the last
+        // found none.
+        assert_eq!((queue.reads.get(), queue.polls.get()), (5, 4));
+        // A key is given as it is read: nothing is polled behind it.
+        let queue = Queue::of(vec![key('k'), Event::Resize(80, 24)]);
+        assert_eq!(queue.next(&mut held).unwrap(), key('k'));
+        assert_eq!((queue.reads.get(), queue.polls.get()), (1, 0));
+    }
+
+    #[test]
+    fn p4_tui_08_a_burst_of_resizes_yields_one_redraw() {
+        use std::convert::Infallible;
+        use std::path::{Path, PathBuf};
+
+        use crossterm::event::Event;
+        use duscope_core::query::ArenaView;
+        use duscope_treemap::cells::Depth;
+        use duscope_treemap::packs::Pack;
+        use duscope_treemap::paint::ColorBy;
+        use ratatui_core::backend::TestBackend;
+        use ratatui_core::terminal::Terminal;
+
+        use crate::panes::tests::{classes, mockup, opts, status};
+        use crate::{App, run};
+
+        let tree = mockup();
+        let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/Users/alex/Library"));
+        let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+        // A window dragged through twenty sizes, a key that draws nothing
+        // new, and `q`.
+        let mut events: Vec<Event> = (0..20u16)
+            .map(|i| Event::Resize(100 + i, 30 + i / 2))
+            .collect();
+        events.extend([key('x'), key('q')]);
+        let frames = |coalesce: bool| {
+            let mut app = App::new(
+                &view,
+                opts(&mocha, &classes, ColorBy::Type),
+                Depth::TrueColor,
+                Some(Path::new("/Users/alex")),
+                status(&view),
+                None,
+            );
+            let mut terminal = Terminal::new(TestBackend::new(119, 39)).unwrap();
+            let queue = Queue::of(events.clone());
+            let mut held = None;
+            run(&mut terminal, &mut app, || -> Result<Event, Infallible> {
+                Ok(if coalesce {
+                    queue.next(&mut held).unwrap()
+                } else {
+                    queue.reads.set(queue.reads.get() + 1);
+                    queue.events.borrow_mut().pop_front().unwrap()
+                })
+            })
+            .unwrap();
+            assert!(queue.events.borrow().is_empty());
+            terminal.get_frame().count()
+        };
+        // The first frame and one for the burst; read one at a time, one
+        // for each size.
+        assert_eq!(frames(true), 2);
+        assert_eq!(frames(false), 21);
     }
 }
