@@ -2294,6 +2294,108 @@ fn p4_tui_09_the_viewer_opens_on_one_pass_over_the_scan() {
 }
 
 #[test]
+fn p4_tui_09_zoomed_maps_painted_with_the_worked_classes_are_the_maps_walked() {
+    use std::cell::RefCell;
+
+    use duscope_core::query::{SizeKind, Subtree};
+    use duscope_treemap::paint::{Drawn, classes_of, paint_viewer};
+    use duscope_treemap::pixels::Picture;
+
+    use crate::panes::{Context, ranks};
+
+    // A zoomed map paints its folders with the dominant classes the one
+    // pass found for the whole scan, read at the scan's ids (the map's
+    // own plus its root's): every cell and tile of the map, and every
+    // pixel and tile of the picture, is the one painted walking each
+    // folder of the subtree for its colour. For each folder of two trees
+    // that holds a folder, by either size, with and without `--pool-files`
+    // and a `--depth` cap.
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mockup, nested) = (mockup(), nested(2, 3, 3));
+    let views = [
+        mockup_view(&mockup),
+        ArenaView::new(&nested.0, &nested.1, PathBuf::from("/nested")),
+    ];
+    let cell = (2, 4);
+    for view in &views {
+        // Their maps paint a folder below their root.
+        let folders: Vec<u32> = (1..view.len())
+            .filter(|&id| {
+                let node = view.node(id);
+                node.is_dir() && node.files_end < node.last_id
+            })
+            .collect();
+        assert!(folders.len() >= 6, "{folders:?}");
+        for size in [SizeKind::Allocated, SizeKind::Apparent] {
+            for (pool_files, depth) in [
+                (false, None),
+                (true, None),
+                (false, Some(2)),
+                (true, Some(1)),
+            ] {
+                let mut paint = opts(&mocha, &classes, ColorBy::Type);
+                paint.size = size;
+                paint.pool_files = pool_files;
+                paint.depth = depth;
+                let mut app = App::new(
+                    view,
+                    paint.clone(),
+                    Depth::TrueColor,
+                    None,
+                    String::new(),
+                    None,
+                );
+                app.draw_in_pixels_unencoded(cell);
+                let mut terminal = first_frame(&app, 120, 40);
+                let class_of = classes_of(view, &classes);
+                let (dominant, ranks) = (RefCell::default(), ranks(view, &paint));
+                let ctx = Context {
+                    view,
+                    opts: &paint,
+                    class_of: &class_of,
+                    dominant: &dominant,
+                    ranks: &ranks,
+                    root: "/",
+                    root_parent: "/",
+                };
+                for &root in &folders {
+                    let path = String::from_utf8_lossy(&view.path(root)).into_owned();
+                    let what = format!("{path}, {size:?}, pool {pool_files}, depth {depth:?}");
+                    app.jump(root);
+                    press(&mut app, &mut terminal, &char('z'));
+                    assert_eq!(app.zoom_root(), root, "{what}");
+                    let map = app.map();
+                    let (w, h) = (map.cells.width(), map.cells.height());
+                    let sub = Subtree::new(view, root);
+                    let sub_classes = classes_of(&sub, &classes);
+                    let base = crate::zoom::base(&ctx, root);
+                    let (cells, drawn) = paint_viewer(&sub, &paint, w, h, &sub_classes, base);
+                    let at_root = |d: &Drawn| Drawn {
+                        id: d.id + root,
+                        parent: d.parent + root,
+                        ..*d
+                    };
+                    assert!(map.cells == cells, "{what}: the map");
+                    assert_eq!(
+                        map.tiles(),
+                        drawn.iter().map(at_root).collect::<Vec<_>>(),
+                        "{what}: the map's tiles"
+                    );
+                    let shown = app.shown().unwrap();
+                    let (picture, _) = shown.as_ref().as_ref().unwrap();
+                    let walked =
+                        Picture::draw(&sub, &paint, w, h, cell, Some(&sub_classes), base).unwrap();
+                    assert!(picture.raster() == walked.raster(), "{what}: the picture");
+                    assert_eq!(picture.tiles(), walked.tiles(), "{what}: the picture");
+                    press(&mut app, &mut terminal, &char('Z'));
+                    assert_eq!(app.zoom_root(), 0, "{what}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
     use std::cell::RefCell;
 
