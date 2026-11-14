@@ -23,6 +23,17 @@ const JOB_BUDGET_MINUTES: u32 = 20;
 /// runner (DEV-141).
 const MACOS_CHECKS_BUDGET_MINUTES: u32 = 30;
 
+/// The budget of `platform (macos-26)`, the macOS leg of the platform tests;
+/// its Linux legs keep [`JOB_BUDGET_MINUTES`] (DEV-169).
+const MACOS_PLATFORM_BUDGET_MINUTES: u32 = 30;
+
+/// `platform`'s `timeout-minutes`: its macOS leg's budget, else the job budget.
+fn platform_timeout() -> String {
+    format!(
+        "${{{{ matrix.os == 'macos-26' && {MACOS_PLATFORM_BUDGET_MINUTES} || {JOB_BUDGET_MINUTES} }}}}"
+    )
+}
+
 /// The required checks as branch protection names them: the job name with its
 /// matrix values, as in the PUT of docs/github-settings.md. Every check a pull
 /// request runs is required but the [`OPTIONAL_JOBS`]: each other job of
@@ -372,8 +383,14 @@ fn p0_ci_01_every_job_has_a_timeout_within_the_budget() {
     let jobs = jobs(&workflow);
     assert!(!jobs.is_empty(), "no jobs parsed from ci.yml");
     for job in &jobs {
-        let minutes: u32 = job_key(job, "timeout-minutes")
-            .unwrap_or_else(|| panic!("job `{}` has no timeout-minutes", job.id))
+        let timeout = job_key(job, "timeout-minutes")
+            .unwrap_or_else(|| panic!("job `{}` has no timeout-minutes", job.id));
+        if job.id == "platform" {
+            // Per leg, which p0_ci_05_macos_platform_has_30_minutes_and_linux_20 reads.
+            assert_eq!(timeout, platform_timeout(), "job `platform`");
+            continue;
+        }
+        let minutes: u32 = timeout
             .parse()
             .unwrap_or_else(|e| panic!("job `{}`: timeout-minutes is not a number: {e}", job.id));
         let budget = if job.id == "checks" {
@@ -387,6 +404,37 @@ fn p0_ci_01_every_job_has_a_timeout_within_the_budget() {
             job.id
         );
     }
+}
+
+/// DEV-169: the macOS leg of the platform tests took 19.6 of its 20 minutes on
+/// `main` and was cancelled saving its cache, so it has 30; the Linux legs,
+/// at 4 to 6 minutes, keep 20.
+#[test]
+fn p0_ci_05_macos_platform_has_30_minutes_and_linux_20() {
+    let workflow = read(WORKFLOW);
+    let jobs = jobs(&workflow);
+    let platform = jobs
+        .iter()
+        .find(|j| j.id == "platform")
+        .expect("ci.yml has no `platform` job");
+    assert_eq!(
+        job_key(platform, "timeout-minutes"),
+        Some(platform_timeout().as_str())
+    );
+    // The leg the expression names is the matrix's macOS runner.
+    assert!(
+        platform
+            .lines
+            .iter()
+            .any(|line| line.trim() == "os: [macos-26, ubuntu-24.04, ubuntu-24.04-arm]"),
+        "the platform matrix names macos-26"
+    );
+    assert!(
+        workflow.contains(&format!(
+            "`platform (macos-26)`, which has {MACOS_PLATFORM_BUDGET_MINUTES} (DEV-169)"
+        )),
+        "ci.yml's header records the leg's own budget"
+    );
 }
 
 /// DEV-141: macOS's clippy and both test legs share one runner, so its

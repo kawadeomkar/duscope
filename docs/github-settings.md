@@ -25,7 +25,8 @@ under [Auditing](#auditing) read it again.
     `ubuntu-24.04-arm`, and on `macos-26` in one job, `checks (macos-26)`,
     whose locale leg leaves out the fixture tree's timed rebuild
     (`just test-locale`) and which has 30 minutes
-  - `platform` and `bench-regression` on the three runners
+  - `platform` on the three runners, `platform (macos-26)` with 30 minutes
+  - `bench-regression` on the three runners
   - `msrv (pinned)` and `msrv (stable)`
   - `deny`
   - `fuzz-smoke` for each fuzz target (`sql`, `ncdu`, `gdu`, `gpscan`, `args`,
