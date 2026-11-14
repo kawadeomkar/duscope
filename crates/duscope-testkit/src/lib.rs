@@ -629,6 +629,13 @@ impl TestEnv {
     /// (`HDIUTIL`) and a binary's images are made, attached and detached one
     /// at a time.
     ///
+    /// Before most of those failures a burst of Spotlight's `mdworker_shared`
+    /// had started, and `mds` takes part in every unmount's approval. But
+    /// `mds` keeps no volume, and so no store to index into or close, for an
+    /// image mounted below the test's temporary directory (`/var/folders`),
+    /// browsable or not, nor for one attached with `-nobrowse` anywhere: a
+    /// platform test checks it where the image tests mount theirs.
+    ///
     /// In six of eight such failures on the runners, the last step of the
     /// failure's report, Disk Arbitration's eject of the image's whole disk
     /// (`diskutil eject`), ejected it at once ("Disk /dev/disk7 ejected"),
