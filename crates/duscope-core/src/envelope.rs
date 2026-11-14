@@ -426,7 +426,8 @@ pub struct TopEntry {
     pub path_bytes: Vec<u8>,
     /// Its name, as lossy UTF-8.
     pub name: String,
-    /// The name's bytes in base64, only when they are not valid UTF-8.
+    /// The name's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `file`, `dir`, `symlink` or `other`.
@@ -455,8 +456,9 @@ pub struct TopEntry {
     /// `uncharged`, …).
     #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
@@ -473,7 +475,8 @@ pub struct TreeEntry {
     pub path_bytes: Vec<u8>,
     /// Its name, as lossy UTF-8.
     pub name: String,
-    /// The name's bytes in base64, only when they are not valid UTF-8.
+    /// The name's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `file`, `dir`, `symlink` or `other`.
@@ -499,8 +502,9 @@ pub struct TreeEntry {
     /// What else is true of it.
     #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
@@ -532,15 +536,17 @@ pub struct Example {
     pub path: String,
     /// Its name, as lossy UTF-8.
     pub name: String,
-    /// The name's bytes in base64, only when they are not valid UTF-8.
+    /// The name's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// Its bytes on disk.
     pub allocated_bytes: u64,
     /// Its apparent bytes.
     pub apparent_bytes: u64,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
@@ -557,7 +563,8 @@ pub struct StaleEntry {
     pub path_bytes: Vec<u8>,
     /// Its name, as lossy UTF-8.
     pub name: String,
-    /// The name's bytes in base64, only when they are not valid UTF-8.
+    /// The name's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `file`, `symlink` or `other`.
@@ -581,8 +588,9 @@ pub struct StaleEntry {
     /// What else is true of it.
     #[cfg_attr(test, schemars(extend("items" = {"type": "string", "anyOf": known(values::FLAGS)})))]
     pub flags: Vec<&'static str>,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
@@ -689,7 +697,8 @@ pub struct CacheEntry {
     pub path_bytes: Vec<u8>,
     /// Its name.
     pub name: String,
-    /// The name's bytes in base64 when they are not UTF-8.
+    /// The name's bytes in standard, padded base64 (RFC 4648) when they are
+    /// not UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// The rule that names it: a name or glob, or `CACHEDIR.TAG`.
@@ -720,12 +729,13 @@ pub struct CacheEntry {
     /// The newest modification time under it.
     #[cfg_attr(test, schemars(extend("format" = "date-time")))]
     pub max_mtime: String,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
-    /// The project root's bytes in base64, only when they are not valid
-    /// UTF-8.
+    /// The project root's bytes in standard, padded base64 (RFC 4648), only
+    /// when they are not valid UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_root_raw: Option<String>,
 }
@@ -752,8 +762,8 @@ pub struct ProjectEntry {
     /// Its largest caches' paths, largest first, at most ten;
     /// `cache_count` counts them all.
     pub caches: Vec<String>,
-    /// The project root's bytes in base64, only when they are not valid
-    /// UTF-8.
+    /// The project root's bytes in standard, padded base64 (RFC 4648), only
+    /// when they are not valid UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_root_raw: Option<String>,
 }
@@ -805,7 +815,8 @@ pub struct Explain {
     pub path_bytes: Vec<u8>,
     /// Its name.
     pub name: String,
-    /// The name's bytes in base64 when they are not UTF-8.
+    /// The name's bytes in standard, padded base64 (RFC 4648) when they are
+    /// not UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `file`, `dir`, `symlink` or `other`.
@@ -877,8 +888,9 @@ pub struct Explain {
     /// expiry fifteen minutes on) and their HMAC; null where none could be
     /// issued (the path is gone, or the key cannot be read).
     pub handle: Option<String>,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
@@ -915,8 +927,9 @@ pub struct ScanErrorEntry {
     pub errno: i32,
     /// What the system calls it.
     pub message: String,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
@@ -1091,8 +1104,9 @@ pub struct Summary {
     pub duration_ms: u64,
     /// The worker threads it ran.
     pub thread_count: u64,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
@@ -1142,8 +1156,9 @@ pub struct SummarySubvolume {
     /// as it reports them; null for a btrfs subvolume, whose size and free
     /// space are the whole filesystem's.
     pub referenced_bytes: Option<u64>,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
@@ -1160,7 +1175,8 @@ pub struct DiffEntry {
     pub path_bytes: Vec<u8>,
     /// Its name.
     pub name: String,
-    /// The name's bytes in base64 when they are not UTF-8.
+    /// The name's bytes in standard, padded base64 (RFC 4648) when they are
+    /// not UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `added`, `removed`, `grown`, `shrunk` or `kind_changed`.
@@ -1178,8 +1194,9 @@ pub struct DiffEntry {
     /// For a directory added or removed whole, the entries in it, itself
     /// included; null otherwise.
     pub collapsed_count: Option<u64>,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
@@ -1436,7 +1453,8 @@ pub struct PlanItem {
     pub path_bytes: Vec<u8>,
     /// Its name.
     pub name: String,
-    /// The name's bytes in base64 when they are not UTF-8.
+    /// The name's bytes in standard, padded base64 (RFC 4648) when they are
+    /// not UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_raw: Option<String>,
     /// `file`, `dir`, `symlink` or `other`.
@@ -1474,8 +1492,9 @@ pub struct PlanItem {
     pub outcome: Option<&'static str>,
     /// Why moving or deleting it failed; null otherwise.
     pub error: Option<ErrorObject>,
-    /// The path's bytes in base64, only when they are not valid UTF-8 (its
-    /// own name's, or an ancestor's): the path to pass back.
+    /// The path's bytes in standard, padded base64 (RFC 4648), only when
+    /// they are not valid UTF-8 (its own name's, or an ancestor's): the
+    /// path to pass back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_raw: Option<String>,
 }
