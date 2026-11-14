@@ -30,6 +30,7 @@ use super::next;
 use super::query::top_envelope;
 use super::scan::{self, Scanned};
 use super::source::{Source, core_failure, saved_as, scanned};
+use super::treemap::shell_quote;
 use super::{Exit, Failure};
 use crate::cli::{AttrsArg, RescanArgs, SizeKind, WalkArgs};
 use crate::out::{Output, thousands};
@@ -108,7 +109,18 @@ pub fn run(args: &RescanArgs, index_dir: Option<&Path>, output: &Output) -> Resu
     let Source::Fresh { scanned, .. } = fresh else {
         return Ok(());
     };
-    scan::save(&scanned, &walk, &excludes, &id, Some(&dir), output, true)
+    // --index-dir also says where a rescan looks for the saved scan, so the
+    // hint names it by its file, which is read wherever the new one goes.
+    scan::save(&scanned, &walk, &excludes, &id, Some(&dir), output, true).map_err(|failure| {
+        let file = shell_quote(&parent.index.file().to_string_lossy());
+        scan::save_hint(
+            failure,
+            format!(
+                "Run duscope rescan --trust {file} --scan {file} with --index-dir naming a \
+                 writable directory"
+            ),
+        )
+    })
 }
 
 /// Reads the tree of `parent` again as `mode` asks, the `parent` and

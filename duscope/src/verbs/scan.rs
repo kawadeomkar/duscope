@@ -331,10 +331,23 @@ pub fn save(
     Ok(())
 }
 
-/// What a failed save says: `index_write_failed`, and how to get past it.
+/// What a failed save says: `index_write_failed`, and how to get past it
+/// after `scan --save` (`rescan` and `import` give their own,
+/// [`save_hint`]).
 fn save_failed(message: String) -> Failure {
     Failure::new(Exit::Runtime, "index_write_failed", message)
         .hint("Run duscope scan --save again with --index-dir naming a writable directory")
+}
+
+/// [`save`]'s `failure` for a verb other than `scan --save`: a failed save
+/// gets `hint`, which runs that verb again; any other failure (Ctrl-C) stays
+/// as it is.
+pub(super) fn save_hint(failure: Failure, hint: impl Into<String>) -> Failure {
+    if failure.code == "index_write_failed" {
+        failure.hint(hint)
+    } else {
+        failure
+    }
 }
 
 /// Writes the index of `scanned` under `dir`, silently: what `save` and a
@@ -534,6 +547,10 @@ pub fn clones_unavailable(unavailable: bool) -> Option<Warning> {
     })
 }
 
+/// `partial_read`'s hint. A list verb, which takes `--strict`, also offers
+/// it ([`offer_strict`]).
+const PARTIAL_READ_HINT: &str = "Rerun duscope as a user who can read them";
+
 /// What a scan says of its own totals, in a fresh scan or a saved one:
 /// directories it could not read, volumes it did not enter, and entries
 /// that vanished while it read them.
@@ -547,10 +564,7 @@ pub fn quality_warnings(unreadable_dirs: u64, mounts_excluded: u64, vanished: u6
                 thousands(unreadable_dirs)
             ),
             count: Some(unreadable_dirs),
-            hint: Some(
-                "Rerun duscope as a user who can read them, or with --strict to fail instead"
-                    .to_owned(),
-            ),
+            hint: Some(PARTIAL_READ_HINT.to_owned()),
         });
     }
     if mounts_excluded > 0 {
@@ -579,6 +593,17 @@ pub fn quality_warnings(unreadable_dirs: u64, mounts_excluded: u64, vanished: u6
         });
     }
     warnings
+}
+
+/// The warnings of a list verb (`top`, `tree`, `by-type`, `stale`,
+/// `caches`), the verbs that take `--strict`: `partial_read`'s hint offers
+/// it too.
+pub fn offer_strict(warnings: &mut [Warning]) {
+    for warning in warnings.iter_mut().filter(|w| w.code == "partial_read") {
+        warning.hint = Some(format!(
+            "{PARTIAL_READ_HINT}, or with --strict to fail instead"
+        ));
+    }
 }
 
 /// `upper_bound`, when the root's totals may count shared blocks more than
