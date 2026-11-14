@@ -60,6 +60,85 @@ enum Side {
     New,
 }
 
+/// `diff`'s rows, ranked and not yet built: each change in order, with
+/// its path, and what the page says of them. Rows are built one at a time
+/// from it ([`DiffRows::rows`]), each read from the scan its entry is in,
+/// for a writer that streams them, or all at once ([`DiffRows::page`]).
+#[derive(Debug, Clone)]
+pub struct DiffRows {
+    /// Rows matched before `--limit`.
+    pub total_count: u64,
+    /// Whether rows remain after these.
+    pub truncated: bool,
+    /// The changes listed, in order, each with its absolute path.
+    changes: Vec<(Vec<u8>, Change)>,
+}
+
+impl DiffRows {
+    /// How many rows there are.
+    pub fn len(&self) -> usize {
+        self.changes.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
+    /// The row at `at`, counted from 0, read from `old` (a `removed` entry)
+    /// or `new`.
+    pub fn row(
+        &self,
+        old: &(impl TreeView + ?Sized),
+        new: &(impl TreeView + ?Sized),
+        at: usize,
+    ) -> DiffEntry {
+        let (path_bytes, c) = &self.changes[at];
+        let (node, name) = match c.side {
+            Side::Old => (old.node(c.id), old.name(c.id)),
+            Side::New => (new.node(c.id), new.name(c.id)),
+        };
+        let (name, name_raw) = name_fields(&name);
+        let (path, path_raw) = path_fields(path_bytes);
+        DiffEntry {
+            path,
+            path_bytes: path_bytes.clone(),
+            name,
+            name_raw,
+            change: c.what,
+            kind: kind_name(node.kind),
+            old_bytes: c.old_bytes,
+            new_bytes: c.new_bytes,
+            delta_bytes: i64::try_from(c.delta()).unwrap_or(i64::MAX),
+            collapsed_count: c.collapsed,
+            path_raw,
+        }
+    }
+
+    /// The rows in order, each built as it is read.
+    pub fn rows<'a, O: TreeView + ?Sized, N: TreeView + ?Sized>(
+        &'a self,
+        old: &'a O,
+        new: &'a N,
+    ) -> impl Iterator<Item = DiffEntry> + 'a {
+        (0..self.changes.len()).map(move |at| self.row(old, new, at))
+    }
+
+    /// The page: every row built.
+    pub fn page(
+        self,
+        old: &(impl TreeView + ?Sized),
+        new: &(impl TreeView + ?Sized),
+    ) -> Page<DiffEntry> {
+        Page {
+            entries: self.rows(old, new).collect(),
+            total_count: self.total_count,
+            next: None,
+            truncated: self.truncated,
+        }
+    }
+}
+
 /// The changes from `old` to `new`, two views of one tree, largest first
 /// by the size of the change, ties by path; and the totals.
 pub fn diff(
@@ -67,60 +146,50 @@ pub fn diff(
     new: &(impl TreeView + ?Sized),
     q: &DiffQuery,
 ) -> (Page<DiffEntry>, DiffTotals) {
+    let (rows, totals) = diff_rows(old, new, q);
+    (rows.page(old, new), totals)
+}
+
+/// [`diff`]'s rows, ranked and not yet built, and the totals.
+pub fn diff_rows(
+    old: &(impl TreeView + ?Sized),
+    new: &(impl TreeView + ?Sized),
+    q: &DiffQuery,
+) -> (DiffRows, DiffTotals) {
     let mut found = Found::default();
     if !old.is_empty() && !new.is_empty() {
         walk(old, new, q, &mut found);
     }
     let mut totals = found.totals;
     totals.net_bytes = signed(size_of(new, 0, q.size)) - signed(size_of(old, 0, q.size));
-    let mut changes = found.changes;
     // Each row's path, for the order among equal changes.
-    let mut keyed: Vec<(i128, Vec<u8>, Change)> = changes
-        .drain(..)
+    let mut changes: Vec<(Vec<u8>, Change)> = found
+        .changes
+        .into_iter()
         .map(|c| {
             let path = match c.side {
                 Side::Old => abs_path(old, c.id),
                 Side::New => abs_path(new, c.id),
             };
-            (c.delta().abs(), path, c)
+            (path, c)
         })
         .collect();
-    keyed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let total_count = keyed.len() as u64;
+    changes.sort_by(|a, b| {
+        b.1.delta()
+            .abs()
+            .cmp(&a.1.delta().abs())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let total_count = changes.len() as u64;
     if let Some(limit) = q.limit {
-        keyed.truncate(limit);
+        changes.truncate(limit);
     }
-    let entries: Vec<DiffEntry> = keyed
-        .into_iter()
-        .map(|(_, path_bytes, c)| {
-            let (node, name) = match c.side {
-                Side::Old => (old.node(c.id), old.name(c.id).into_owned()),
-                Side::New => (new.node(c.id), new.name(c.id).into_owned()),
-            };
-            let (name, name_raw) = name_fields(&name);
-            let (path, path_raw) = path_fields(&path_bytes);
-            DiffEntry {
-                path,
-                path_bytes,
-                name,
-                name_raw,
-                change: c.what,
-                kind: kind_name(node.kind),
-                old_bytes: c.old_bytes,
-                new_bytes: c.new_bytes,
-                delta_bytes: i64::try_from(c.delta()).unwrap_or(i64::MAX),
-                collapsed_count: c.collapsed,
-                path_raw,
-            }
-        })
-        .collect();
-    let page = Page {
-        truncated: remain(0, entries.len(), total_count),
-        entries,
+    let rows = DiffRows {
+        truncated: remain(0, changes.len(), total_count),
         total_count,
-        next: None,
+        changes,
     };
-    (page, totals)
+    (rows, totals)
 }
 
 /// What the walk has found so far.

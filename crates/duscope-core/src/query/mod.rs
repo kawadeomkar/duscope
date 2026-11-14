@@ -41,10 +41,10 @@ use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::index::Index;
 use crate::rollup::RollUp;
 
-pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
-pub use caches::{CachesQuery, caches, projects};
+pub use by_type::{ByTypeQuery, ByTypeRows, by_type, by_type_rows, classify, root_dirs};
+pub use caches::{CacheRows, CachesQuery, ProjectRows, cache_rows, caches, project_rows, projects};
 pub use cursor::{After, Cursor, query_hash};
-pub use diff::{DEFAULT_MIN_DELTA, DiffQuery, diff};
+pub use diff::{DEFAULT_MIN_DELTA, DiffQuery, DiffRows, diff, diff_rows};
 pub use explain::{
     ExplainQuery, explain, explain_unindexed, fs_holds_file, holds_file, shared_extents,
 };
@@ -61,7 +61,7 @@ pub use summary::{
     shares, subvolume_shares, summary, unaccounted,
 };
 pub use top::{TopQuery, TopRows, top, top_rows};
-pub use tree::{TreeQuery, tree};
+pub use tree::{TreeQuery, TreeRows, tree, tree_rows};
 
 /// One entry of a scan, as the queries read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
