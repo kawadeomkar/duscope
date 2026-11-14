@@ -1,8 +1,8 @@
 //! P2-BENCH-01: `bench/run.sh index` against the binary this test run built,
-//! on a scaled T2 (the tree the gates are read from), with
-//! `bench/testdata/hyperfine_stub.py` for hyperfine (CI's test job does not
-//! install it), `true` for the cache drop, and stand-ins for dua and fdu that
-//! answer as their pins: nothing touches the network. The numbers it prints
+//! on a scaled T2 (the tree the gates are read from) and on T3 alone (which
+//! judges none), with `bench/testdata/hyperfine_stub.py` for hyperfine (CI's
+//! test job does not install it), `true` for the cache drop, and stand-ins
+//! for dua and fdu that answer as their pins: nothing touches the network. The numbers it prints
 //! are a smoke tree's and mean nothing; the nightly measures T2 on the bench
 //! runners.
 
@@ -81,14 +81,21 @@ fn stand_ins(scratch: &Path, fdu_status: u8) -> (PathBuf, PathBuf) {
     (dua, fdu)
 }
 
-/// `bench/run.sh index` on a scaled T2 under `scratch`, with `extra`.
-fn index(env: &TestEnv, scratch: &Path, dua: &Path, fdu: &Path, extra: &[&str]) -> Output {
+/// `bench/run.sh index` on the scaled `trees` under `scratch`, with `extra`.
+fn index(
+    env: &TestEnv,
+    scratch: &Path,
+    dua: &Path,
+    fdu: &Path,
+    trees: &str,
+    extra: &[&str],
+) -> Output {
     let stub = repo_root().join("bench/testdata/hyperfine_stub.py");
     env.command(repo_root().join("bench/run.sh"))
         .arg("index")
         .arg("--duscope")
         .arg(env.cmd().get_program())
-        .args(["--trees", "T2", "--scale", "0.001", "--jobs", "1"])
+        .args(["--trees", trees, "--scale", "0.001", "--jobs", "1"])
         .args(["--mode", "both", "--cold-cmd", "true"])
         .args(["--runs", "2", "--warmup", "1"])
         .arg("--tool-path")
@@ -141,7 +148,7 @@ fn p2_bench_01_the_index_measurements_run_end_to_end() {
     let env = TestEnv::new();
     let scratch = env.tmp_dir();
     let (dua, fdu) = stand_ins(&scratch, 0);
-    let out = index(&env, &scratch, &dua, &fdu, &[]);
+    let out = index(&env, &scratch, &dua, &fdu, "T2", &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
@@ -230,7 +237,7 @@ fn p2_bench_01_a_part_that_fails_leaves_the_others_measured() {
     let env = TestEnv::new();
     let scratch = env.tmp_dir();
     let (dua, fdu) = stand_ins(&scratch, 1);
-    let out = index(&env, &scratch, &dua, &fdu, &[]);
+    let out = index(&env, &scratch, &dua, &fdu, "T2", &[]);
     assert_eq!(out.status.code(), Some(1));
     let result = result(&out, &scratch);
     let failures: Vec<&str> = result["failures"]
@@ -259,7 +266,49 @@ fn p2_bench_01_a_part_that_fails_leaves_the_others_measured() {
         &scratch,
         &dua,
         &fdu,
+        "T2",
         &["--tool-path", "duscope=/bin/true"],
     );
     assert_eq!(refused.status.code(), Some(2));
+}
+
+#[test]
+fn p2_bench_01_a_run_without_t2_judges_no_gate() {
+    // T3 alone: one folder of files, so `top` has no directory below the
+    // root and the subtree query falls back to the tree itself; and with T2
+    // not measured, no tree's figures are read as the gates'.
+    let env = TestEnv::new();
+    let scratch = env.tmp_dir();
+    let (dua, fdu) = stand_ins(&scratch, 0);
+    let out = index(&env, &scratch, &dua, &fdu, "T3", &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "exit {:?}: {stderr}",
+        out.status.code()
+    );
+    let result = result(&out, &scratch);
+    assert_eq!(result["failures"], serde_json::json!([]));
+    let tree = &result["trees"][0];
+    assert_eq!(tree["name"], "T3");
+    let targets = &tree["query_targets"];
+    assert_eq!(targets["largest_dir_files"], tree["files"], "{targets}");
+    assert_eq!(result["gates_tree"], Value::Null);
+    let gates = result["gates"].as_array().unwrap();
+    assert_eq!(gates.len(), 14);
+    for gate in gates {
+        assert_eq!(gate["value"], Value::Null, "{gate}");
+        assert_eq!(gate["holds"], Value::Null, "{gate}");
+    }
+    let said: Vec<&str> = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("bench: gate "))
+        .collect();
+    assert_eq!(said.len(), gates.len(), "{stderr}");
+    for line in said {
+        assert!(
+            line.ends_with(": not judged, T2 was not measured"),
+            "{line}"
+        );
+    }
 }
