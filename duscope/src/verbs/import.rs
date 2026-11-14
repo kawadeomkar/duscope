@@ -134,7 +134,12 @@ pub fn run(args: &ImportArgs, index_dir: Option<&Path>, output: &Output) -> Resu
     let Source::Fresh { scanned, .. } = fresh else {
         return Ok(());
     };
-    scan::save(&scanned, &walk, &[], &id, Some(&dir), output, true)
+    scan::save(&scanned, &walk, &[], &id, Some(&dir), output, true).map_err(|failure| {
+        scan::save_hint(
+            failure,
+            "Run duscope import again with --index-dir naming a writable directory",
+        )
+    })
 }
 
 /// `read`'s result, or `interrupted` for a read that failed once `stop` was

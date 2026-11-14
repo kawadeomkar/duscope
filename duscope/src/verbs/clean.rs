@@ -592,7 +592,7 @@ fn first_error(plan: &Plan) -> Option<&ErrorObject> {
 /// The command that measures `index`'s tree again: a rescan of it, named as
 /// `next` names it; for an import, which has no scan options to rescan
 /// with, a new scan of its root.
-fn measure_again(index: &Index) -> String {
+pub(super) fn measure_again(index: &Index) -> String {
     if scanned(index) {
         let id = index.meta().scan_id.to_string();
         next::command("rescan", None, &[], &id, index.file())

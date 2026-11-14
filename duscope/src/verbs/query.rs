@@ -580,12 +580,18 @@ fn stale_written(
     };
     let rows = query::stale_rows(&*prepared.source.view(), &q).map_err(core_failure)?;
     let mut warnings = Vec::new();
-    warnings.extend(scan_age(
-        prepared.now,
-        prepared.source.finished_ns(),
-        older_than,
-        older,
-    ));
+    warnings.extend(
+        scan_age(
+            prepared.now,
+            prepared.source.finished_ns(),
+            older_than,
+            older,
+        )
+        .map(|age| Warning {
+            hint: scan_age_hint(&prepared.source),
+            ..age
+        }),
+    );
     if args.atime {
         warnings.extend(prepared.source.atime_unreliable());
     }
@@ -1016,6 +1022,10 @@ fn envelope<T: Hinted>(
     let block = source.scan_block(walk, size, Some(source::LISTED_EXCLUDED));
     let footer = source.footer(&block, output);
     let mut warnings = source.warnings(walk);
+    // A list verb takes --strict; the rows of scan, rescan and import do not.
+    if !matches!(verb, "scan" | "rescan" | "import") {
+        scan::offer_strict(&mut warnings);
+    }
     warnings.extend(flag_warnings);
     warnings.extend(extra);
     let returned_count = page.entries.len() as u64;
@@ -1068,7 +1078,8 @@ fn envelope<T: Hinted>(
 
 /// `scan_age`: the scan finished longer ago than a tenth of the window
 /// `stale` asks about (`older`, `older_than` nanoseconds), both read on the
-/// clock the scan was timed by. A fresh scan never is.
+/// clock the scan was timed by. A fresh scan never is. The hint is the
+/// source's, [`scan_age_hint`].
 fn scan_age(now: i64, finished_ns: i64, older_than: i64, older: &str) -> Option<Warning> {
     let age = now.saturating_sub(finished_ns);
     (age > older_than / 10).then(|| Warning {
@@ -1078,8 +1089,22 @@ fn scan_age(now: i64, finished_ns: i64, older_than: i64, older: &str) -> Option<
             crate::out::thousands(u64::try_from(age / 3_600_000_000_000).unwrap_or(0))
         ),
         count: None,
-        hint: Some("Rerun duscope stale to measure from a fresh scan".to_owned()),
+        hint: None,
     })
+}
+
+/// `scan_age`'s hint: `stale` reads the same saved scan however often it
+/// runs, so the command that measures the tree again comes first, a rescan
+/// of the saved scan or, for an import, a new scan of its root. A fresh
+/// scan, never old, has none.
+fn scan_age_hint(source: &Source) -> Option<String> {
+    let Source::Saved { index, .. } = source else {
+        return None;
+    };
+    Some(format!(
+        "Run {}, then duscope stale again, to measure from a fresh scan",
+        super::clean::measure_again(index)
+    ))
 }
 
 /// `atime_unreliable`: the volumes the scan entered that are mounted

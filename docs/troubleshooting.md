@@ -9,7 +9,7 @@ several of them are in [limits.md](limits.md).
 
 A warning does not stop a command: the result is printed, and the warning
 follows it. On a terminal it is two lines on stderr, the message and a command
-that helps:
+that helps, here after `duscope top`:
 
 ```text
 warning: 3 directories could not be read; the totals are a lower bound
@@ -75,6 +75,8 @@ What to do:
 - To fail rather than answer with a lower bound, give `--strict` to a list verb
   (`top`, `tree`, `by-type`, `stale`, `caches`): it exits 4
   (`permission_denied`) when a directory under the path could not be read.
+  Only those verbs take it, so only their hint offers it; `scan` and the other
+  verbs take no `--strict`.
 - For `clean`, make what is under the item readable, then run `duscope clean`
   again.
 
@@ -194,7 +196,10 @@ about (`--older-than`, 180 days by default, so 18 days). It judges files by the
 times the scan read: a file modified or removed since is still listed as the
 scan saw it.
 
-What to do: `duscope rescan PATH`, then `duscope stale` again.
+What to do: `stale` run again alone reads the same saved scan, so measure the
+tree again first with the command in the hint, `duscope rescan` of that scan,
+or for an import, which cannot be rescanned, `duscope scan --save` of its root;
+then run `duscope stale` again.
 
 ### `atime_unreliable`
 
@@ -392,10 +397,12 @@ Under `duscope mcp` the error replaces the result, so a client never holds an
 id that names nothing.
 
 What to do: give `--index-dir` (or `DUSCOPE_INDEX_DIR`) a writable directory,
-or set `HOME`. To scan without saving: `scan` without `--save`, or `--no-save`
-on a verb that scans when no saved scan holds the path (the list verbs,
-`summary`, `query`, `export`, `render`, `view`). `rescan` and `import` always
-save.
+or set `HOME`; the hint names the verb to run again. `rescan` also looks for
+the saved scan in the index directory, so its hint names that scan by its file,
+`--trust FILE --scan FILE`, which it reads wherever `--index-dir` points. To
+scan without saving: `scan` without `--save`, or `--no-save` on a verb that
+scans when no saved scan holds the path (the list verbs, `summary`, `query`,
+`export`, `render`, `view`). `rescan` and `import` always save.
 
 ### `index_corrupt`
 
