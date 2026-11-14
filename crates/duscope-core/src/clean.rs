@@ -62,8 +62,9 @@
 //! item through `duscope-walk`'s descriptor walk: every component of the
 //! path opened without following a symbolic link, the item's device and
 //! inode checked again before anything is removed, a directory emptied
-//! bottom up, never across a mount; only then is `freed_bytes` counted, as
-//! the bytes on disk of each inode whose last link went.
+//! bottom up, never across a mount nor into a btrfs subvolume, whose hints
+//! name `umount` and `btrfs subvolume delete`; only then is `freed_bytes`
+//! counted, as the bytes on disk of each inode whose last link went.
 //!
 //! [`within_one_percent`] is `--expect-bytes`' test, made before anything is
 //! touched. [`Plan::refuse_unexpected`] holds each item to it, for a caller
@@ -1123,9 +1124,10 @@ fn plan_item(
 ///   `duscope-walk`'s [`unlink_checked`](duscope_walk::unlink_checked) and
 ///   [`remove_dir_checked`](duscope_walk::remove_dir_checked); a change on
 ///   the way to it or under it is `path_changed`, a mount point under it,
-///   or a directory whose mount the system cannot tell, `refused_path`, and
-///   what was deleted before a failure stays deleted and counts in
-///   `freed_bytes`.
+///   a btrfs subvolume (whose hint names `btrfs subvolume delete`, not
+///   `umount`), or a directory whose mount the system cannot tell,
+///   `refused_path`, and what was deleted before a failure stays deleted
+///   and counts in `freed_bytes`.
 pub fn clean_execute(plan: &mut Plan) -> CleanOutcome {
     let mut outcome = CleanOutcome::default();
     let method = plan.method;
@@ -1284,6 +1286,22 @@ fn removal_error(item: &Path, error: &RemoveError) -> ErrorObject {
             ),
             Some(&format!(
                 "Run umount {} first, then duscope clean again",
+                path.display()
+            )),
+            false,
+            "user",
+        ),
+        // Not mounted on its own: no umount applies.
+        RemoveError::Subvolume { path } => error_object(
+            "refused_path",
+            format!(
+                "{} is a btrfs subvolume, which clean never crosses: it and the directories \
+                 above it in {} were left",
+                path.display(),
+                item.display()
+            ),
+            Some(&format!(
+                "Run btrfs subvolume delete {} first, then duscope clean again",
                 path.display()
             )),
             false,

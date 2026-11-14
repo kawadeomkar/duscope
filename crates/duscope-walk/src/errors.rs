@@ -165,6 +165,17 @@ pub enum RemoveError {
         /// The mount point.
         path: PathBuf,
     },
+    /// A directory under the one being removed, or that one, on another
+    /// device than the directory above it and, as the system tells it, no
+    /// mount's root: a btrfs subvolume (Linux). Never entered, as a mount
+    /// point is not, so it and every directory above it stay. Where the
+    /// system cannot tell whether such a directory is a mount's root, it
+    /// is a [`Mount`](RemoveError::Mount).
+    #[error("{} is a subvolume, which is never crossed", path.display())]
+    Subvolume {
+        /// The subvolume's root.
+        path: PathBuf,
+    },
     /// A directory under the one being removed, or that one, whose mount
     /// nothing can tell (Linux before 5.8, or without `statx`, where
     /// neither a file handle nor the mount table answers): never entered,

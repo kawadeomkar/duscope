@@ -549,14 +549,16 @@ so. Each item the plan refuses gives its `reason`:
 
 While acting, the Trash refuses a directory that the mount table, read again
 just before its move, lists a mount point in, or cannot be read for; and
-`--permanent` stops at a mount point, or a directory it cannot tell is not one,
-under an item: that item fails `refused_path`, and what was removed before it
-stays removed. Under `duscope mcp`, a path outside `--roots`, or longer than
-4096 bytes, is refused with this code ([mcp.md](mcp.md#the---roots-rule)).
+`--permanent` stops at a mount point, a btrfs subvolume, or a directory it
+cannot tell is not a mount point, under an item: that item fails
+`refused_path`, and what was removed before it stays removed. Under
+`duscope mcp`, a path outside `--roots`, or longer than 4096 bytes, is refused
+with this code ([mcp.md](mcp.md#the---roots-rule)).
 
-What to do: `--skip-refused` acts on the other items. For a mount point, unmount
-it first, as the hint says. A btrfs subvolume is a mount point to `clean` but
-cannot be unmounted when it is not mounted on its own
+What to do: `--skip-refused` acts on the other items. For a mount point met while
+acting, unmount it first, as the hint says. A btrfs subvolume is a mount point
+to `clean`, but one that is not mounted on its own cannot be unmounted: for one
+under an item, the hint names `btrfs subvolume delete`, which deletes it
 ([limits.md](limits.md#a-btrfs-subvolume-is-a-mount-point-to-clean-linux)).
 
 ### `expectation_mismatch`

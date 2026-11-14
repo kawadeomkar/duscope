@@ -313,10 +313,12 @@ every list verb. `summary` gives each volume's share of the path's bytes there
 
 A btrfs subvolume reports a device of its own, another than its parent
 directory's, and `clean` tells a directory that is a mount point by its device
-(a file, by whether it is a mount's root): a subvolume named
-as an item is refused as `mount_point`, and `--permanent` stops at one under an
-item (`refused_path`). The hint's `umount` does not apply to a subvolume that
-is not mounted on its own; `btrfs subvolume delete` deletes one.
+(a file, by whether it is a mount's root): a subvolume named as an item is
+refused as `mount_point`, and `--permanent` stops at one under an item
+(`refused_path`). There the hint names `btrfs subvolume delete`, which deletes
+a subvolume, since `umount` does not apply to one that is not mounted on its
+own; a subvolume that is also mounted on its own there is a mount point, and
+its hint names `umount`.
 
 ### The Trash on NFS, 9p and FUSE (Linux)
 

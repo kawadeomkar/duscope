@@ -466,6 +466,34 @@ fn p5_core_03_a_directory_whose_mount_cannot_be_told_is_refused() {
 }
 
 #[test]
+fn p5_core_03_a_subvolume_is_left_to_btrfs_subvolume_delete_and_a_mount_to_umount() {
+    let item = Path::new("/srv/data");
+    // A btrfs subvolume, not mounted on its own: no umount applies.
+    let sub = item.join("snapshots/1");
+    let error = removal_error(item, &RemoveError::Subvolume { path: sub.clone() });
+    assert_eq!(
+        (error.code, error.retryable, error.fixable_by),
+        ("refused_path", false, "user")
+    );
+    assert_eq!(
+        error.message,
+        "/srv/data/snapshots/1 is a btrfs subvolume, which clean never crosses: it and the \
+         directories above it in /srv/data were left"
+    );
+    assert_eq!(
+        error.hint.as_deref(),
+        Some("Run btrfs subvolume delete /srv/data/snapshots/1 first, then duscope clean again")
+    );
+    // A mount point, a subvolume mounted on its own among them.
+    let error = removal_error(item, &RemoveError::Mount { path: sub });
+    assert_eq!(error.code, "refused_path");
+    assert_eq!(
+        error.hint.as_deref(),
+        Some("Run umount /srv/data/snapshots/1 first, then duscope clean again")
+    );
+}
+
+#[test]
 fn p5_core_05_a_move_to_the_trash_that_finds_the_item_changed_is_path_changed() {
     // `duscope-walk` checks the item as it moves it, and names the item or
     // the directory on the way to it that was replaced: either way the item

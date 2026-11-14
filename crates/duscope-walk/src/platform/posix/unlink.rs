@@ -23,7 +23,9 @@
 //!   (an older kernel, or no `statx`), each directory's mount is compared
 //!   with its parent's through their descriptors once it is opened, and
 //!   before anything in it is removed ([`MountCheck`]); a directory whose
-//!   mount nothing can tell is never entered either.
+//!   mount nothing can tell is never entered either. A directory on
+//!   another device that is no mount's root, a btrfs subvolume, fails as
+//!   one ([`RemoveError::Subvolume`]), not as a mount point.
 //! - **What it frees.** Each removal adds the bytes on disk of each inode
 //!   whose last link it removed, and of each directory, as `du` counts them.
 //!
@@ -138,20 +140,51 @@ impl CheckedDir {
         let path = child_path(self, name).ok()?;
         let up = self.fd.as_fd();
         let stat = super::with_c_name(name.as_bytes(), |c_name| stat_at(up, c_name)).ok()?;
-        if let Some(mount) = stat.mount {
-            return Some(mount);
-        }
-        let ids = mount_id(up).and_then(|up_id| {
-            super::with_c_name(name.as_bytes(), |c_name| mount_id_at(up, c_name, 0))
-                .map(|id| (up_id, id))
-        });
-        if let Ok((up_id, id)) = ids {
-            return Some(id != up_id);
-        }
-        mount_point_under(&path)
-            .ok()
-            .map(|point| point.as_deref() == Some(path.as_path()))
+        stat.mount.or_else(|| mount_root_unflagged(up, name, &path))
     }
+}
+
+/// Whether `name`, at `path`, in the directory open on `up` is the root of
+/// a mount, where `statx` did not say: its mount id against `up`'s, from
+/// `name_to_handle_at`, as [`MountCheck`] compares two directories'; else
+/// the mount table, read now, which lists a mount point by its path. `None`
+/// where neither answers.
+#[cfg(target_os = "linux")]
+fn mount_root_unflagged(up: BorrowedFd<'_>, name: &OsStr, path: &Path) -> Option<bool> {
+    let ids = mount_id(up).and_then(|up_id| {
+        super::with_c_name(name.as_bytes(), |c_name| mount_id_at(up, c_name, 0))
+            .map(|id| (up_id, id))
+    });
+    if let Ok((up_id, id)) = ids {
+        return Some(id != up_id);
+    }
+    mount_point_under(path)
+        .ok()
+        .map(|point| point.as_deref() == Some(path))
+}
+
+/// Why a removal does not enter the directory `name`, at `path`, in the
+/// directory open on `up`, read there as `stat`: it is the root of a
+/// mount, or on another device than `up`. [`RemoveError::Subvolume`] for
+/// one on another device that is no mount's root, as
+/// [`CheckedDir::mount_root`] tells it (`stat`'s mount-root attribute,
+/// else the two mount ids, else the mount table): a btrfs subvolume.
+/// [`RemoveError::Mount`] otherwise, and where nothing tells.
+#[cfg(target_os = "linux")]
+fn not_crossed(up: BorrowedFd<'_>, name: &OsStr, path: PathBuf, stat: &Stat) -> RemoveError {
+    if stat.mount.or_else(|| mount_root_unflagged(up, name, &path)) == Some(false) {
+        RemoveError::Subvolume { path }
+    } else {
+        RemoveError::Mount { path }
+    }
+}
+
+/// Why a removal does not enter the directory at `path`: on macOS it is
+/// another device's, and every mount there has a device of its own, so it
+/// is a mount point ([`RemoveError::Mount`]).
+#[cfg(not(target_os = "linux"))]
+fn not_crossed(_up: BorrowedFd<'_>, _name: &OsStr, path: PathBuf, _stat: &Stat) -> RemoveError {
+    RemoveError::Mount { path }
 }
 
 /// Removes `name`, any entry but a directory (a symbolic link itself, never
@@ -196,10 +229,12 @@ pub fn unlink_checked(
 /// [`RemoveError::Changed`] when the directory, or one under it, is gone or
 /// is not what was just read of it; [`RemoveError::Mount`] for a mount
 /// point or a directory of another device under it, which stays with every
-/// directory above it; [`RemoveError::MountUnknown`] for a directory whose
-/// mount nothing can tell, which is never entered either;
-/// [`RemoveError::Io`] when an entry cannot be read or removed. What was
-/// removed before the failure stays removed.
+/// directory above it, and [`RemoveError::Subvolume`] for one of another
+/// device that is no mount's root (a btrfs subvolume), which stays too;
+/// [`RemoveError::MountUnknown`] for a directory whose mount nothing can
+/// tell, which is never entered either; [`RemoveError::Io`] when an entry
+/// cannot be read or removed. What was removed before the failure stays
+/// removed.
 pub fn remove_dir_checked(
     parent: &CheckedDir,
     name: &OsStr,
@@ -212,7 +247,7 @@ pub fn remove_dir_checked(
         return Err(RemoveError::Changed { path });
     }
     if stat.mount == Some(true) || stat.dev != parent.dev {
-        return Err(RemoveError::Mount { path });
+        return Err(not_crossed(parent.fd.as_fd(), name, path, &stat));
     }
     let fd = open_child(parent.fd.as_fd(), name.as_bytes(), &path)?;
     let opened = stat_fd(fd.as_fd()).map_err(|source| RemoveError::Io {
@@ -561,7 +596,12 @@ fn empty(
             };
         if stat.dir {
             if stat.mount == Some(true) || stat.dev != level.dev {
-                return Err(RemoveError::Mount { path: child });
+                return Err(not_crossed(
+                    level.fd.as_fd(),
+                    name.as_os_str(),
+                    child,
+                    &stat,
+                ));
             }
             let fd = match open_at(level.fd.as_fd(), name.as_bytes(), &child, super::OPEN_DIR) {
                 Ok(fd) => fd,

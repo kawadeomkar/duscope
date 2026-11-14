@@ -854,9 +854,11 @@ pub fn unlink_checked(
 ///
 /// [`RemoveError::Changed`] when the directory, or one under it, is gone or
 /// is not what was just read of it; [`RemoveError::Mount`] for a mount
-/// point or another device's directory under it, and
-/// [`RemoveError::MountUnknown`] for a directory whose mount nothing can
-/// tell, either of which stays with every directory above it;
+/// point or another device's directory under it, [`RemoveError::Subvolume`]
+/// for another device's directory that the system says is no mount's root
+/// (on Linux a btrfs subvolume), and [`RemoveError::MountUnknown`] for a
+/// directory whose mount nothing can tell, any of which stays with every
+/// directory above it;
 /// [`RemoveError::Io`] when an entry cannot be read or removed. What was
 /// removed before the failure stays removed.
 pub fn remove_dir_checked(
