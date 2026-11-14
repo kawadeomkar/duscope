@@ -163,6 +163,16 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Whether `entry`, a directory just read, is an automount point not yet
+    /// triggered: it still carries its parent's mount, and opening it would
+    /// mount another filesystem on it. The walk enters one only under
+    /// `--include-network` without `-x`, and reads no mount table for it. A
+    /// provider that wraps another forwards it. The default: never.
+    fn untriggered_automount(&self, entry: &Entry) -> bool {
+        let _ = entry;
+        false
+    }
+
     /// Whether `--clones` was asked of a filesystem that has no clone ids,
     /// for the `clones_unavailable` warning; asked once the walk is done.
     /// The default: never.
@@ -1833,9 +1843,13 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
     /// pseudo-filesystem, a network one only under `--include-network`, and
     /// under `-x` no mount other than the root's (a firmlink leads into the
     /// volume the root's own is paired with, so it is no crossing for
-    /// `-x`); then whatever the provider skips. A mount's volume is added to
-    /// `volumes` the first time it is met, read in full only when the walk
-    /// enters it. `None` enters.
+    /// `-x`); then whatever the provider skips. An automount point not yet
+    /// triggered, which opening would mount, is entered only where a network
+    /// mount would be and never under `-x`; it has no volume of its own
+    /// until it is mounted, and the mount it still carries is its parent's,
+    /// so it is neither classified nor reported. A mount's volume is added
+    /// to `volumes` the first time it is met, read in full only when the
+    /// walk enters it. `None` enters.
     ///
     /// The bind-cycle test walks the directory's ancestors, one pointer per
     /// level; a mount is classified once, and the classification is kept
@@ -1854,6 +1868,17 @@ impl<P: Provider + ?Sized> Walk<'_, P> {
         if !crossing {
             return if cycle {
                 Some(Skip::BindCycle)
+            } else {
+                self.provider.skip(dir, entry, self.opts)
+            };
+        }
+        if self.provider.untriggered_automount(entry) {
+            return if cycle {
+                Some(Skip::BindCycle)
+            } else if self.opts.one_file_system {
+                Some(Skip::OneFileSystem)
+            } else if !self.opts.include_network {
+                Some(Skip::Network)
             } else {
                 self.provider.skip(dir, entry, self.opts)
             };

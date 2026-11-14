@@ -430,6 +430,36 @@ fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
 }
 
 #[test]
+fn p5_walk_06_linux_an_automount_attribute_off_a_mount_root_is_untriggered() {
+    // SAFETY: statx is plain data; all zeros is a valid value.
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    stx.stx_mode = u16::try_from(libc::S_IFDIR).unwrap();
+    let bit = |b: libc::c_int| u64::from(b.cast_unsigned());
+    let untriggered = |vouched: &[libc::c_int], set: &[libc::c_int]| {
+        let mut stx = stx;
+        for &b in vouched {
+            stx.stx_attributes_mask |= bit(b);
+        }
+        for &b in set {
+            stx.stx_attributes |= bit(b);
+        }
+        let entry = super::statx::entry(NameRef::from("d"), &stx, crate::Attrs::Basic);
+        LinuxProvider::default().untriggered_automount(&entry)
+    };
+    let (root, auto) = (libc::STATX_ATTR_MOUNT_ROOT, libc::STATX_ATTR_AUTOMOUNT);
+    // The trigger itself, read without triggering it, in the mount around it.
+    assert!(untriggered(&[root, auto], &[auto]));
+    // What was mounted on a triggered one (or any mount root), and a plain
+    // directory.
+    assert!(!untriggered(&[root, auto], &[root]));
+    assert!(!untriggered(&[root, auto], &[root, auto]));
+    assert!(!untriggered(&[root, auto], &[]));
+    // Before 5.8 the kernel vouches for no mount root: the attribute decides.
+    assert!(untriggered(&[auto], &[auto]));
+    assert!(!untriggered(&[auto], &[]));
+}
+
+#[test]
 fn p5_walk_04_listing_is_timed_apart_from_statx() {
     let env = TestEnv::new();
     let root = env.fixtures().case_root("wide-directory");

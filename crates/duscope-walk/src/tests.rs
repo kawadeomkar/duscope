@@ -686,10 +686,6 @@ struct MountRow {
     class: VolumeClass,
 }
 
-/// A [`MemProvider`] with mounts: each entry takes the mount id of the
-/// longest mount path above it, a mount point carries `Boundary::Mount`, and
-/// `bind_of` gives a mount point the identity of another directory, as a
-/// bind mount does.
 /// A mount table row.
 fn row(path: &'static str, mnt_id: u64, class: VolumeClass) -> MountRow {
     MountRow {
@@ -699,9 +695,16 @@ fn row(path: &'static str, mnt_id: u64, class: VolumeClass) -> MountRow {
     }
 }
 
+/// A [`MemProvider`] with mounts: each entry takes the mount id of the
+/// longest mount path above it, a mount point carries `Boundary::Mount` and
+/// `MOUNT_ROOT`, and `bind_of` gives a mount point the identity of another
+/// directory, as a bind mount does.
 struct Mounted<'a> {
     inner: &'a MemProvider,
     mounts: Vec<MountRow>,
+    /// Automount points not yet triggered, as Linux reads them: a
+    /// `Boundary::Mount` without `MOUNT_ROOT`, in the mount around them.
+    automounts: Vec<&'static str>,
     bind_of: Option<(&'static str, &'static str)>,
     /// Paths that are firmlinks, and the one mount point the provider skips
     /// as reached through them.
@@ -710,6 +713,8 @@ struct Mounted<'a> {
     /// Paths `volume` and `mount_info` were asked about.
     volume_calls: Mutex<Vec<PathBuf>>,
     mount_info_calls: Mutex<Vec<PathBuf>>,
+    /// Directories read: entering an automount point would mount it.
+    reads: Mutex<Vec<PathBuf>>,
 }
 
 impl<'a> Mounted<'a> {
@@ -717,11 +722,13 @@ impl<'a> Mounted<'a> {
         Mounted {
             inner,
             mounts,
+            automounts: Vec::new(),
             bind_of: None,
             firmlinks: Vec::new(),
             firmlinked: None,
             volume_calls: Mutex::new(Vec::new()),
             mount_info_calls: Mutex::new(Vec::new()),
+            reads: Mutex::new(Vec::new()),
         }
     }
 }
@@ -739,7 +746,11 @@ impl Mounted<'_> {
             entry.mnt_id = mount.mnt_id;
             if path == Path::new(mount.path) {
                 entry.boundary = Boundary::Mount;
+                entry.flags.insert(Flags::MOUNT_ROOT);
             }
+        }
+        if self.automounts.iter().any(|a| path == Path::new(a)) {
+            entry.boundary = Boundary::Mount;
         }
         if self.firmlinks.iter().any(|f| path == Path::new(f)) {
             entry.boundary = Boundary::Firmlink;
@@ -764,12 +775,17 @@ impl Provider for Mounted<'_> {
         out: &mut Vec<Entry>,
         errs: &mut Vec<ScanError>,
     ) -> io::Result<()> {
+        self.reads.lock().unwrap().push(dir.path());
         let start = out.len();
         self.inner.read_dir(dir, opts, out, errs)?;
         for entry in &mut out[start..] {
             self.fix(&dir.path().join(entry.name.as_os_str()), entry);
         }
         Ok(())
+    }
+
+    fn untriggered_automount(&self, entry: &Entry) -> bool {
+        entry.boundary == Boundary::Mount && !entry.flags.contains(Flags::MOUNT_ROOT)
     }
 
     fn skip(&self, _dir: &DirHandle, entry: &Entry, _opts: &WalkOptions) -> Option<Skip> {
@@ -1058,6 +1074,96 @@ fn p1_walk_06_firmlinks_are_no_crossing_for_one_file_system() {
             .collect();
         assert_eq!(data, [true], "-x {one_file_system}");
         assert_eq!(summary.mounts_excluded, 0);
+    }
+}
+
+#[test]
+fn p5_walk_06_an_untriggered_automount_is_entered_only_under_include_network() {
+    // /mem/auto lies in the root's mount and /mem/disk/auto in an entered
+    // local one, each read as Linux reads an automount point not yet
+    // triggered: a mount boundary, no mount root, its parent's mount id.
+    let mut tree = MemProvider::new("/mem");
+    tree.file("plain/e", 1)
+        .file("auto/inside", 1)
+        .file("disk/a", 1)
+        .file("disk/auto/inside", 1);
+    let mut provider = Mounted::new(
+        &tree,
+        vec![
+            row("/mem", 1, VolumeClass::Local),
+            row("/mem/disk", 2, VolumeClass::Local),
+        ],
+    );
+    provider.automounts = vec!["/mem/auto", "/mem/disk/auto"];
+    let (auto, disk, inner) = (
+        PathBuf::from("/mem/auto"),
+        PathBuf::from("/mem/disk"),
+        PathBuf::from("/mem/disk/auto"),
+    );
+    for (one_file_system, include_network, skips) in [
+        (
+            false,
+            false,
+            vec![(&auto, Skip::Network), (&inner, Skip::Network)],
+        ),
+        (false, true, vec![]),
+        (
+            true,
+            false,
+            vec![(&auto, Skip::OneFileSystem), (&disk, Skip::OneFileSystem)],
+        ),
+        (
+            true,
+            true,
+            vec![(&auto, Skip::OneFileSystem), (&disk, Skip::OneFileSystem)],
+        ),
+    ] {
+        let flags = format!("-x {one_file_system}, --include-network {include_network}");
+        let opts = WalkOptions {
+            one_file_system,
+            include_network,
+            ..WalkOptions::default()
+        };
+        provider.reads.lock().unwrap().clear();
+        provider.mount_info_calls.lock().unwrap().clear();
+        let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+        let summary = result.unwrap();
+        let (paths, dirs) = replay(tree.root_path(), &events);
+        let mut skipped: Vec<(PathBuf, Skip)> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::Skipped { dir, reason } => Some((dirs[dir].clone(), *reason)),
+                _ => None,
+            })
+            .collect();
+        skipped.sort_by(|a, b| a.0.cmp(&b.0));
+        let skips: Vec<(PathBuf, Skip)> = skips.into_iter().map(|(p, s)| (p.clone(), s)).collect();
+        assert_eq!(skipped, skips, "{flags}");
+        assert!(paths.contains(&auto), "{flags}: listed either way");
+        // A point not entered is never read: reading it would mount it.
+        let reads = provider.reads.lock().unwrap().clone();
+        for point in [&auto, &inner] {
+            let entered = !skipped.iter().any(|(p, _)| point.starts_with(p));
+            assert_eq!(reads.contains(point), entered, "{flags}: {point:?}");
+            assert_eq!(paths.contains(&point.join("inside")), entered, "{flags}");
+        }
+        // Neither is classified or reported as a volume: the mount it
+        // carries is its parent's, reported already.
+        let info = provider.mount_info_calls.lock().unwrap().clone();
+        assert_eq!(info, std::slice::from_ref(&disk), "{flags}");
+        let volumes: Vec<(u64, bool)> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::Volume(v) => Some((v.mnt_id, v.entered())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(volumes, [(1, true), (2, !one_file_system)], "{flags}");
+        assert_eq!(
+            summary.mounts_excluded,
+            u64::from(one_file_system),
+            "{flags}: only the disk under -x"
+        );
     }
 }
 

@@ -264,6 +264,10 @@ impl Provider for LinuxProvider {
         true
     }
 
+    fn untriggered_automount(&self, entry: &Entry) -> bool {
+        statx::untriggered_automount(entry)
+    }
+
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
         self.mounts.volume(path)
     }
