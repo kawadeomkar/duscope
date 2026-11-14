@@ -2068,6 +2068,130 @@ fn p4_tui_08_ten_clicks_on_a_wide_folders_pool_read_its_children_once() {
     assert!(read <= N + 10 * tiles + 64, "{read} reads of {N} children");
 }
 
+/// The viewer of `view`, a [`wide`] tree, at 120×40 with the mask `glob`
+/// on, and the `+N small` tile of `big/`: its index on the map and a cell
+/// in it.
+fn masked_pool<'a>(
+    view: &'a ArenaView<'a>,
+    pack: &'a Pack,
+    classes: &'a duscope_core::rules::Classes,
+    glob: &str,
+) -> (App<'a>, Terminal<TestBackend>, usize, (u16, u16)) {
+    use duscope_treemap::paint::DrawnKind;
+
+    use crate::layout::layout;
+
+    let (w, h) = (120, 40);
+    let mut app = App::new(
+        view,
+        opts(pack, classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let mut terminal = first_frame(&app, w, h);
+    press(&mut app, &mut terminal, &char('/'));
+    for c in glob.chars() {
+        press(&mut app, &mut terminal, &char(c));
+    }
+    assert_eq!(
+        press(&mut app, &mut terminal, &key(KeyCode::Enter)),
+        Flow::Redraw
+    );
+    assert!(row(terminal.backend().buffer(), 2).contains(&format!("filter: {glob}")));
+    let big = id_of(view, "big");
+    let map = app.map();
+    let index = map
+        .tiles()
+        .iter()
+        .position(|t| t.kind == DrawnKind::Small && t.id == big)
+        .unwrap_or_else(|| panic!("no pool: {:?}", map.tiles()));
+    let pool = map.tiles()[index].rect;
+    let area = layout(w, h).map;
+    let cell = (
+        area.x + pool.x + pool.w / 2,
+        area.y + pool.y.midpoint(pool.y + pool.h) / 2,
+    );
+    (app, terminal, index, cell)
+}
+
+/// A left click at column `x`, row `y`.
+fn left_click((x, y): (u16, u16)) -> crossterm::event::MouseEvent {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn p4_tui_08_a_click_on_a_pool_under_a_mask_lands_on_the_largest_it_keeps() {
+    use std::cmp::Reverse;
+    use std::time::Instant;
+
+    use crate::zoom::Mark;
+
+    // Under `/*[02468]` a click on the pool of `big/` lands on the largest
+    // child pooled there whose name ends in an even digit, the first of
+    // the pool's rows the siblings pane lists; the largest child pooled,
+    // which the mask hides, is another.
+    const N: u32 = 2_000;
+    let tree = wide(N as usize);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/wide"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mut app, _terminal, index, cell) = masked_pool(&view, &mocha, &classes, "*[02468]");
+    let big = id_of(&view, "big");
+    let map = app.map();
+    let largest = |keep: &dyn Fn(u32) -> bool| {
+        (big + 1..=big + N)
+            .filter(|&id| map.mark(&view, id) == Mark::Tile(index) && keep(id))
+            .min_by_key(|&id| (Reverse(view.node(id).allocated), id))
+            .unwrap()
+    };
+    let even = |id: u32| view.name(id).last().is_some_and(|&digit| digit % 2 == 0);
+    let kept = largest(&even);
+    assert_ne!(kept, largest(&|_| true), "the largest child pooled is kept");
+    let before = app.selected();
+    assert_eq!(app.mouse(left_click(cell), Instant::now()), Flow::Redraw);
+    assert_eq!(
+        app.selected(),
+        kept,
+        "{}, not {}",
+        String::from_utf8_lossy(&view.name(app.selected())),
+        String::from_utf8_lossy(&view.name(kept))
+    );
+    assert_ne!(app.selected(), before);
+}
+
+#[test]
+fn p4_tui_08_a_click_on_a_pool_the_mask_hides_whole_moves_nowhere() {
+    use std::time::Instant;
+
+    use crate::mask::WALK_BUDGET;
+
+    // `big/` holds more children than the mask reads for a map, so its
+    // pool shows under `/*.zip`, which keeps none of them (the budget runs
+    // out in it): a click on it finds no child the mask keeps there and
+    // leaves the cursor where it is, where it would land on the largest
+    // child pooled.
+    let n = WALK_BUDGET + 1_000;
+    let tree = wide(n);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/wide"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mut app, terminal, _, cell) = masked_pool(&view, &mocha, &classes, "*.zip");
+    // The pool is painted, not masked out.
+    let base = Shown::Rgb(0x1e, 0x1e, 0x2e);
+    assert_ne!(terminal.backend().buffer()[cell].bg, base, "the pool shows");
+    let before = app.selected();
+    assert_eq!(before, id_of(&view, "huge"));
+    assert_eq!(app.mouse(left_click(cell), Instant::now()), Flow::Wait);
+    assert_eq!(app.selected(), before);
+}
+
 // P4-TUI-09: the viewer opens on one pass over the scan.
 
 /// A tree shaped as T2 is, many small folders deep: `fanout` folders in
