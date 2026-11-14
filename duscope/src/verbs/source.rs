@@ -444,6 +444,16 @@ impl Source {
         }
     }
 
+    /// Whether [`Source::check`] fails: a read of a saved scan failed after
+    /// the file opened, and from then on every entry reads as empty. No
+    /// query: what a writer asks after each row it builds.
+    pub fn failed(&self) -> bool {
+        match self {
+            Source::Saved { index, .. } => index.failed(),
+            Source::Fresh { .. } => false,
+        }
+    }
+
     /// When the scan finished, Unix nanoseconds.
     pub fn finished_ns(&self) -> i64 {
         match self {
