@@ -6,7 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use duscope_testkit::TestEnv;
-use duscope_walk::{Attrs, Kind, MemProvider, WalkOptions, walk, walk_with};
+use duscope_walk::{
+    Attrs, Boundary, DirId, Entry, Flags, Kind, MemProvider, NameRef, ScanEvent, Share,
+    WalkOptions, walk, walk_with,
+};
 use rusqlite::Connection;
 
 use super::Index;
@@ -951,4 +954,67 @@ fn p5_sec_04_imported_indexes_keep_the_layout() {
         // its parent's ids place it.
         crate::check::rows_keep_the_layout(&index).unwrap();
     }
+}
+
+#[test]
+fn p5_cli_02_a_directory_reads_the_device_it_lies_on() {
+    // The root on device 1; `data` on device 2 through a firmlink, as
+    // macOS's /Users is on the Data volume; `data/sub` and the file in it
+    // there too.
+    let entry = |name: &str, parent: u32, dir: Option<u32>, dev: u64, boundary| Entry {
+        name: NameRef::from(name),
+        parent: DirId::new(parent),
+        dir: dir.map(DirId::new),
+        kind: if dir.is_some() { Kind::Dir } else { Kind::File },
+        apparent: 10,
+        allocated: 4096,
+        mtime_ns: 0,
+        ctime_ns: 0,
+        nlink: 1,
+        dev,
+        ino: u64::from(dir.unwrap_or(9)) + 1,
+        mnt_id: dev,
+        share: Share::None,
+        boundary,
+        flags: Flags::empty(),
+        full: None,
+    };
+    let closed = |dir: u32| ScanEvent::DirClosed {
+        dir: DirId::new(dir),
+        errno: None,
+    };
+    let mut arena = Arena::new(Attrs::Basic);
+    for event in [
+        ScanEvent::Entry(entry("/t", 0, Some(0), 1, Boundary::None)),
+        ScanEvent::Entry(entry("data", 0, Some(1), 2, Boundary::Firmlink)),
+        ScanEvent::Entry(entry("top", 0, None, 1, Boundary::None)),
+        closed(0),
+        ScanEvent::Entry(entry("sub", 1, Some(2), 2, Boundary::None)),
+        closed(1),
+        ScanEvent::Entry(entry("f", 2, None, 2, Boundary::None)),
+        closed(2),
+    ] {
+        arena.push(event).unwrap();
+    }
+    let rollup = roll_up(&mut arena);
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    let id = ScanId::new(b"/t", 1, [0; 8]);
+    IndexWriter::write(&arena, &rollup, &meta(id.clone(), Path::new("/t"), 1), &dir).unwrap();
+    let index = Index::open(&index_path(&dir, &id)).unwrap();
+    let devs: Vec<(Vec<u8>, Option<u64>)> = (0..index.len())
+        .map(|id| (index.path(id), index.dir_dev(id)))
+        .collect();
+    assert_eq!(
+        devs,
+        [
+            (b"".to_vec(), Some(1)),
+            (b"top".to_vec(), None),
+            (b"data".to_vec(), Some(2)),
+            (b"data/sub".to_vec(), Some(2)),
+            (b"data/sub/f".to_vec(), None),
+        ]
+    );
+    assert_eq!(index.dir_dev(index.len()), None);
+    assert_eq!(index.failure(), None);
 }

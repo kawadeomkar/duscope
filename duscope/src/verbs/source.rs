@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use duscope_core::CoreError;
 use duscope_core::envelope::{Envelope, ExcludedEntry, ScanBlock, VolumeEntry, Warning};
-use duscope_core::index::{Index, ScanId, index_path};
+use duscope_core::index::{Index, IndexVolume, ScanId, index_path};
 use duscope_core::query::{
     self, Resolved, ScanQuery, ScanSelector, SizeKind, Subtree, TreeView, clock, resolve_scan,
     short_id, timegrammar,
@@ -509,18 +509,19 @@ impl Source {
     pub fn warnings(&self, walk: &WalkArgs) -> Vec<Warning> {
         match self {
             Source::Fresh { scanned, .. } => scan::warnings(scanned),
-            Source::Saved { index, stale, .. } => {
-                // What a scan of the path would have met: the volumes under
-                // it, the directories in it.
+            Source::Saved {
+                index, base, stale, ..
+            } => {
+                // What a scan of the path would have met: of the volumes
+                // within it, as `scan.volumes` names them, those not entered
+                // (each mounted at or under it); the directories in it.
                 let view = self.view();
-                let under = view.root_path();
-                let mounts_excluded = index
-                    .volumes()
+                let volumes = index.volumes();
+                let within = volumes_within(index, &volumes, &[*base]);
+                let mounts_excluded = volumes
                     .iter()
-                    .filter(|v| {
-                        !v.entered
-                            && Path::new(OsStr::from_bytes(&v.mount_point)).starts_with(under)
-                    })
+                    .zip(&within)
+                    .filter(|&(v, &kept)| kept && !v.entered)
                     .count() as u64;
                 let mut warnings = scan::quality_warnings(
                     self.unreadable_dirs(),
@@ -680,7 +681,8 @@ pub(super) fn saved_block(index: &Index, size: SizeKind) -> ScanBlock {
 
 /// The scan block of a saved scan read at `bases`, the entries its answer
 /// is about: the volumes and excluded directories within them (every one
-/// where a base is the root). `listed` caps the excluded directories at the
+/// where a base is the root), the volumes by path and by device
+/// ([`volumes_within`]). `listed` caps the excluded directories at the
 /// first in the scan's order (its ids: pre-order, siblings bytewise) before
 /// any path is spelled, and the block counts the others in
 /// `excluded_unlisted`.
@@ -716,19 +718,7 @@ pub(super) fn read_block(
         .map(|&(id, reason)| (query::abs_path(index, id), reason))
         .collect();
     excluded.sort();
-    let mounts: Vec<&Path> = volumes
-        .iter()
-        .map(|v| Path::new(OsStr::from_bytes(&v.mount_point)))
-        .collect();
-    let read_at: Vec<PathBuf> = if whole {
-        Vec::new()
-    } else {
-        bases
-            .iter()
-            .map(|&base| PathBuf::from(OsString::from_vec(query::abs_path(index, base))))
-            .collect()
-    };
-    let kept = |i: usize| whole || read_at.iter().any(|at| volume_within(&mounts, i, at));
+    let kept = volumes_within(index, &volumes, bases);
     ScanBlock {
         id: Some(meta.scan_id.to_string()),
         root: root_path.to_string_lossy().into_owned(),
@@ -757,19 +747,9 @@ pub(super) fn read_block(
         fallback_reason: None,
         volumes: volumes
             .iter()
-            .enumerate()
-            .filter(|&(i, _)| kept(i))
-            .map(|(_, v)| VolumeEntry {
-                mount_point: lossy(&v.mount_point),
-                fs_type: v.fs_type.clone(),
-                entered: v.entered,
-                reason: v.reason.as_deref().and_then(reason_name),
-                read_only: v.read_only,
-                total_bytes: v.total_bytes.unwrap_or(0),
-                free_bytes: v.free_bytes.unwrap_or(0),
-                dev: v.dev,
-                options: v.options.clone(),
-            })
+            .zip(&kept)
+            .filter(|&(_, &kept)| kept)
+            .map(|(v, _)| volume_entry(v))
             .collect(),
         excluded_count: meta.excluded_count,
         excluded: excluded
@@ -783,25 +763,69 @@ pub(super) fn read_block(
     }
 }
 
-/// Whether volume `i` of a scan's volumes, mounted at `mounts` (the root's
-/// first, as the walk met them), lies within the path `at`: mounted at or
-/// under it, or the volume `at` is on. That is the deepest of the volumes
-/// the walk crossed whose mount point is `at` or above it, else the root's:
-/// a path on the root's volume lies on it even where its mount point is not
-/// on the path, as macOS's Data volume (`/System/Volumes/Data`) holds
-/// `/Users` through a firmlink.
-fn volume_within(mounts: &[&Path], i: usize, at: &Path) -> bool {
-    if mounts[i].starts_with(at) {
-        return true;
+/// A saved scan's volume as `scan.volumes` names it.
+fn volume_entry(v: &IndexVolume) -> VolumeEntry {
+    VolumeEntry {
+        mount_point: lossy(&v.mount_point),
+        fs_type: v.fs_type.clone(),
+        entered: v.entered,
+        reason: v.reason.as_deref().and_then(reason_name),
+        read_only: v.read_only,
+        total_bytes: v.total_bytes.unwrap_or(0),
+        free_bytes: v.free_bytes.unwrap_or(0),
+        dev: v.dev,
+        options: v.options.clone(),
     }
-    let on = mounts
+}
+
+/// Which of `volumes`, a saved scan's, lie within its entries `bases`, in
+/// their order, as [`volume_within`] decides: every one where a base is the
+/// root. `scan.volumes` names these, and the warning `mounts_excluded`
+/// counts those of them the scan did not enter.
+fn volumes_within(index: &Index, volumes: &[IndexVolume], bases: &[u32]) -> Vec<bool> {
+    if bases.contains(&0) {
+        return vec![true; volumes.len()];
+    }
+    let read_at: Vec<PathBuf> = bases
         .iter()
-        .enumerate()
-        .skip(1)
-        .filter(|(_, mount)| at.starts_with(mount))
-        .max_by_key(|(_, mount)| mount.as_os_str().len())
-        .map_or(0, |(j, _)| j);
-    on == i
+        .map(|&base| PathBuf::from(OsString::from_vec(query::abs_path(index, base))))
+        .collect();
+    let on: Vec<u64> = bases
+        .iter()
+        .filter_map(|&base| device_of(index, base))
+        .collect();
+    volumes
+        .iter()
+        .map(|v| {
+            let mount = Path::new(OsStr::from_bytes(&v.mount_point));
+            volume_within(mount, v.dev, v.entered, &read_at, &on)
+        })
+        .collect()
+}
+
+/// The device the entry `id` lies on (`dirs.dev`): a directory's own, a
+/// file's directory's.
+fn device_of(index: &Index, id: u32) -> Option<u64> {
+    let node = index.node(id);
+    index.dir_dev(if node.is_dir() { id } else { node.parent })
+}
+
+/// Whether a volume mounted at `mount`, on device `dev`, lies within a read
+/// at the paths `at`, which lie on the devices `on`: mounted at or under one
+/// of them, or, entered, the volume one of them lies on. The device finds
+/// that volume however the path reaches it: on a scan of `/`, macOS's Data
+/// volume, mounted at `/System/Volumes/Data`, holds `/Users` and `/private`
+/// through firmlinks, outside its mount point. A volume the scan did not
+/// enter holds nothing it read, so only its mount point puts it within a
+/// path. A device mounted twice and entered at both (a bind mount) is kept
+/// at both mount points.
+///
+/// The devices are the paths' own, not those of the directories below
+/// them, which would take a pass over every one: a volume reached through
+/// a firmlink below the path and mounted elsewhere (the Data volume holds
+/// `/usr/local`, below `/usr` on the System volume) is not within `/usr`.
+fn volume_within(mount: &Path, dev: u64, entered: bool, at: &[PathBuf], on: &[u64]) -> bool {
+    (entered && on.contains(&dev)) || at.iter().any(|at| mount.starts_with(at))
 }
 
 /// `excluded_truncated`, when `block`'s `excluded` leaves directories out:
@@ -946,43 +970,93 @@ pub fn core_failure(error: CoreError) -> Failure {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::volume_within;
 
-    /// The volumes of `mounts` within `at`, by mount point.
-    fn within<'m>(mounts: &[&'m str], at: &str) -> Vec<&'m str> {
-        let paths: Vec<&Path> = mounts.iter().map(Path::new).collect();
-        (0..mounts.len())
-            .filter(|&i| volume_within(&paths, i, Path::new(at)))
-            .map(|i| mounts[i])
+    /// A volume: its mount point, its device, and whether the scan entered
+    /// it.
+    type Volume<'m> = (&'m str, u64, bool);
+
+    /// The mount points of `volumes` within a read at `at`, a path on device
+    /// `on`.
+    fn within<'m>(volumes: &[Volume<'m>], at: &str, on: u64) -> Vec<&'m str> {
+        let at = [PathBuf::from(at)];
+        volumes
+            .iter()
+            .filter(|&&(mount, dev, entered)| {
+                volume_within(Path::new(mount), dev, entered, &at, &[on])
+            })
+            .map(|&(mount, _, _)| mount)
             .collect()
     }
 
     #[test]
     fn p5_cli_02_a_path_keeps_the_volume_it_lies_on_and_those_under_it() {
         // Linux: the root's volume is mounted above the root.
-        let linux = ["/", "/home", "/home/u/img", "/srv"];
-        assert_eq!(within(&linux, "/home/u"), ["/home", "/home/u/img"]);
-        assert_eq!(within(&linux, "/home/u/img"), ["/home/u/img"]);
-        assert_eq!(within(&linux, "/home/u/img/a"), ["/home/u/img"]);
-        assert_eq!(within(&linux, "/var/x"), ["/"]);
+        let linux = [
+            ("/", 1, true),
+            ("/home", 2, true),
+            ("/home/u/img", 3, true),
+            ("/srv", 4, true),
+        ];
+        assert_eq!(within(&linux, "/home/u", 2), ["/home", "/home/u/img"]);
+        assert_eq!(within(&linux, "/home/u/img", 3), ["/home/u/img"]);
+        assert_eq!(within(&linux, "/home/u/img/a", 3), ["/home/u/img"]);
+        assert_eq!(within(&linux, "/var/x", 1), ["/"]);
         // A mount point named by its prefix's sibling is not under it.
-        assert_eq!(within(&["/", "/home2"], "/home"), ["/"]);
-        // macOS: the root's volume is the Data volume, whose mount point is
-        // not on the path to anything it holds through a firmlink.
-        let macos = ["/System/Volumes/Data", "/private/tmp/x/img"];
+        let sibling = [("/", 1, true), ("/home2", 2, true)];
+        assert_eq!(within(&sibling, "/home", 1), ["/"]);
+        // macOS, a scan below `/`: the root's volume is the Data volume,
+        // whose mount point is not on the path to anything it holds through
+        // a firmlink.
+        let data = [
+            ("/System/Volumes/Data", 1, true),
+            ("/private/tmp/x/img", 2, true),
+        ];
         assert_eq!(
-            within(&macos, "/private/tmp/x/sub"),
+            within(&data, "/private/tmp/x/sub", 1),
             ["/System/Volumes/Data"]
         );
         assert_eq!(
-            within(&macos, "/private/tmp/x"),
+            within(&data, "/private/tmp/x", 1),
             ["/System/Volumes/Data", "/private/tmp/x/img"]
         );
         assert_eq!(
-            within(&macos, "/private/tmp/x/img/d"),
+            within(&data, "/private/tmp/x/img/d", 2),
             ["/private/tmp/x/img"]
         );
+    }
+
+    #[test]
+    fn p5_cli_02_a_scan_of_slash_keeps_the_data_volume_below_a_firmlink() {
+        // macOS, a scan of `/`: the root's volume is the read-only System
+        // volume (device 1); the Data volume (device 2), mounted at
+        // /System/Volumes/Data, holds /private and /Users through firmlinks.
+        let slash = [("/", 1, true), ("/System/Volumes/Data", 2, true)];
+        assert_eq!(
+            within(&slash, "/private/tmp/x", 2),
+            ["/System/Volumes/Data"]
+        );
+        assert_eq!(within(&slash, "/Users/u", 2), ["/System/Volumes/Data"]);
+        assert_eq!(within(&slash, "/bin", 1), ["/"]);
+        assert_eq!(within(&slash, "/", 1), ["/", "/System/Volumes/Data"]);
+        // /usr lies on the System volume; the Data volume it holds at
+        // /usr/local, through a firmlink, is not looked for.
+        assert_eq!(within(&slash, "/usr", 1), ["/"]);
+    }
+
+    #[test]
+    fn p5_cli_02_a_device_mounted_twice_is_kept_where_entered() {
+        // A bind mount: /home's device again at /srv/home, entered at both.
+        let bound = [("/", 1, true), ("/home", 2, true), ("/srv/home", 2, true)];
+        assert_eq!(within(&bound, "/home/u", 2), ["/home", "/srv/home"]);
+        assert_eq!(within(&bound, "/srv/home/u", 2), ["/home", "/srv/home"]);
+        assert_eq!(within(&bound, "/srv/www", 1), ["/"]);
+        // A bind mount of the root's device the walk did not enter (a cycle,
+        // or -x) holds nothing a read beside it lies on.
+        let cycle = [("/", 1, true), ("/home/u/loop", 1, false)];
+        assert_eq!(within(&cycle, "/var", 1), ["/"]);
+        assert_eq!(within(&cycle, "/home/u", 1), ["/", "/home/u/loop"]);
     }
 }

@@ -1,19 +1,24 @@
-//! P5-CLI-02: `scan.excluded` within the path read (decision E). Every verb
-//! names only the excluded directories inside the subtree its result was
-//! read at; a list names the first 20 of them, in the scan's order, and the
-//! warning `excluded_truncated` counts the rest; `summary` and `explain` name
-//! them all. Over MCP, where a scan rooted above a root is read at the root,
-//! a result names none outside it.
+//! P5-CLI-02: `scan.excluded` and `scan.volumes` within the path read
+//! (decision E). Every verb names only the excluded directories inside the
+//! subtree its result was read at; a list names the first 20 of them, in
+//! the scan's order, and the warning `excluded_truncated` counts the rest;
+//! `summary` and `explain` name them all. Of the volumes, a verb names the
+//! one the path lies on, by its device, and those mounted at or under it.
+//! Over MCP, where a scan rooted above a root is read at the root, a result
+//! names no excluded directory outside it, and the volume the root lies on.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, DirBuilder};
 use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use duscope_testkit::{TestEnv, golden, replace_values};
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
 /// A valid `CACHEDIR.TAG`.
@@ -462,4 +467,338 @@ fn p5_cli_02_a_tool_names_no_excluded_directory_outside_the_roots() {
         let leaked: Vec<&&str> = texts.iter().filter(|t| t.contains(&outside_text)).collect();
         assert!(leaked.is_empty(), "{leaked:?}");
     }
+}
+
+/// A volume row of [`firmlinked`]'s scan: its device, its mount's id, its
+/// mount point, whether it is read-only, and why the scan did not enter it.
+type VolumeRow<'a> = (u32, u32, Vec<u8>, bool, Option<&'a str>);
+
+/// A saved scan shaped as macOS's scan of `/`, made by a scan of `vol` and
+/// given its devices and volumes after: `vol` and `vol/sys` on the System
+/// volume (device 1, mounted at `/`, read-only); `vol/data` on the Data
+/// volume (device 2), reached as through a firmlink, whose mount point
+/// `vol/sys/Volumes/Data` no path under `vol/data` is under, and so is
+/// `vol/sys/usr/local`, through a firmlink below `vol/sys/usr`;
+/// `vol/data/proj/nas`, a network mount (device 3) the scan did not enter;
+/// and `vol/data/loop`, a bind mount of the Data volume it did not enter, a
+/// cycle. The scan is saved in an index directory of its own and copied
+/// into the test's, where it is changed: an index is never edited in place.
+/// The root, and the scan's id.
+fn firmlinked(env: &TestEnv) -> (PathBuf, String) {
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("vol");
+    for dir in [
+        "sys/usr/bin",
+        "sys/usr/local/lib",
+        "sys/Volumes/Data",
+        "data/proj/src",
+        "data/proj/nas",
+        "data/loop",
+    ] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    fs::write(root.join("sys/usr/bin/tool"), vec![1u8; 8_192]).unwrap();
+    fs::write(root.join("sys/usr/local/lib/libx"), vec![4u8; 12_000]).unwrap();
+    fs::write(root.join("data/proj/src/main.rs"), vec![2u8; 20_000]).unwrap();
+    fs::write(root.join("data/proj/README"), vec![3u8; 3_000]).unwrap();
+    let staging = env.tmp_dir().join("staging");
+    let scanned = run(
+        env,
+        &[
+            os("scan"),
+            root.as_os_str(),
+            os("--save"),
+            os("--index-dir"),
+            staging.as_os_str(),
+            os("--json"),
+        ],
+    );
+    let id = scanned["scan"]["id"].as_str().unwrap().to_owned();
+    let scans = env.index_dir().join("scans");
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&scans)
+        .unwrap();
+    let file = scans.join(format!("{id}.db"));
+    fs::copy(staging.join("scans").join(format!("{id}.db")), &file).unwrap();
+    let db = Connection::open(&file).unwrap();
+    // A directory's id and last id, by its path below the root.
+    let dir = |path: &str| -> (u32, u32) {
+        path.split('/').fold((0, 0), |(parent, _), name| {
+            db.query_row(
+                "SELECT id, last_id FROM dirs WHERE parent_id = ?1 AND name = ?2",
+                params![parent, name.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        })
+    };
+    let (data, data_last) = dir("data");
+    let (mount, _) = dir("sys/Volumes/Data");
+    let (local, local_last) = dir("sys/usr/local");
+    let (nas, _) = dir("data/proj/nas");
+    db.execute("UPDATE dirs SET dev = 1", []).unwrap();
+    db.execute(
+        "UPDATE dirs SET dev = 2 WHERE id BETWEEN ?1 AND ?2 OR id BETWEEN ?3 AND ?4 OR id = ?5",
+        [data, data_last, local, local_last, mount],
+    )
+    .unwrap();
+    db.execute("UPDATE dirs SET dev = 3 WHERE id = ?1", [nas])
+        .unwrap();
+    // The volumes, each a copy of the one the walk met but for its device,
+    // mount, mount point, whether it is read-only and why it was not
+    // entered.
+    db.execute_batch(
+        "CREATE TEMP TABLE walked AS SELECT * FROM scan_volumes; DELETE FROM scan_volumes;",
+    )
+    .unwrap();
+    let walked: u32 = db
+        .query_row("SELECT count(*) FROM walked", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(walked, 1, "the scan met one volume");
+    let at = |path: &str| root.join(path).into_os_string().into_vec();
+    let volumes: [VolumeRow<'_>; 4] = [
+        (1, 1, b"/".to_vec(), true, None),
+        (2, 2, at("sys/Volumes/Data"), false, None),
+        (3, 3, at("data/proj/nas"), false, Some("network")),
+        (2, 4, at("data/loop"), false, Some("bind_cycle")),
+    ];
+    for (dev, mnt_id, mount_point, read_only, reason) in volumes {
+        db.execute(
+            "INSERT INTO scan_volumes SELECT ?1, ?2, ?3, fs_type, ?4, ?5 IS NULL, ?5, \
+             case_sensitive, normalization, fsevents_uuid, fsevents_event_id, os_build, \
+             total_bytes, free_bytes, options FROM walked",
+            params![dev, mnt_id, mount_point, read_only, reason],
+        )
+        .unwrap();
+    }
+    (root, id)
+}
+
+/// The mount points of the volumes `block` names (a scan block, or a
+/// summary's result).
+fn mount_points(block: &Value) -> Vec<String> {
+    block["volumes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{block}"))
+        .iter()
+        .map(|v| v["mount_point"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The count of the warning `code` among `warnings`.
+fn counted(warnings: &Value, code: &str) -> Option<u64> {
+    warnings
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == code)
+        .map(|w| w["count"].as_u64().unwrap())
+}
+
+#[test]
+fn p5_cli_02_a_subtree_names_the_volume_its_device_is_on() {
+    let env = TestEnv::new();
+    let (root, id) = firmlinked(&env);
+    let read = |verb: &str, path: &Path| {
+        run(
+            &env,
+            &[
+                os(verb),
+                os("--scan"),
+                os(&id),
+                os("--json"),
+                path.as_os_str(),
+            ],
+        )
+    };
+    let path = |rel: &str| root.join(rel).display().to_string();
+    let (data, nas, bound) = (
+        path("sys/Volumes/Data"),
+        path("data/proj/nas"),
+        path("data/loop"),
+    );
+
+    // Below the firmlink: the Data volume, by its device, though its mount
+    // point is on no path under it, and the mount under the path.
+    let proj = root.join("data/proj");
+    let summary = read("summary", &proj);
+    assert_eq!(
+        mount_points(&summary["scan"]),
+        [data.as_str(), nas.as_str()],
+        "{summary}"
+    );
+    let result = &summary["result"];
+    assert_eq!(
+        mount_points(result),
+        [data.as_str(), nas.as_str()],
+        "{summary}"
+    );
+    assert!(result["allocated_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(
+        result["volumes"][0]["allocated_bytes"], result["allocated_bytes"],
+        "{summary}"
+    );
+    let top = read("top", &proj);
+    assert_eq!(
+        mount_points(&top["scan"]),
+        [data.as_str(), nas.as_str()],
+        "{top}"
+    );
+    assert_eq!(top["scan"]["volumes"][0]["read_only"], false);
+    // The mount the scan did not enter under the path, and not the bind
+    // mount of the path's device beside it.
+    assert_eq!(counted(&top["warnings"], "mounts_excluded"), Some(1));
+    // A file lies on its directory's device.
+    let file = read("summary", &proj.join("src/main.rs"));
+    assert_eq!(mount_points(&file["scan"]), [data.as_str()], "{file}");
+
+    // Above both mounts the scan did not enter: both, by their mount
+    // points.
+    let above = read("top", &root.join("data"));
+    assert_eq!(
+        mount_points(&above["scan"]),
+        [data.as_str(), nas.as_str(), bound.as_str()]
+    );
+    assert_eq!(counted(&above["warnings"], "mounts_excluded"), Some(2));
+
+    // On the System volume: it, and the Data volume where it is mounted
+    // under the path.
+    let sys = read("top", &root.join("sys"));
+    assert_eq!(mount_points(&sys["scan"]), ["/", data.as_str()], "{sys}");
+    let bin = read("top", &root.join("sys/usr/bin"));
+    assert_eq!(mount_points(&bin["scan"]), ["/"], "{bin}");
+    assert_eq!(bin["scan"]["volumes"][0]["read_only"], true);
+    assert_eq!(counted(&bin["warnings"], "mounts_excluded"), None);
+
+    // At the scan's root, every one.
+    let whole = read("summary", &root);
+    assert_eq!(
+        mount_points(&whole["scan"]),
+        ["/", data.as_str(), nas.as_str(), bound.as_str()]
+    );
+}
+
+#[test]
+fn p5_cli_02_a_tool_names_the_volume_its_root_lies_on() {
+    let env = TestEnv::new();
+    let (root, id) = firmlinked(&env);
+    let data = root.join("sys/Volumes/Data").display().to_string();
+    let nas = root.join("data/proj/nas").display().to_string();
+    let replies = serve(
+        &env,
+        &root.join("data/proj"),
+        &[
+            call(1, "duscope_summary", &json!({"scan_id": id})),
+            call(2, "duscope_top", &json!({"scan_id": id})),
+        ],
+    );
+    for id in 1..=2 {
+        let reply = replies
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("no reply {id}: {replies:?}"));
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        let content = &reply["result"]["structuredContent"];
+        assert_eq!(
+            mount_points(&content["scan"]),
+            [data.as_str(), nas.as_str()],
+            "{reply}"
+        );
+    }
+    let summary = &replies.iter().find(|r| r["id"] == 1).unwrap()["result"];
+    let result = &summary["structuredContent"]["result"];
+    assert_eq!(
+        mount_points(result),
+        [data.as_str(), nas.as_str()],
+        "{summary}"
+    );
+}
+
+/// The lines of a gitignore file that leaves out every entry of `/` but
+/// those on the way to `dir`, absolute: a scan of `/` with it reads `dir`
+/// and the directories above it alone.
+#[cfg(target_os = "macos")]
+fn only(dir: &Path) -> String {
+    let escaped = |name: &OsStr| {
+        let mut out = String::new();
+        for c in name.to_str().unwrap().chars() {
+            if matches!(c, '\\' | '*' | '?' | '[' | ']') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    };
+    let mut lines = vec!["/*".to_owned()];
+    let mut at = String::new();
+    for name in dir.iter().skip(1) {
+        if !at.is_empty() {
+            lines.push(format!("{at}/*"));
+        }
+        at = format!("{at}/{}", escaped(name));
+        lines.push(format!("!{at}/"));
+    }
+    lines.join("\n") + "\n"
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "scans /; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_cli_02_macos_a_scan_of_slash_names_the_data_volume_below_private() {
+    const DATA: &str = "/System/Volumes/Data";
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+        eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    let env = TestEnv::new();
+    // The test's directory, under /private (/var/folders), which is the
+    // Data volume's through a firmlink.
+    let dir = fs::canonicalize(env.tmp_dir()).unwrap().join("slash");
+    assert!(dir.starts_with("/private"), "{}", dir.display());
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("sub/file"), vec![1u8; 20_000]).unwrap();
+    // A scan of `/` that reads the way down to it alone.
+    let ignore = env.tmp_dir().join("only.ignore");
+    fs::write(&ignore, only(&dir)).unwrap();
+    let scanned = run(
+        &env,
+        &[
+            os("scan"),
+            os("/"),
+            os("--ignore-from"),
+            ignore.as_os_str(),
+            os("--save"),
+            os("--json"),
+        ],
+    );
+    assert_eq!(scanned["ok"], true, "{scanned}");
+    let id = scanned["scan"]["id"].as_str().unwrap().to_owned();
+    let met = mount_points(&scanned["scan"]);
+    assert!(
+        met.iter().any(|m| m == "/") && met.iter().any(|m| m == DATA),
+        "{met:?}"
+    );
+    let read = |verb: &str| {
+        run(
+            &env,
+            &[
+                os(verb),
+                os("--scan"),
+                os(&id),
+                os("--json"),
+                dir.as_os_str(),
+            ],
+        )
+    };
+    // Read at the directory: the Data volume, not the read-only System
+    // volume mounted at `/`.
+    let summary = read("summary");
+    assert_eq!(mount_points(&summary["scan"]), [DATA], "{summary}");
+    let result = &summary["result"];
+    assert_eq!(mount_points(result), [DATA], "{summary}");
+    assert!(result["volumes"][0]["allocated_bytes"].as_u64().unwrap() > 0);
+    let top = read("top");
+    assert_eq!(mount_points(&top["scan"]), [DATA], "{top}");
+    assert_eq!(top["scan"]["volumes"][0]["read_only"], false);
 }

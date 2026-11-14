@@ -700,6 +700,27 @@ impl Index {
         }
     }
 
+    /// The device directory `id` lies on (`dirs.dev`): the volume the walk
+    /// read it on, by whatever path it reached it (macOS's Data volume holds
+    /// `/Users` through a firmlink, outside its mount point). One row, where
+    /// [`TreeView::volume_roots`] reads every directory under `id`. `None`
+    /// for an id no directory has.
+    pub fn dir_dev(&self, id: u32) -> Option<u64> {
+        let dev = self
+            .db
+            .query_row("SELECT dev FROM dirs WHERE id = ?1", [id], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional();
+        match dev {
+            Ok(dev) => dev.map(unsigned),
+            Err(e) => {
+                self.fail(&e);
+                None
+            }
+        }
+    }
+
     /// Keeps a failed query's error as the first failed read, when it is.
     pub(crate) fn record(&self, e: &CoreError) {
         let mut failed = self.failed.borrow_mut();
