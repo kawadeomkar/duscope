@@ -2399,13 +2399,18 @@ fn p4_tui_09_zoomed_maps_painted_with_the_worked_classes_are_the_maps_walked() {
 fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
     use std::cell::RefCell;
 
-    use crate::panes::{Context, legend_label, legend_rows, ranks};
+    use duscope_treemap::paint::tile_color;
+
+    use crate::panes::{Context, LegendRow, legend_label, legend_rows, ranks};
 
     // The legend the viewer opens with, tallied in the pass that classifies
     // the scan, is the one read entry by entry: each file's row its
-    // `legend_label`, read up its path, the bytes added in the order rows
-    // first appear, the largest first; and what `c` and `p` read again on
-    // their own. In every colour mode, with and without a `--depth` cap.
+    // `legend_label`, read up its path, in the colour the map gives its
+    // tile (`tile_color`: of the file, or for `level` and `age` of the
+    // folder the `--depth` cap draws it in), the bytes added in the order
+    // rows first appear, the largest first; and so is what `c` and `p`
+    // read again on their own. In every colour mode, with and without a
+    // `--depth` cap.
     let ls = LsColors {
         executable: None,
         suffixes: vec![
@@ -2453,31 +2458,47 @@ fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
                 };
                 let what = format!("{} {color_by:?} {depth:?}", view.root_path().display());
                 let alone = legend_rows(&ctx);
-                assert_eq!(*app.legend(), alone, "{what}");
                 assert!(!alone.1.is_empty(), "{what}");
+                assert_eq!(app.legend().0, alone.0, "{what}");
                 if color_by == ColorBy::Folder {
+                    // The root's tiles, not tallied: `legend_rows` gives
+                    // the viewer's.
+                    assert_eq!(*app.legend(), alone, "{what}");
                     continue;
                 }
-                let mut read: Vec<(String, u64)> = Vec::new();
+                let mut read: Vec<LegendRow> = Vec::new();
                 for node in (0..view.len())
                     .map(|id| view.node(id))
                     .filter(|n| !n.is_dir())
                 {
                     let label = legend_label(&ctx, &node);
+                    let mut shown = node;
+                    while depth.is_some_and(|cap| shown.depth > cap.max(1)) {
+                        shown = view.node(shown.parent);
+                    }
+                    let tile = match color_by {
+                        ColorBy::Level | ColorBy::Age => shown,
+                        _ => node,
+                    };
+                    let class = class_of[node.id as usize];
+                    let color = tile_color(view, &paint, &tile, class, shown.depth, None);
                     let bytes = node.counted(paint.size);
-                    match read.iter_mut().find(|(l, _)| *l == label) {
-                        Some(row) => row.1 += bytes,
-                        None => read.push((label, bytes)),
+                    match read.iter_mut().find(|row| row.label == label) {
+                        Some(row) => {
+                            assert_eq!(row.color, color, "{what}: {label}");
+                            row.bytes += bytes;
+                        }
+                        None => read.push(LegendRow {
+                            label,
+                            bytes,
+                            color,
+                        }),
                     }
                 }
-                read.retain(|&(_, bytes)| bytes > 0);
-                read.sort_by_key(|&(_, bytes)| std::cmp::Reverse(bytes));
-                let tallied: Vec<(String, u64)> = alone
-                    .1
-                    .iter()
-                    .map(|row| (row.label.clone(), row.bytes))
-                    .collect();
-                assert_eq!(tallied, read, "{what}");
+                read.retain(|row| row.bytes > 0);
+                read.sort_by_key(|row| std::cmp::Reverse(row.bytes));
+                assert_eq!(app.legend().1, read, "{what}: the viewer's");
+                assert_eq!(alone.1, read, "{what}: c and p's");
             }
         }
     }
