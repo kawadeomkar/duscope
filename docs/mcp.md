@@ -21,8 +21,10 @@ directories the client may reach, and it can be given several:
 - A saved scan of a directory under a root is visible as it is; one of a
   directory above a root is read at that root; any other is invisible.
 - A result read at a path names the excluded directories (`scan.excluded`) and
-  the volumes (`scan.volumes`) within that path alone, so a scan read at a root
-  names none outside it; the scan's root, above the root, and its totals stay
+  the volumes (`scan.volumes`) within that path alone: no excluded directory
+  outside a root, and of the volumes those the root lies on, each at its own
+  mount point, which may lie outside it (macOS's `/System/Volumes/Data` for a
+  root under `/Users`). The scan's root, above the root, and its totals stay
   whole.
 
 ## Register it
