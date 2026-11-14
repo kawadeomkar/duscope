@@ -808,7 +808,7 @@ pub fn cache_dir(home: &Path) -> PathBuf {
 ///   device, and the entry renamed into the Trash's `files` directory,
 ///   itself opened without following a link, with `renameat2`'s
 ///   `RENAME_NOREPLACE`. What was moved is read again in the Trash and
-///   moved back when it is not `expect`.
+///   moved back when it is not `expect` or cannot be read.
 ///
 /// Nothing is ever removed.
 ///
