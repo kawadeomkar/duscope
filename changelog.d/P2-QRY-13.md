@@ -6,5 +6,4 @@
   is the same, byte for byte. A run whose read of the saved scan fails part way (`index_corrupt`,
   exit 5) now writes the rows read before the failure, where it wrote none, then under
   `--format ndjson` the error envelope in place of the `end` line, and under `--plain` nothing
-  more on stdout (the error goes to stderr). `tree`, `by-type`, `caches` and `diff` still hold
-  their rows.
+  more on stdout (the error goes to stderr).

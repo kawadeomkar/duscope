@@ -6,13 +6,16 @@
 //! one the path lies on, by its device, and those mounted at or under it;
 //! `summary`'s shares name every volume holding bytes under the path. Over
 //! MCP, where a scan rooted above a root is read at the root, a result names
-//! no excluded directory outside it, and the volume the root lies on.
+//! no path outside it but the scan's root and the mount point of the volume
+//! the root lies on. P5-CLI-05: `export --format gpscan` records the volume
+//! its path lies on by the same device rule, and `summary` of a file names
+//! the volume its directory lies on, with the file's bytes.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -382,15 +385,20 @@ fn call(id: u64, tool: &str, arguments: &Value) -> Value {
     })
 }
 
-/// Every string in `value`.
-fn strings<'v>(value: &'v Value, out: &mut Vec<&'v str>) {
+/// Every string in `value`, an object's keys among them, each with the
+/// JSON pointer of where it is under `at` (a key's, its object's).
+fn strings<'v>(at: &str, value: &'v Value, out: &mut Vec<(String, &'v str)>) {
     match value {
-        Value::String(s) => out.push(s),
-        Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+        Value::String(s) => out.push((at.to_owned(), s)),
+        Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                strings(&format!("{at}/{i}"), v, out);
+            }
+        }
         Value::Object(map) => {
             for (key, v) in map {
-                out.push(key);
-                strings(v, out);
+                out.push((at.to_owned(), key));
+                strings(&format!("{at}/{key}"), v, out);
             }
         }
         _ => {}
@@ -431,6 +439,11 @@ fn p5_cli_02_a_tool_names_no_excluded_directory_outside_the_roots() {
             .any(|p| Path::new(p).starts_with(&outside)),
         "{whole}"
     );
+    // It met one volume, the one the root lies on, named at the scan's
+    // root whatever its mount point (on macOS, the Data volume's at
+    // /System/Volumes/Data, which holds the root through a firmlink).
+    let mounts = mount_points(&whole["scan"]);
+    assert_eq!(mounts.len(), 1, "{whole}");
     let replies = serve(
         &env,
         &inside,
@@ -445,7 +458,6 @@ fn p5_cli_02_a_tool_names_no_excluded_directory_outside_the_roots() {
             ),
         ],
     );
-    let outside_text = outside.display().to_string();
     for id in 1..=4 {
         let reply = replies
             .iter()
@@ -453,21 +465,64 @@ fn p5_cli_02_a_tool_names_no_excluded_directory_outside_the_roots() {
             .unwrap_or_else(|| panic!("no reply {id}: {replies:?}"));
         let result = &reply["result"];
         assert_eq!(result["isError"], false, "{reply}");
-        let content = &result["structuredContent"];
+        // Every path the result names lies within the root, but the scan's
+        // root, above it, and the mount point of the volume the root lies
+        // on, which a volume names (`scan.volumes`, and `summary`'s
+        // `result.volumes`) wherever it is mounted.
+        let mut texts = Vec::new();
+        strings("", result, &mut texts);
+        for (at, path) in named_paths(&texts) {
+            let within = Path::new(path).starts_with(&inside);
+            let scan_root = matches!(
+                at,
+                "/structuredContent/scan/root" | "/structuredContent/scan/root_as_given"
+            ) && inside.starts_with(path);
+            let mount = volume_mount_point(at) && mounts.iter().any(|m| m == path);
+            assert!(
+                within || scan_root || mount,
+                "{id}: {at} names {path}, outside {}",
+                inside.display()
+            );
+        }
         // The excluded directories inside the root, and no others.
-        let listed = excluded(content);
+        let listed = excluded(&result["structuredContent"]);
         assert!(!listed.is_empty(), "{reply}");
         assert!(
             listed.iter().all(|p| Path::new(p).starts_with(&inside)),
             "{listed:?}"
         );
-        // No string of the result names a path outside the root; the
-        // scan's root, above it, is the one path that is not under it.
-        let mut texts = Vec::new();
-        strings(result, &mut texts);
-        let leaked: Vec<&&str> = texts.iter().filter(|t| t.contains(&outside_text)).collect();
-        assert!(leaked.is_empty(), "{leaked:?}");
     }
+}
+
+/// The paths among `texts` (from [`strings`]), each with its pointer: a
+/// string of the envelope that starts with `/`, and in any other string (the
+/// text block, a hint, a message) each word that does, less a trailing `,`,
+/// `:` or `;`. The test's paths hold no space.
+fn named_paths<'t>(texts: &'t [(String, &'t str)]) -> Vec<(&'t str, &'t str)> {
+    let mut paths = Vec::new();
+    for (at, text) in texts {
+        if at.starts_with("/structuredContent/") && text.starts_with('/') {
+            paths.push((at.as_str(), *text));
+        } else {
+            paths.extend(
+                text.split_whitespace()
+                    .filter(|word| word.starts_with('/'))
+                    .map(|word| (at.as_str(), word.trim_end_matches([',', ':', ';']))),
+            );
+        }
+    }
+    paths
+}
+
+/// Whether `at` points at a volume's mount point: `scan.volumes[i]`'s, or
+/// `summary`'s `result.volumes[i]`'s.
+fn volume_mount_point(at: &str) -> bool {
+    let parts: Vec<&str> = at.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["", "structuredContent", "scan" | "result", "volumes", i, "mount_point"]
+            if i.parse::<usize>().is_ok()
+    )
 }
 
 /// A volume row of [`firmlinked`]'s scan: its device, its mount's id, its
@@ -753,6 +808,160 @@ fn p5_cli_02_summary_shares_out_a_volume_reached_below_the_path() {
         .map(|v| v["allocated_bytes"].as_u64().unwrap())
         .sum();
     assert_eq!(shares, result["allocated_bytes"].as_u64().unwrap());
+}
+
+/// Gives each volume of [`firmlinked`]'s scan in `env` a size and a free
+/// space of its own, so that a reader can tell which it took: mount `i`
+/// holds `i` GB, `i` MB of them free.
+fn sized(env: &TestEnv, id: &str) {
+    let file = env.index_dir().join("scans").join(format!("{id}.db"));
+    Connection::open(file)
+        .unwrap()
+        .execute(
+            "UPDATE scan_volumes SET total_bytes = mnt_id * 1000000000, \
+             free_bytes = mnt_id * 1000000",
+            [],
+        )
+        .unwrap();
+}
+
+/// What `export --format gpscan` of `path` in the saved scan `id` records:
+/// its `ScanInfo`'s `volumePath`, `volumeSize` and `freeSpace`, and its top
+/// folder's name.
+fn scan_info(env: &TestEnv, id: &str, path: &Path) -> (String, u64, u64, String) {
+    let file = env.tmp_dir().join("export.gpscan");
+    let out = env
+        .cmd()
+        .args(["export", "--scan", id, "--format", "gpscan", "-o"])
+        .arg(&file)
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut xml = String::new();
+    flate2::read::GzDecoder::new(fs::File::open(&file).unwrap())
+        .read_to_string(&mut xml)
+        .unwrap();
+    let attribute = |element: &str, name: &str| -> String {
+        let at = xml.find(&format!("<{element} ")).unwrap();
+        let key = format!(" {name}=\"");
+        let start = at + xml[at..].find(&key).unwrap() + key.len();
+        let end = start + xml[start..].find('"').unwrap();
+        xml[start..end].to_owned()
+    };
+    (
+        attribute("ScanInfo", "volumePath"),
+        attribute("ScanInfo", "volumeSize").parse().unwrap(),
+        attribute("ScanInfo", "freeSpace").parse().unwrap(),
+        attribute("Folder", "name"),
+    )
+}
+
+#[test]
+fn p5_cli_05_a_gpscan_records_the_volume_its_root_lies_on() {
+    let env = TestEnv::new();
+    let (root, id) = firmlinked(&env);
+    sized(&env, &id);
+    let at = |dir: &str| {
+        if dir.is_empty() {
+            root.clone()
+        } else {
+            root.join(dir)
+        }
+    };
+    let below = |dir: &str| at(dir).strip_prefix("/").unwrap().display().to_string();
+    let path = |dir: &str| at(dir).display().to_string();
+    let system = ("/".to_owned(), 1_000_000_000, 1_000_000);
+    let data = ("/".to_owned(), 2_000_000_000, 2_000_000);
+    // Below the firmlink, and through the firmlink below sys/usr: the Data
+    // volume, by its device, though `/` is the one mount point above the
+    // path. Its mount point is on no path under it, so the volume is
+    // recorded at `/`, as a scan rooted there would record it, and the top
+    // folder is named by its path below `/`.
+    for dir in ["data/proj", "data/proj/src", "sys/usr/local"] {
+        let (volume, size, free, name) = scan_info(&env, &id, &at(dir));
+        assert_eq!((volume, size, free), data, "{dir}");
+        assert_eq!(name, below(dir), "{dir}");
+    }
+    // On the System volume.
+    for dir in ["", "sys", "sys/usr/bin"] {
+        let (volume, size, free, name) = scan_info(&env, &id, &at(dir));
+        assert_eq!((volume, size, free), system, "{dir}");
+        assert_eq!(name, below(dir), "{dir}");
+    }
+    // At a mount point: its own volume, a mount the scan did not enter, and
+    // the bind mount of the Data volume beside it, each at its mount point.
+    let nas = scan_info(&env, &id, &at("data/proj/nas"));
+    assert_eq!(
+        nas,
+        (
+            path("data/proj/nas"),
+            3_000_000_000,
+            3_000_000,
+            "nas".to_owned()
+        )
+    );
+    let bound = scan_info(&env, &id, &at("data/loop"));
+    assert_eq!(
+        bound,
+        (
+            path("data/loop"),
+            4_000_000_000,
+            4_000_000,
+            "loop".to_owned()
+        )
+    );
+}
+
+#[test]
+fn p5_cli_05_summary_of_a_file_names_the_volume_it_lies_on() {
+    let env = TestEnv::new();
+    let (root, id) = firmlinked(&env);
+    let summary = |path: &Path, scan: &[&OsStr]| {
+        let mut args = vec![os("summary"), os("--json"), path.as_os_str()];
+        args.extend_from_slice(scan);
+        run(&env, &args)
+    };
+    let data = root.join("sys/Volumes/Data").display().to_string();
+    // A file lies on its directory's device: below the firmlink into the
+    // Data volume, through the firmlink below sys/usr, and on the System
+    // volume. Its volume's share is the file's bytes.
+    for (file, volume) in [
+        ("data/proj/src/main.rs", data.as_str()),
+        ("data/proj/README", data.as_str()),
+        ("sys/usr/local/lib/libx", data.as_str()),
+        ("sys/usr/bin/tool", "/"),
+    ] {
+        let answer = summary(&root.join(file), &[os("--scan"), os(&id)]);
+        let result = &answer["result"];
+        assert_eq!(mount_points(result), [volume], "{file}: {answer}");
+        assert!(result["allocated_bytes"].as_u64().unwrap() > 0, "{file}");
+        for bytes in ["allocated_bytes", "apparent_bytes", "du_compatible_bytes"] {
+            assert_eq!(
+                result["volumes"][0][bytes], result[bytes],
+                "{file}: {bytes}"
+            );
+        }
+    }
+    // A file scanned for the verb, which no saved scan holds: the volume the
+    // scan met, with the file's bytes.
+    let alone = env.tmp_dir().join("alone");
+    fs::create_dir_all(&alone).unwrap();
+    fs::write(alone.join("file"), vec![5u8; 20_000]).unwrap();
+    let answer = summary(&alone.join("file"), &[os("--no-save")]);
+    let result = &answer["result"];
+    assert_eq!(result["volumes"].as_array().unwrap().len(), 1, "{answer}");
+    assert!(result["allocated_bytes"].as_u64().unwrap() > 0, "{answer}");
+    for bytes in ["allocated_bytes", "apparent_bytes", "du_compatible_bytes"] {
+        assert_eq!(
+            result["volumes"][0][bytes], result[bytes],
+            "{bytes}: {answer}"
+        );
+    }
 }
 
 /// The lines of a gitignore file that leaves out every entry of `/` but

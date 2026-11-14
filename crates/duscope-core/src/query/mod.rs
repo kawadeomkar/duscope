@@ -41,10 +41,10 @@ use crate::arena::{Arena, DirRec, EntryIdx};
 use crate::index::Index;
 use crate::rollup::RollUp;
 
-pub use by_type::{ByTypeQuery, by_type, classify, root_dirs};
-pub use caches::{CachesQuery, caches, projects};
+pub use by_type::{ByTypeQuery, ByTypeRows, by_type, by_type_rows, classify, root_dirs};
+pub use caches::{CacheRows, CachesQuery, ProjectRows, cache_rows, caches, project_rows, projects};
 pub use cursor::{After, Cursor, query_hash};
-pub use diff::{DEFAULT_MIN_DELTA, DiffQuery, diff};
+pub use diff::{DEFAULT_MIN_DELTA, DiffQuery, DiffRows, diff, diff_rows};
 pub use explain::{
     ExplainQuery, explain, explain_unindexed, fs_holds_file, holds_file, shared_extents,
 };
@@ -57,11 +57,11 @@ pub use resolve::{
 pub use sql::{SqlQuery, human_size, sql};
 pub use stale::{DEFAULT_MIN_SIZE, StaleQuery, StaleRows, stale, stale_rows};
 pub use summary::{
-    SubvolumeBytes, SummaryBytes, VolumeBytes, VolumeRoot, VolumeUse, referenced, shares,
-    subvolume_shares, summary, unaccounted,
+    SubvolumeBytes, SummaryBytes, VolumeBytes, VolumeRoot, VolumeUse, file_root, referenced,
+    shares, subvolume_shares, summary, unaccounted,
 };
 pub use top::{TopQuery, TopRows, top, top_rows};
-pub use tree::{TreeQuery, tree};
+pub use tree::{TreeQuery, TreeRows, tree, tree_rows};
 
 /// One entry of a scan, as the queries read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +210,8 @@ pub trait TreeView {
     }
 
     /// The directories under `dir` (itself first) where a volume starts,
-    /// in id order, with their totals. A view that knows no volumes has
+    /// in id order, with their totals; for a file, the file, on its
+    /// directory's device ([`file_root`]). A view that knows no volumes has
     /// one, starting at `dir`, whose device is 0 and whose bytes as `du`
     /// counts them are its allocated ones.
     fn volume_roots(&self, dir: u32) -> Vec<VolumeRoot> {
@@ -424,12 +425,17 @@ impl TreeView for ArenaView<'_> {
             .collect();
         crossings.sort_unstable();
         // The device of `dir` itself: that of the innermost crossing at or
-        // above it, else the root's.
+        // above it, else the root's. A crossing is a directory, so a file's
+        // is its directory's.
         let dev = crossings
             .iter()
             .filter(|&&(id, _)| id <= dir && self.node(id).last_id >= dir)
             .max_by_key(|&&(id, _)| id)
             .map_or(self.arena.root_volume().0, |&(_, dev)| dev);
+        let node = self.node(dir);
+        if !node.is_dir() {
+            return file_root(&node, Some(dev)).into_iter().collect();
+        }
         let mut roots: Vec<VolumeRoot> = root(dir, dev).into_iter().collect();
         roots.extend(
             crossings
@@ -816,13 +822,18 @@ pub fn rel_path(view: &(impl TreeView + ?Sized), id: u32) -> Vec<u8> {
 
 /// The absolute path of `id`, as bytes.
 pub fn abs_path(view: &(impl TreeView + ?Sized), id: u32) -> Vec<u8> {
-    let mut path = view.root_path().as_os_str().as_bytes().to_vec();
-    let rel = rel_path(view, id);
+    joined(view.root_path(), &rel_path(view, id))
+}
+
+/// The path `rel`, relative to `root` ([`rel_path`]), made absolute:
+/// `root` itself when `rel` is empty.
+pub fn joined(root: &Path, rel: &[u8]) -> Vec<u8> {
+    let mut path = root.as_os_str().as_bytes().to_vec();
     if !rel.is_empty() {
         if path.last() != Some(&b'/') {
             path.push(b'/');
         }
-        path.extend_from_slice(&rel);
+        path.extend_from_slice(rel);
     }
     path
 }

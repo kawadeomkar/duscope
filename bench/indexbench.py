@@ -97,14 +97,18 @@ BY_TYPE_PER = 100_000
 # tie densely; the modification times are the generator's (trees.mtime_ns:
 # 2023-11-14T22:13:20Z and up to 20,000 s after), so `--since` keeps about
 # two thirds of the files on any machine, as `--size apparent --min-size 1K`
-# keeps a third. `stale` keeps what its default age leaves, by depth.
+# keeps a third. `stale` keeps a file whose change time is before its cutoff as
+# well as its modification time, and the change times are the tree's build:
+# with the default 180 days it would keep none until the tree is half a year old
+# and time a count, so `--older-than 1d` keeps, by depth, the files of a tree
+# built a day or more before.
 SHAPES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("top_files_depth", ("top", "--files", "--depth", "3")),
     ("top_files_min_size", ("top", "--files", "--min-size", "1M")),
     ("top_files_apparent", ("top", "--files", "--size", "apparent")),
     ("top_files_apparent_min_size", ("top", "--files", "--size", "apparent", "--min-size", "1K")),
     ("top_files_since", ("top", "--files", "--since", "2023-11-15T00:00:00Z")),
-    ("stale_depth", ("stale", "--min-size", "1", "--max-depth", "4")),
+    ("stale_depth", ("stale", "--min-size", "1", "--max-depth", "4", "--older-than", "1d")),
 )
 
 # What `scan -v` prints (duscope/src/verbs/scan.rs), after the logger's prefix.

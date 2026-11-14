@@ -379,7 +379,7 @@
           "type": "string"
         },
         "name_raw": {
-          "description": "The name's bytes in base64, only when they are not valid UTF-8.",
+          "description": "The name's bytes in standard, padded base64 (RFC 4648), only when\nthey are not valid UTF-8.",
           "type": [
             "string",
             "null"
@@ -390,7 +390,7 @@
           "type": "string"
         },
         "path_raw": {
-          "description": "The path's bytes in base64, only when they are not valid UTF-8 (its\nown name's, or an ancestor's): the path to pass back.",
+          "description": "The path's bytes in standard, padded base64 (RFC 4648), only when\nthey are not valid UTF-8 (its own name's, or an ancestor's): the\npath to pass back.",
           "type": [
             "string",
             "null"

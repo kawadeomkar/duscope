@@ -50,6 +50,10 @@
     "cursor": {
       "type": "string",
       "description": "Where the next page starts: the previous result's next_cursor, sent with the same other arguments"
+    },
+    "strict": {
+      "type": "boolean",
+      "description": "Fail with permission_denied when the scan could not read some directories, instead of answering with a partial_read warning. Default: false"
     }
   },
   "additionalProperties": false

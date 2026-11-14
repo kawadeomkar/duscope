@@ -23,6 +23,15 @@ it is entered only with
 .B \-\-include\-network
 and without
 .BR \-x .
+Under
+.BR \-\-follow\-symlinks ,
+a symbolic link that leads to such a point mounts it when the scan
+follows the link, whatever
+.B \-x
+and
+.B \-\-include\-network
+say; whether the scan then enters what was mounted follows the usual
+rules.
 .PP
 .B \-\-exclude\-caches
 looks for a cache rule's marker files only beside the directory, in its

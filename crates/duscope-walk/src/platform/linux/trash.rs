@@ -41,6 +41,17 @@ pub(in crate::platform) fn trash(
     expect: (u64, u64),
     guarded: bool,
 ) -> Result<(), TrashError> {
+    trash_to(path, expect, guarded, home_trash(guarded))
+}
+
+/// [`trash`], with `home` the home Trash (`None` where there is none): a
+/// test gives one of its own, never reading the environment.
+fn trash_to(
+    path: &Path,
+    expect: (u64, u64),
+    guarded: bool,
+    home: Option<PathBuf>,
+) -> Result<(), TrashError> {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(TrashError::Failed(format!(
             "{} has no name",
@@ -56,7 +67,7 @@ pub(in crate::platform) fn trash(
     // the same reason).
     let dev = parent.dev();
     let failed = |e: io::Error| TrashError::Failed(format!("cannot read {}: {e}", path.display()));
-    let home = home_trash(guarded).ok_or_else(|| {
+    let home = home.ok_or_else(|| {
         TrashError::Unavailable(if guarded {
             "the test environment sets no XDG_DATA_HOME: there is no test Trash".to_owned()
         } else {
@@ -279,6 +290,29 @@ fn move_into(
                     trash.join("files").join(&taken).display()
                 )));
             }
+            // What moved could not be read again, so it may be the item or
+            // what took its place: moved back as the latter is, and if it
+            // could not be, its info file stays too.
+            Err(RenameError::Unread { read, back: None }) => {
+                forget();
+                return Err(TrashError::Failed(format!(
+                    "{} was not moved to the Trash: what was moved could not be checked after \
+                     the move ({read}), so it was moved back",
+                    path.display()
+                )));
+            }
+            Err(RenameError::Unread {
+                read,
+                back: Some(e),
+            }) => {
+                return Err(TrashError::Failed(format!(
+                    "{} could not be checked after the move to the Trash ({read}): what was \
+                     moved, the item or an entry that took its place, was moved to {} and \
+                     could not be moved back ({e})",
+                    path.display(),
+                    trash.join("files").join(&taken).display()
+                )));
+            }
             Err(RenameError::Io(e)) => {
                 forget();
                 return Err(if e.kind() == ErrorKind::CrossesDevices {
@@ -323,7 +357,7 @@ mod tests {
 
     use duscope_testkit::TestEnv;
 
-    use super::{escape, move_into};
+    use super::{escape, move_into, trash_to};
     use crate::TrashError;
     use crate::platform::posix::unlink::{CheckedDir, hook};
 
@@ -428,6 +462,111 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), b"swapped in");
         assert!(names(&trash.join("files")).is_empty());
         assert!(names(&trash.join("info")).is_empty());
+    }
+
+    /// The names in the Trash `trash`'s `files` and `info` directories,
+    /// none where they were never made.
+    fn trashed(trash: &Path) -> Vec<String> {
+        ["files", "info"]
+            .iter()
+            .filter(|sub| trash.join(sub).exists())
+            .flat_map(|sub| names(&trash.join(sub)))
+            .collect()
+    }
+
+    #[test]
+    fn p5_core_05_linux_the_trash_moves_nothing_through_a_parent_swapped_for_a_symlink() {
+        let env = TestEnv::new();
+        let (file, _) = setup(&env);
+        let item = file.parent().unwrap().to_owned();
+        let (away, outside) = (
+            item.with_file_name("item.away"),
+            item.with_file_name("outside"),
+        );
+        // Outside, a link of the very file the plan saw: through a symbolic
+        // link in place of its directory the path leads to the same device
+        // and inode, so only the way there tells them apart.
+        fs::create_dir(&outside).unwrap();
+        fs::hard_link(&file, outside.join("a.bin")).unwrap();
+        let expect = ident(&file);
+        // The test's own home Trash, as `clean` under DUSCOPE_TEST_TRASH
+        // finds it, never read from the environment.
+        let home = env.xdg_data_home().join("Trash");
+        let swap = |dir: &Path, away: &Path, to: &Path| {
+            fs::rename(dir, away).unwrap();
+            symlink(to, dir).unwrap();
+        };
+        let nothing_moved = || {
+            assert!(trashed(&home).is_empty(), "{:?}", trashed(&home));
+            for at in [away.join("a.bin"), outside.join("a.bin")] {
+                assert_eq!(ident(&at), expect, "{}", at.display());
+                assert_eq!(fs::read(&at).unwrap(), b"planned");
+            }
+        };
+        // After the plan, before the move: the item's directory goes, and a
+        // link to the outside one takes its place.
+        swap(&item, &away, &outside);
+        let err = trash_to(&file, expect, true, Some(home.clone())).unwrap_err();
+        assert!(
+            matches!(&err, TrashError::Changed { path } if *path == item),
+            "{err:?}"
+        );
+        nothing_moved();
+        // Put back, then swapped as the way to the item is opened, when its
+        // directory is reached.
+        fs::remove_file(&item).unwrap();
+        fs::rename(&away, &item).unwrap();
+        let (at, from, to) = (item.clone(), away.clone(), outside.clone());
+        let _hook = hook::on_step(move |path| {
+            if path == at {
+                swap(&at, &from, &to);
+            }
+        });
+        let err = trash_to(&file, expect, true, Some(home.clone())).unwrap_err();
+        assert!(
+            matches!(&err, TrashError::Changed { path } if *path == item),
+            "{err:?}"
+        );
+        nothing_moved();
+    }
+
+    #[test]
+    fn p5_core_05_linux_what_cannot_be_read_after_the_move_is_unchecked_not_changed() {
+        let env = TestEnv::new();
+        let (file, trash) = setup(&env);
+        let expect = ident(&file);
+        // What moved cannot be read again in the Trash, as on a stale NFS
+        // handle: it may be the item, so it goes back as another entry
+        // would, and the error says it was not checked, not that it changed.
+        let _unread = hook::unreadable_after_move(libc::ESTALE);
+        let err = move_to(&file, expect, &trash).unwrap_err();
+        let TrashError::Failed(message) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            message.contains("could not be checked after the move") && !message.contains("changed"),
+            "{message}"
+        );
+        assert_eq!(ident(&file), expect);
+        assert!(names(&trash.join("files")).is_empty());
+        assert!(names(&trash.join("info")).is_empty());
+        // Its name taken again once it has moved: it stays in the Trash with
+        // its info file, and the error does not call it another entry.
+        let taken = file.clone();
+        let _again = hook::on_moved(move || fs::write(&taken, b"after").unwrap());
+        let err = move_to(&file, expect, &trash).unwrap_err();
+        let TrashError::Failed(message) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            message.contains("could not be checked after the move")
+                && message.contains("could not be moved back")
+                && !message.contains("changed"),
+            "{message}"
+        );
+        assert_eq!(ident(&trash.join("files/a.bin")), expect);
+        assert_eq!(names(&trash.join("info")), ["a.bin.trashinfo"]);
+        assert_eq!(fs::read(&file).unwrap(), b"after");
     }
 
     #[test]

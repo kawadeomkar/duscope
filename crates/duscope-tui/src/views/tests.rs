@@ -2068,6 +2068,130 @@ fn p4_tui_08_ten_clicks_on_a_wide_folders_pool_read_its_children_once() {
     assert!(read <= N + 10 * tiles + 64, "{read} reads of {N} children");
 }
 
+/// The viewer of `view`, a [`wide`] tree, at 120×40 with the mask `glob`
+/// on, and the `+N small` tile of `big/`: its index on the map and a cell
+/// in it.
+fn masked_pool<'a>(
+    view: &'a ArenaView<'a>,
+    pack: &'a Pack,
+    classes: &'a duscope_core::rules::Classes,
+    glob: &str,
+) -> (App<'a>, Terminal<TestBackend>, usize, (u16, u16)) {
+    use duscope_treemap::paint::DrawnKind;
+
+    use crate::layout::layout;
+
+    let (w, h) = (120, 40);
+    let mut app = App::new(
+        view,
+        opts(pack, classes, ColorBy::Type),
+        Depth::TrueColor,
+        None,
+        String::new(),
+        None,
+    );
+    let mut terminal = first_frame(&app, w, h);
+    press(&mut app, &mut terminal, &char('/'));
+    for c in glob.chars() {
+        press(&mut app, &mut terminal, &char(c));
+    }
+    assert_eq!(
+        press(&mut app, &mut terminal, &key(KeyCode::Enter)),
+        Flow::Redraw
+    );
+    assert!(row(terminal.backend().buffer(), 2).contains(&format!("filter: {glob}")));
+    let big = id_of(view, "big");
+    let map = app.map();
+    let index = map
+        .tiles()
+        .iter()
+        .position(|t| t.kind == DrawnKind::Small && t.id == big)
+        .unwrap_or_else(|| panic!("no pool: {:?}", map.tiles()));
+    let pool = map.tiles()[index].rect;
+    let area = layout(w, h).map;
+    let cell = (
+        area.x + pool.x + pool.w / 2,
+        area.y + pool.y.midpoint(pool.y + pool.h) / 2,
+    );
+    (app, terminal, index, cell)
+}
+
+/// A left click at column `x`, row `y`.
+fn left_click((x, y): (u16, u16)) -> crossterm::event::MouseEvent {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn p4_tui_08_a_click_on_a_pool_under_a_mask_lands_on_the_largest_it_keeps() {
+    use std::cmp::Reverse;
+    use std::time::Instant;
+
+    use crate::zoom::Mark;
+
+    // Under `/*[02468]` a click on the pool of `big/` lands on the largest
+    // child pooled there whose name ends in an even digit, the first of
+    // the pool's rows the siblings pane lists; the largest child pooled,
+    // which the mask hides, is another.
+    const N: u32 = 2_000;
+    let tree = wide(N as usize);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/wide"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mut app, _terminal, index, cell) = masked_pool(&view, &mocha, &classes, "*[02468]");
+    let big = id_of(&view, "big");
+    let map = app.map();
+    let largest = |keep: &dyn Fn(u32) -> bool| {
+        (big + 1..=big + N)
+            .filter(|&id| map.mark(&view, id) == Mark::Tile(index) && keep(id))
+            .min_by_key(|&id| (Reverse(view.node(id).allocated), id))
+            .unwrap()
+    };
+    let even = |id: u32| view.name(id).last().is_some_and(|&digit| digit % 2 == 0);
+    let kept = largest(&even);
+    assert_ne!(kept, largest(&|_| true), "the largest child pooled is kept");
+    let before = app.selected();
+    assert_eq!(app.mouse(left_click(cell), Instant::now()), Flow::Redraw);
+    assert_eq!(
+        app.selected(),
+        kept,
+        "{}, not {}",
+        String::from_utf8_lossy(&view.name(app.selected())),
+        String::from_utf8_lossy(&view.name(kept))
+    );
+    assert_ne!(app.selected(), before);
+}
+
+#[test]
+fn p4_tui_08_a_click_on_a_pool_the_mask_hides_whole_moves_nowhere() {
+    use std::time::Instant;
+
+    use crate::mask::WALK_BUDGET;
+
+    // `big/` holds more children than the mask reads for a map, so its
+    // pool shows under `/*.zip`, which keeps none of them (the budget runs
+    // out in it): a click on it finds no child the mask keeps there and
+    // leaves the cursor where it is, where it would land on the largest
+    // child pooled.
+    let n = WALK_BUDGET + 1_000;
+    let tree = wide(n);
+    let view = ArenaView::new(&tree.0, &tree.1, PathBuf::from("/wide"));
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mut app, terminal, _, cell) = masked_pool(&view, &mocha, &classes, "*.zip");
+    // The pool is painted, not masked out.
+    let base = Shown::Rgb(0x1e, 0x1e, 0x2e);
+    assert_ne!(terminal.backend().buffer()[cell].bg, base, "the pool shows");
+    let before = app.selected();
+    assert_eq!(before, id_of(&view, "huge"));
+    assert_eq!(app.mouse(left_click(cell), Instant::now()), Flow::Wait);
+    assert_eq!(app.selected(), before);
+}
+
 // P4-TUI-09: the viewer opens on one pass over the scan.
 
 /// A tree shaped as T2 is, many small folders deep: `fanout` folders in
@@ -2170,16 +2294,123 @@ fn p4_tui_09_the_viewer_opens_on_one_pass_over_the_scan() {
 }
 
 #[test]
+fn p4_tui_09_zoomed_maps_painted_with_the_worked_classes_are_the_maps_walked() {
+    use std::cell::RefCell;
+
+    use duscope_core::query::{SizeKind, Subtree};
+    use duscope_treemap::paint::{Drawn, classes_of, paint_viewer};
+    use duscope_treemap::pixels::Picture;
+
+    use crate::panes::{Context, ranks};
+
+    // A zoomed map paints its folders with the dominant classes the one
+    // pass found for the whole scan, read at the scan's ids (the map's
+    // own plus its root's): every cell and tile of the map, and every
+    // pixel and tile of the picture, is the one painted walking each
+    // folder of the subtree for its colour. For each folder of two trees
+    // that holds a folder, by either size, with and without `--pool-files`
+    // and a `--depth` cap.
+    let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
+    let (mockup, nested) = (mockup(), nested(2, 3, 3));
+    let views = [
+        mockup_view(&mockup),
+        ArenaView::new(&nested.0, &nested.1, PathBuf::from("/nested")),
+    ];
+    let cell = (2, 4);
+    for view in &views {
+        // Their maps paint a folder below their root.
+        let folders: Vec<u32> = (1..view.len())
+            .filter(|&id| {
+                let node = view.node(id);
+                node.is_dir() && node.files_end < node.last_id
+            })
+            .collect();
+        assert!(folders.len() >= 6, "{folders:?}");
+        for size in [SizeKind::Allocated, SizeKind::Apparent] {
+            for (pool_files, depth) in [
+                (false, None),
+                (true, None),
+                (false, Some(2)),
+                (true, Some(1)),
+            ] {
+                let mut paint = opts(&mocha, &classes, ColorBy::Type);
+                paint.size = size;
+                paint.pool_files = pool_files;
+                paint.depth = depth;
+                let mut app = App::new(
+                    view,
+                    paint.clone(),
+                    Depth::TrueColor,
+                    None,
+                    String::new(),
+                    None,
+                );
+                app.draw_in_pixels_unencoded(cell);
+                let mut terminal = first_frame(&app, 120, 40);
+                let class_of = classes_of(view, &classes);
+                let (dominant, ranks) = (RefCell::default(), ranks(view, &paint));
+                let ctx = Context {
+                    view,
+                    opts: &paint,
+                    class_of: &class_of,
+                    dominant: &dominant,
+                    ranks: &ranks,
+                    root: "/",
+                    root_parent: "/",
+                };
+                for &root in &folders {
+                    let path = String::from_utf8_lossy(&view.path(root)).into_owned();
+                    let what = format!("{path}, {size:?}, pool {pool_files}, depth {depth:?}");
+                    app.jump(root);
+                    press(&mut app, &mut terminal, &char('z'));
+                    assert_eq!(app.zoom_root(), root, "{what}");
+                    let map = app.map();
+                    let (w, h) = (map.cells.width(), map.cells.height());
+                    let sub = Subtree::new(view, root);
+                    let sub_classes = classes_of(&sub, &classes);
+                    let base = crate::zoom::base(&ctx, root);
+                    let (cells, drawn) = paint_viewer(&sub, &paint, w, h, &sub_classes, base);
+                    let at_root = |d: &Drawn| Drawn {
+                        id: d.id + root,
+                        parent: d.parent + root,
+                        ..*d
+                    };
+                    assert!(map.cells == cells, "{what}: the map");
+                    assert_eq!(
+                        map.tiles(),
+                        drawn.iter().map(at_root).collect::<Vec<_>>(),
+                        "{what}: the map's tiles"
+                    );
+                    let shown = app.shown().unwrap();
+                    let (picture, _) = shown.as_ref().as_ref().unwrap();
+                    let walked =
+                        Picture::draw(&sub, &paint, w, h, cell, Some(&sub_classes), base).unwrap();
+                    assert!(picture.raster() == walked.raster(), "{what}: the picture");
+                    assert_eq!(picture.tiles(), walked.tiles(), "{what}: the picture");
+                    press(&mut app, &mut terminal, &char('Z'));
+                    assert_eq!(app.zoom_root(), 0, "{what}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
     use std::cell::RefCell;
 
-    use crate::panes::{Context, legend_label, legend_rows, ranks};
+    use duscope_treemap::paint::tile_color;
+
+    use crate::panes::{Context, LegendRow, legend_label, legend_rows, ranks};
 
     // The legend the viewer opens with, tallied in the pass that classifies
     // the scan, is the one read entry by entry: each file's row its
-    // `legend_label`, read up its path, the bytes added in the order rows
-    // first appear, the largest first; and what `c` and `p` read again on
-    // their own. In every colour mode, with and without a `--depth` cap.
+    // `legend_label`, read up its path, in the colour the map gives its
+    // tile (`tile_color`: of the file, or for `level` and `age` of the
+    // folder the `--depth` cap draws it in), the bytes added in the order
+    // rows first appear, the largest first; and so is what `c` and `p`
+    // read again on their own. In every colour mode, with and without a
+    // `--depth` cap.
     let ls = LsColors {
         executable: None,
         suffixes: vec![
@@ -2227,31 +2458,47 @@ fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
                 };
                 let what = format!("{} {color_by:?} {depth:?}", view.root_path().display());
                 let alone = legend_rows(&ctx);
-                assert_eq!(*app.legend(), alone, "{what}");
                 assert!(!alone.1.is_empty(), "{what}");
+                assert_eq!(app.legend().0, alone.0, "{what}");
                 if color_by == ColorBy::Folder {
+                    // The root's tiles, not tallied: `legend_rows` gives
+                    // the viewer's.
+                    assert_eq!(*app.legend(), alone, "{what}");
                     continue;
                 }
-                let mut read: Vec<(String, u64)> = Vec::new();
+                let mut read: Vec<LegendRow> = Vec::new();
                 for node in (0..view.len())
                     .map(|id| view.node(id))
                     .filter(|n| !n.is_dir())
                 {
                     let label = legend_label(&ctx, &node);
+                    let mut shown = node;
+                    while depth.is_some_and(|cap| shown.depth > cap.max(1)) {
+                        shown = view.node(shown.parent);
+                    }
+                    let tile = match color_by {
+                        ColorBy::Level | ColorBy::Age => shown,
+                        _ => node,
+                    };
+                    let class = class_of[node.id as usize];
+                    let color = tile_color(view, &paint, &tile, class, shown.depth, None);
                     let bytes = node.counted(paint.size);
-                    match read.iter_mut().find(|(l, _)| *l == label) {
-                        Some(row) => row.1 += bytes,
-                        None => read.push((label, bytes)),
+                    match read.iter_mut().find(|row| row.label == label) {
+                        Some(row) => {
+                            assert_eq!(row.color, color, "{what}: {label}");
+                            row.bytes += bytes;
+                        }
+                        None => read.push(LegendRow {
+                            label,
+                            bytes,
+                            color,
+                        }),
                     }
                 }
-                read.retain(|&(_, bytes)| bytes > 0);
-                read.sort_by_key(|&(_, bytes)| std::cmp::Reverse(bytes));
-                let tallied: Vec<(String, u64)> = alone
-                    .1
-                    .iter()
-                    .map(|row| (row.label.clone(), row.bytes))
-                    .collect();
-                assert_eq!(tallied, read, "{what}");
+                read.retain(|row| row.bytes > 0);
+                read.sort_by_key(|row| std::cmp::Reverse(row.bytes));
+                assert_eq!(app.legend().1, read, "{what}: the viewer's");
+                assert_eq!(alone.1, read, "{what}: c and p's");
             }
         }
     }
@@ -2303,7 +2550,7 @@ impl TreeView for Counted<'_> {
 /// entries it reads to open and to draw its first frame, and how long each
 /// takes. Asserted for the reads, reported for the time.
 #[test]
-#[ignore = "needs bench/.trees/T2 and the release binary; DUSCOPE_TEST_PLATFORM=1"]
+#[ignore = "needs bench/.trees/T2 and the release binary; DUSCOPE_TEST_PLATFORM=1, run by nightly-bench.yml"]
 fn p4_tui_09_the_viewer_opens_on_one_pass_over_t2() {
     use std::time::Instant;
 
@@ -2345,8 +2592,12 @@ fn p4_tui_09_the_viewer_opens_on_one_pass_over_t2() {
         drawn.as_millis()
     );
     assert!(nodes <= entries + 1024, "{nodes} entries read to start");
+    // 2,417 on macOS: the children of the folders the map opens, and a few
+    // reads for each tile and pane. Four times that leaves room for a
+    // layout that opens other folders; a walk of any one of T2's top-level
+    // folders reads 37,200 entries or more.
     assert!(
-        frame_nodes <= entries / 10,
+        frame_nodes <= 10_000,
         "{frame_nodes} entries read for the first frame"
     );
 }

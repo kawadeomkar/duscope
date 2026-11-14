@@ -11,9 +11,9 @@ use duscope_core::envelope::{
     TopEntry, TreeEntry, Warning,
 };
 use duscope_core::query::{
-    self, After, ByTypeQuery, CachesQuery, Cursor, DEFAULT_MIN_SIZE, Filters, Page, Regex,
-    SizeKind, StaleQuery, StaleRows, TimeField, TopQuery, TopRows, TreeQuery, TreeView, query_hash,
-    timegrammar,
+    self, After, ByTypeQuery, ByTypeRows, CacheRows, CachesQuery, Cursor, DEFAULT_MIN_SIZE,
+    Filters, Page, ProjectRows, Regex, SizeKind, StaleQuery, StaleRows, TimeField, TopQuery,
+    TopRows, TreeQuery, TreeRows, TreeView, query_hash, timegrammar,
 };
 use duscope_core::rules::Classes;
 use duscope_walk::VolumeInfo;
@@ -138,16 +138,27 @@ pub fn scan(args: &ScanArgs, index_dir: Option<&Path>, output: &Output) -> Resul
 }
 
 /// `scan --reuse`, when a saved scan answers: its rows, as a scan of the
-/// tree would print them, and nothing saved.
+/// tree would print them, and nothing saved. They are read and written as
+/// `top`'s are ([`write_ranked`]), so a failed read of the saved scan ends
+/// them there and fails `index_corrupt`.
 fn reused(saved: Source, args: &ScanArgs, output: &Output) -> Result<(), Failure> {
-    let file = saved.index_file();
     if let Some(id) = saved.scan_id() {
         log::info!("printing the saved scan {id} in place of a scan");
     }
-    let (mut envelope, footer, _) =
-        top_envelope(saved, &args.walk, None, "scan", false, true, None, output)?;
-    envelope.next = next::list(&envelope, file.as_deref(), args.walk.path.as_deref());
-    output.list(&envelope, &footer)
+    let asked = top_asked(saved, &args.walk, None, "scan", false, true, None, output)?;
+    let rows = query::top_rows(&*asked.prepared.source.view(), &asked.q);
+    write_ranked(
+        asked.prepared,
+        &args.walk,
+        "scan",
+        asked.listed,
+        &rows,
+        Vec::new(),
+        None,
+        output,
+        output.streams(),
+    )?;
+    Ok(())
 }
 
 /// `top`.
@@ -300,62 +311,127 @@ fn top_asked(
     })
 }
 
-/// A verb's rows, ranked, and built one at a time from their ids.
+/// A verb's rows, ranked, and built one at a time.
 trait Ranked {
     /// The row a list writes.
     type Row: Row + Hinted;
-    /// The rows' ids, in order.
-    fn ids(&self) -> &[u32];
-    /// The row of `id`.
-    fn row(&self, view: &dyn TreeView, id: u32) -> Self::Row;
+    /// How many rows there are.
+    fn len(&self) -> usize;
+    /// The row at `at`, counted from 0.
+    fn row(&self, view: &dyn TreeView, at: usize) -> Self::Row;
     /// The page with no row built: its count, cursor and truncation.
     fn head(&self) -> Page<Self::Row>;
+}
+
+/// A page of no rows, saying `total_count`, `next` and `truncated`.
+fn head<T>(total_count: u64, next: Option<After>, truncated: bool) -> Page<T> {
+    Page {
+        entries: Vec::new(),
+        total_count,
+        next,
+        truncated,
+    }
 }
 
 impl Ranked for TopRows {
     type Row = TopEntry;
 
-    fn ids(&self) -> &[u32] {
-        &self.ids
+    fn len(&self) -> usize {
+        self.ids.len()
     }
 
-    fn row(&self, view: &dyn TreeView, id: u32) -> TopEntry {
-        TopRows::row(self, view, id)
+    fn row(&self, view: &dyn TreeView, at: usize) -> TopEntry {
+        TopRows::row(self, view, self.ids[at])
     }
 
     fn head(&self) -> Page<TopEntry> {
-        Page {
-            entries: Vec::new(),
-            total_count: self.total_count,
-            next: self.next,
-            truncated: self.truncated,
-        }
+        head(self.total_count, self.next, self.truncated)
     }
 }
 
 impl Ranked for StaleRows {
     type Row = StaleEntry;
 
-    fn ids(&self) -> &[u32] {
-        &self.ids
+    fn len(&self) -> usize {
+        self.ids.len()
     }
 
-    fn row(&self, view: &dyn TreeView, id: u32) -> StaleEntry {
-        StaleRows::row(self, view, id)
+    fn row(&self, view: &dyn TreeView, at: usize) -> StaleEntry {
+        StaleRows::row(self, view, self.ids[at])
     }
 
     fn head(&self) -> Page<StaleEntry> {
-        Page {
-            entries: Vec::new(),
-            total_count: self.total_count,
-            next: self.next,
-            truncated: self.truncated,
-        }
+        head(self.total_count, self.next, self.truncated)
     }
 }
 
-/// Writes a verb's ranked `rows` and gives the source back. With `stream`
-/// (a format that [`Output::streams`]), each row is built as it is written
+impl Ranked for TreeRows {
+    type Row = TreeEntry;
+
+    fn len(&self) -> usize {
+        TreeRows::len(self)
+    }
+
+    fn row(&self, view: &dyn TreeView, at: usize) -> TreeEntry {
+        TreeRows::row(self, view, at)
+    }
+
+    fn head(&self) -> Page<TreeEntry> {
+        head(self.total_count, None, self.truncated)
+    }
+}
+
+impl Ranked for ByTypeRows {
+    type Row = ByTypeEntry;
+
+    fn len(&self) -> usize {
+        ByTypeRows::len(self)
+    }
+
+    fn row(&self, view: &dyn TreeView, at: usize) -> ByTypeEntry {
+        ByTypeRows::row(self, view, at)
+    }
+
+    fn head(&self) -> Page<ByTypeEntry> {
+        head(self.total_count, None, self.truncated)
+    }
+}
+
+impl Ranked for CacheRows {
+    type Row = CacheEntry;
+
+    fn len(&self) -> usize {
+        CacheRows::len(self)
+    }
+
+    fn row(&self, view: &dyn TreeView, at: usize) -> CacheEntry {
+        CacheRows::row(self, view, at)
+    }
+
+    fn head(&self) -> Page<CacheEntry> {
+        head(self.total_count, self.next, self.truncated)
+    }
+}
+
+/// A project's row reads nothing more of the scan.
+impl Ranked for ProjectRows {
+    type Row = ProjectEntry;
+
+    fn len(&self) -> usize {
+        ProjectRows::len(self)
+    }
+
+    fn row(&self, _view: &dyn TreeView, at: usize) -> ProjectEntry {
+        ProjectRows::row(self, at)
+    }
+
+    fn head(&self) -> Page<ProjectEntry> {
+        head(self.total_count, None, self.truncated)
+    }
+}
+
+/// Writes a verb's ranked `rows` and gives the source back. With `stream`,
+/// in a format that [`Output::streams`], each row is built as it is written
 /// and none is held: the saved scan is checked before the first row, and
 /// each row once built ([`Source::failed`]). A row built from a failed read
 /// is empty, as is every row after it, so the rows end before it, and the
@@ -376,9 +452,9 @@ fn write_ranked<R: Ranked>(
     stream: bool,
 ) -> Result<Source, Failure> {
     let mut page = rows.head();
-    if !stream {
+    if !(stream && output.streams()) {
         let view = prepared.source.view();
-        page.entries = rows.ids().iter().map(|&id| rows.row(&*view, id)).collect();
+        page.entries = (0..rows.len()).map(|at| rows.row(&*view, at)).collect();
         drop(view);
         let (envelope, footer, source) =
             envelope(prepared, walk, verb, depth, page, extra, hash, output);
@@ -388,13 +464,11 @@ fn write_ranked<R: Ranked>(
     }
     let (mut envelope, footer, source) =
         envelope(prepared, walk, verb, depth, page, extra, hash, output);
-    envelope.returned_count = rows.ids().len() as u64;
+    envelope.returned_count = rows.len() as u64;
     source.check()?;
     let view = source.view();
-    let built = rows
-        .ids()
-        .iter()
-        .map(|&id| rows.row(&*view, id))
+    let built = (0..rows.len())
+        .map(|at| rows.row(&*view, at))
         .take_while(|_| !source.failed());
     output.list_rows(&envelope, built, || source.check(), &footer)?;
     drop(view);
@@ -403,6 +477,16 @@ fn write_ranked<R: Ranked>(
 
 /// `tree`.
 pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    tree_written(args, index_dir, output, output.streams())
+}
+
+/// `tree`, its rows streamed when `stream` ([`write_ranked`]).
+fn tree_written(
+    args: &TreeArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+    stream: bool,
+) -> Result<(), Failure> {
     if output.fields_first::<TreeEntry>("tree")? {
         return Ok(());
     }
@@ -426,20 +510,19 @@ pub fn tree(args: &TreeArgs, index_dir: Option<&Path>, output: &Output) -> Resul
         limit: prepared.limit,
         size: prepared.size,
     };
-    let page = query::tree(&*prepared.source.view(), &q);
+    let rows = query::tree_rows(&*prepared.source.view(), &q);
     let depth = Some(args.query.depth.unwrap_or(2));
-    let (envelope, footer, source) = envelope(
+    let source = write_ranked(
         prepared,
         &args.walk,
         "tree",
         depth,
-        page,
+        &rows,
         Vec::new(),
         None,
         output,
-    );
-    source.check()?;
-    output.list(&envelope, &footer)?;
+        stream,
+    )?;
     source.finish(&args.walk, output)
 }
 
@@ -466,6 +549,16 @@ pub fn by_type(
     args: &ByTypeArgs,
     index_dir: Option<&Path>,
     output: &Output,
+) -> Result<(), Failure> {
+    by_type_written(args, index_dir, output, output.streams())
+}
+
+/// `by-type`, its rows streamed when `stream` ([`write_ranked`]).
+fn by_type_written(
+    args: &ByTypeArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+    stream: bool,
 ) -> Result<(), Failure> {
     // --classes, else the configuration's [classes] extra.
     let label = if args.classes == args.walk.classes_extra {
@@ -497,19 +590,18 @@ pub fn by_type(
         sort: prepared.sort,
         reverse: prepared.reverse,
     };
-    let page: Page<ByTypeEntry> = query::by_type(&*prepared.source.view(), &q);
-    let (envelope, footer, source) = envelope(
+    let rows = query::by_type_rows(&*prepared.source.view(), &q);
+    let source = write_ranked(
         prepared,
         &args.walk,
         "by-type",
         args.query.depth,
-        page,
+        &rows,
         Vec::new(),
         None,
         output,
-    );
-    source.check()?;
-    output.list(&envelope, &footer)?;
+        stream,
+    )?;
     source.finish(&args.walk, output)
 }
 
@@ -611,6 +703,16 @@ fn stale_written(
 
 /// `caches`: each cache by default, each project's with `--by-project`.
 pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> Result<(), Failure> {
+    caches_written(args, index_dir, output, output.streams())
+}
+
+/// `caches`, its rows streamed when `stream` ([`write_ranked`]).
+fn caches_written(
+    args: &CachesArgs,
+    index_dir: Option<&Path>,
+    output: &Output,
+    stream: bool,
+) -> Result<(), Failure> {
     // A scan that leaves the caches out holds none of their bytes.
     if args.walk.exclude_caches {
         return Err(Failure::new(
@@ -689,45 +791,26 @@ pub fn caches(args: &CachesArgs, index_dir: Option<&Path>, output: &Output) -> R
         size: prepared.size,
         after,
     };
-    if args.by_project {
-        let page: Page<ProjectEntry> = query::projects(&*source.view(), &q);
-        write(prepared, &args.walk, verb, &args.query, page, None, output)
+    let (walk, depth, extra) = (&args.walk, args.query.depth, Vec::new());
+    let source = if args.by_project {
+        let rows = query::project_rows(&*source.view(), &q);
+        write_ranked(
+            prepared, walk, verb, depth, &rows, extra, None, output, stream,
+        )?
     } else {
-        let page: Page<CacheEntry> = query::caches(&*source.view(), &q);
-        write(
+        let rows = query::cache_rows(&*source.view(), &q);
+        write_ranked(
             prepared,
-            &args.walk,
+            walk,
             verb,
-            &args.query,
-            page,
+            depth,
+            &rows,
+            extra,
             Some(&hash),
             output,
-        )
-    }
-}
-
-/// Writes a verb's page as its envelope, and saves a scan run for it.
-fn write<T: Row + Hinted>(
-    prepared: Prepared,
-    walk: &WalkArgs,
-    verb: &'static str,
-    query: &QueryArgs,
-    page: Page<T>,
-    hash: Option<&str>,
-    output: &Output,
-) -> Result<(), Failure> {
-    let (envelope, footer, source) = envelope(
-        prepared,
-        walk,
-        verb,
-        query.depth,
-        page,
-        Vec::new(),
-        hash,
-        output,
-    );
-    source.check()?;
-    output.list(&envelope, &footer)?;
+            stream,
+        )?
+    };
     source.finish(walk, output)
 }
 
@@ -1157,12 +1240,15 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use clap::Parser;
-    use duscope_core::query::{self, StaleQuery, TreeView, timegrammar};
+    use duscope_core::query::{
+        self, ByTypeQuery, CachesQuery, Page, StaleQuery, TreeQuery, TreeView, timegrammar,
+    };
     use duscope_walk::{Normalization, Skip, VolumeClass, VolumeInfo};
 
     use super::{
-        DepthUse, Owns, atime_unreliable, prepare, scan_age, source, stale_written, top_asked,
-        top_written, write_ranked,
+        DepthUse, Owns, Ranked, atime_unreliable, by_type_written, caches_written, classes,
+        prepare, reused, scan, scan_age, source, stale_written, top_asked, top_written,
+        tree_written, write_ranked,
     };
     use crate::cli::{Cli, Verb};
     use crate::out::{Capture, Fields, Format, Output, Units};
@@ -1293,9 +1379,9 @@ mod tests {
         }
     }
 
-    /// `top` or `stale` as `cli` asks, on the saved scan in `dir`, written
-    /// to `output` as the verb writes it (without `stale`'s warnings),
-    /// streamed when `stream`. With `fail_at`, the read of that row
+    /// `top`, `stale` or `scan --reuse` as `cli` asks, on the saved scan in
+    /// `dir`, written to `output` as the verb writes it (without `stale`'s
+    /// warnings), streamed when `stream`. With `fail_at`, the read of that row
     /// (counted from 1) fails: its id is the one past the scan's last
     /// entry, which the index fails to read as it fails a read of a file
     /// overwritten under it, and from then on every entry reads as empty.
@@ -1375,6 +1461,26 @@ mod tests {
                     &args.walk,
                     "stale",
                     args.query.depth,
+                    &rows,
+                    Vec::new(),
+                    None,
+                    output,
+                    stream,
+                )?;
+            }
+            Some(Verb::Scan(args)) => {
+                let age = args.reuse.as_deref().unwrap();
+                let source = source::reusable(&args.walk, &args.exclude, age, Some(dir))?.unwrap();
+                let asked = top_asked(source, &args.walk, None, "scan", false, true, None, output)?;
+                let view = asked.prepared.source.view();
+                let mut rows = query::top_rows(&*view, &asked.q);
+                fail(&mut rows.ids, &*view);
+                drop(view);
+                write_ranked(
+                    asked.prepared,
+                    &args.walk,
+                    "scan",
+                    asked.listed,
                     &rows,
                     Vec::new(),
                     None,
@@ -1464,10 +1570,455 @@ mod tests {
                 }
             }
             // JSON holds its rows for the envelope: a failed read writes
-            // none, collected by the verb or by list_rows.
+            // none, whether the verb is asked to stream them or not.
             for stream in [false, true] {
                 let (output, capture) = captured(Format::Json, None, false);
                 let failure = ranked(&cli, &dir, &output, stream, Some(20)).unwrap_err();
+                assert_eq!(failure.code, "index_corrupt", "{line:?} {stream}");
+                assert!(capture.take().is_empty(), "{line:?} {stream}");
+            }
+        }
+    }
+
+    /// `scan --reuse` checks the saved scan it prints as `top` does: a
+    /// read that failed before the rows (of the entry past the scan's
+    /// last) writes none of them in any format, and one that fails at row
+    /// n of the rows streamed under `ndjson` or `--plain` leaves the n - 1
+    /// before it, as [`p2_qry_13_a_read_that_fails_mid_stream_ends_the_rows_there`]
+    /// has for `top`; the failure is `index_corrupt`. A read that does not
+    /// fail writes the rows the collected list does.
+    #[test]
+    fn p5_cli_05_scan_reuse_fails_on_a_failed_read_as_top_does() {
+        let env = duscope_testkit::TestEnv::new();
+        let (root, id) = saved_tree(&env);
+        let dir = env.index_dir();
+        let line = ["duscope", "scan", root.to_str().unwrap(), "--reuse", "1d"];
+        let cli = Cli::try_parse_from(line).unwrap();
+        let Some(Verb::Scan(args)) = &cli.verb else {
+            unreachable!()
+        };
+        let saved = || {
+            let source = source::reusable(&args.walk, &args.exclude, "1d", Some(&dir));
+            let source = source.unwrap().expect("the saved scan answers --reuse");
+            assert_eq!(source.scan_id().as_deref(), Some(id.as_str()));
+            source
+        };
+        let fields = Fields::Named(
+            ["name", "allocated_bytes", "path"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        let shapes: [(Format, Option<&Fields>, bool); 5] = [
+            (Format::Json, None, false),
+            (Format::Ndjson, None, false),
+            (Format::Ndjson, Some(&fields), false),
+            (Format::Plain, None, false),
+            (Format::Plain, Some(&fields), true),
+        ];
+        for (format, chosen, header_null) in shapes {
+            let shape = format!("{format:?} {chosen:?}");
+            let (output, capture) = captured(format, chosen, header_null);
+            ranked(&cli, &dir, &output, false, None).unwrap();
+            let whole = capture.take();
+            let (output, capture) = captured(format, chosen, header_null);
+            reused(saved(), args, &output).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&capture.take()),
+                String::from_utf8_lossy(&whole),
+                "{shape}"
+            );
+
+            // A read that failed before the first row.
+            let source = saved();
+            let view = source.view();
+            let _ = view.node(view.len());
+            drop(view);
+            assert!(source.failed(), "{shape}");
+            let (output, capture) = captured(format, chosen, header_null);
+            let failure = reused(source, args, &output).unwrap_err();
+            assert_eq!(failure.code, "index_corrupt", "{shape}");
+            assert!(capture.take().is_empty(), "{shape}");
+
+            // One that fails at row n.
+            if format == Format::Json {
+                let (output, capture) = captured(format, chosen, header_null);
+                let failure = ranked(&cli, &dir, &output, true, Some(2)).unwrap_err();
+                assert_eq!(failure.code, "index_corrupt", "{shape}");
+                assert!(capture.take().is_empty(), "{shape}");
+                continue;
+            }
+            let terminator = if header_null { 0 } else { b'\n' };
+            let records: Vec<&[u8]> = whole.split_inclusive(|&b| b == terminator).collect();
+            let ndjson = format == Format::Ndjson;
+            let before = usize::from(ndjson || header_null);
+            let rows = records.len() - before - usize::from(ndjson);
+            assert!(rows >= 5, "{shape}: {rows} rows");
+            for at in [1, 2, rows / 2, rows] {
+                let shape = format!("{shape}, row {at} of {rows}");
+                let (output, capture) = captured(format, chosen, header_null);
+                let failure = ranked(&cli, &dir, &output, true, Some(at)).unwrap_err();
+                assert_eq!(failure.code, "index_corrupt", "{shape}");
+                let written = capture.take();
+                assert_eq!(
+                    String::from_utf8_lossy(&written),
+                    String::from_utf8_lossy(&records[..before + at - 1].concat()),
+                    "{shape}"
+                );
+                if ndjson {
+                    output.failure(&failure);
+                    let error = capture.take();
+                    let lines: Vec<serde_json::Value> = written
+                        .split_inclusive(|&b| b == b'\n')
+                        .chain([error.as_slice()])
+                        .map(|line| serde_json::from_slice(line).unwrap())
+                        .collect();
+                    let (last, lines) = lines.split_last().unwrap();
+                    assert_eq!(last["error"]["code"], "index_corrupt", "{shape}");
+                    assert_eq!(lines[0]["type"], "scan", "{shape}");
+                    for row in &lines[1..] {
+                        assert_eq!(row["type"], "entry", "{shape}");
+                        assert_ne!(row["name"], "", "{shape}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A tree of files of every class, twelve projects each with a
+    /// `package.json` and a `node_modules` (four with a `Cargo.toml` and a
+    /// `target` as well), and three directories a `CACHEDIR.TAG` marks,
+    /// saved in `env`'s index directory: its root and the scan's id.
+    fn saved_mixed(env: &duscope_testkit::TestEnv) -> (PathBuf, String) {
+        let root = env.work_dir().canonicalize().unwrap().join("mixed");
+        let exts = ["rs", "png", "zip", "db", "o", "pdf", "xyz"];
+        for i in 0..70usize {
+            let dir = root.join(format!("files/d{}", i % 5));
+            std::fs::create_dir_all(&dir).unwrap();
+            let name = format!("{i:02}.{}", exts[i % exts.len()]);
+            std::fs::write(dir.join(name), vec![b'x'; (i * 1543) % 30_000 + 1]).unwrap();
+        }
+        for p in 0..12usize {
+            let project = root.join(format!("projects/p{p:02}"));
+            let modules = project.join("node_modules/pkg");
+            std::fs::create_dir_all(&modules).unwrap();
+            std::fs::write(project.join("package.json"), b"{}").unwrap();
+            for f in 0..3 {
+                let size = (p + 1) * 4096 + f;
+                std::fs::write(modules.join(format!("{f}.js")), vec![b'x'; size]).unwrap();
+            }
+            if p % 3 == 0 {
+                std::fs::write(project.join("Cargo.toml"), b"").unwrap();
+                std::fs::create_dir_all(project.join("target/debug")).unwrap();
+                let out = vec![b'x'; (p + 2) * 8192];
+                std::fs::write(project.join("target/debug/out"), out).unwrap();
+            }
+        }
+        for t in 0..3usize {
+            let tagged = root.join(format!("tagged/t{t}"));
+            std::fs::create_dir_all(&tagged).unwrap();
+            let tag = b"Signature: 8a477f597d28d172789f06886806bc55\n";
+            std::fs::write(tagged.join("CACHEDIR.TAG"), tag).unwrap();
+            std::fs::write(tagged.join("blob"), vec![b'x'; (t + 1) * 10_000]).unwrap();
+        }
+        let mut argv: Vec<std::ffi::OsString> = ["duscope", "scan", "--save", "--json"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        argv.extend([root.clone().into(), "--index-dir".into()]);
+        argv.extend([env.index_dir().into(), "--config".into(), "none".into()]);
+        let (code, written) = crate::run_captured(argv);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&written));
+        let envelope: serde_json::Value = serde_json::from_slice(&written).unwrap();
+        (root, envelope["scan"]["id"].as_str().unwrap().to_owned())
+    }
+
+    /// The verbs P2-QRY-14 streams, each with its flags for the tests'
+    /// tree and `--fields` naming three of its fields.
+    fn streamed_verbs() -> [(&'static [&'static str], Fields); 4] {
+        let named = |names: &[&str]| Fields::Named(names.iter().map(|&n| n.to_owned()).collect());
+        [
+            (
+                &["tree", "--depth", "3"],
+                named(&["name", "pct_of_parent", "path"]),
+            ),
+            (
+                &["by-type", "--examples", "2"],
+                named(&["class", "largest", "file_count"]),
+            ),
+            (
+                &["caches", "--min-size", "0"],
+                named(&["name", "rule", "project_root"]),
+            ),
+            (
+                &["caches", "--by-project", "--min-size", "0"],
+                named(&["project_root", "caches", "cache_count"]),
+            ),
+        ]
+    }
+
+    /// `tree`, `by-type`, `caches` and `caches --by-project`, each written
+    /// collected and streamed to the same output, give the same bytes:
+    /// `ndjson` (every row, the trailer's counts), with `--fields` and
+    /// `--detail`, and `--plain` with `--all`, with `--fields`, `--header`
+    /// and `-0`, and with a limit.
+    #[test]
+    fn p2_qry_14_streamed_rows_are_the_collected_rows_byte_for_byte() {
+        let env = duscope_testkit::TestEnv::new();
+        let (root, id) = saved_mixed(&env);
+        let dir = env.index_dir();
+        for (verb, fields) in &streamed_verbs() {
+            let shapes: [(Format, Option<&Fields>, bool, &[&str]); 6] = [
+                (Format::Ndjson, None, false, &[]),
+                (Format::Ndjson, Some(fields), false, &[]),
+                (Format::Ndjson, Some(&Fields::Detail), false, &[]),
+                (Format::Plain, None, false, &["--all"]),
+                (Format::Plain, Some(fields), true, &["--all"]),
+                (Format::Plain, None, false, &["--limit", "3"]),
+            ];
+            for (format, chosen, header_null, extra) in shapes {
+                let mut line = vec!["duscope"];
+                line.extend_from_slice(verb);
+                line.extend([root.to_str().unwrap(), "--scan", &id]);
+                line.extend_from_slice(extra);
+                let cli = Cli::try_parse_from(&line).unwrap();
+                let written = |stream: bool| {
+                    let (output, capture) = captured(format, chosen, header_null);
+                    let dir = Some(dir.as_path());
+                    match &cli.verb {
+                        Some(Verb::Tree(args)) => tree_written(args, dir, &output, stream),
+                        Some(Verb::ByType(args)) => by_type_written(args, dir, &output, stream),
+                        Some(Verb::Caches(args)) => caches_written(args, dir, &output, stream),
+                        _ => unreachable!(),
+                    }
+                    .unwrap();
+                    capture.take()
+                };
+                let (collected, streamed) = (written(false), written(true));
+                let rows = collected.iter().filter(|&&b| b == b'\n' || b == 0).count();
+                assert!(rows >= 3, "{line:?} {format:?}: {rows} lines");
+                assert_eq!(
+                    String::from_utf8_lossy(&streamed),
+                    String::from_utf8_lossy(&collected),
+                    "{line:?} {format:?} {chosen:?}"
+                );
+            }
+        }
+    }
+
+    /// `rows`, with the read of the row at `at` (counted from 1) failing
+    /// before the row is built: the read of the id past the scan's last
+    /// entry, which the index fails as it fails a read of a file
+    /// overwritten under it; from then on every entry reads as empty.
+    struct FailAt<'r, R> {
+        rows: &'r R,
+        at: usize,
+    }
+
+    impl<R: Ranked> Ranked for FailAt<'_, R> {
+        type Row = R::Row;
+
+        fn len(&self) -> usize {
+            self.rows.len()
+        }
+
+        fn row(&self, view: &dyn TreeView, at: usize) -> R::Row {
+            if at + 1 == self.at {
+                view.node(view.len());
+            }
+            self.rows.row(view, at)
+        }
+
+        fn head(&self) -> Page<R::Row> {
+            self.rows.head()
+        }
+    }
+
+    /// `rows` written as `verb` on `prepared`, streamed when `stream`, the
+    /// read of row `fail_at` failing ([`FailAt`]).
+    fn fail_written<R: Ranked>(
+        prepared: super::Prepared,
+        walk: &crate::cli::WalkArgs,
+        verb: &'static str,
+        rows: &R,
+        output: &Output,
+        stream: bool,
+        fail_at: Option<usize>,
+    ) -> Result<(), Failure> {
+        let none = Vec::new();
+        match fail_at {
+            Some(at) => {
+                let failing = FailAt { rows, at };
+                write_ranked(
+                    prepared, walk, verb, None, &failing, none, None, output, stream,
+                )
+            }
+            None => write_ranked(prepared, walk, verb, None, rows, none, None, output, stream),
+        }
+        .map(drop)
+    }
+
+    /// `tree`, `by-type` or `caches` as `cli` asks, on the saved scan in
+    /// `dir`, its rows written to `output` as the verb writes them,
+    /// streamed when `stream`; with `fail_at`, the read of that row
+    /// (counted from 1) fails ([`FailAt`]).
+    fn listed(
+        cli: &Cli,
+        dir: &Path,
+        output: &Output,
+        stream: bool,
+        fail_at: Option<usize>,
+    ) -> Result<(), Failure> {
+        let owns = Owns {
+            min_size: true,
+            older_than: false,
+        };
+        match &cli.verb {
+            Some(Verb::Tree(args)) => {
+                let source = source::source(&args.walk, &args.index, Some(dir))?;
+                let lists = DepthUse::Lists;
+                let query = Some(&args.query);
+                let prepared = prepare(source, &args.walk, query, output, lists, Owns::default())?;
+                let q = TreeQuery {
+                    depth: args.query.depth,
+                    min_pct: 0.0,
+                    filters: prepared.filters.clone(),
+                    sort: prepared.sort,
+                    reverse: prepared.reverse,
+                    limit: prepared.limit,
+                    size: prepared.size,
+                };
+                let rows = query::tree_rows(&*prepared.source.view(), &q);
+                fail_written(prepared, &args.walk, "tree", &rows, output, stream, fail_at)
+            }
+            Some(Verb::ByType(args)) => {
+                let classes = classes(None, "--classes")?;
+                let source = source::source(&args.walk, &args.index, Some(dir))?;
+                let filters = DepthUse::Filters;
+                let query = Some(&args.query);
+                let prepared = prepare(source, &args.walk, query, output, filters, owns)?;
+                let q = ByTypeQuery {
+                    classes: &classes,
+                    examples: args.examples.unwrap_or(3),
+                    filters: prepared.filters.clone(),
+                    limit: prepared.limit,
+                    size: prepared.size,
+                    sort: prepared.sort,
+                    reverse: prepared.reverse,
+                };
+                let rows = query::by_type_rows(&*prepared.source.view(), &q);
+                fail_written(
+                    prepared, &args.walk, "by-type", &rows, output, stream, fail_at,
+                )
+            }
+            Some(Verb::Caches(args)) => {
+                let rules = scan::cache_rules(None)?;
+                let source = source::source(&args.walk, &args.index, Some(dir))?;
+                let filters = DepthUse::Filters;
+                let query = Some(&args.query);
+                let prepared = prepare(source, &args.walk, query, output, filters, owns)?;
+                let saved = &prepared.source;
+                let holds = |dir: &Path, name: &str| saved.holds_file(dir, name);
+                let q = CachesQuery {
+                    caches: &rules,
+                    above: &holds,
+                    loose: false,
+                    min_size: 0,
+                    filters: prepared.filters.clone(),
+                    sort: prepared.sort,
+                    reverse: prepared.reverse,
+                    limit: prepared.limit,
+                    size: prepared.size,
+                    after: None,
+                };
+                if args.by_project {
+                    let rows = query::project_rows(&*saved.view(), &q);
+                    let verb = "caches --by-project";
+                    fail_written(prepared, &args.walk, verb, &rows, output, stream, fail_at)
+                } else {
+                    let rows = query::cache_rows(&*saved.view(), &q);
+                    fail_written(
+                        prepared, &args.walk, "caches", &rows, output, stream, fail_at,
+                    )
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// A read of the saved scan that fails at row n of `tree`, `by-type`,
+    /// `caches` or `caches --by-project` ends the streamed rows there:
+    /// stdout holds the header and the n - 1 rows before it, each the row
+    /// the collected list writes, and none built from the failed read or
+    /// after it; `ndjson` has no `end` line, and the error envelope main
+    /// writes next is its last line; the failure is `index_corrupt`. A
+    /// format that collects the rows (JSON) writes none of them.
+    #[test]
+    fn p2_qry_14_a_read_that_fails_mid_stream_ends_the_rows_there() {
+        let env = duscope_testkit::TestEnv::new();
+        let (root, id) = saved_mixed(&env);
+        let dir = env.index_dir();
+        for (verb, fields) in &streamed_verbs() {
+            let mut line = vec!["duscope"];
+            line.extend_from_slice(verb);
+            line.extend([root.to_str().unwrap(), "--scan", &id, "--all"]);
+            let cli = Cli::try_parse_from(&line).unwrap();
+            let shapes: [(Format, Option<&Fields>, bool); 4] = [
+                (Format::Ndjson, None, false),
+                (Format::Ndjson, Some(fields), false),
+                (Format::Plain, None, false),
+                (Format::Plain, Some(fields), true),
+            ];
+            for (format, chosen, header_null) in shapes {
+                let (output, capture) = captured(format, chosen, header_null);
+                listed(&cli, &dir, &output, false, None).unwrap();
+                let whole = capture.take();
+                let terminator = if header_null { 0 } else { b'\n' };
+                let records: Vec<&[u8]> = whole.split_inclusive(|&b| b == terminator).collect();
+                // The lines before the rows (ndjson's header, --header's
+                // names) and after them (ndjson's trailer).
+                let ndjson = format == Format::Ndjson;
+                let before = usize::from(ndjson || header_null);
+                let rows = records.len() - before - usize::from(ndjson);
+                assert!(rows >= 7, "{line:?} {format:?}: {rows} rows");
+                for at in [1, 2, rows / 2, rows] {
+                    let shape = format!("{line:?} {format:?} {chosen:?}, row {at} of {rows}");
+                    let (output, capture) = captured(format, chosen, header_null);
+                    let failure = listed(&cli, &dir, &output, true, Some(at)).unwrap_err();
+                    assert_eq!(failure.code, "index_corrupt", "{shape}");
+                    let written = capture.take();
+                    assert_eq!(
+                        String::from_utf8_lossy(&written),
+                        String::from_utf8_lossy(&records[..before + at - 1].concat()),
+                        "{shape}"
+                    );
+                    if ndjson {
+                        output.failure(&failure);
+                        let error = capture.take();
+                        let lines: Vec<serde_json::Value> = written
+                            .split_inclusive(|&b| b == b'\n')
+                            .chain([error.as_slice()])
+                            .map(|line| serde_json::from_slice(line).unwrap())
+                            .collect();
+                        let (last, lines) = lines.split_last().unwrap();
+                        assert_eq!(last["error"]["code"], "index_corrupt", "{shape}");
+                        assert_eq!(lines[0]["type"], "scan", "{shape}");
+                        for row in &lines[1..] {
+                            assert_eq!(row["type"], "entry", "{shape}");
+                            // A row read whole names its entry, and each
+                            // of its examples.
+                            assert_ne!(row["name"], "", "{shape}");
+                            for example in row["largest"].as_array().into_iter().flatten() {
+                                assert_ne!(example["name"], "", "{shape}");
+                            }
+                        }
+                    }
+                }
+            }
+            // JSON holds its rows for the envelope: a failed read writes
+            // none, whether the verb would stream them or not.
+            for stream in [false, true] {
+                let (output, capture) = captured(Format::Json, None, false);
+                let failure = listed(&cli, &dir, &output, stream, Some(2)).unwrap_err();
                 assert_eq!(failure.code, "index_corrupt", "{line:?} {stream}");
                 assert!(capture.take().is_empty(), "{line:?} {stream}");
             }

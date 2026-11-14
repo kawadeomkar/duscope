@@ -144,7 +144,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--regex` | — | `glob` and `exclude` match paths |
 | `--invert` | — | `exclude` leaves rows out |
 | `--all` | — | a tool returns one envelope; `cursor` pages |
-| `--strict` | — | an unreadable directory is a warning in the envelope |
+| `--strict` | `strict` | |
 | `--no-scan` | — | always set: a read-only tool never scans |
 | `--no-save` | — | with `--no-scan`, nothing is scanned to save |
 | `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
@@ -193,7 +193,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--reverse` | — | the tool lists the largest first |
 | `--regex` | — | `glob` and `exclude` match paths |
 | `--invert` | — | `exclude` leaves rows out |
-| `--strict` | — | an unreadable directory is a warning in the envelope |
+| `--strict` | `strict` | |
 | `--no-scan` | — | always set: a read-only tool never scans |
 | `--no-save` | — | with `--no-scan`, nothing is scanned to save |
 | `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
@@ -242,7 +242,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--regex` | — | `glob` and `exclude` match paths |
 | `--invert` | — | `exclude` leaves rows out |
 | `--all` | — | a tool returns one envelope; `cursor` pages |
-| `--strict` | — | an unreadable directory is a warning in the envelope |
+| `--strict` | `strict` | |
 | `--no-scan` | — | always set: a read-only tool never scans |
 | `--no-save` | — | with `--no-scan`, nothing is scanned to save |
 | `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
@@ -301,7 +301,7 @@ the roots, so a scan whose root lies above a root is compared at that root.
 | `--invert` | — | caches are found by their rules' markers |
 | `--exclude` | — | caches are found by their rules' markers |
 | `--all` | — | a tool returns one envelope; `cursor` pages |
-| `--strict` | — | an unreadable directory is a warning in the envelope |
+| `--strict` | `strict` | |
 | `--no-scan` | — | always set: a read-only tool never scans |
 | `--no-save` | — | with `--no-scan`, nothing is scanned to save |
 | `--trust` | — | names an index file outside the index directory; a client names saved scans by id |

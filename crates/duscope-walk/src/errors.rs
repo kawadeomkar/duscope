@@ -50,7 +50,8 @@ pub enum TrashError {
     Unavailable(String),
     /// The item could not be read or moved. On Linux, rarely, an entry that
     /// took the item's place while it was being moved went to the Trash in
-    /// its stead and could not be moved back, as the message says.
+    /// its stead and could not be moved back, or what was moved could not
+    /// be checked after the move, as the message says.
     #[error("{0}")]
     Failed(String),
 }

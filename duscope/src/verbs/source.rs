@@ -836,8 +836,9 @@ fn volumes_within(index: &Index, volumes: &[IndexVolume], bases: &[u32]) -> Vec<
 }
 
 /// The device the entry `id` lies on (`dirs.dev`): a directory's own, a
-/// file's directory's.
-fn device_of(index: &Index, id: u32) -> Option<u64> {
+/// file's directory's. `export --format gpscan` finds the volume it
+/// records by it, as [`volumes_within`] does.
+pub(super) fn device_of(index: &Index, id: u32) -> Option<u64> {
     let node = index.node(id);
     index.dir_dev(if node.is_dir() { id } else { node.parent })
 }

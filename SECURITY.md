@@ -153,6 +153,14 @@ with one exception a person opts into: a server started with `--allow-delete` of
     of a directory reached from `/` without following a link, only when its device and inode
     are still what the plan saw, and never over an entry already in the trash. On macOS,
     where `NSFileManager` moves by path, the same identity is checked by path just before.
+  - The exception: where `renameat2` refuses `RENAME_NOREPLACE` (`EINVAL`, `EOPNOTSUPP`), as
+    on NFS, 9p and Ceph and on a FUSE filesystem whose server does not offer it (NTFS through
+    ntfs-3g among them), or is missing (`ENOSYS`, before Linux 3.15), the name is first looked
+    for (`lstat`) and the entry renamed with a plain `renameat` when nothing is there, as
+    `mv -n` does. An entry another program makes under that name in between is replaced: in
+    the trash on the way in, and at the item's own name when what was moved proves to be
+    another entry and is moved back. Only a program writing in that same directory at that
+    moment can bring this about.
   - `--permanent` deletes through `openat`, `O_NOFOLLOW` and `unlinkat`, after checking that the
     entry's device and inode are still what the plan saw (a handle's, for an item named by one).
 
@@ -198,14 +206,19 @@ virtual tables and crafted pages.
   runs, a tree of more than about a million files, it opens a second file to merge them. Both go
   in `SQLITE_TMPDIR` if that is set and writable, else `TMPDIR`, else the first of `/var/tmp`,
   `/usr/tmp` and `/tmp` that is writable, and as a last resort the current directory.
-  - **Privacy.** Each file has mode 0600 and is in no directory while it is in use, so nothing of
+  - **Privacy.** Each file has mode 0600 and is in no directory while it is in use, so no name of
     them remains however the process ends: on Linux SQLite opens it with `O_TMPFILE` where the
-    filesystem allows, and otherwise gives it a random name and unlinks it as it opens it. They hold the keys being sorted: a directory's name with its parent's id and its
-    own (about a dozen bytes beside the name), and a file's size on disk with its id (about a dozen
-    bytes in all). They never hold a file's name or a path.
-  - **Where they go.** Set `SQLITE_TMPDIR` to choose the directory. The first file is about as
-    large as the largest index being built, about 12 MB for a tree of a million files, and the
-    second about 1 MB for every 16 runs.
+    filesystem allows, and otherwise gives it a random name and unlinks it as it opens it. Their
+    blocks are freed as a deleted file's are, not wiped. They hold the keys being sorted: a
+    directory's name with its parent's id and its own (about a dozen bytes beside the name), and
+    a file's size on disk with its id (about a dozen bytes in all). They never hold a file's name
+    or a path.
+  - **Where they go.** Set `SQLITE_TMPDIR` to choose the directory. Where the temporary
+    directory is on another volume than the tree and the index, and that volume is not
+    encrypted, the directory names written there stay in its free blocks until they are
+    overwritten: set it to a directory on an encrypted volume. The first file is about as large
+    as the largest index being built, about 12 MB for a tree of a million files, and the second
+    about 1 MB for every 16 runs.
   - **If it fails.** Where the temporary directory is full, or no directory will take the file,
     duscope builds the index file again with the sort in memory, and warns on stderr.
 

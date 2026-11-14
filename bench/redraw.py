@@ -24,7 +24,7 @@ zoom and a table's first frame, which build what later frames reuse.
 The result file (`<date>-<platform>-redraw.json` in `--results-dir`) holds the
 usual header, one row per tree, kind and class, `sessions` (every press in order,
 those that drew nothing too), and `gates`, the two lines of plan/SPEC.md's Gate
-4 → 5, read from T2 (the first tree when T2 was not measured): the worst 95th
+4 → 5, read from T2 and not judged when T2 was not measured: the worst 95th
 percentile of the navigation rows against the 16 ms, and the slowest recompute
 frame against the 1 s, a maximum so that no percentile can hide a frame that
 happens a few times a session. A gate failing is no failure of the run; a part
@@ -39,7 +39,7 @@ T3, one folder of a million empty files, has kinds of its own (`TREE_KEYS`):
 its map draws no tile, so the cursor moves in the siblings pane, through the
 folder's million entries, and there is no folder under the root to zoom into;
 the resize is measured as on every tree. The gates are read from T2 all the
-same.
+same: a run of T3 alone judges none.
 
 Standard library only; runs on Python 3.9 and later, on Linux and macOS.
 """
@@ -417,6 +417,30 @@ def gates(navigation_p95_ms: Optional[float], recompute_max_ms: Optional[float])
     ]
 
 
+def judged(per_tree: Sequence[Dict[str, Any]]) -> Tuple[Optional[str], List[Dict[str, object]]]:
+    """The tree the gates are read from and the gate lines: T2's figures, or
+    no tree and lines of no value when T2 was not measured, whatever else was
+    (T1's and T3's frames are not the budget's)."""
+    t2 = next((t for t in per_tree if t["name"] == "T2"), None)
+    if t2 is None:
+        return None, gates(None, None)
+    return "T2", gates(t2.get("navigation_p95_ms"), t2.get("recompute_max_ms"))
+
+
+def verdicts(gates_tree: Optional[str], gate_lines: Sequence[Dict[str, object]]) -> List[str]:
+    """What the run says of each gate: its value and whether it holds, or
+    that it is not judged when T2 was not measured."""
+    said = []
+    for gate in gate_lines:
+        head = f"gate {gate['name']} {gate['op']} {gate['limit']:g}"
+        if gates_tree is None:
+            said.append(f"{head}: not judged, T2 was not measured")
+        else:
+            verdict = {True: "holds", False: "FAILS", None: "not measured"}[gate["holds"]]
+            said.append(f"{head}: {gate['value']} ({verdict})")
+    return said
+
+
 def measure_tree(duscope: str, index_dir: str, tree: str, name: str, rounds: int, frame_wait: float, log, failures: List[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Measures each kind in a fresh session of the viewer on `tree`: its rows
     and its sessions. A kind that fails is recorded and the rest still
@@ -494,8 +518,7 @@ def cmd_redraw(args, harness) -> int:
         shutil.rmtree(index_dir, ignore_errors=True)
     finished = time.gmtime()
 
-    judged = next((i for i, t in enumerate(tree_list) if t.name == "T2"), 0)
-    judged_tree = per_tree[judged] if per_tree else {}
+    gates_tree, gate_lines = judged(per_tree)
     result = {
         "schema_version": harness.SCHEMA_VERSION,
         "kind": "redraw",
@@ -517,8 +540,8 @@ def cmd_redraw(args, harness) -> int:
         },
         "duscope": {"path": duscope.path, "version": duscope.version},
         "trees": per_tree,
-        "gates_tree": tree_list[judged].name if tree_list else None,
-        "gates": gates(judged_tree.get("navigation_p95_ms"), judged_tree.get("recompute_max_ms")),
+        "gates_tree": gates_tree,
+        "gates": gate_lines,
         "failures": failures,
         "results": rows,
         "sessions": sessions,
@@ -529,9 +552,8 @@ def cmd_redraw(args, harness) -> int:
     for r in rows:
         shown = f"p50 {r['p50_ms']} ms, p95 {r['p95_ms']} ms, max {r['max_ms']} ms" if "p95_ms" in r else "not measured"
         harness.log(f"{r['tree']} {r['kind']} ({r['class']}): {r['samples']} frames, {r['first']} first-time, {r['over_limit']} over {r['limit_ms']:g} ms, {r['no_frame']} presses without one, {shown}")
-    for gate in result["gates"]:
-        verdict = {True: "holds", False: "FAILS", None: "not measured"}[gate["holds"]]
-        harness.log(f"gate {gate['name']} {gate['op']} {gate['limit']:g}: {gate['value']} ({verdict})")
+    for said in verdicts(gates_tree, gate_lines):
+        harness.log(said)
     for failure in failures:
         harness.log(f"not measured: {failure}")
     print(out)

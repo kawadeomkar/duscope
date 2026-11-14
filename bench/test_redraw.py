@@ -184,6 +184,39 @@ class Gates(unittest.TestCase):
         self.assertIsNone(redraw.gates(None, None)[0]["holds"])
         self.assertIsNone(redraw.gates(None, None)[1]["holds"])
 
+    def test_p4_test_01_the_gates_are_judged_on_t2_alone(self):
+        t1 = {"name": "T1", "navigation_p95_ms": 30.0, "recompute_max_ms": 2000.0}
+        t2 = {"name": "T2", "navigation_p95_ms": 3.0, "recompute_max_ms": 700.0}
+        t3 = {"name": "T3", "navigation_p95_ms": 0.3, "recompute_max_ms": 409.0}
+        for measured in ([t2], [t3, t2], [t1, t2, t3]):
+            tree, lines = redraw.judged(measured)
+            self.assertEqual(tree, "T2")
+            self.assertEqual([gate["value"] for gate in lines], [3.0, 700.0])
+            self.assertEqual(
+                redraw.verdicts(tree, lines),
+                ["gate redraw_p95_ms_at_120x40 <= 16: 3.0 (holds)", "gate redraw_recompute_max_ms <= 1000: 700.0 (holds)"],
+            )
+        # T3's sub-millisecond moves, or T1's frames, are not the budget's: a
+        # run without T2 judges nothing, rather than holding or failing.
+        for measured in ([t3], [t1], [t1, t3], []):
+            tree, lines = redraw.judged(measured)
+            self.assertIsNone(tree)
+            self.assertEqual([gate["value"] for gate in lines], [None, None])
+            self.assertEqual([gate["holds"] for gate in lines], [None, None])
+            self.assertEqual(
+                redraw.verdicts(tree, lines),
+                [
+                    "gate redraw_p95_ms_at_120x40 <= 16: not judged, T2 was not measured",
+                    "gate redraw_recompute_max_ms <= 1000: not judged, T2 was not measured",
+                ],
+            )
+        # T2 measured, a gate without its frames.
+        tree, lines = redraw.judged([{"name": "T2", "navigation_p95_ms": None, "recompute_max_ms": 1200.0}])
+        self.assertEqual(
+            redraw.verdicts(tree, lines),
+            ["gate redraw_p95_ms_at_120x40 <= 16: None (not measured)", "gate redraw_recompute_max_ms <= 1000: 1200.0 (FAILS)"],
+        )
+
     def test_p4_test_01_no_number_of_rounds_hides_a_first_zoom(self):
         # z, Z, l at 30 rounds, as the nightly runs: two first zooms among 61
         # frames. In one row its p95 would be about 2.5 ms.

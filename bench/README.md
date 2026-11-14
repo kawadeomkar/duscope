@@ -359,8 +359,10 @@ runs:
 - **The filtered shapes:** `top --files` and `stale` with the filters the index answers
   (P2-QRY-10), timed as the queries are: `--depth 3`; `--min-size 1M`, which keeps nothing on T2;
   `--size apparent`, alone and with `--min-size 1K`; `--since` a date that splits T2's
-  modification times, which the generator sets; and `stale --min-size 1 --max-depth 4`. Each is
-  recorded per tree under `shapes` with the rows it matched (`total_count`), and holds no gate.
+  modification times, which the generator sets; and `stale --min-size 1 --max-depth 4
+  --older-than 1d`, since the change times are the tree's build and the default 180 days would
+  keep nothing. Each is recorded per tree under `shapes` with the rows it matched
+  (`total_count`), and holds no gate.
 - **The first query after a cache drop:** `top --scan`, cold, against a scan saved beside the
   cold trees.
 - **The index's size:** bytes per entry of a basic index and of an `--attrs full` one.
@@ -442,7 +444,7 @@ frames:
 On T3 (`--trees T3`), one folder of a million empty files, the map draws no tile and there is no
 folder under the root, so its kinds are `move` (`⇥`, then `j k` in the siblings pane, along the
 folder's whole list) and `page` (`⇥`, then `PgDn PgUp`), both navigation, and `resize`. The gates
-are read from T2 whatever else is measured.
+are read from T2 whatever else is measured, and a run without T2 judges none.
 
 **Why two classes.** A frame the viewer can draw from what it has kept is a frame of navigation,
 and 16 ms is one frame at 60 Hz. A frame that works the whole map out, or builds a table, is a wait
@@ -454,7 +456,8 @@ initial and screen-change frames separately from slow rendering ("No frames in y
 ever take longer than 700ms to render"), the browser reports each long task, and Interaction to
 Next Paint reports nearly a page's worst interaction.
 
-**The two lines.** `gates`, read from T2 (a gate failing is no failure of the run):
+**The two lines.** `gates`, read from T2 (`gates_tree`); without T2, `gates_tree` and the values
+are null and the run says each line is not judged (a gate failing is no failure of the run):
 
 - `redraw_p95_ms_at_120x40 <= 16`: the largest p95 of the navigation rows.
 - `redraw_recompute_max_ms <= 1000`: the slowest frame of the recompute rows, the first-time
@@ -474,9 +477,9 @@ ms, bytes, first]`, `ms` being null for one that drew nothing, so that a later c
 be worked out from the file. A part that cannot be measured is recorded in `failures` and exit
 status 1 means something could not be measured.
 
-`nightly-bench.yml` runs it on each bench runner after the index measurements and publishes the
-file to `bench-results` beside the others. `--note` keeps free text in the result file;
-`--tree-path` measures a tree that is already there, read-only and neither built nor verified.
+`nightly-bench.yml` runs it on T2 and T3 on each bench runner after the index measurements and
+publishes the file to `bench-results` beside the others. `--note` keeps free text in the result
+file; `--tree-path` measures a tree that is already there, read-only and neither built nor verified.
 `results/redraw-macos-arm64-provisional.json` is one such run, on an Apple M5 Pro against a
 read-only `bench/.trees/T2`, kept until the first nightly number exists; it is provisional and
 macOS-local, and it is not the nightly result. It was measured before the frames were split and is

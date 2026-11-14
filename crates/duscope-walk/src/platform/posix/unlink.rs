@@ -35,7 +35,8 @@
 //!   reached, only when the entry is the expected one, into a directory
 //!   open on a descriptor of its own, never replacing what is there.
 //!   Linux renames by name only, so what was moved is read again at its
-//!   new name and moved back when it is not the entry expected.
+//!   new name and moved back when it is not the entry expected, or cannot
+//!   be read.
 
 use std::ffi::{CStr, OsStr};
 use std::io;
@@ -270,6 +271,14 @@ pub(crate) enum RenameError {
     /// failed (its name taken again, most likely): it is at the target
     /// name.
     Stranded(io::Error),
+    /// What was moved could not be read again at the target name (`read`:
+    /// `ESTALE`, `EIO`), so whether it was the entry expected is not known:
+    /// it was moved back, or, where moving it back failed (`back`), it is
+    /// at the target name.
+    Unread {
+        read: io::Error,
+        back: Option<io::Error>,
+    },
     /// The system refused the rename, or the target name is not one name
     /// in its directory: nothing was moved.
     Io(io::Error),
@@ -280,8 +289,8 @@ pub(crate) enum RenameError {
 /// when its device and inode are `expect`, never replacing what is at
 /// `target_name`. Linux renames by name only, so another entry may take the
 /// name between the check and the rename: what was moved is read again at
-/// its new name through `target` and, when it is not the entry expected,
-/// moved back, again replacing nothing.
+/// its new name through `target` and, when it is not the entry expected or
+/// cannot be read, moved back, again replacing nothing.
 ///
 /// The rename is `renameat2(2)` with `RENAME_NOREPLACE`. Where the
 /// filesystem refuses the flag (`EINVAL`: NFS, 9p and Ceph always, FUSE
@@ -297,8 +306,10 @@ pub(crate) enum RenameError {
 /// [`RenameError::Entry`] when the entry is gone or is not `expect`:
 /// nothing moved, or what moved was moved back; [`RenameError::Taken`]
 /// when something is at `target_name`; [`RenameError::Stranded`] when what
-/// moved was not `expect` and could not be moved back; [`RenameError::Io`]
-/// when the system refuses the rename.
+/// moved was not `expect` and could not be moved back;
+/// [`RenameError::Unread`] when what moved could not be read again: moved
+/// back, or not where moving it back failed; [`RenameError::Io`] when the
+/// system refuses the rename.
 #[cfg(target_os = "linux")]
 pub(crate) fn rename_checked(
     parent: &CheckedDir,
@@ -333,14 +344,33 @@ pub(crate) fn rename_checked(
     }
     #[cfg(test)]
     hook::moved();
-    let moved = super::with_c_name(to.1, |c_name| stat_at(to.0, c_name));
-    if moved.is_ok_and(|stat| stat.ident() == expect) {
-        return Ok(());
+    // What cannot be read is moved back as another entry is: it may be the
+    // entry expected, or another.
+    let unread = match super::with_c_name(to.1, |c_name| stat_after_move(to.0, c_name)) {
+        Ok(stat) if stat.ident() == expect => return Ok(()),
+        Ok(_) => None,
+        Err(e) => Some(e),
+    };
+    match (rename_noreplace(to, from), unread) {
+        (Ok(()), None) => Err(RenameError::Entry(RemoveError::Changed { path })),
+        (Ok(()), Some(read)) => Err(RenameError::Unread { read, back: None }),
+        (Err(back), None) => Err(RenameError::Stranded(back)),
+        (Err(back), Some(read)) => Err(RenameError::Unread {
+            read,
+            back: Some(back),
+        }),
     }
-    match rename_noreplace(to, from) {
-        Ok(()) => Err(RenameError::Entry(RemoveError::Changed { path })),
-        Err(e) => Err(RenameError::Stranded(e)),
+}
+
+/// What [`rename_checked`] moved, read again at its new name: `name` in the
+/// directory open on `dir`.
+#[cfg(target_os = "linux")]
+fn stat_after_move(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Stat> {
+    #[cfg(test)]
+    if let Some(errno) = hook::unread_after_move() {
+        return Err(io::Error::from_raw_os_error(errno));
     }
+    stat_at(dir, name)
 }
 
 /// Renames `from` to `to`, each the descriptor of a directory and a name in
@@ -816,8 +846,9 @@ fn statx(dir: BorrowedFd<'_>, name: &CStr, flags: c_int) -> io::Result<Stat> {
             let bit = |attribute: c_int| u64::from(attribute.cast_unsigned());
             let set = |attribute: c_int| stx.stx_attributes & bit(attribute) != 0;
             // The kernel flags an automount point from statx's first version
-            // (4.11), but puts the bit in the mask, with the mount root's,
-            // only from 5.8: before, an unflagged directory may be either.
+            // (4.11), though it puts the bit in the mask only from 5.13, and
+            // a mount root from 5.8, the bit in the mask with it: before, an
+            // unflagged directory may be either.
             let mount = if set(libc::STATX_ATTR_AUTOMOUNT) {
                 Some(true)
             } else if stx.stx_attributes_mask & bit(libc::STATX_ATTR_MOUNT_ROOT) != 0 {
@@ -1059,6 +1090,7 @@ pub(crate) mod hook {
     thread_local! {
         static MOVED: RefCell<Option<Moved>> = const { RefCell::new(None) };
         static NO_NOREPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static UNREAD: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
     }
 
     /// Calls `moved` on this thread just after a rename into the Trash has
@@ -1113,6 +1145,31 @@ pub(crate) mod hook {
     #[cfg(target_os = "linux")]
     pub(super) fn no_noreplace() -> bool {
         NO_NOREPLACE.with(std::cell::Cell::get)
+    }
+
+    /// Makes the read of what a rename into the Trash moved fail with
+    /// `errno` on this thread, as a stale NFS handle (`ESTALE`) or a disk
+    /// error (`EIO`) makes it, until the returned guard drops.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn unreadable_after_move(errno: i32) -> UnreadGuard {
+        UNREAD.with(|u| u.set(Some(errno)));
+        UnreadGuard
+    }
+
+    /// Lets the read succeed again when dropped.
+    #[cfg(target_os = "linux")]
+    pub(crate) struct UnreadGuard;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for UnreadGuard {
+        fn drop(&mut self) {
+            UNREAD.with(|u| u.set(None));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn unread_after_move() -> Option<i32> {
+        UNREAD.with(std::cell::Cell::get)
     }
 
     /// What the kernel answers a removal, as a test makes it: an older or

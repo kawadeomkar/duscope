@@ -115,10 +115,96 @@ struct Project {
     id: Option<u32>,
 }
 
+/// `caches`' rows, ranked and not yet built: the caches listed, in order,
+/// each with what the pass found of it, and what the page says of them.
+/// Rows are built one at a time from it ([`CacheRows::rows`]), for a
+/// writer that streams them, or all at once ([`CacheRows::page`]).
+#[derive(Debug, Clone)]
+pub struct CacheRows {
+    /// Rows matched before `--limit`, those of earlier pages included.
+    pub total_count: u64,
+    /// Where the next page starts, when rows remain.
+    pub next: Option<After>,
+    /// Whether rows remain after this page.
+    pub truncated: bool,
+    /// The caches listed, in order.
+    caches: Vec<Found>,
+    /// The root's size, which each row's share is of.
+    root_total: u64,
+    /// The size rows are shown by.
+    size: SizeKind,
+}
+
+impl CacheRows {
+    /// How many rows there are.
+    pub fn len(&self) -> usize {
+        self.caches.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.caches.is_empty()
+    }
+
+    /// The row at `at`, counted from 0.
+    pub fn row(&self, view: &(impl TreeView + ?Sized), at: usize) -> CacheEntry {
+        let f = &self.caches[at];
+        let node = view.node(f.id);
+        let (name, name_raw) = name_fields(&view.name(f.id));
+        let project = f.project.as_ref().map(|p| p.path.clone());
+        let (path, path_raw) = path_fields(&f.path);
+        let (project_root, project_root_raw) = project
+            .as_deref()
+            .map(path_fields)
+            .map_or((None, None), |(p, raw)| (Some(p), raw));
+        CacheEntry {
+            path,
+            path_bytes: f.path.clone(),
+            name,
+            name_raw,
+            rule: f.rule.clone(),
+            regenerable_by: f.regenerable_by,
+            project_root,
+            project_bytes: project.unwrap_or_default(),
+            confirmed: f.confirmed,
+            cachedir_tag: f.cachedir_tag,
+            allocated_bytes: node.allocated,
+            apparent_bytes: node.apparent,
+            pct_of_root: pct(node.size(self.size), self.root_total),
+            file_count: node.file_count,
+            max_mtime: iso8601(node.max_mtime_ns),
+            path_raw,
+            project_root_raw,
+        }
+    }
+
+    /// The rows in order, each built as it is read.
+    pub fn rows<'a, V: TreeView + ?Sized>(
+        &'a self,
+        view: &'a V,
+    ) -> impl Iterator<Item = CacheEntry> + 'a {
+        (0..self.caches.len()).map(move |at| self.row(view, at))
+    }
+
+    /// The page: every row built.
+    pub fn page(self, view: &(impl TreeView + ?Sized)) -> Page<CacheEntry> {
+        Page {
+            entries: self.rows(view).collect(),
+            total_count: self.total_count,
+            next: self.next,
+            truncated: self.truncated,
+        }
+    }
+}
+
 /// The cache directories under the root of `view`, largest first.
 pub fn caches(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<CacheEntry> {
+    cache_rows(view, q).page(view)
+}
+
+/// [`caches`]' rows, ranked and not yet built.
+pub fn cache_rows(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> CacheRows {
     let found = find(view, q);
-    let by_id: BTreeMap<u32, &Found> = found.iter().map(|f| (f.id, f)).collect();
     let candidates = found.iter().map(|f| f.id).filter(|&id| {
         let node = view.node(id);
         node.size(q.size) >= q.min_size && q.filters.keeps(view, &node, q.size)
@@ -134,48 +220,21 @@ pub fn caches(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Cach
     } else {
         view.node(0).size(q.size)
     };
-    let entries: Vec<_> = ids
-        .into_iter()
-        .filter_map(|id| by_id.get(&id).copied())
-        .map(|f| {
-            let node = view.node(f.id);
-            let (name, name_raw) = name_fields(&view.name(f.id));
-            let project = f.project.as_ref().map(|p| p.path.clone());
-            let (path, path_raw) = path_fields(&f.path);
-            let (project_root, project_root_raw) = project
-                .as_deref()
-                .map(path_fields)
-                .map_or((None, None), |(p, raw)| (Some(p), raw));
-            CacheEntry {
-                path,
-                path_bytes: f.path.clone(),
-                name,
-                name_raw,
-                rule: f.rule.clone(),
-                regenerable_by: f.regenerable_by,
-                project_root,
-                project_bytes: project.unwrap_or_default(),
-                confirmed: f.confirmed,
-                cachedir_tag: f.cachedir_tag,
-                allocated_bytes: node.allocated,
-                apparent_bytes: node.apparent,
-                pct_of_root: pct(node.size(q.size), root_total),
-                file_count: node.file_count,
-                max_mtime: iso8601(node.max_mtime_ns),
-                path_raw,
-                project_root_raw,
-            }
-        })
-        .collect();
-    Page {
-        truncated: remain(seen, entries.len(), total_count),
-        entries,
+    // Each directory is found once.
+    let mut by_id: BTreeMap<u32, Found> = found.into_iter().map(|f| (f.id, f)).collect();
+    let caches: Vec<Found> = ids.iter().filter_map(|id| by_id.remove(id)).collect();
+    CacheRows {
+        truncated: remain(seen, caches.len(), total_count),
         total_count,
         next,
+        caches,
+        root_total,
+        size: q.size,
     }
 }
 
 /// One project's caches, as they are summed.
+#[derive(Debug, Clone)]
 struct Group {
     allocated: u64,
     apparent: u64,
@@ -184,10 +243,82 @@ struct Group {
     caches: Vec<(u64, Vec<u8>)>,
 }
 
+/// `caches --by-project`'s rows, ranked and not yet built: each project
+/// listed, in order, with its caches, and what the page says of them. A
+/// row reads nothing more of the scan; rows are built one at a time from
+/// it ([`ProjectRows::rows`]), for a writer that streams them, or all at
+/// once ([`ProjectRows::page`]).
+#[derive(Debug, Clone)]
+pub struct ProjectRows {
+    /// Projects matched before `--limit`.
+    pub total_count: u64,
+    /// Whether projects remain after these.
+    pub truncated: bool,
+    /// The projects listed, in order: each one's path (`None` for the
+    /// caches no marker confirms) and caches.
+    projects: Vec<(Option<Vec<u8>>, Group)>,
+}
+
+impl ProjectRows {
+    /// How many rows there are.
+    pub fn len(&self) -> usize {
+        self.projects.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.projects.is_empty()
+    }
+
+    /// The row at `at`, counted from 0.
+    pub fn row(&self, at: usize) -> ProjectEntry {
+        let (project, group) = &self.projects[at];
+        let (project_root, project_root_raw) = project
+            .as_deref()
+            .map(path_fields)
+            .map_or((None, None), |(p, raw)| (Some(p), raw));
+        ProjectEntry {
+            project_root,
+            path_bytes: project.clone().unwrap_or_default(),
+            allocated_bytes: group.allocated,
+            apparent_bytes: group.apparent,
+            cache_count: group.caches.len() as u64,
+            max_mtime: iso8601(group.newest_ns),
+            caches: group
+                .caches
+                .iter()
+                .take(PROJECT_CACHES)
+                .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
+                .collect(),
+            project_root_raw,
+        }
+    }
+
+    /// The rows in order, each built as it is read.
+    pub fn rows(&self) -> impl Iterator<Item = ProjectEntry> + '_ {
+        (0..self.projects.len()).map(move |at| self.row(at))
+    }
+
+    /// The page: every row built.
+    pub fn page(self) -> Page<ProjectEntry> {
+        Page {
+            entries: self.rows().collect(),
+            total_count: self.total_count,
+            next: None,
+            truncated: self.truncated,
+        }
+    }
+}
+
 /// The caches under the root of `view`, grouped by the directory holding
 /// their marker, largest first; the caches no marker confirms form one
 /// group of their own, whose `project_root` is null.
 pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<ProjectEntry> {
+    project_rows(view, q).page()
+}
+
+/// [`projects`]' rows, ranked and not yet built.
+pub fn project_rows(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> ProjectRows {
     let found = find(view, q);
     let mut groups: BTreeMap<Option<Project>, Group> = BTreeMap::new();
     for f in found {
@@ -238,35 +369,10 @@ pub fn projects(view: &(impl TreeView + ?Sized), q: &CachesQuery<'_>) -> Page<Pr
     if let Some(limit) = q.limit {
         rows.truncate(limit);
     }
-    let entries: Vec<_> = rows
-        .into_iter()
-        .map(|(project, group)| {
-            let (project_root, project_root_raw) = project
-                .as_deref()
-                .map(path_fields)
-                .map_or((None, None), |(p, raw)| (Some(p), raw));
-            ProjectEntry {
-                project_root,
-                path_bytes: project.unwrap_or_default(),
-                allocated_bytes: group.allocated,
-                apparent_bytes: group.apparent,
-                cache_count: group.caches.len() as u64,
-                max_mtime: iso8601(group.newest_ns),
-                caches: group
-                    .caches
-                    .into_iter()
-                    .take(PROJECT_CACHES)
-                    .map(|(_, p)| String::from_utf8_lossy(&p).into_owned())
-                    .collect(),
-                project_root_raw,
-            }
-        })
-        .collect();
-    Page {
-        truncated: remain(0, entries.len(), total_count),
-        entries,
+    ProjectRows {
+        truncated: remain(0, rows.len(), total_count),
         total_count,
-        next: None,
+        projects: rows,
     }
 }
 

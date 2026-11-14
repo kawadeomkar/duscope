@@ -193,6 +193,38 @@ fn p3_mcp_04_each_argument_becomes_its_flag() {
     }
 }
 
+/// P3-MCP-10: the list tools, whose verbs take `--strict`, take `strict`;
+/// `false` sets nothing, as an absent `strict` does.
+#[test]
+fn p3_mcp_10_strict_becomes_strict_in_each_list_tool() {
+    let env = TestEnv::new();
+    let root = env.work_dir().canonicalize().unwrap();
+    let index_dir = env.index_dir();
+    for tool in [
+        "duscope_top",
+        "duscope_stale",
+        "duscope_caches",
+        "duscope_by_type",
+    ] {
+        let strict = command_line(tool, &json!({"strict": true}), &root, &index_dir);
+        assert_eq!(
+            strict.iter().filter(|arg| *arg == "--strict").count(),
+            1,
+            "{tool}: {strict:?}"
+        );
+        let lenient = command_line(tool, &json!({"strict": false}), &root, &index_dir);
+        assert!(
+            !lenient.iter().any(|arg| arg == "--strict"),
+            "{tool}: {lenient:?}"
+        );
+        assert_eq!(
+            lenient,
+            command_line(tool, &json!({}), &root, &index_dir),
+            "{tool}"
+        );
+    }
+}
+
 #[test]
 fn p3_mcp_04_a_spilled_result_says_where_the_rows_went() {
     let text = spilled_text(&json!({"path": "/tmp/out/x.json", "rows": 400, "bytes": 90_000}));

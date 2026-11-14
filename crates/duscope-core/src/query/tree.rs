@@ -34,17 +34,80 @@ pub struct TreeQuery {
     pub size: SizeKind,
 }
 
+/// `tree`'s rows, kept and not yet built: their ids in pre-order, what the
+/// page says of them, and what each row needs besides its entry. Rows are
+/// built one at a time from it ([`TreeRows::rows`]), for a writer that
+/// streams them, or all at once ([`TreeRows::page`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TreeRows {
+    /// Rows matched before `--limit`.
+    pub total_count: u64,
+    /// Whether rows remain after these.
+    pub truncated: bool,
+    /// The rows' ids, in pre-order, each with its parent's size, which its
+    /// share is of.
+    rows: Vec<(u32, u64)>,
+    /// The root's size, which each row's share of the root is of.
+    root_total: u64,
+    /// The size rows are shown by.
+    size: SizeKind,
+}
+
+impl TreeRows {
+    /// How many rows there are.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// The row at `at`, counted from 0.
+    pub fn row(&self, view: &(impl TreeView + ?Sized), at: usize) -> TreeEntry {
+        let (id, parent_total) = self.rows[at];
+        let node = view.node(id);
+        let share = pct(node.counted(self.size), parent_total);
+        entry(view, &node, self.root_total, share, self.size)
+    }
+
+    /// The rows in order, each built as it is read.
+    pub fn rows<'a, V: TreeView + ?Sized>(
+        &'a self,
+        view: &'a V,
+    ) -> impl Iterator<Item = TreeEntry> + 'a {
+        (0..self.rows.len()).map(move |at| self.row(view, at))
+    }
+
+    /// The page: every row built.
+    pub fn page(self, view: &(impl TreeView + ?Sized)) -> Page<TreeEntry> {
+        Page {
+            entries: self.rows(view).collect(),
+            total_count: self.total_count,
+            next: None,
+            truncated: self.truncated,
+        }
+    }
+}
+
 /// The tree under the root of `view`, in pre-order. `--limit` keeps the
 /// shallowest rows: every row of one depth before any row below it, the
 /// earlier in pre-order first within a depth, so a kept row's parent is
 /// kept too; the kept rows stay in pre-order.
 pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
+    tree_rows(view, q).page(view)
+}
+
+/// [`tree`]'s rows, kept and not yet built.
+pub fn tree_rows(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> TreeRows {
     if view.is_empty() {
-        return Page {
-            entries: Vec::new(),
+        return TreeRows {
             total_count: 0,
-            next: None,
             truncated: false,
+            rows: Vec::new(),
+            root_total: 0,
+            size: q.size,
         };
     }
     let depth = q.depth.unwrap_or(2);
@@ -84,19 +147,16 @@ pub fn tree(view: &(impl TreeView + ?Sized), q: &TreeQuery) -> Page<TreeEntry> {
     }
     let mut rows = kept.into_vec();
     rows.sort_unstable_by_key(|&(_, order, _, _)| order);
-    let entries: Vec<_> = rows
+    let rows: Vec<(u32, u64)> = rows
         .into_iter()
-        .map(|(_, _, id, parent_total)| {
-            let node = view.node(id);
-            let share = pct(node.counted(q.size), parent_total);
-            entry(view, &node, root_total, share, q.size)
-        })
+        .map(|(_, _, id, parent_total)| (id, parent_total))
         .collect();
-    Page {
-        truncated: remain(0, entries.len(), total_count),
-        entries,
+    TreeRows {
+        truncated: remain(0, rows.len(), total_count),
         total_count,
-        next: None,
+        rows,
+        root_total,
+        size: q.size,
     }
 }
 

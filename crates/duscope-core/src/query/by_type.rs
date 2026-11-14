@@ -55,18 +55,106 @@ struct Tally {
     largest: Vec<(u64, u32)>,
 }
 
+/// `by-type`'s rows, ranked and not yet built: the classes listed, in
+/// order, each with what it adds up to and the ids of its largest files,
+/// and what the page says of them. Rows are built one at a time from it
+/// ([`ByTypeRows::rows`]), each with its examples, for a writer that
+/// streams them, or all at once ([`ByTypeRows::page`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ByTypeRows {
+    /// Classes matched before `--limit`.
+    pub total_count: u64,
+    /// Whether classes remain after these.
+    pub truncated: bool,
+    /// The classes listed, in order, each with its tally.
+    classes: Vec<(Class, Tally)>,
+    /// The root's size, which each class's share is of.
+    root_total: u64,
+    /// The size classes are shown by.
+    size: SizeKind,
+}
+
+impl ByTypeRows {
+    /// How many rows there are.
+    pub fn len(&self) -> usize {
+        self.classes.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.classes.is_empty()
+    }
+
+    /// The row at `at`, counted from 0, its examples read from `view`.
+    pub fn row(&self, view: &(impl TreeView + ?Sized), at: usize) -> ByTypeEntry {
+        let (class, tally) = &self.classes[at];
+        let size = match self.size {
+            SizeKind::Allocated => tally.allocated,
+            SizeKind::Apparent => tally.apparent,
+        };
+        ByTypeEntry {
+            class: class.as_str(),
+            allocated_bytes: tally.allocated,
+            apparent_bytes: tally.apparent,
+            pct_of_root: pct(size, self.root_total),
+            file_count: tally.files,
+            largest: tally
+                .largest
+                .iter()
+                .map(|&(_, id)| {
+                    let node = view.node(id);
+                    let (name, name_raw) = name_fields(&view.name(id));
+                    let (path, path_raw) = path_fields(&abs_path(view, id));
+                    Example {
+                        path,
+                        name,
+                        name_raw,
+                        allocated_bytes: node.allocated,
+                        apparent_bytes: node.apparent,
+                        path_raw,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// The rows in order, each built as it is read.
+    pub fn rows<'a, V: TreeView + ?Sized>(
+        &'a self,
+        view: &'a V,
+    ) -> impl Iterator<Item = ByTypeEntry> + 'a {
+        (0..self.classes.len()).map(move |at| self.row(view, at))
+    }
+
+    /// The page: every row built.
+    pub fn page(self, view: &(impl TreeView + ?Sized)) -> Page<ByTypeEntry> {
+        Page {
+            entries: self.rows(view).collect(),
+            total_count: self.total_count,
+            next: None,
+            truncated: self.truncated,
+        }
+    }
+}
+
 /// The file classes under the root of `view`.
 pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByTypeEntry> {
+    by_type_rows(view, q).page(view)
+}
+
+/// [`by_type`]'s rows, ranked and not yet built.
+pub fn by_type_rows(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> ByTypeRows {
     if view.is_empty() {
-        return Page {
-            entries: Vec::new(),
+        return ByTypeRows {
             total_count: 0,
-            next: None,
             truncated: false,
+            classes: Vec::new(),
+            root_total: 0,
+            size: q.size,
         };
     }
     let root = view.node(0);
-    let tallies = from_index(view, q).unwrap_or_else(|| tally(view, q));
+    let mut tallies = from_index(view, q).unwrap_or_else(|| tally(view, q));
     let root_total = root.size(q.size);
     let mut classes: Vec<Class> = Class::ALL
         .into_iter()
@@ -103,41 +191,16 @@ pub fn by_type(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Page<ByT
     if let Some(limit) = q.limit {
         classes.truncate(limit);
     }
-    let entries: Vec<_> = classes
+    let classes: Vec<(Class, Tally)> = classes
         .into_iter()
-        .map(|class| {
-            let tally = &tallies[index(class)];
-            ByTypeEntry {
-                class: class.as_str(),
-                allocated_bytes: tally.allocated,
-                apparent_bytes: tally.apparent,
-                pct_of_root: pct(size_of(class), root_total),
-                file_count: tally.files,
-                largest: tally
-                    .largest
-                    .iter()
-                    .map(|&(_, id)| {
-                        let node = view.node(id);
-                        let (name, name_raw) = name_fields(&view.name(id));
-                        let (path, path_raw) = path_fields(&abs_path(view, id));
-                        Example {
-                            path,
-                            name,
-                            name_raw,
-                            allocated_bytes: node.allocated,
-                            apparent_bytes: node.apparent,
-                            path_raw,
-                        }
-                    })
-                    .collect(),
-            }
-        })
+        .map(|class| (class, std::mem::take(&mut tallies[index(class)])))
         .collect();
-    Page {
-        truncated: remain(0, entries.len(), total_count),
-        entries,
+    ByTypeRows {
+        truncated: remain(0, classes.len(), total_count),
         total_count,
-        next: None,
+        classes,
+        root_total,
+        size: q.size,
     }
 }
 
