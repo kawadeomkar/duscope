@@ -8,7 +8,8 @@
 //! MCP, where a scan rooted above a root is read at the root, a result names
 //! no path outside it but the scan's root and the mount point of the volume
 //! the root lies on. P5-CLI-05: `export --format gpscan` records the volume
-//! its path lies on by the same device rule.
+//! its path lies on by the same device rule, and `summary` of a file names
+//! the volume its directory lies on, with the file's bytes.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -914,6 +915,53 @@ fn p5_cli_05_a_gpscan_records_the_volume_its_root_lies_on() {
             "loop".to_owned()
         )
     );
+}
+
+#[test]
+fn p5_cli_05_summary_of_a_file_names_the_volume_it_lies_on() {
+    let env = TestEnv::new();
+    let (root, id) = firmlinked(&env);
+    let summary = |path: &Path, scan: &[&OsStr]| {
+        let mut args = vec![os("summary"), os("--json"), path.as_os_str()];
+        args.extend_from_slice(scan);
+        run(&env, &args)
+    };
+    let data = root.join("sys/Volumes/Data").display().to_string();
+    // A file lies on its directory's device: below the firmlink into the
+    // Data volume, through the firmlink below sys/usr, and on the System
+    // volume. Its volume's share is the file's bytes.
+    for (file, volume) in [
+        ("data/proj/src/main.rs", data.as_str()),
+        ("data/proj/README", data.as_str()),
+        ("sys/usr/local/lib/libx", data.as_str()),
+        ("sys/usr/bin/tool", "/"),
+    ] {
+        let answer = summary(&root.join(file), &[os("--scan"), os(&id)]);
+        let result = &answer["result"];
+        assert_eq!(mount_points(result), [volume], "{file}: {answer}");
+        assert!(result["allocated_bytes"].as_u64().unwrap() > 0, "{file}");
+        for bytes in ["allocated_bytes", "apparent_bytes", "du_compatible_bytes"] {
+            assert_eq!(
+                result["volumes"][0][bytes], result[bytes],
+                "{file}: {bytes}"
+            );
+        }
+    }
+    // A file scanned for the verb, which no saved scan holds: the volume the
+    // scan met, with the file's bytes.
+    let alone = env.tmp_dir().join("alone");
+    fs::create_dir_all(&alone).unwrap();
+    fs::write(alone.join("file"), vec![5u8; 20_000]).unwrap();
+    let answer = summary(&alone.join("file"), &[os("--no-save")]);
+    let result = &answer["result"];
+    assert_eq!(result["volumes"].as_array().unwrap().len(), 1, "{answer}");
+    assert!(result["allocated_bytes"].as_u64().unwrap() > 0, "{answer}");
+    for bytes in ["allocated_bytes", "apparent_bytes", "du_compatible_bytes"] {
+        assert_eq!(
+            result["volumes"][0][bytes], result[bytes],
+            "{bytes}: {answer}"
+        );
+    }
 }
 
 /// The lines of a gitignore file that leaves out every entry of `/` but
