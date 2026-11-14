@@ -1760,7 +1760,8 @@ fn p4_tui_05_the_tables_and_a_mask_on_t2() {
     step("the help", &[char('?')]);
 }
 
-/// A saved scan of the benchmark tree `name` (`bench/.trees/<name>`), as
+/// A saved scan of the benchmark tree `name` (under `DUSCOPE_BENCH_TREES`,
+/// as the nightly names its trees, else `bench/.trees`), as
 /// [`crate::cursor::tests::t2`] makes T2's.
 fn bench_index(env: &duscope_testkit::TestEnv, name: &str) -> Option<duscope_core::index::Index> {
     use duscope_core::index::Index;
@@ -1770,9 +1771,11 @@ fn bench_index(env: &duscope_testkit::TestEnv, name: &str) -> Option<duscope_cor
         eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
         return None;
     }
-    let tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../bench/.trees")
-        .join(name);
+    let trees = std::env::var_os("DUSCOPE_BENCH_TREES").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/.trees"),
+        PathBuf::from,
+    );
+    let tree = trees.join(name);
     let tree = std::fs::canonicalize(&tree).unwrap_or_else(|e| {
         panic!(
             "{name} is not built at {}: {e}: run `just bench build --trees {name}`",
@@ -1798,7 +1801,7 @@ fn bench_index(env: &duscope_testkit::TestEnv, name: &str) -> Option<duscope_cor
 /// A folder of a million files, T3, as the T2 test measures: the frames
 /// that sort it, move in it and mask it. Reported rather than asserted.
 #[test]
-#[ignore = "needs bench/.trees/T3 and the release binary; DUSCOPE_TEST_PLATFORM=1"]
+#[ignore = "needs T3 (DUSCOPE_BENCH_TREES, else bench/.trees) and the release binary; DUSCOPE_TEST_PLATFORM=1"]
 fn p4_tui_05_a_folder_of_a_million_files_on_t3() {
     use std::time::Instant;
 
