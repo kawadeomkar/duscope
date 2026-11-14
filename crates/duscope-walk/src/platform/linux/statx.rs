@@ -155,7 +155,10 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
     let mount_root = attribute(libc::STATX_ATTR_MOUNT_ROOT);
     flags.set(Flags::MOUNT_ROOT, mount_root);
     // An automount point not yet triggered is a mount boundary too: what
-    // lies beneath it is another filesystem.
+    // lies beneath it is another filesystem. The kernel sets the attribute
+    // from statx's first version (4.11), but vouches for it in the mask only
+    // from 5.13 (5.10.36 in the 5.10 series): before, it is not read, and
+    // such a point reads as a plain directory.
     let automount = attribute(libc::STATX_ATTR_AUTOMOUNT);
     let mnt_id = if stx.stx_mask & (libc::STATX_MNT_ID | libc::STATX_MNT_ID_UNIQUE) != 0 {
         stx.stx_mnt_id
@@ -198,8 +201,10 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
 /// `S_AUTOMOUNT` (an NFS submount or referral, debugfs's `tracing`),
 /// which `statx` reports as `STATX_ATTR_AUTOMOUNT` with the
 /// mount around it; a triggered one reads as the root of what was mounted
-/// on it. A kernel before 5.8 reports no mount roots, so there the
-/// attribute alone decides. autofs marks its triggers on the dentry, not
+/// on it. Before Linux 5.13 (5.10.36 in the 5.10 series) the kernel does
+/// not vouch for the attribute in `stx_attributes_mask`, so [`entry`] does
+/// not read it: no point is found, and the walk enters one as a directory,
+/// which mounts it. autofs marks its triggers on the dentry, not
 /// the inode, so they carry no attribute: a direct map's is the root of an
 /// `autofs` mount, classified as a network one.
 pub(super) fn untriggered_automount(entry: &Entry) -> bool {

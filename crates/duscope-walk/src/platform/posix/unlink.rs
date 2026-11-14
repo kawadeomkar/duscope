@@ -846,8 +846,9 @@ fn statx(dir: BorrowedFd<'_>, name: &CStr, flags: c_int) -> io::Result<Stat> {
             let bit = |attribute: c_int| u64::from(attribute.cast_unsigned());
             let set = |attribute: c_int| stx.stx_attributes & bit(attribute) != 0;
             // The kernel flags an automount point from statx's first version
-            // (4.11), but puts the bit in the mask, with the mount root's,
-            // only from 5.8: before, an unflagged directory may be either.
+            // (4.11), though it puts the bit in the mask only from 5.13, and
+            // a mount root from 5.8, the bit in the mask with it: before, an
+            // unflagged directory may be either.
             let mount = if set(libc::STATX_ATTR_AUTOMOUNT) {
                 Some(true)
             } else if stx.stx_attributes_mask & bit(libc::STATX_ATTR_MOUNT_ROOT) != 0 {

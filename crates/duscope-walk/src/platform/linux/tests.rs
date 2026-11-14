@@ -454,7 +454,7 @@ fn p5_walk_06_linux_an_automount_attribute_off_a_mount_root_is_untriggered() {
     assert!(!untriggered(&[root, auto], &[root]));
     assert!(!untriggered(&[root, auto], &[root, auto]));
     assert!(!untriggered(&[root, auto], &[]));
-    // Before 5.8 the kernel vouches for no mount root: the attribute decides.
+    // Where the mask vouches for no mount root, the attribute decides.
     assert!(untriggered(&[auto], &[auto]));
     assert!(!untriggered(&[auto], &[]));
 }
