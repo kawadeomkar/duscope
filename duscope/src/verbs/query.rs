@@ -1122,15 +1122,19 @@ pub(super) fn lagging_atime(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use clap::Parser;
-    use duscope_core::query::timegrammar;
+    use duscope_core::query::{self, StaleQuery, TreeView, timegrammar};
     use duscope_walk::{Normalization, Skip, VolumeClass, VolumeInfo};
 
-    use super::{atime_unreliable, scan_age, stale_written, top_written};
+    use super::{
+        DepthUse, Owns, atime_unreliable, prepare, scan_age, source, stale_written, top_asked,
+        top_written, write_ranked,
+    };
     use crate::cli::{Cli, Verb};
     use crate::out::{Capture, Fields, Format, Output, Units};
+    use crate::verbs::Failure;
 
     const HOUR: i64 = 3_600_000_000_000;
 
@@ -1253,6 +1257,187 @@ mod tests {
                     String::from_utf8_lossy(&collected),
                     "{line:?} {format:?} {chosen:?}"
                 );
+            }
+        }
+    }
+
+    /// `top` or `stale` as `cli` asks, on the saved scan in `dir`, written
+    /// to `output` as the verb writes it (without `stale`'s warnings),
+    /// streamed when `stream`. With `fail_at`, the read of that row
+    /// (counted from 1) fails: its id is the one past the scan's last
+    /// entry, which the index fails to read as it fails a read of a file
+    /// overwritten under it, and from then on every entry reads as empty.
+    fn ranked(
+        cli: &Cli,
+        dir: &Path,
+        output: &Output,
+        stream: bool,
+        fail_at: Option<usize>,
+    ) -> Result<(), Failure> {
+        let fail = |ids: &mut [u32], view: &dyn TreeView| {
+            if let Some(at) = fail_at {
+                ids[at - 1] = view.len();
+            }
+        };
+        match &cli.verb {
+            Some(Verb::Top(args)) => {
+                let source = source::source(&args.walk, &args.index, Some(dir))?;
+                let asked = top_asked(
+                    source,
+                    &args.walk,
+                    Some(&args.query),
+                    "top",
+                    args.files,
+                    !args.no_cut_through,
+                    None,
+                    output,
+                )?;
+                let view = asked.prepared.source.view();
+                let mut rows = query::top_rows(&*view, &asked.q);
+                fail(&mut rows.ids, &*view);
+                drop(view);
+                write_ranked(
+                    asked.prepared,
+                    &args.walk,
+                    "top",
+                    asked.listed,
+                    &rows,
+                    Vec::new(),
+                    asked.hash.as_deref(),
+                    output,
+                    stream,
+                )?;
+            }
+            Some(Verb::Stale(args)) => {
+                let source = source::source(&args.walk, &args.index, Some(dir))?;
+                let owns = Owns {
+                    min_size: true,
+                    older_than: true,
+                };
+                let prepared = prepare(
+                    source,
+                    &args.walk,
+                    Some(&args.query),
+                    output,
+                    DepthUse::Filters,
+                    owns,
+                )?;
+                let q = StaleQuery {
+                    now: prepared.now,
+                    older_than: 0,
+                    atime: false,
+                    min_size: 0,
+                    filters: prepared.filters.clone(),
+                    sort: prepared.sort,
+                    reverse: prepared.reverse,
+                    limit: prepared.limit,
+                    size: prepared.size,
+                    after: None,
+                };
+                let view = prepared.source.view();
+                let mut rows = query::stale_rows(&*view, &q).unwrap();
+                fail(&mut rows.ids, &*view);
+                drop(view);
+                write_ranked(
+                    prepared,
+                    &args.walk,
+                    "stale",
+                    args.query.depth,
+                    &rows,
+                    Vec::new(),
+                    None,
+                    output,
+                    stream,
+                )?;
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    /// A read of the saved scan that fails at row n of a ranked list ends
+    /// the streamed rows there: stdout holds the header and the n - 1 rows
+    /// before it, each the row the collected list writes, and none built
+    /// from the failed read or after it (empty, the scan's root for a
+    /// path); `ndjson` has no `end` line, and the error envelope main
+    /// writes next is its last line; the failure is `index_corrupt`. A
+    /// format that collects the rows (JSON) writes none of them.
+    #[test]
+    fn p2_qry_13_a_read_that_fails_mid_stream_ends_the_rows_there() {
+        let env = duscope_testkit::TestEnv::new();
+        let (root, id) = saved_tree(&env);
+        let dir = env.index_dir();
+        let named = |names: &[&str]| Fields::Named(names.iter().map(|&n| n.to_owned()).collect());
+        let verbs: [(&[&str], Fields); 2] = [
+            (
+                &["top", "--files"],
+                named(&["name", "allocated_bytes", "path"]),
+            ),
+            (&["stale"], named(&["name", "mtime", "path"])),
+        ];
+        for (verb, fields) in &verbs {
+            let mut line = vec!["duscope"];
+            line.extend_from_slice(verb);
+            line.extend([root.to_str().unwrap(), "--scan", &id, "--all"]);
+            let cli = Cli::try_parse_from(&line).unwrap();
+            let shapes: [(Format, Option<&Fields>, bool); 4] = [
+                (Format::Ndjson, None, false),
+                (Format::Ndjson, Some(fields), false),
+                (Format::Plain, None, false),
+                (Format::Plain, Some(fields), true),
+            ];
+            for (format, chosen, header_null) in shapes {
+                let (output, capture) = captured(format, chosen, header_null);
+                ranked(&cli, &dir, &output, false, None).unwrap();
+                let whole = capture.take();
+                let terminator = if header_null { 0 } else { b'\n' };
+                let records: Vec<&[u8]> = whole.split_inclusive(|&b| b == terminator).collect();
+                // The lines before the rows (ndjson's header, --header's
+                // names) and after them (ndjson's trailer).
+                let ndjson = format == Format::Ndjson;
+                let before = usize::from(ndjson || header_null);
+                let rows = records.len() - before - usize::from(ndjson);
+                assert!(rows >= 50, "{line:?} {format:?}: {rows} rows");
+                for at in [1, 2, rows / 2, rows] {
+                    let shape = format!("{line:?} {format:?} {chosen:?}, row {at} of {rows}");
+                    let (output, capture) = captured(format, chosen, header_null);
+                    let failure = ranked(&cli, &dir, &output, true, Some(at)).unwrap_err();
+                    assert_eq!(failure.code, "index_corrupt", "{shape}");
+                    let written = capture.take();
+                    assert_eq!(
+                        String::from_utf8_lossy(&written),
+                        String::from_utf8_lossy(&records[..before + at - 1].concat()),
+                        "{shape}"
+                    );
+                    if ndjson {
+                        output.failure(&failure);
+                        let error = capture.take();
+                        let lines: Vec<serde_json::Value> = written
+                            .split_inclusive(|&b| b == b'\n')
+                            .chain([error.as_slice()])
+                            .map(|line| serde_json::from_slice(line).unwrap())
+                            .collect();
+                        let (last, lines) = lines.split_last().unwrap();
+                        assert_eq!(last["error"]["code"], "index_corrupt", "{shape}");
+                        assert_eq!(lines[0]["type"], "scan", "{shape}");
+                        for row in &lines[1..] {
+                            assert_eq!(row["type"], "entry", "{shape}");
+                            assert_ne!(row["name"], "", "{shape}");
+                        }
+                    } else if chosen.is_some() {
+                        // `name` is the first field: no row's is empty.
+                        let rows = written.split_inclusive(|&b| b == terminator).skip(before);
+                        assert!(rows.into_iter().all(|row| row[0] != b'\t'), "{shape}");
+                    }
+                }
+            }
+            // JSON holds its rows for the envelope: a failed read writes
+            // none, collected by the verb or by list_rows.
+            for stream in [false, true] {
+                let (output, capture) = captured(Format::Json, None, false);
+                let failure = ranked(&cli, &dir, &output, stream, Some(20)).unwrap_err();
+                assert_eq!(failure.code, "index_corrupt", "{line:?} {stream}");
+                assert!(capture.take().is_empty(), "{line:?} {stream}");
             }
         }
     }
