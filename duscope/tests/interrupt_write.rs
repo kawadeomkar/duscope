@@ -7,12 +7,20 @@
 //! long enough to reach the progress handler, until it is stopped or the
 //! time is up: the tests wait for the temporary file, which the write
 //! creates first, and stop it there.
+//!
+//! P5-CORE-09: `import`, which reads its tree from a file or stdin rather
+//! than walking one, stops as `scan` does: Ctrl-C while it reads ends the
+//! process at once, Ctrl-C after it stops the write, and Ctrl-C once the
+//! index has its name leaves the save to finish.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::fmt::Write as _;
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -312,4 +320,225 @@ fn p5_core_07_a_tool_call_past_its_deadline_during_its_write_saves_nothing() {
     assert_eq!(entries, json!([]));
     assert_eq!(scans(&env), Vec::<String>::new(), "no .db, no .db.tmp-*");
     server.finish();
+}
+
+/// An ncdu export of a root, `/srv/imported`, holding `files` files. Cut
+/// after its last file when `whole` is false, the root's array and the
+/// export's still open, as ncdu leaves its output while it writes it.
+fn ncdu_export(files: usize, whole: bool) -> String {
+    let mut export = String::from(
+        "[1,2,{\"progname\":\"ncdu\",\"progver\":\"2.4\",\"timestamp\":2114380800},\n\
+         [{\"name\":\"/srv/imported\",\"asize\":4096,\"dsize\":4096,\"mtime\":2114380000}",
+    );
+    for n in 0..files {
+        write!(
+            export,
+            ",\n{{\"name\":\"file-with-a-longer-name-{n:06}\",\"asize\":1,\"dsize\":4096,\
+             \"mtime\":2114370000}}"
+        )
+        .unwrap();
+    }
+    if whole {
+        export.push_str("]]\n");
+    }
+    export
+}
+
+/// An export of `files` files, whole, in the work directory.
+fn export_file(env: &TestEnv, files: usize) -> PathBuf {
+    let file = env.work_dir().join("export.json");
+    std::fs::write(&file, ncdu_export(files, true)).unwrap();
+    file
+}
+
+/// How `child` exited, within [`PATIENCE`]; past it the child is killed
+/// and the test fails.
+fn exited(child: &mut Child) -> ExitStatus {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if started.elapsed() > PATIENCE {
+            let _ = child.kill();
+            panic!("still running {PATIENCE:?} after the signal");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Ctrl-C while `import` reads its tree, from a pipe its producer still
+/// holds open, so the read alone would never end: the process ends at once,
+/// as during a scan's walk, and nothing has been written.
+#[test]
+fn p5_core_09_ctrl_c_while_import_reads_exits_130_and_leaves_nothing() {
+    let env = TestEnv::new();
+    let mut child = env
+        .cmd()
+        .args(["import", "-", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    // More than a pipe and the reader's buffers hold (64 KiB by default on
+    // both systems, 1 MiB on a kernel with 64 KiB pages): once it is in,
+    // the import has read most of it, and is reading.
+    let export = ncdu_export(32_768, false);
+    assert!(export.len() > 2 << 20, "{}", export.len());
+    stdin.write_all(export.as_bytes()).unwrap();
+    interrupt(&child);
+    let status = exited(&mut child);
+    drop(stdin);
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(status.code(), Some(130), "{status}: {stderr}");
+    // `scan`'s one line, and in --json mode no envelope.
+    assert_eq!(stderr, "duscope: interrupted\n");
+    assert_eq!(String::from_utf8_lossy(&stdout), "");
+    assert_eq!(scans(&env), Vec::<String>::new(), "no .db, no .db.tmp-*");
+}
+
+/// Ctrl-C while `import` saves the tree it read: the write stops, and the
+/// envelope already written stands, as for `scan --save`.
+#[test]
+fn p5_core_09_ctrl_c_during_import_s_write_exits_130_and_leaves_nothing() {
+    let env = TestEnv::new();
+    let file = export_file(&env, 300);
+    let mut child = env
+        .cmd()
+        .arg("import")
+        .arg(&file)
+        .arg("--json")
+        .env("DUSCOPE_TEST_SLOW_WRITE_MS", HOLD_MS)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_the_write(&env, &mut child);
+    interrupt(&child);
+    let signalled = Instant::now();
+    let out = child.wait_with_output().unwrap();
+    let took = signalled.elapsed();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(130), "{}: {stderr}", out.status);
+    assert!(took < PATIENCE, "exit took {took:?}");
+    interrupted_alone(&stderr);
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(envelope["query"]["command"], "import", "{envelope}");
+    assert_eq!(envelope["scan"]["file_count"], 300, "{envelope}");
+    assert_eq!(scans(&env), Vec::<String>::new(), "no .db, no .db.tmp-*");
+}
+
+/// Waits until the write has given the index its name; the name.
+fn wait_for_the_index(env: &TestEnv, child: &mut Child) -> String {
+    let started = Instant::now();
+    loop {
+        let names = scans(env);
+        // `<id>.db`; a temporary file's extension is `tmp-<pid>`.
+        if let Some(name) = names
+            .iter()
+            .find(|name| Path::new(name).extension().is_some_and(|ext| ext == "db"))
+        {
+            return name.clone();
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("the process ended before its index had its name: {status}");
+        }
+        assert!(started.elapsed() < PATIENCE, "no index: {names:?}");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Fills `stderr`, the process's stderr, with empty lines until a write
+/// would block, whatever it holds: in blocks, then a byte at a time, so
+/// that no line of the process fits. Non-blocking only meanwhile, since the
+/// process shares the flag; it writes nothing while its write is held.
+fn fill(stderr: &UnixStream) {
+    stderr.set_nonblocking(true).unwrap();
+    let mut writer = stderr;
+    for block in [&[b'\n'; 4096][..], b"\n"] {
+        loop {
+            match writer.write(block) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) => panic!("cannot fill stderr: {e}"),
+            }
+        }
+    }
+    stderr.set_nonblocking(false).unwrap();
+}
+
+/// Ctrl-C once the import's index has its name: the save is done, and
+/// finishes. The process is held after the rename, where it says `saved as`
+/// (outside JSON) on a stderr the test filled while the write was held: a
+/// socket, which says when it is full, rather than a pipe, whose size
+/// differs between systems and page sizes.
+#[test]
+fn p5_core_09_ctrl_c_after_import_s_rename_keeps_the_scan() {
+    let env = TestEnv::new();
+    let file = export_file(&env, 300);
+    let (mut stderr, writer) = UnixStream::pair().unwrap();
+    let mut child = env
+        .cmd()
+        .arg("import")
+        .arg(&file)
+        .arg("--plain")
+        .env("DUSCOPE_TEST_SLOW_WRITE_MS", "2000")
+        .stdout(Stdio::null())
+        .stderr(OwnedFd::from(writer.try_clone().unwrap()))
+        .spawn()
+        .unwrap();
+    wait_for_the_write(&env, &mut child);
+    fill(&writer);
+    drop(writer);
+    assert!(
+        scans(&env).iter().all(|name| name.contains(".db.tmp-")),
+        "the hold ended while stderr was filled: {:?}",
+        scans(&env)
+    );
+    let saved = wait_for_the_index(&env, &mut child);
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the process ended before the signal: it was not held after the rename"
+    );
+    interrupt(&child);
+    let mut text = Vec::new();
+    stderr.read_to_end(&mut text).unwrap();
+    let status = child.wait().unwrap();
+    let text = String::from_utf8_lossy(&text);
+    let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(status.code(), Some(0), "{status}: {lines:#?}");
+    let id = saved.strip_suffix(".db").unwrap();
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.starts_with(&format!("saved as {id} ("))),
+        "{lines:#?}"
+    );
+    assert!(!text.contains("interrupted"), "{lines:#?}");
+    assert_eq!(scans(&env), vec![saved.clone()]);
+    // The saved scan is whole: `scans` reads it.
+    let out = env.cmd().args(["scans", "--json"]).output().unwrap();
+    let listed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let entries = listed["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{listed}");
+    assert_eq!(entries[0]["id"], id, "{listed}");
+    assert_eq!(entries[0]["source"], "import:ncdu", "{listed}");
+    assert_eq!(entries[0]["file_count"], 300, "{listed}");
 }

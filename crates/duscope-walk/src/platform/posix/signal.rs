@@ -1,10 +1,11 @@
 //! SIGINT: a handler that sets a walk's cancellation flag and wakes a
-//! waiting thread through a pipe.
+//! waiting thread through a pipe, and the action it replaced, which a
+//! program that cannot wait for it puts back.
 
 use std::io;
 use std::ptr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// The flag SIGINT sets; null until a handler is installed. It holds a
 /// reference from `Arc::into_raw` that is never given back, so the flag
@@ -16,6 +17,11 @@ static FLAG: AtomicPtr<AtomicBool> = AtomicPtr::new(ptr::null_mut());
 /// installed; open for the rest of the process.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
 static WAIT: AtomicI32 = AtomicI32::new(-1);
+
+/// SIGINT's action before the handler was installed, which [`restore`]
+/// puts back; `None` while the handler is not installed. The handler never
+/// reads it.
+static BEFORE: Mutex<Option<libc::sigaction>> = Mutex::new(None);
 
 /// What a byte on the pipe means.
 const INTERRUPTED: u8 = b'i';
@@ -137,7 +143,9 @@ fn drain() {
 /// Installs the handler, which sets `flag` on SIGINT; `false`, installing
 /// nothing, when SIGINT is ignored (as the shell leaves it for a background
 /// job). A flag set by an earlier call stays allocated, since the handler
-/// may be reading it.
+/// may be reading it. The action the first call replaces is kept for
+/// [`restore`]; a later call, which replaces the handler with itself,
+/// keeps it.
 pub(crate) fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<bool> {
     // SAFETY: `sigaction` is plain data, for which all-zero bytes are a
     // valid value.
@@ -168,8 +176,76 @@ pub(crate) fn cancel_on_interrupt(flag: &Arc<AtomicBool>) -> io::Result<bool> {
         libc::sigaction(libc::SIGINT, &raw const action, ptr::null_mut())
     };
     if installed == 0 {
+        BEFORE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert(current);
         Ok(true)
     } else {
         Err(io::Error::last_os_error())
+    }
+}
+
+/// Gives SIGINT back the action the handler replaced, for a program that
+/// installed it and cannot start the thread that waits for it: Ctrl-C then
+/// has its usual effect again, and the flag is no longer set. Nothing
+/// happens when the handler is not installed.
+pub(crate) fn restore() -> io::Result<()> {
+    let mut before = BEFORE.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(action) = *before else {
+        return Ok(());
+    };
+    // SAFETY: `action` is the action sigaction(2) returned for SIGINT, a
+    // valid one to install again, and lives through the call, which copies
+    // it.
+    if unsafe { libc::sigaction(libc::SIGINT, &raw const action, ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    *before = None;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ptr;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use super::{cancel_on_interrupt, on_interrupt, restore};
+
+    /// SIGINT's handler now: `SIG_DFL`, `SIG_IGN` or a function. Not its
+    /// flags, to which Linux's C library adds `SA_RESTORER` on every
+    /// installation.
+    fn handler() -> libc::sighandler_t {
+        // SAFETY: `sigaction` is plain data, for which all-zero bytes are a
+        // valid value.
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: a null new action only reads the current one into
+        // `current`, which lives through the call.
+        let read = unsafe { libc::sigaction(libc::SIGINT, ptr::null(), &raw mut current) };
+        assert_eq!(read, 0);
+        current.sa_sigaction
+    }
+
+    /// The action the handler replaced comes back, across a second
+    /// installation, which replaces the handler with itself; a second
+    /// restore changes nothing. Where the test runs with SIGINT ignored,
+    /// nothing is installed and nothing changes.
+    #[test]
+    fn p5_core_09_restore_gives_sigint_back_the_action_the_handler_replaced() {
+        let before = handler();
+        let flag = Arc::new(AtomicBool::new(false));
+        if cancel_on_interrupt(&flag).unwrap() {
+            let installed = on_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            assert_eq!(handler(), installed);
+            assert!(cancel_on_interrupt(&flag).unwrap());
+            assert_eq!(handler(), installed);
+        } else {
+            assert_eq!(before, libc::SIG_IGN);
+        }
+        restore().unwrap();
+        assert_eq!(handler(), before);
+        restore().unwrap();
+        assert_eq!(handler(), before);
     }
 }

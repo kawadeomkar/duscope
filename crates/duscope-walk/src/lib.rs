@@ -718,6 +718,14 @@ pub fn stand_down_interrupt() {
     platform::stand_down_interrupt();
 }
 
+/// Gives SIGINT back the action [`cancel_on_interrupt`] replaced, for a
+/// program that installed the handler and cannot start the thread that
+/// waits for it: Ctrl-C then has its usual effect again, and the flag is
+/// no longer set. Nothing happens when no handler is installed.
+pub fn restore_interrupt() -> io::Result<()> {
+    platform::restore_interrupt()
+}
+
 /// The columns and rows of the terminal on stdout (`TIOCGWINSZ`); `None`
 /// when stdout is not a terminal. The static treemap sizes itself by it.
 pub fn terminal_size() -> Option<(u16, u16)> {
