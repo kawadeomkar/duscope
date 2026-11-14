@@ -378,10 +378,11 @@ depends on the verb:
   result was printed, and the scan id in it names no file. On the command line
   the error goes to stderr alone, never as a second envelope.
 - `query` and `export` save the scan they ran before they answer from it:
-  nothing was printed, and the error is the answer, the error envelope under
-  `--json` and `--format ndjson` and two lines on stderr otherwise; an `-o`
-  file is left as it was. `view` saves before it takes the terminal, and the
-  error goes to stderr.
+  nothing was printed, and the error is the answer: the error envelope under
+  `--format ndjson`, and for `query` under `--json` too (`export` takes no
+  `--json`), and two lines on stderr otherwise; an `-o` file is left as it
+  was. `view` saves before it takes the terminal, and the error goes to
+  stderr.
 - With no index directory, `scan --save` fails this way after printing, and
   `import` before it reads the file (under `--json`, the error envelope);
   `rescan` fails `scan_not_found`, with no saved scan to renew; and a verb that

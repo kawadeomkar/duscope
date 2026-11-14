@@ -1,9 +1,10 @@
 //! P5-CLI-03: a save that fails before anything was printed (`query --sql`
 //! and `export`, which read the index of a scan run for them; `import`
 //! with no index directory) is the verb's failure as any other: the error
-//! envelope on stdout under `--json` and `--format ndjson`, two lines on
-//! stderr otherwise. One that fails after the output (`scan --save`, the
-//! list verbs, `rescan`, `import`) leaves the output standing, with the
+//! envelope on stdout under `--json` (`query`, `import`) and `--format
+//! ndjson` (`query`, `export`), two lines on stderr otherwise. One that
+//! fails after the output (`scan --save`, the list verbs, `summary`,
+//! `render`, `rescan`, `import`) leaves the output standing, with the
 //! failure on stderr alone.
 //!
 //! The index directory's `scans` is a regular file, so no scan can be
@@ -200,6 +201,13 @@ fn p5_cli_03_a_save_after_the_output_leaves_the_output_standing() {
     printed_then_failed(&run(&env, &dir, &["scan", root, "--save", "--json"]));
     printed_then_failed(&run(&env, &dir, &["top", root, "--json"]));
     printed_then_failed(&run(&env, &dir, &["summary", root, "--json"]));
+    // `render` writes its picture, then fails.
+    let out = run(&env, &dir, &["render", root, "--format", "svg"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let svg = String::from_utf8_lossy(&out.stdout);
+    assert!(svg.trim_end().ends_with("</svg>"), "{svg}");
+    let err = stderr(&out);
+    assert!(err.contains("duscope: cannot write the index"), "{err}");
     // A rescan of a scan saved elsewhere, and an import of its export,
     // saved where nothing can be.
     let saved = env
