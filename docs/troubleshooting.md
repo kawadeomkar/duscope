@@ -415,13 +415,13 @@ before it compares the tree ([`index_stale`](#index_stale)). When duscope looks
 for the newest saved scan it passes over a file it cannot open, and
 `duscope scans` names such a file on stderr.
 
-`top` and `stale` under `--format ndjson` or `--plain` write each row as they
-read it. A read that fails after the first rows ends them there: the rows
-written before it are whole, and none is written from the failed read or after
-it. `ndjson` then has no `end` line, and the error envelope follows on stdout
-in its place; `--plain` has no trailer, so the output ends with the last row
-read, the error is on stderr, and exit 5 is the only sign
-([limits.md](limits.md#a-stream-cut-short-has-no-end-line)).
+`top`, `stale` and `scan --reuse` under `--format ndjson` or `--plain` write
+each row as they read it. A read that fails after the first rows ends them
+there: the rows written before it are whole, and none is written from the
+failed read or after it. `ndjson` then has no `end` line, and the error
+envelope follows on stdout in its place; `--plain` has no trailer, so the
+output ends with the last row read, the error is on stderr, and exit 5 is the
+only sign ([limits.md](limits.md#a-stream-cut-short-has-no-end-line)).
 
 What to do: remove the file (`scans/<id>.db` in the index directory) and scan
 the tree again, `duscope scan --save PATH`.
