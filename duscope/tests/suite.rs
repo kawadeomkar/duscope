@@ -3,8 +3,8 @@
 //! tree, by-type and stale (the other `--json` goldens and top's four
 //! formats live beside their packages' tests); `du` parity of the binary's
 //! totals on the fixture tree, and on a system tree in the nightly; and the
-//! scan's peak RSS per entry on the benchmark trees. P2-QRY-13: the peak RSS
-//! of `--all`, which streams its rows, on T2.
+//! scan's peak RSS per entry on the benchmark trees. P2-QRY-13 and
+//! P2-QRY-14: the peak RSS of `--all`, which streams its rows, on T2.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -656,6 +656,135 @@ fn p2_qry_13_all_streams_its_rows_within_a_peak_rss_budget_on_t2() {
         words.extend_from_slice(args);
         words.extend([root.as_str(), "--all", "--format", "ndjson", "--scan", &id]);
         words.extend(["--index-dir", index_dir.as_str()]);
+        let command: Vec<String> = words.iter().map(|w| shell_quote(w)).collect();
+        let export = env.tmp_dir().join(format!("{name}-all.json"));
+        let out = env
+            .command(&hyperfine)
+            .args(["-N", "--runs", "3", "--warmup", "0", "--style", "none"])
+            .args(["--metrics", "time_wall_clock,memory_peak_resident"])
+            .arg("--export-json")
+            .arg(&export)
+            .args(["--command-name", name])
+            .arg(command.join(" "))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "hyperfine: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&export).unwrap()).unwrap();
+        // Byte counts well inside f64's integers.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let mut peaks: Vec<u64> = result["results"][0]["measurements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|run| run["memory_peak_resident"]["value"].as_f64())
+            .map(|peak| peak as u64)
+            .collect();
+        assert_eq!(peaks.len(), 3, "{result}");
+        peaks.sort_unstable();
+        let peak = peaks[1];
+        eprintln!(
+            "{name} --all on T2: {entries} entries, median peak {peak} bytes, {} per entry (budget {STREAMED_ALL_BUDGET}; runs {peaks:?})",
+            peak / entries
+        );
+        assert!(
+            peak <= STREAMED_ALL_BUDGET * entries,
+            "{name} --all on T2: {peak} bytes is over {STREAMED_ALL_BUDGET} per entry"
+        );
+    }
+}
+
+/// A saved scan of `root` that differs from scan `new` in every file: its
+/// ncdu export, by `bin`, imported with each entry's size on disk changed
+/// (a 1 written before it). Its id.
+fn resized(env: &TestEnv, bin: &str, root: &str, new: &str, index_dir: &str) -> String {
+    let ncdu = env.tmp_dir().join("t2.ncdu.json");
+    let ncdu_path = ncdu.to_string_lossy().into_owned();
+    let out = env
+        .command(bin)
+        .args(["export", root, "--scan", new, "--format", "ncdu"])
+        .args(["-o", &ncdu_path, "--index-dir", index_dir])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = fs::read(&ncdu).unwrap();
+    let key: &[u8] = b"\"dsize\":";
+    let mut changed = Vec::with_capacity(text.len() + text.len() / 32);
+    let mut rest = text.as_slice();
+    while let Some(at) = rest.windows(key.len()).position(|w| w == key) {
+        changed.extend_from_slice(&rest[..at + key.len()]);
+        changed.push(b'1');
+        rest = &rest[at + key.len()..];
+    }
+    changed.extend_from_slice(rest);
+    fs::write(&ncdu, changed).unwrap();
+    let out = env
+        .command(bin)
+        .args(["import", &ncdu_path, "--format", "ncdu", "--json"])
+        .args(["--index-dir", index_dir])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let imported: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    imported["scan"]["id"].as_str().unwrap().to_owned()
+}
+
+/// P2-QRY-14: `tree --all --depth 1000` and `diff --all --min-delta 1`, as
+/// `ndjson`, on a scan of T2 saved first, every entry a row of `tree` and
+/// every file a row of `diff`: the median peak RSS of three runs under
+/// hyperfine stays within [`STREAMED_ALL_BUDGET`] bytes per entry. `diff`
+/// compares the scan with its own ncdu export imported with each entry's
+/// size on disk changed (a 1 written before it), so that every file has
+/// shrunk. `HYPERFINE` names the hyperfine to run; T2 is under
+/// `DUSCOPE_BENCH_TREES` (which must hold it), else `bench/.trees`.
+/// `by-type` and `caches` are not measured: T2 has seven classes and no
+/// cache, and `--all` lifts neither `--examples` nor the rules.
+#[test]
+#[ignore = "needs the T2 bench tree and hyperfine; DUSCOPE_TEST_PLATFORM=1"]
+fn p2_qry_14_tree_and_diff_stream_their_rows_within_a_peak_rss_budget_on_t2() {
+    if !platform_tests() {
+        return;
+    }
+    let env = TestEnv::new();
+    let named = std::env::var_os("DUSCOPE_BENCH_TREES");
+    let trees = named.clone().map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/.trees"),
+        PathBuf::from,
+    );
+    let root = trees.join("T2");
+    if !root.is_dir() {
+        assert!(named.is_none(), "T2 is not built under {}", trees.display());
+        eprintln!("skipped T2: not built under {}", trees.display());
+        return;
+    }
+    let hyperfine = std::env::var_os("HYPERFINE").unwrap_or_else(|| "hyperfine".into());
+    let bin = shipped(&env).to_string_lossy().into_owned();
+    let scan = &scan_json(&env, &["--save", "--treemap", "never"], &root)["scan"];
+    let new = scan["id"].as_str().unwrap().to_owned();
+    let entries = scan["file_count"].as_u64().unwrap() + scan["dir_count"].as_u64().unwrap();
+    let index_dir = env.index_dir().to_string_lossy().into_owned();
+    let root = root.to_string_lossy().into_owned();
+    let old = resized(&env, &bin, &root, &new, &index_dir);
+    let verbs: [(&str, &[&str]); 2] = [
+        ("tree", &["tree", &root, "--depth", "1000", "--scan", &new]),
+        ("diff", &["diff", &old, &new, "--min-delta", "1"]),
+    ];
+    for (name, args) in verbs {
+        let mut words: Vec<&str> = vec![&bin];
+        words.extend_from_slice(args);
+        words.extend(["--all", "--format", "ndjson", "--index-dir", &index_dir]);
         let command: Vec<String> = words.iter().map(|w| shell_quote(w)).collect();
         let export = env.tmp_dir().join(format!("{name}-all.json"));
         let out = env

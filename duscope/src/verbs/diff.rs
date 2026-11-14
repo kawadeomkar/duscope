@@ -375,3 +375,268 @@ fn footer(t: &DiffTotals, (old_id, new_id): &(String, String), output: &Output) 
         thousands(t.changed_count),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use clap::Parser;
+    use duscope_core::envelope::DiffEntry;
+    use duscope_core::query::{self, Page, TreeView};
+
+    use super::{Changes, compare, write, written};
+    use crate::cli::{Cli, Verb};
+    use crate::out::{Capture, Fields, Format, Output, Units};
+    use crate::verbs::Failure;
+
+    /// `tree` scanned, changed (files removed, added, grown and shrunk, a
+    /// directory removed, a file become a directory) and scanned again,
+    /// each scan saved in `env`'s index directory: the root and the two
+    /// scans' ids.
+    fn saved_pair(env: &duscope_testkit::TestEnv) -> (PathBuf, String, String) {
+        let root = env.work_dir().canonicalize().unwrap().join("tree");
+        let dirs = ["a", "a/deep", "b", "gone", "gone/inner"];
+        for dir in dirs {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let file = |i: usize| root.join(dirs[i % 3]).join(format!("{i:02}.bin"));
+        for i in 0..40usize {
+            std::fs::write(file(i), vec![b'x'; (i * 997) % 20_000 + 1]).unwrap();
+        }
+        std::fs::write(root.join("gone/inner/x"), vec![b'x'; 9000]).unwrap();
+        std::fs::write(root.join("b/becomes"), b"a file").unwrap();
+        let save = || {
+            let mut argv: Vec<std::ffi::OsString> = ["duscope", "scan", "--save", "--json"]
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            argv.extend([root.clone().into(), "--index-dir".into()]);
+            argv.extend([env.index_dir().into(), "--config".into(), "none".into()]);
+            let (code, written) = crate::run_captured(argv);
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&written));
+            let envelope: serde_json::Value = serde_json::from_slice(&written).unwrap();
+            envelope["scan"]["id"].as_str().unwrap().to_owned()
+        };
+        let old = save();
+        for i in 0..8 {
+            std::fs::remove_file(file(i)).unwrap();
+        }
+        for i in 10..30usize {
+            let size = if i % 2 == 0 { (i + 2) * 8192 } else { 1 };
+            std::fs::write(file(i), vec![b'x'; size]).unwrap();
+        }
+        for i in 40..52usize {
+            std::fs::write(file(i), vec![b'x'; i * 1000]).unwrap();
+        }
+        std::fs::remove_dir_all(root.join("gone")).unwrap();
+        std::fs::remove_file(root.join("b/becomes")).unwrap();
+        std::fs::create_dir(root.join("b/becomes")).unwrap();
+        let new = save();
+        (root, old, new)
+    }
+
+    /// An output in `format` with `fields`, `--header` and `-0` as given,
+    /// that writes to the buffer returned beside it.
+    fn captured(format: Format, fields: Option<&Fields>, header_null: bool) -> (Output, Capture) {
+        let capture = Capture::default();
+        let output = Output {
+            format,
+            color: false,
+            units: Units::default(),
+            null: header_null,
+            header: header_null,
+            quiet: true,
+            fields: fields.cloned(),
+            file: None,
+            max_chars: 0,
+            spill_dir: None,
+            capture: Some(capture.clone()),
+        };
+        (output, capture)
+    }
+
+    fn fields() -> Fields {
+        Fields::Named(
+            ["name", "change", "delta_bytes"]
+                .map(str::to_owned)
+                .to_vec(),
+        )
+    }
+
+    /// `diff` written collected and streamed to the same output gives the
+    /// same bytes: `ndjson` (every row, the trailer's counts), with
+    /// `--fields` and `--detail`, and `--plain` with `--all`, with
+    /// `--fields`, `--header` and `-0`, and with a limit.
+    #[test]
+    fn p2_qry_14_diff_streamed_rows_are_the_collected_rows_byte_for_byte() {
+        let env = duscope_testkit::TestEnv::new();
+        let (_, old, new) = saved_pair(&env);
+        let dir = env.index_dir();
+        let fields = fields();
+        let shapes: [(Format, Option<&Fields>, bool, &[&str]); 6] = [
+            (Format::Ndjson, None, false, &[]),
+            (Format::Ndjson, Some(&fields), false, &[]),
+            (Format::Ndjson, Some(&Fields::Detail), false, &[]),
+            (Format::Plain, None, false, &["--all"]),
+            (Format::Plain, Some(&fields), true, &["--all"]),
+            (Format::Plain, None, false, &["--limit", "3"]),
+        ];
+        for (format, chosen, header_null, extra) in shapes {
+            let mut line = vec!["duscope", "diff", &old, &new, "--min-delta", "1"];
+            line.extend_from_slice(extra);
+            let cli = Cli::try_parse_from(&line).unwrap();
+            let Some(Verb::Diff(args)) = &cli.verb else {
+                unreachable!()
+            };
+            let written = |stream: bool| {
+                let (output, capture) = captured(format, chosen, header_null);
+                written(args, Some(&dir), &output, stream).unwrap();
+                capture.take()
+            };
+            let (collected, streamed) = (written(false), written(true));
+            let rows = collected.iter().filter(|&&b| b == b'\n' || b == 0).count();
+            assert!(rows >= 3, "{line:?} {format:?}: {rows} lines");
+            assert_eq!(
+                String::from_utf8_lossy(&streamed),
+                String::from_utf8_lossy(&collected),
+                "{line:?} {format:?} {chosen:?}"
+            );
+        }
+    }
+
+    /// `rows`, with a read of the old scan (`old`) or of the new one
+    /// failing before the row at `at` (counted from 1) is built: the read
+    /// of the id past that scan's last entry, which the index fails as it
+    /// fails a read of a file overwritten under it; from then on each of
+    /// that scan's entries reads as empty.
+    struct FailAt<'r, C> {
+        rows: &'r C,
+        at: usize,
+        old: bool,
+    }
+
+    impl<C: Changes> Changes for FailAt<'_, C> {
+        fn len(&self) -> usize {
+            self.rows.len()
+        }
+
+        fn row(&self, old: &dyn TreeView, new: &dyn TreeView, at: usize) -> DiffEntry {
+            if at + 1 == self.at {
+                let failing = if self.old { old } else { new };
+                failing.node(failing.len());
+            }
+            self.rows.row(old, new, at)
+        }
+
+        fn head(&self) -> Page<DiffEntry> {
+            self.rows.head()
+        }
+    }
+
+    /// `diff` as `cli` asks, on the saved scans in `dir`, written to
+    /// `output` as the verb writes it, streamed when `stream`; with
+    /// `fail`, a read of the old scan (`true`) or the new one fails at
+    /// that row ([`FailAt`]).
+    fn diffed(
+        cli: &Cli,
+        dir: &Path,
+        output: &Output,
+        stream: bool,
+        fail: Option<(usize, bool)>,
+    ) -> Result<(), Failure> {
+        let Some(Verb::Diff(args)) = &cli.verb else {
+            unreachable!()
+        };
+        let compared = compare(args, Some(dir), output)?;
+        let (old, new) = compared.views();
+        let (rows, totals) = query::diff_rows(&old, &new, &compared.q);
+        drop((old, new));
+        match fail {
+            Some((at, old)) => {
+                let failing = FailAt {
+                    rows: &rows,
+                    at,
+                    old,
+                };
+                write(&compared, &failing, totals, output, stream)
+            }
+            None => write(&compared, &rows, totals, output, stream),
+        }
+    }
+
+    /// A read of either scan that fails at row n of `diff` ends the
+    /// streamed rows there: stdout holds the header and the n - 1 rows
+    /// before it, each the row the collected list writes, and none built
+    /// from the failed read or after it; `ndjson` has no `end` line, and
+    /// the error envelope main writes next is its last line; the failure
+    /// is `index_corrupt`. A format that collects the rows (JSON) writes
+    /// none of them.
+    #[test]
+    fn p2_qry_14_a_read_that_fails_mid_stream_ends_the_diff_rows_there() {
+        let env = duscope_testkit::TestEnv::new();
+        let (_, old, new) = saved_pair(&env);
+        let dir = env.index_dir();
+        let line = ["duscope", "diff", &old, &new, "--min-delta", "1", "--all"];
+        let cli = Cli::try_parse_from(line).unwrap();
+        let fields = fields();
+        let shapes: [(Format, Option<&Fields>, bool); 4] = [
+            (Format::Ndjson, None, false),
+            (Format::Ndjson, Some(&fields), false),
+            (Format::Plain, None, false),
+            (Format::Plain, Some(&fields), true),
+        ];
+        for (format, chosen, header_null) in shapes {
+            let (output, capture) = captured(format, chosen, header_null);
+            diffed(&cli, &dir, &output, false, None).unwrap();
+            let whole = capture.take();
+            let terminator = if header_null { 0 } else { b'\n' };
+            let records: Vec<&[u8]> = whole.split_inclusive(|&b| b == terminator).collect();
+            // The lines before the rows (ndjson's header, --header's
+            // names) and after them (ndjson's trailer).
+            let ndjson = format == Format::Ndjson;
+            let before = usize::from(ndjson || header_null);
+            let rows = records.len() - before - usize::from(ndjson);
+            assert!(rows >= 30, "{format:?}: {rows} rows");
+            for (at, old) in [1, 2, rows / 2, rows]
+                .into_iter()
+                .flat_map(|at| [(at, true), (at, false)])
+            {
+                let side = if old { "old" } else { "new" };
+                let shape = format!("{format:?} {chosen:?}, the {side} scan at row {at} of {rows}");
+                let (output, capture) = captured(format, chosen, header_null);
+                let failure = diffed(&cli, &dir, &output, true, Some((at, old))).unwrap_err();
+                assert_eq!(failure.code, "index_corrupt", "{shape}");
+                let written = capture.take();
+                assert_eq!(
+                    String::from_utf8_lossy(&written),
+                    String::from_utf8_lossy(&records[..before + at - 1].concat()),
+                    "{shape}"
+                );
+                if ndjson {
+                    output.failure(&failure);
+                    let error = capture.take();
+                    let lines: Vec<serde_json::Value> = written
+                        .split_inclusive(|&b| b == b'\n')
+                        .chain([error.as_slice()])
+                        .map(|line| serde_json::from_slice(line).unwrap())
+                        .collect();
+                    let (last, lines) = lines.split_last().unwrap();
+                    assert_eq!(last["error"]["code"], "index_corrupt", "{shape}");
+                    assert_eq!(lines[0]["type"], "scan", "{shape}");
+                    for row in &lines[1..] {
+                        assert_eq!(row["type"], "entry", "{shape}");
+                        assert_ne!(row["name"], "", "{shape}");
+                    }
+                }
+            }
+        }
+        // JSON holds its rows for the envelope: a failed read writes none,
+        // whether the verb would stream them or not.
+        for stream in [false, true] {
+            let (output, capture) = captured(Format::Json, None, false);
+            let failure = diffed(&cli, &dir, &output, stream, Some((2, false))).unwrap_err();
+            assert_eq!(failure.code, "index_corrupt", "{stream}");
+            assert!(capture.take().is_empty(), "{stream}");
+        }
+    }
+}

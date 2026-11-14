@@ -390,6 +390,14 @@ jobs:
           DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
             caffeinate -is cargo test --release --locked -p duscope --test suite \
             -- --ignored --exact --nocapture p2_qry_13_all_streams_its_rows_within_a_peak_rss_budget_on_t2
+      # P2-QRY-14: `tree --all` and `diff --all` do the same.
+      - name: Streamed tree and diff --all within budget
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
+            caffeinate -is cargo test --release --locked -p duscope --test suite \
+            -- --ignored --exact --nocapture p2_qry_14_tree_and_diff_stream_their_rows_within_a_peak_rss_budget_on_t2
       # P4-TUI-09: the viewer opens on a saved scan of T2 reading each entry once,
       # and its first frame reads a few thousand more. The test saves the scan
       # with the binary beside its own build, the release build above.
@@ -580,6 +588,14 @@ jobs:
           DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
             cargo test --release --locked -p duscope --test suite \
             -- --ignored --exact --nocapture p2_qry_13_all_streams_its_rows_within_a_peak_rss_budget_on_t2
+      # P2-QRY-14: `tree --all` and `diff --all` do the same.
+      - name: Streamed tree and diff --all within budget
+        if: ${{ !cancelled() }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          DUSCOPE_TEST_PLATFORM=1 DUSCOPE_BENCH_BIN="$DUSCOPE_BIN" DUSCOPE_BENCH_TREES="$home/trees" CARGO_TARGET_DIR="$home/target" \
+            cargo test --release --locked -p duscope --test suite \
+            -- --ignored --exact --nocapture p2_qry_14_tree_and_diff_stream_their_rows_within_a_peak_rss_budget_on_t2
       # P4-TUI-09: the viewer opens on a saved scan of T2 reading each entry once,
       # and its first frame reads a few thousand more. The test saves the scan
       # with the binary beside its own build: the host's release build, which
