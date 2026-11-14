@@ -430,8 +430,8 @@ impl Ranked for ProjectRows {
     }
 }
 
-/// Writes a verb's ranked `rows` and gives the source back. With `stream`
-/// (a format that [`Output::streams`]), each row is built as it is written
+/// Writes a verb's ranked `rows` and gives the source back. With `stream`,
+/// in a format that [`Output::streams`], each row is built as it is written
 /// and none is held: the saved scan is checked before the first row, and
 /// each row once built ([`Source::failed`]). A row built from a failed read
 /// is empty, as is every row after it, so the rows end before it, and the
@@ -452,7 +452,7 @@ fn write_ranked<R: Ranked>(
     stream: bool,
 ) -> Result<Source, Failure> {
     let mut page = rows.head();
-    if !stream {
+    if !(stream && output.streams()) {
         let view = prepared.source.view();
         page.entries = (0..rows.len()).map(|at| rows.row(&*view, at)).collect();
         drop(view);
@@ -1570,7 +1570,7 @@ mod tests {
                 }
             }
             // JSON holds its rows for the envelope: a failed read writes
-            // none, collected by the verb or by list_rows.
+            // none, whether the verb is asked to stream them or not.
             for stream in [false, true] {
                 let (output, capture) = captured(Format::Json, None, false);
                 let failure = ranked(&cli, &dir, &output, stream, Some(20)).unwrap_err();

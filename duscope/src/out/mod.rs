@@ -1003,15 +1003,15 @@ impl Output {
     }
 
     /// Writes a list verb's rows as they are built, holding none of them,
-    /// in a format that [`Output::streams`]: `ndjson` (the header, a line
-    /// per row, the trailer) or `--plain`, each row cut to `--fields`
-    /// alone. `envelope` gives the header and the trailer; its entries are
-    /// not read. `settle` answers for the rows once the last is written
-    /// (a saved scan's read that failed while they were built, which the
-    /// caller ends `rows` at, before the first row built from it): its
-    /// failure ends the output there, without `ndjson`'s trailer, and is
-    /// returned. In another format the rows are collected and written as
-    /// [`Output::list`] writes them, unless `settle` fails first.
+    /// in a format that [`Output::streams`], which the caller has checked:
+    /// `ndjson` (the header, a line per row, the trailer) or `--plain`,
+    /// each row cut to `--fields` alone. `envelope` gives the header and
+    /// the trailer; its entries are not read. `settle` answers for the rows
+    /// once the last is written (a saved scan's read that failed while they
+    /// were built, which the caller ends `rows` at, before the first row
+    /// built from it): its failure ends the output there, without
+    /// `ndjson`'s trailer, and is returned. The other formats hold every
+    /// row ([`Output::list`]).
     pub fn list_rows<T: Row>(
         &self,
         envelope: &Envelope<T>,
@@ -1019,25 +1019,7 @@ impl Output {
         settle: impl FnOnce() -> Result<(), Failure>,
         footer: &str,
     ) -> Result<(), Failure> {
-        if !self.streams() {
-            let entries: Vec<T> = rows.collect();
-            settle()?;
-            let collected = Envelope {
-                returned_count: entries.len() as u64,
-                entries,
-                ok: envelope.ok,
-                schema_version: envelope.schema_version,
-                tool: envelope.tool,
-                scan: envelope.scan.clone(),
-                query: envelope.query.clone(),
-                total_count: envelope.total_count,
-                truncated: envelope.truncated,
-                next_cursor: envelope.next_cursor.clone(),
-                warnings: envelope.warnings.clone(),
-                next: envelope.next.clone(),
-            };
-            return self.list(&collected, footer);
-        }
+        debug_assert!(self.streams(), "list_rows in a format that holds its rows");
         let chosen = self.chosen::<T>(envelope.query.command)?;
         if let Some(chosen) = &chosen {
             let named = matches!(self.fields, Some(Fields::Named(_)));

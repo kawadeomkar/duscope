@@ -160,8 +160,8 @@ impl Changes for DiffRows {
     }
 }
 
-/// Writes the `rows` of `compared` with their `totals`. With `stream` (a
-/// format that [`Output::streams`]), each row is built as it is written
+/// Writes the `rows` of `compared` with their `totals`. With `stream`, in
+/// a format that [`Output::streams`], each row is built as it is written
 /// and none is held: both scans are checked before the first row, and
 /// after each row is built ([`Index::failed`]); the rows end before the
 /// first built from a failed read, and the failure is returned (`ndjson`
@@ -183,6 +183,7 @@ fn write<C: Changes>(
         dir,
         q,
     } = compared;
+    let stream = stream && output.streams();
     let (old_view, new_view) = compared.views();
     totals.old_scan = old.meta().scan_id.to_string();
     totals.new_scan = new.meta().scan_id.to_string();
