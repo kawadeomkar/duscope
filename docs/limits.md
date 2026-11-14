@@ -228,11 +228,15 @@ So, for an item from a lower layer:
 - What it frees is overstated, for the Trash and `--permanent` alike: the lower
   layer is read-only and keeps the item's bytes. Emptying the Trash deletes the
   copy in the upper layer, and `--permanent` leaves a whiteout there that hides
-  the item; `freed_bytes` counts the item's blocks either way.
+  the item. The plan's `frees_bytes` counts the item's blocks either way, and
+  so does `trashed_bytes` after a move to the Trash, or `freed_bytes` after
+  `--permanent` (for the Trash `freed_bytes` is 0, as on any volume).
 - A file with more than one hard link is not moved the first time, unless the
   overlay is mounted with `index=on`: the copy-up makes it another inode, so the
   move is undone and the item fails `path_changed`, left where it was. It has
-  been copied up by then, so running the same `clean` again moves it.
+  been copied up by then, so running the same `clean` again on its path moves
+  it; a `--from` handle still names the inode it had, so it needs a new one
+  (`duscope rescan`, then `duscope explain --json`).
 - A directory is moved only when the overlay is mounted with `redirect_dir=on`;
   otherwise the rename fails across the layers and the item fails
   `trash_unavailable`, left where it was.
@@ -286,7 +290,8 @@ the `end` line has come, or, for `--plain`, once the command has exited 0.
 ### A btrfs subvolume is a mount point to `clean` (Linux)
 
 A btrfs subvolume reports a device of its own, another than its parent
-directory's, and `clean` tells a mount point by its device: a subvolume named
+directory's, and `clean` tells a directory that is a mount point by its device
+(a file, by whether it is a mount's root): a subvolume named
 as an item is refused as `mount_point`, and `--permanent` stops at one under an
 item (`refused_path`). The hint's `umount` does not apply to a subvolume that
 is not mounted on its own; `btrfs subvolume delete` deletes one.

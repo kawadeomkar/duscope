@@ -616,7 +616,9 @@ On an overlayfs mount without `index=on`, a file from a lower layer with more
 than one hard link fails this way the first time it is moved to the Trash: its
 copy-up makes it another inode
 ([limits.md](limits.md#overlayfs-what-the-trash-cannot-take-linux)). The
-copy-up is done by then, so the same `clean` run again moves it.
+copy-up is done by then, so the same `clean` run again on the item's path
+moves it; a handle still names the inode it had, and needs a new one, as
+below.
 
 What to do: for an item named by path, run `duscope clean` again to plan what
 is there now, as the hint says. For a handle, rescan the tree that holds it
