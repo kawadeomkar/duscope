@@ -89,11 +89,17 @@ impl Tui {
     /// then the alternate screen, mouse capture and bracketed paste. A step
     /// that fails gives back what the ones before it took. The first call
     /// in a process first has `SIGTERM` and `SIGHUP` answered
-    /// (`answer_signals`).
+    /// (`answer_signals`). Raw mode and `HELD` are taken holding stdout,
+    /// which a signal's thread holds from before its restore to the end
+    /// (`end_by`): the signal finds both taken, or ends the process
+    /// before either is.
     pub fn enter(probe: bool) -> io::Result<Tui> {
         answer_signals();
-        enable_raw_mode()?;
-        HELD.store(true, Ordering::SeqCst);
+        {
+            let _turn = io::stdout().lock();
+            enable_raw_mode()?;
+            HELD.store(true, Ordering::SeqCst);
+        }
         let background = if probe { background(PROBE_WAIT) } else { None };
         let taken = execute!(
             io::stdout(),
