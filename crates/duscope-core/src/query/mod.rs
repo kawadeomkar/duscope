@@ -822,13 +822,18 @@ pub fn rel_path(view: &(impl TreeView + ?Sized), id: u32) -> Vec<u8> {
 
 /// The absolute path of `id`, as bytes.
 pub fn abs_path(view: &(impl TreeView + ?Sized), id: u32) -> Vec<u8> {
-    let mut path = view.root_path().as_os_str().as_bytes().to_vec();
-    let rel = rel_path(view, id);
+    joined(view.root_path(), &rel_path(view, id))
+}
+
+/// The path `rel`, relative to `root` ([`rel_path`]), made absolute:
+/// `root` itself when `rel` is empty.
+pub fn joined(root: &Path, rel: &[u8]) -> Vec<u8> {
+    let mut path = root.as_os_str().as_bytes().to_vec();
     if !rel.is_empty() {
         if path.last() != Some(&b'/') {
             path.push(b'/');
         }
-        path.extend_from_slice(&rel);
+        path.extend_from_slice(rel);
     }
     path
 }

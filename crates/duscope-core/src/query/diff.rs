@@ -16,7 +16,7 @@
 
 use std::cmp::Ordering;
 
-use super::{Node, Page, SizeKind, TreeView, abs_path, kind_name, remain};
+use super::{Node, Page, SizeKind, TreeView, joined, kind_name, rel_path, remain};
 use crate::envelope::{DiffEntry, DiffTotals, name_fields, path_fields};
 
 /// `diff`'s default `--min-delta`: 1 MiB.
@@ -35,33 +35,62 @@ pub struct DiffQuery {
     pub limit: Option<usize>,
 }
 
-/// A change found, before it is spelled as a row.
+/// What a change is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum What {
+    Added,
+    Removed,
+    KindChanged,
+    Grown,
+    Shrunk,
+}
+
+impl What {
+    /// The change as the row spells it.
+    fn as_str(self) -> &'static str {
+        match self {
+            What::Added => "added",
+            What::Removed => "removed",
+            What::KindChanged => "kind_changed",
+            What::Grown => "grown",
+            What::Shrunk => "shrunk",
+        }
+    }
+}
+
+/// A change found, before it is spelled as a row: 40 bytes, since every
+/// change of a tree is held until they are ranked.
 #[derive(Debug, Clone)]
 struct Change {
-    what: &'static str,
+    what: What,
     /// The entry in the new scan, or the old one for `removed`.
-    side: Side,
     id: u32,
-    old_bytes: Option<u64>,
-    new_bytes: Option<u64>,
+    /// Its bytes in the old scan; 0 for `added`, which has none.
+    old_bytes: u64,
+    /// Its bytes in the new scan; 0 for `removed`, which has none.
+    new_bytes: u64,
+    /// The entries an added or removed directory holds, it included.
     collapsed: Option<u64>,
 }
 
 impl Change {
     fn delta(&self) -> i128 {
-        i128::from(self.new_bytes.unwrap_or(0)) - i128::from(self.old_bytes.unwrap_or(0))
+        i128::from(self.new_bytes) - i128::from(self.old_bytes)
+    }
+
+    /// Its bytes in the old scan, unless it was added.
+    fn before(&self) -> Option<u64> {
+        (self.what != What::Added).then_some(self.old_bytes)
+    }
+
+    /// Its bytes in the new scan, unless it was removed.
+    fn after(&self) -> Option<u64> {
+        (self.what != What::Removed).then_some(self.new_bytes)
     }
 }
 
-/// Which scan an entry is in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Side {
-    Old,
-    New,
-}
-
 /// `diff`'s rows, ranked and not yet built: each change in order, with
-/// its path, and what the page says of them. Rows are built one at a time
+/// its path below the root, and what the page says of them. Rows are built one at a time
 /// from it ([`DiffRows::rows`]), each read from the scan its entry is in,
 /// for a writer that streams them, or all at once ([`DiffRows::page`]).
 #[derive(Debug, Clone)]
@@ -70,8 +99,9 @@ pub struct DiffRows {
     pub total_count: u64,
     /// Whether rows remain after these.
     pub truncated: bool,
-    /// The changes listed, in order, each with its absolute path.
-    changes: Vec<(Vec<u8>, Change)>,
+    /// The changes listed, in order, each with its path relative to its
+    /// scan's root.
+    changes: Vec<(Box<[u8]>, Change)>,
 }
 
 impl DiffRows {
@@ -93,22 +123,24 @@ impl DiffRows {
         new: &(impl TreeView + ?Sized),
         at: usize,
     ) -> DiffEntry {
-        let (path_bytes, c) = &self.changes[at];
-        let (node, name) = match c.side {
-            Side::Old => (old.node(c.id), old.name(c.id)),
-            Side::New => (new.node(c.id), new.name(c.id)),
+        let (rel, c) = &self.changes[at];
+        let (node, name, root) = if c.what == What::Removed {
+            (old.node(c.id), old.name(c.id), old.root_path())
+        } else {
+            (new.node(c.id), new.name(c.id), new.root_path())
         };
+        let path_bytes = joined(root, rel);
         let (name, name_raw) = name_fields(&name);
-        let (path, path_raw) = path_fields(path_bytes);
+        let (path, path_raw) = path_fields(&path_bytes);
         DiffEntry {
             path,
-            path_bytes: path_bytes.clone(),
+            path_bytes,
             name,
             name_raw,
-            change: c.what,
+            change: c.what.as_str(),
             kind: kind_name(node.kind),
-            old_bytes: c.old_bytes,
-            new_bytes: c.new_bytes,
+            old_bytes: c.before(),
+            new_bytes: c.after(),
             delta_bytes: i64::try_from(c.delta()).unwrap_or(i64::MAX),
             collapsed_count: c.collapsed,
             path_raw,
@@ -162,23 +194,28 @@ pub fn diff_rows(
     }
     let mut totals = found.totals;
     totals.net_bytes = signed(size_of(new, 0, q.size)) - signed(size_of(old, 0, q.size));
-    // Each row's path, for the order among equal changes.
-    let mut changes: Vec<(Vec<u8>, Change)> = found
-        .changes
-        .into_iter()
-        .map(|c| {
-            let path = match c.side {
-                Side::Old => abs_path(old, c.id),
-                Side::New => abs_path(new, c.id),
-            };
-            (path, c)
-        })
-        .collect();
+    // Largest first, the path deciding among equal changes. The two roots
+    // are one path, two scans of one tree, and then the paths below it
+    // order the rows as the whole paths do.
+    let roots = (old.root_path(), new.root_path());
+    let one_root = roots.0.as_os_str() == roots.1.as_os_str();
+    let whole = |(rel, c): &(Box<[u8]>, Change)| {
+        let root = if c.what == What::Removed {
+            roots.0
+        } else {
+            roots.1
+        };
+        joined(root, rel)
+    };
+    let mut changes = found.changes;
     changes.sort_by(|a, b| {
-        b.1.delta()
-            .abs()
-            .cmp(&a.1.delta().abs())
-            .then_with(|| a.0.cmp(&b.0))
+        b.1.delta().abs().cmp(&a.1.delta().abs()).then_with(|| {
+            if one_root {
+                a.0.cmp(&b.0)
+            } else {
+                whole(a).cmp(&whole(b))
+            }
+        })
     });
     let total_count = changes.len() as u64;
     if let Some(limit) = q.limit {
@@ -195,7 +232,8 @@ pub fn diff_rows(
 /// What the walk has found so far.
 #[derive(Debug, Default)]
 struct Found {
-    changes: Vec<Change>,
+    /// Each change, with its path relative to its scan's root.
+    changes: Vec<(Box<[u8]>, Change)>,
     totals: DiffTotals,
 }
 
@@ -252,6 +290,14 @@ fn children(view: &(impl TreeView + ?Sized), dir: u32) -> (Named, Named) {
 }
 
 impl Found {
+    /// Notes `change`, of an entry of `view` (the old scan for `removed`,
+    /// else the new), with its path below the root, which every change
+    /// shares.
+    fn push(&mut self, view: &(impl TreeView + ?Sized), change: Change) {
+        let path = rel_path(view, change.id).into_boxed_slice();
+        self.changes.push((path, change));
+    }
+
     /// `id` of `old`, removed; a row when `report`.
     fn removed(&mut self, old: &(impl TreeView + ?Sized), id: u32, q: &DiffQuery, report: bool) {
         let node = old.node(id);
@@ -259,14 +305,14 @@ impl Found {
         self.totals.removed_count += entries(&node);
         self.totals.removed_bytes += bytes;
         if report {
-            self.changes.push(Change {
-                what: "removed",
-                side: Side::Old,
+            let removed = Change {
+                what: What::Removed,
                 id,
-                old_bytes: Some(bytes),
-                new_bytes: None,
+                old_bytes: bytes,
+                new_bytes: 0,
                 collapsed: node.is_dir().then(|| entries(&node)),
-            });
+            };
+            self.push(old, removed);
         }
     }
 
@@ -277,14 +323,14 @@ impl Found {
         self.totals.added_count += entries(&node);
         self.totals.added_bytes += bytes;
         if report {
-            self.changes.push(Change {
-                what: "added",
-                side: Side::New,
+            let added = Change {
+                what: What::Added,
                 id,
-                old_bytes: None,
-                new_bytes: Some(bytes),
+                old_bytes: 0,
+                new_bytes: bytes,
                 collapsed: node.is_dir().then(|| entries(&node)),
-            });
+            };
+            self.push(new, added);
         }
     }
 
@@ -310,33 +356,39 @@ impl Found {
             self.totals.added_bytes += new_bytes;
         }
         if report {
-            self.changes.push(Change {
-                what: "kind_changed",
-                side: Side::New,
+            let changed = Change {
+                what: What::KindChanged,
                 id: is,
-                old_bytes: Some(old_bytes),
-                new_bytes: Some(new_bytes),
+                old_bytes,
+                new_bytes,
                 collapsed: None,
-            });
+            };
+            self.push(new, changed);
         }
     }
 
-    /// A change of size of `is`, from `old_bytes` to `new_bytes`: `grown`
-    /// or `shrunk` when it reaches `--min-delta`.
-    fn resized(&mut self, is: u32, old_bytes: u64, new_bytes: u64, q: &DiffQuery) {
+    /// A change of size of `is` of `new`, from `old_bytes` to `new_bytes`:
+    /// `grown` or `shrunk` when it reaches `--min-delta`.
+    fn resized(
+        &mut self,
+        (new, is): (&(impl TreeView + ?Sized), u32),
+        old_bytes: u64,
+        new_bytes: u64,
+        q: &DiffQuery,
+    ) {
         if old_bytes.abs_diff(new_bytes) >= q.min_delta {
-            self.changes.push(Change {
+            let resized = Change {
                 what: if new_bytes > old_bytes {
-                    "grown"
+                    What::Grown
                 } else {
-                    "shrunk"
+                    What::Shrunk
                 },
-                side: Side::New,
                 id: is,
-                old_bytes: Some(old_bytes),
-                new_bytes: Some(new_bytes),
+                old_bytes,
+                new_bytes,
                 collapsed: None,
-            });
+            };
+            self.push(new, resized);
         }
     }
 }
@@ -452,7 +504,7 @@ fn pair(
         let whole = q.depth.is_some_and(|d| depth >= d);
         if whole && report {
             let (ob, nb) = (size_of(old, was, q.size), size_of(new, is, q.size));
-            found.resized(is, ob, nb, q);
+            found.resized((new, is), ob, nb, q);
         }
         stack.push(Open {
             was,
@@ -469,7 +521,7 @@ fn pair(
     }
     found.totals.changed_count += 1;
     if report {
-        found.resized(is, ob, nb, q);
+        found.resized((new, is), ob, nb, q);
     }
 }
 
