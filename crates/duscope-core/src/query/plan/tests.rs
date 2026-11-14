@@ -419,7 +419,9 @@ const PLANS: [Option<Plan>; 4] = [None, Some(Plan::Range), Some(Plan::Walk), Som
 
 /// One file of a generated tree: the directories it is in (each from a
 /// set of names whose path order differs from their name order), its
-/// name, kind, sizes and times, each an index into a small set.
+/// name, kind, sizes and times, each an index into a small set, and what
+/// it shares (`share`: nothing, a link of one of three inodes, or a member
+/// of one of three clone groups, sharing all its blocks or some).
 #[derive(Debug, Clone)]
 struct Pick {
     dirs: Vec<u8>,
@@ -428,6 +430,7 @@ struct Pick {
     apparent: u8,
     allocated: u8,
     times: [u8; 4],
+    share: u8,
 }
 
 fn pick() -> impl Strategy<Value = Pick> {
@@ -438,19 +441,27 @@ fn pick() -> impl Strategy<Value = Pick> {
         any::<u8>(),
         any::<u8>(),
         any::<[u8; 4]>(),
+        any::<u8>(),
     )
-        .prop_map(|(dirs, name, kind, apparent, allocated, times)| Pick {
-            dirs,
-            name,
-            kind,
-            apparent,
-            allocated,
-            times,
-        })
+        .prop_map(
+            |(dirs, name, kind, apparent, allocated, times, share)| Pick {
+                dirs,
+                name,
+                kind,
+                apparent,
+                allocated,
+                times,
+                share,
+            },
+        )
 }
 
 /// The arena (`--attrs full`) and roll-up of the tree `picks` describe,
-/// under `/r`; with `equal`, every file has the same sizes.
+/// under `/r`; with `equal`, every file has the same sizes. The links of
+/// an inode are one file (its first link's kind, sizes and times, `nlink`
+/// 3 whatever the tree holds of it), and a clone group's members regular
+/// files of its first member's sizes: the first of each carries the
+/// bytes, and a member that shares only some of its blocks its own.
 fn generated(picks: &[Pick], equal: bool) -> (Arena, crate::rollup::RollUp) {
     // `a-b` and `a.b` sort before `a/` in a path, after `a` by name.
     const DIRS: [&str; 5] = ["a", "a-b", "a.b", "b", "c"];
@@ -468,6 +479,8 @@ fn generated(picks: &[Pick], equal: bool) -> (Arena, crate::rollup::RollUp) {
     const ALLOCATED: [u64; 3] = [0, 4096, 8192];
     const LARGE: u64 = 1 << 20;
     const AGES: [i64; 4] = [3 * YEAR, 30 * DAY, DAY, 0];
+    // An inode's kind, sizes and times, by its index among the three.
+    type Inode = (Kind, (u64, u64), [u8; 4]);
     let at = |i: u8| NOW - AGES[usize::from(i) % AGES.len()];
     let entry = |name: &str, parent: u32, kind: Kind, sizes: (u64, u64), times: [u8; 4]| Entry {
         name: NameRef::from(name),
@@ -500,6 +513,8 @@ fn generated(picks: &[Pick], equal: bool) -> (Arena, crate::rollup::RollUp) {
         ..entry("r", 0, Kind::Dir, (0, 0), [3; 4])
     });
     let mut dirs: HashMap<Vec<u8>, u32> = HashMap::new();
+    let mut inodes: HashMap<u8, Inode> = HashMap::new();
+    let mut groups: HashMap<u8, (u64, u64)> = HashMap::new();
     for (i, p) in picks.iter().enumerate() {
         let mut parent = 0;
         let mut path = Vec::new();
@@ -526,7 +541,26 @@ fn generated(picks: &[Pick], equal: bool) -> (Arena, crate::rollup::RollUp) {
         };
         let name = format!("{}{i}", NAMES[usize::from(p.name) % NAMES.len()]);
         let kind = KINDS[usize::from(p.kind) % KINDS.len()];
-        push(entry(&name, parent, kind, sizes, p.times));
+        let group = p.share / 8 % 3;
+        let (kind, sizes, times) = match p.share % 8 {
+            1 => *inodes.entry(group).or_insert((kind, sizes, p.times)),
+            2 | 3 => (Kind::File, *groups.entry(group).or_insert(sizes), p.times),
+            _ => (kind, sizes, p.times),
+        };
+        let clone = Share::Clone(500 + u64::from(group));
+        let (nlink, ino, share, flags) = match p.share % 8 {
+            1 => (3, 1000 + u64::from(group), Share::Hardlink, Flags::empty()),
+            2 => (1, 0, clone, Flags::MAY_SHARE | Flags::SHARES_ALL),
+            3 => (1, 0, clone, Flags::MAY_SHARE),
+            _ => (1, 0, Share::None, Flags::empty()),
+        };
+        push(Entry {
+            nlink,
+            ino,
+            share,
+            flags,
+            ..entry(&name, parent, kind, sizes, times)
+        });
     }
     let rollup = crate::rollup::roll_up(&mut arena);
     (arena, rollup)
@@ -763,8 +797,8 @@ proptest! {
 
     /// Each plan, and the plan the count chooses, answers a random query
     /// of a random tree as the arena does: at its root and in a subtree,
-    /// with ties by path (a quarter of the trees have equal sizes), on
-    /// both pages.
+    /// with ties by path (a quarter of the trees have equal sizes), hard
+    /// links and clones charged once, on both pages.
     #[test]
     fn p2_qry_10_every_plan_answers_as_the_arena(
         picks in prop::collection::vec(pick(), 1..64),
@@ -806,6 +840,7 @@ fn p2_qry_10_ties_of_equal_files_are_found_in_path_order_at_every_depth() {
                 apparent: 0,
                 allocated: 0,
                 times: [i8 % 4, 0, 3, 3],
+                share: 0,
             }
         })
         .collect();
@@ -863,6 +898,7 @@ fn p2_qry_10_the_count_chooses_each_plan() {
                 // 1 MiB (the generator's large size) in twenty, else 4 KiB.
                 allocated: if i % 20 == 0 { 0 } else { 16 },
                 times: [i8 % 4, 0, 3, 3],
+                share: 0,
             }
         })
         .collect();
@@ -965,6 +1001,7 @@ fn p2_qry_10_a_band_at_a_sixteenth_of_the_subtree_is_wide() {
                 apparent: 20,
                 allocated: if i < large { 0 } else { 16 },
                 times: [0; 4],
+                share: 0,
             })
             .collect();
         let (arena, rollup) = generated(&picks, false);
