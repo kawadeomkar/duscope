@@ -1161,8 +1161,8 @@ mod tests {
     use duscope_walk::{Normalization, Skip, VolumeClass, VolumeInfo};
 
     use super::{
-        DepthUse, Owns, atime_unreliable, prepare, scan_age, source, stale_written, top_asked,
-        top_written, write_ranked,
+        DepthUse, Owns, atime_unreliable, prepare, reused, scan_age, source, stale_written,
+        top_asked, top_written, write_ranked,
     };
     use crate::cli::{Cli, Verb};
     use crate::out::{Capture, Fields, Format, Output, Units};
@@ -1293,9 +1293,9 @@ mod tests {
         }
     }
 
-    /// `top` or `stale` as `cli` asks, on the saved scan in `dir`, written
-    /// to `output` as the verb writes it (without `stale`'s warnings),
-    /// streamed when `stream`. With `fail_at`, the read of that row
+    /// `top`, `stale` or `scan --reuse` as `cli` asks, on the saved scan in
+    /// `dir`, written to `output` as the verb writes it (without `stale`'s
+    /// warnings), streamed when `stream`. With `fail_at`, the read of that row
     /// (counted from 1) fails: its id is the one past the scan's last
     /// entry, which the index fails to read as it fails a read of a file
     /// overwritten under it, and from then on every entry reads as empty.
@@ -1375,6 +1375,26 @@ mod tests {
                     &args.walk,
                     "stale",
                     args.query.depth,
+                    &rows,
+                    Vec::new(),
+                    None,
+                    output,
+                    stream,
+                )?;
+            }
+            Some(Verb::Scan(args)) => {
+                let age = args.reuse.as_deref().unwrap();
+                let source = source::reusable(&args.walk, &args.exclude, age, Some(dir))?.unwrap();
+                let asked = top_asked(source, &args.walk, None, "scan", false, true, None, output)?;
+                let view = asked.prepared.source.view();
+                let mut rows = query::top_rows(&*view, &asked.q);
+                fail(&mut rows.ids, &*view);
+                drop(view);
+                write_ranked(
+                    asked.prepared,
+                    &args.walk,
+                    "scan",
+                    asked.listed,
                     &rows,
                     Vec::new(),
                     None,
@@ -1470,6 +1490,110 @@ mod tests {
                 let failure = ranked(&cli, &dir, &output, stream, Some(20)).unwrap_err();
                 assert_eq!(failure.code, "index_corrupt", "{line:?} {stream}");
                 assert!(capture.take().is_empty(), "{line:?} {stream}");
+            }
+        }
+    }
+
+    /// `scan --reuse` checks the saved scan it prints as `top` does: a
+    /// read that failed before the rows (of the entry past the scan's
+    /// last) writes none of them in any format, and one that fails at row
+    /// n of the rows streamed under `ndjson` or `--plain` leaves the n - 1
+    /// before it, as [`p2_qry_13_a_read_that_fails_mid_stream_ends_the_rows_there`]
+    /// has for `top`; the failure is `index_corrupt`. A read that does not
+    /// fail writes the rows the collected list does.
+    #[test]
+    fn p5_cli_05_scan_reuse_fails_on_a_failed_read_as_top_does() {
+        let env = duscope_testkit::TestEnv::new();
+        let (root, id) = saved_tree(&env);
+        let dir = env.index_dir();
+        let line = ["duscope", "scan", root.to_str().unwrap(), "--reuse", "1d"];
+        let cli = Cli::try_parse_from(line).unwrap();
+        let Some(Verb::Scan(args)) = &cli.verb else {
+            unreachable!()
+        };
+        let saved = || {
+            let source = source::reusable(&args.walk, &args.exclude, "1d", Some(&dir));
+            let source = source.unwrap().expect("the saved scan answers --reuse");
+            assert_eq!(source.scan_id().as_deref(), Some(id.as_str()));
+            source
+        };
+        let fields = Fields::Named(
+            ["name", "allocated_bytes", "path"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        let shapes: [(Format, Option<&Fields>, bool); 5] = [
+            (Format::Json, None, false),
+            (Format::Ndjson, None, false),
+            (Format::Ndjson, Some(&fields), false),
+            (Format::Plain, None, false),
+            (Format::Plain, Some(&fields), true),
+        ];
+        for (format, chosen, header_null) in shapes {
+            let shape = format!("{format:?} {chosen:?}");
+            let (output, capture) = captured(format, chosen, header_null);
+            ranked(&cli, &dir, &output, false, None).unwrap();
+            let whole = capture.take();
+            let (output, capture) = captured(format, chosen, header_null);
+            reused(saved(), args, &output).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&capture.take()),
+                String::from_utf8_lossy(&whole),
+                "{shape}"
+            );
+
+            // A read that failed before the first row.
+            let source = saved();
+            let view = source.view();
+            let _ = view.node(view.len());
+            drop(view);
+            assert!(source.failed(), "{shape}");
+            let (output, capture) = captured(format, chosen, header_null);
+            let failure = reused(source, args, &output).unwrap_err();
+            assert_eq!(failure.code, "index_corrupt", "{shape}");
+            assert!(capture.take().is_empty(), "{shape}");
+
+            // One that fails at row n.
+            if format == Format::Json {
+                let (output, capture) = captured(format, chosen, header_null);
+                let failure = ranked(&cli, &dir, &output, true, Some(2)).unwrap_err();
+                assert_eq!(failure.code, "index_corrupt", "{shape}");
+                assert!(capture.take().is_empty(), "{shape}");
+                continue;
+            }
+            let terminator = if header_null { 0 } else { b'\n' };
+            let records: Vec<&[u8]> = whole.split_inclusive(|&b| b == terminator).collect();
+            let ndjson = format == Format::Ndjson;
+            let before = usize::from(ndjson || header_null);
+            let rows = records.len() - before - usize::from(ndjson);
+            assert!(rows >= 5, "{shape}: {rows} rows");
+            for at in [1, 2, rows / 2, rows] {
+                let shape = format!("{shape}, row {at} of {rows}");
+                let (output, capture) = captured(format, chosen, header_null);
+                let failure = ranked(&cli, &dir, &output, true, Some(at)).unwrap_err();
+                assert_eq!(failure.code, "index_corrupt", "{shape}");
+                let written = capture.take();
+                assert_eq!(
+                    String::from_utf8_lossy(&written),
+                    String::from_utf8_lossy(&records[..before + at - 1].concat()),
+                    "{shape}"
+                );
+                if ndjson {
+                    output.failure(&failure);
+                    let error = capture.take();
+                    let lines: Vec<serde_json::Value> = written
+                        .split_inclusive(|&b| b == b'\n')
+                        .chain([error.as_slice()])
+                        .map(|line| serde_json::from_slice(line).unwrap())
+                        .collect();
+                    let (last, lines) = lines.split_last().unwrap();
+                    assert_eq!(last["error"]["code"], "index_corrupt", "{shape}");
+                    assert_eq!(lines[0]["type"], "scan", "{shape}");
+                    for row in &lines[1..] {
+                        assert_eq!(row["type"], "entry", "{shape}");
+                        assert_ne!(row["name"], "", "{shape}");
+                    }
+                }
             }
         }
     }
