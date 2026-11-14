@@ -15,8 +15,8 @@ measures what
 .B du \-x /
 does.
 .PP
-On Linux, an automount point the kernel has not mounted yet (an NFS
-submount, debugfs's
+On Linux 4.11 and later, an automount point the kernel has not mounted
+yet (an NFS submount, debugfs's
 .IR tracing )
 is listed and not entered, since opening it would mount a filesystem:
 it is entered only with
