@@ -6,7 +6,8 @@
 //! one the path lies on, by its device, and those mounted at or under it;
 //! `summary`'s shares name every volume holding bytes under the path. Over
 //! MCP, where a scan rooted above a root is read at the root, a result names
-//! no excluded directory outside it, and the volume the root lies on.
+//! no path outside it but the scan's root and the mount point of the volume
+//! the root lies on.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -382,15 +383,20 @@ fn call(id: u64, tool: &str, arguments: &Value) -> Value {
     })
 }
 
-/// Every string in `value`.
-fn strings<'v>(value: &'v Value, out: &mut Vec<&'v str>) {
+/// Every string in `value`, an object's keys among them, each with the
+/// JSON pointer of where it is under `at` (a key's, its object's).
+fn strings<'v>(at: &str, value: &'v Value, out: &mut Vec<(String, &'v str)>) {
     match value {
-        Value::String(s) => out.push(s),
-        Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+        Value::String(s) => out.push((at.to_owned(), s)),
+        Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                strings(&format!("{at}/{i}"), v, out);
+            }
+        }
         Value::Object(map) => {
             for (key, v) in map {
-                out.push(key);
-                strings(v, out);
+                out.push((at.to_owned(), key));
+                strings(&format!("{at}/{key}"), v, out);
             }
         }
         _ => {}
@@ -431,6 +437,11 @@ fn p5_cli_02_a_tool_names_no_excluded_directory_outside_the_roots() {
             .any(|p| Path::new(p).starts_with(&outside)),
         "{whole}"
     );
+    // It met one volume, the one the root lies on, named at the scan's
+    // root whatever its mount point (on macOS, the Data volume's at
+    // /System/Volumes/Data, which holds the root through a firmlink).
+    let mounts = mount_points(&whole["scan"]);
+    assert_eq!(mounts.len(), 1, "{whole}");
     let replies = serve(
         &env,
         &inside,
@@ -445,7 +456,6 @@ fn p5_cli_02_a_tool_names_no_excluded_directory_outside_the_roots() {
             ),
         ],
     );
-    let outside_text = outside.display().to_string();
     for id in 1..=4 {
         let reply = replies
             .iter()
@@ -453,21 +463,64 @@ fn p5_cli_02_a_tool_names_no_excluded_directory_outside_the_roots() {
             .unwrap_or_else(|| panic!("no reply {id}: {replies:?}"));
         let result = &reply["result"];
         assert_eq!(result["isError"], false, "{reply}");
-        let content = &result["structuredContent"];
+        // Every path the result names lies within the root, but the scan's
+        // root, above it, and the mount point of the volume the root lies
+        // on, which a volume names (`scan.volumes`, and `summary`'s
+        // `result.volumes`) wherever it is mounted.
+        let mut texts = Vec::new();
+        strings("", result, &mut texts);
+        for (at, path) in named_paths(&texts) {
+            let within = Path::new(path).starts_with(&inside);
+            let scan_root = matches!(
+                at,
+                "/structuredContent/scan/root" | "/structuredContent/scan/root_as_given"
+            ) && inside.starts_with(path);
+            let mount = volume_mount_point(at) && mounts.iter().any(|m| m == path);
+            assert!(
+                within || scan_root || mount,
+                "{id}: {at} names {path}, outside {}",
+                inside.display()
+            );
+        }
         // The excluded directories inside the root, and no others.
-        let listed = excluded(content);
+        let listed = excluded(&result["structuredContent"]);
         assert!(!listed.is_empty(), "{reply}");
         assert!(
             listed.iter().all(|p| Path::new(p).starts_with(&inside)),
             "{listed:?}"
         );
-        // No string of the result names a path outside the root; the
-        // scan's root, above it, is the one path that is not under it.
-        let mut texts = Vec::new();
-        strings(result, &mut texts);
-        let leaked: Vec<&&str> = texts.iter().filter(|t| t.contains(&outside_text)).collect();
-        assert!(leaked.is_empty(), "{leaked:?}");
     }
+}
+
+/// The paths among `texts` (from [`strings`]), each with its pointer: a
+/// string of the envelope that starts with `/`, and in any other string (the
+/// text block, a hint, a message) each word that does, less a trailing `,`,
+/// `:` or `;`. The test's paths hold no space.
+fn named_paths<'t>(texts: &'t [(String, &'t str)]) -> Vec<(&'t str, &'t str)> {
+    let mut paths = Vec::new();
+    for (at, text) in texts {
+        if at.starts_with("/structuredContent/") && text.starts_with('/') {
+            paths.push((at.as_str(), *text));
+        } else {
+            paths.extend(
+                text.split_whitespace()
+                    .filter(|word| word.starts_with('/'))
+                    .map(|word| (at.as_str(), word.trim_end_matches([',', ':', ';']))),
+            );
+        }
+    }
+    paths
+}
+
+/// Whether `at` points at a volume's mount point: `scan.volumes[i]`'s, or
+/// `summary`'s `result.volumes[i]`'s.
+fn volume_mount_point(at: &str) -> bool {
+    let parts: Vec<&str> = at.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["", "structuredContent", "scan" | "result", "volumes", i, "mount_point"]
+            if i.parse::<usize>().is_ok()
+    )
 }
 
 /// A volume row of [`firmlinked`]'s scan: its device, its mount's id, its
