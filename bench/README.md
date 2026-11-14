@@ -359,8 +359,10 @@ runs:
 - **The filtered shapes:** `top --files` and `stale` with the filters the index answers
   (P2-QRY-10), timed as the queries are: `--depth 3`; `--min-size 1M`, which keeps nothing on T2;
   `--size apparent`, alone and with `--min-size 1K`; `--since` a date that splits T2's
-  modification times, which the generator sets; and `stale --min-size 1 --max-depth 4`. Each is
-  recorded per tree under `shapes` with the rows it matched (`total_count`), and holds no gate.
+  modification times, which the generator sets; and `stale --min-size 1 --max-depth 4
+  --older-than 1d`, since the change times are the tree's build and the default 180 days would
+  keep nothing. Each is recorded per tree under `shapes` with the rows it matched
+  (`total_count`), and holds no gate.
 - **The first query after a cache drop:** `top --scan`, cold, against a scan saved beside the
   cold trees.
 - **The index's size:** bytes per entry of a basic index and of an `--attrs full` one.

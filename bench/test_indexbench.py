@@ -114,6 +114,12 @@ class Shapes(unittest.TestCase):
         first, last = trees.BASE_MTIME_S, trees.BASE_MTIME_S + 2 * (10_000 - 1)
         self.assertTrue(first < at < last, (first, at, last))
         self.assertGreater((last - at) / (last - first), 0.5)
+        # `stale` asks for a `ctime` before the cutoff too, and the change
+        # times are the tree's build: a day ago, not the default 180 days,
+        # which would keep nothing on a tree built this year.
+        stale = shapes["stale_depth"]
+        self.assertEqual(stale[0], "stale")
+        self.assertEqual(stale[stale.index("--older-than") + 1], "1d")
 
     def test_p2_qry_10_a_shape_is_recorded_with_the_rows_it_matched(self):
         answer = [sys.executable, "-c", "print('{\"ok\": true, \"total_count\": 594990}')"]
