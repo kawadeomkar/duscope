@@ -1,9 +1,10 @@
 //! P2-BENCH-01: `bench/run.sh index` against the binary this test run built,
-//! on a scaled T3, with `bench/testdata/hyperfine_stub.py` for hyperfine (CI's
-//! test job does not install it), `true` for the cache drop, and stand-ins for
-//! dua and fdu that answer as their pins: nothing touches the network. The
-//! numbers it prints are a smoke tree's and mean nothing; the nightly measures
-//! T2 on the bench runners.
+//! on a scaled T2 (the tree the gates are read from), with
+//! `bench/testdata/hyperfine_stub.py` for hyperfine (CI's test job does not
+//! install it), `true` for the cache drop, and stand-ins for dua and fdu that
+//! answer as their pins: nothing touches the network. The numbers it prints
+//! are a smoke tree's and mean nothing; the nightly measures T2 on the bench
+//! runners.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -80,14 +81,14 @@ fn stand_ins(scratch: &Path, fdu_status: u8) -> (PathBuf, PathBuf) {
     (dua, fdu)
 }
 
-/// `bench/run.sh index` on a scaled T3 under `scratch`, with `extra`.
+/// `bench/run.sh index` on a scaled T2 under `scratch`, with `extra`.
 fn index(env: &TestEnv, scratch: &Path, dua: &Path, fdu: &Path, extra: &[&str]) -> Output {
     let stub = repo_root().join("bench/testdata/hyperfine_stub.py");
     env.command(repo_root().join("bench/run.sh"))
         .arg("index")
         .arg("--duscope")
         .arg(env.cmd().get_program())
-        .args(["--trees", "T3", "--scale", "0.001", "--jobs", "1"])
+        .args(["--trees", "T2", "--scale", "0.001", "--jobs", "1"])
         .args(["--mode", "both", "--cold-cmd", "true"])
         .args(["--runs", "2", "--warmup", "1"])
         .arg("--tool-path")
@@ -150,7 +151,7 @@ fn p2_bench_01_the_index_measurements_run_end_to_end() {
     let result = result(&out, &scratch);
     assert_eq!(result["kind"], "index");
     assert_eq!(result["failures"], serde_json::json!([]));
-    assert_eq!(result["gates_tree"], "T3");
+    assert_eq!(result["gates_tree"], "T2");
     // Every gate was measured, and says whether it holds, but the warm write
     // on macOS, which the target leaves to Linux. The write's share of a cold
     // scan is measured (below) and holds no line (DEV-108).
@@ -168,7 +169,7 @@ fn p2_bench_01_the_index_measurements_run_end_to_end() {
         assert_eq!(gate["holds"].is_boolean(), !macos_write, "{gate}");
     }
     let tree = &result["trees"][0];
-    assert_eq!(tree["name"], "T3");
+    assert_eq!(tree["name"], "T2");
     assert_ne!(tree["filesystem"], Value::Null);
     for kind in ["basic", "full"] {
         assert!(
@@ -239,7 +240,7 @@ fn p2_bench_01_a_part_that_fails_leaves_the_others_measured() {
         .map(|f| f.as_str().unwrap())
         .collect();
     assert_eq!(failures.len(), 1, "{failures:?}");
-    assert!(failures[0].starts_with("T3 fdu: "), "{failures:?}");
+    assert!(failures[0].starts_with("T2 fdu: "), "{failures:?}");
     let measured = |name: &str| {
         result["gates"]
             .as_array()

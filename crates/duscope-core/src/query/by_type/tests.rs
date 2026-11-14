@@ -9,7 +9,7 @@ use duscope_testkit::TestEnv;
 use duscope_walk::{Attrs, MemProvider, WalkOptions, walk, walk_with};
 use proptest::prelude::*;
 
-use super::{ByTypeQuery, from_index, index, tally};
+use super::{ByTypeQuery, Kept, from_index, index, keep_largest, largest_first, tally};
 use crate::arena::Arena;
 use crate::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
 use crate::query::{Filters, SizeKind, SortKey, Subtree, TreeView};
@@ -397,5 +397,49 @@ proptest! {
         let env = TestEnv::new();
         let index = index_with(&tree_from(&picks), &env.tmp_dir(), Attrs::Full);
         prop_assert_eq!(every_subtree_answers_as_the_walk(&index, &[0, 2]), Ok(()));
+    }
+}
+
+/// The sorted list `keep_largest` kept before it kept a heap: each file
+/// inserted at its place, bytes down, then ids up, and the list cut to
+/// `examples`.
+fn kept_in_a_sorted_list(files: &[(u64, u32)], examples: usize) -> Vec<(u64, u32)> {
+    let mut largest: Vec<(u64, u32)> = Vec::new();
+    if examples == 0 {
+        return largest;
+    }
+    for &(size, id) in files {
+        let at = largest.partition_point(|&(s, other)| s > size || (s == size && other < id));
+        if at < examples {
+            largest.insert(at, (size, id));
+            largest.truncate(examples);
+        }
+    }
+    largest
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// A class's examples kept in a heap are the ones a sorted list kept,
+    /// in the same order, ties of size included (sizes from a few values,
+    /// so most files tie), whatever order the files come in.
+    #[test]
+    fn p2_qry_09_the_examples_kept_are_the_sorted_lists(
+        sizes in prop::collection::vec(0u64..6, 0..300),
+        order in prop::collection::vec(any::<u32>(), 300),
+        examples in 0usize..40,
+    ) {
+        let mut files: Vec<(u64, u32)> = sizes
+            .iter()
+            .enumerate()
+            .map(|(id, &size)| (size * 4096, u32::try_from(id).unwrap()))
+            .collect();
+        files.sort_by_key(|&(_, id)| order[id as usize]);
+        let mut kept = Kept::new();
+        for &(size, id) in &files {
+            keep_largest(&mut kept, examples, size, id);
+        }
+        prop_assert_eq!(largest_first(kept), kept_in_a_sorted_list(&files, examples));
     }
 }

@@ -96,6 +96,46 @@ class Gates(unittest.TestCase):
         self.assertEqual(subtree(300_000, 151.0), (150.0, False))
 
 
+    def test_p2_bench_01_the_gates_are_judged_on_t2_alone(self):
+        def tree(name, top_p50_ms):
+            return {"files": 1, "gate_values": {"top_p50_ms": top_p50_ms}}
+
+        for names in (["T2"], ["T3", "T2"], ["T1", "T2", "T3"]):
+            per_tree = [tree(name, {"T1": 30.0, "T2": 3.0, "T3": 0.4}[name]) for name in names]
+            judged, values = indexbench.judged(names, per_tree)
+            self.assertEqual(judged, "T2")
+            self.assertEqual(values, {"top_p50_ms": 3.0})
+            # Taken out of every tree's figures, T2's or not.
+            self.assertTrue(all("gate_values" not in found for found in per_tree), names)
+            [line] = [said for said in indexbench.verdicts(judged, indexbench.gates(values, "linux"))
+                      if said.startswith("gate top_p50_ms ")]
+            self.assertEqual(line, "gate top_p50_ms <= 20: 3 (holds)")
+        # T1's figures, or T3's one folder of a million files, are not the
+        # targets': a run without T2 judges nothing, rather than holding or
+        # failing on them.
+        for names in (["T3"], ["T1"], ["T1", "T3"], []):
+            per_tree = [tree(name, 0.4) for name in names]
+            judged, values = indexbench.judged(names, per_tree)
+            self.assertIsNone(judged, names)
+            self.assertEqual(values, {}, names)
+            self.assertTrue(all("gate_values" not in found for found in per_tree), names)
+            lines = indexbench.gates(values, "linux")
+            self.assertTrue(all(gate["holds"] is None for gate in lines), names)
+            said = indexbench.verdicts(judged, lines)
+            self.assertEqual(len(said), len(indexbench.GATES))
+            self.assertTrue(all(line.endswith(": not judged, T2 was not measured") for line in said), said)
+        # T2 measured: a gate it did not measure, one that binds another
+        # platform, one that fails.
+        judged, values = indexbench.judged(["T2"], [{"gate_values": {"top_p95_ms": 60.0, "write_us_per_entry_warm_p50": 3.1}}])
+        said = {line.split(":")[0]: line for line in indexbench.verdicts(judged, indexbench.gates(values, "macos"))}
+        self.assertEqual(said["gate top_p95_ms <= 50"], "gate top_p95_ms <= 50: 60 (FAILS)")
+        self.assertEqual(said["gate top_p50_ms <= 20"], "gate top_p50_ms <= 20: not measured (-)")
+        self.assertEqual(
+            said["gate write_us_per_entry_warm_p50 <= 2.75"],
+            "gate write_us_per_entry_warm_p50 <= 2.75: 3.1 (binds linux only)",
+        )
+
+
 class Shapes(unittest.TestCase):
     def test_p2_qry_10_the_filtered_shapes_are_the_audits_and_select_on_t2(self):
         shapes = dict(indexbench.SHAPES)

@@ -1760,7 +1760,8 @@ fn p4_tui_05_the_tables_and_a_mask_on_t2() {
     step("the help", &[char('?')]);
 }
 
-/// A saved scan of the benchmark tree `name` (`bench/.trees/<name>`), as
+/// A saved scan of the benchmark tree `name` (under `DUSCOPE_BENCH_TREES`,
+/// as the nightly names its trees, else `bench/.trees`), as
 /// [`crate::cursor::tests::t2`] makes T2's.
 fn bench_index(env: &duscope_testkit::TestEnv, name: &str) -> Option<duscope_core::index::Index> {
     use duscope_core::index::Index;
@@ -1770,9 +1771,11 @@ fn bench_index(env: &duscope_testkit::TestEnv, name: &str) -> Option<duscope_cor
         eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
         return None;
     }
-    let tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../bench/.trees")
-        .join(name);
+    let trees = std::env::var_os("DUSCOPE_BENCH_TREES").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/.trees"),
+        PathBuf::from,
+    );
+    let tree = trees.join(name);
     let tree = std::fs::canonicalize(&tree).unwrap_or_else(|e| {
         panic!(
             "{name} is not built at {}: {e}: run `just bench build --trees {name}`",
@@ -1798,7 +1801,7 @@ fn bench_index(env: &duscope_testkit::TestEnv, name: &str) -> Option<duscope_cor
 /// A folder of a million files, T3, as the T2 test measures: the frames
 /// that sort it, move in it and mask it. Reported rather than asserted.
 #[test]
-#[ignore = "needs bench/.trees/T3 and the release binary; DUSCOPE_TEST_PLATFORM=1"]
+#[ignore = "needs T3 (DUSCOPE_BENCH_TREES, else bench/.trees) and the release binary; DUSCOPE_TEST_PLATFORM=1"]
 fn p4_tui_05_a_folder_of_a_million_files_on_t3() {
     use std::time::Instant;
 
@@ -2420,9 +2423,24 @@ fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
     };
     let (mocha, classes) = (Pack::named("mocha").unwrap(), classes());
     let (mockup, nested) = (mockup(), nested(4, 4, 3));
+    // Root tiles of equal size, which the folder legend ranks in id order:
+    // `z.bin` before `d1` (a folder's files come before its folders), though
+    // `d1` comes first by name.
+    let mut tied = import(
+        br#"[1,2,{"progname":"ncdu"},[{"name":"/tied"},
+            {"name":"z.bin","asize":4096,"dsize":4096},
+            [{"name":"d0"},{"name":"x.mp4","asize":8192,"dsize":8192}],
+            [{"name":"d1"},{"name":"y.db","asize":4096,"dsize":4096}]]]"#
+            .as_slice(),
+        Some(ImportFormat::Ncdu),
+    )
+    .unwrap()
+    .arena;
+    let tied_rollup = roll_up(&mut tied);
     let views = [
         mockup_view(&mockup),
         ArenaView::new(&nested.0, &nested.1, PathBuf::from("/nested")),
+        ArenaView::new(&tied, &tied_rollup, PathBuf::from("/tied")),
     ];
     for view in &views {
         for color_by in [
@@ -2462,8 +2480,13 @@ fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
                 assert_eq!(app.legend().0, alone.0, "{what}");
                 if color_by == ColorBy::Folder {
                     // The root's tiles, not tallied: `legend_rows` gives
-                    // the viewer's.
+                    // the viewer's, and they are the root's children read
+                    // alone (`root_tiles_read_alone`).
+                    assert!(!paint.pool_files);
                     assert_eq!(*app.legend(), alone, "{what}");
+                    let read = root_tiles_read_alone(view, &paint, &class_of);
+                    assert!(read.len() > 1, "{what}: the root's tiles");
+                    assert_eq!(alone.1, read, "{what}: the root's tiles, c and p's");
                     continue;
                 }
                 let mut read: Vec<LegendRow> = Vec::new();
@@ -2502,6 +2525,39 @@ fn p4_tui_09_the_legend_tallied_in_the_pass_is_the_legend_read_alone() {
             }
         }
     }
+}
+
+/// The folder legend's rows read alone: the root's children, each its own
+/// tile (no `--pool-files`), ranked by bytes as the map lays them out, ties
+/// in id order, each in its rank's colour of the cycle, the empty ones left
+/// out.
+fn root_tiles_read_alone(
+    view: &dyn TreeView,
+    paint: &duscope_treemap::paint::PaintOpts<'_>,
+    class_of: &[duscope_core::rules::Class],
+) -> Vec<crate::panes::LegendRow> {
+    let mut tiles: Vec<_> = (1..view.len())
+        .map(|id| view.node(id))
+        .filter(|n| n.parent == 0)
+        .collect();
+    tiles.sort_by_key(|n| std::cmp::Reverse(n.counted(paint.size)));
+    tiles
+        .iter()
+        .enumerate()
+        .map(|(rank, n)| crate::panes::LegendRow {
+            label: String::from_utf8_lossy(&view.name(n.id)).into_owned(),
+            bytes: n.counted(paint.size),
+            color: duscope_treemap::paint::tile_color(
+                view,
+                paint,
+                n,
+                class_of[n.id as usize],
+                1,
+                Some(rank),
+            ),
+        })
+        .filter(|row| row.bytes > 0)
+        .collect()
 }
 
 /// A view of `view` that counts the entries and the names read through

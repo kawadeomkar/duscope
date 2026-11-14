@@ -14,6 +14,8 @@
 //! file; name), and `other` is always the last row.
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -289,6 +291,7 @@ fn file_class(classes: &Classes, suffix: &str, executable: bool) -> Class {
 /// Each class's files under the root, by [`index`].
 fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
     let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
+    let mut kept: Vec<Kept> = vec![Kept::new(); Class::ALL.len()];
     classify(view, q.classes, |node, class| {
         if node.is_dir() || node.linked_away || !q.filters.keeps(view, node, q.size) {
             return;
@@ -303,22 +306,48 @@ fn tally(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Vec<Tally> {
             tally.newest_mtime_ns.max(node.mtime_ns)
         };
         tally.files += 1;
-        keep_largest(&mut tally.largest, q.examples, node.counted(q.size), id);
+        keep_largest(
+            &mut kept[index(class)],
+            q.examples,
+            node.counted(q.size),
+            id,
+        );
     });
+    for (tally, kept) in tallies.iter_mut().zip(kept) {
+        tally.largest = largest_first(kept);
+    }
     tallies
 }
 
-/// Keeps file `id`, counting `size`, among a class's `examples` largest:
-/// bytes counted, down, then ids, up.
-fn keep_largest(largest: &mut Vec<(u64, u32)>, examples: usize, size: u64, id: u32) {
+/// A class's largest files while its files are read, ranked bytes counted
+/// down, then ids up, as `(Reverse(size), id)` rises: the top of the heap is
+/// the least of them, the one a larger file takes the place of.
+type Kept = BinaryHeap<(Reverse<u64>, u32)>;
+
+/// Keeps file `id`, counting `size`, among a class's `examples` largest
+/// (`kept`), in time logarithmic in `examples`: a file that ranks among
+/// them replaces the least, where a sorted list would move every file
+/// after it.
+fn keep_largest(kept: &mut Kept, examples: usize, size: u64, id: u32) {
     if examples == 0 {
         return;
     }
-    let at = largest.partition_point(|&(s, other)| s > size || (s == size && other < id));
-    if at < examples {
-        largest.insert(at, (size, id));
-        largest.truncate(examples);
+    let file = (Reverse(size), id);
+    if kept.len() < examples {
+        kept.push(file);
+    } else if let Some(mut least) = kept.peek_mut()
+        && file < *least
+    {
+        *least = file;
     }
+}
+
+/// The files `kept` holds, largest first: bytes counted down, then ids up.
+fn largest_first(kept: Kept) -> Vec<(u64, u32)> {
+    kept.into_sorted_vec()
+        .into_iter()
+        .map(|(Reverse(size), id)| (size, id))
+        .collect()
 }
 
 /// The tallies of a saved scan read without a filter, from its own tables.
@@ -449,6 +478,7 @@ fn subtree_tallies(
     class_of: impl Fn(&str, bool) -> Class,
 ) -> rusqlite::Result<Vec<Tally>> {
     let mut tallies: Vec<Tally> = vec![Tally::default(); Class::ALL.len()];
+    let mut kept: Vec<Kept> = vec![Kept::new(); Class::ALL.len()];
     // The pass reads every file of the subtree, and a basic scan's modes
     // are NULL: only a scan with modes selects them.
     let modes = saved.full_attrs();
@@ -476,7 +506,10 @@ fn subtree_tallies(
         tally.files += 1;
         tally.allocated = tally.allocated.saturating_add(allocated);
         tally.apparent = tally.apparent.saturating_add(unsigned(row.get(5)?));
-        keep_largest(&mut tally.largest, q.examples, allocated, id);
+        keep_largest(&mut kept[index(class)], q.examples, allocated, id);
+    }
+    for (tally, kept) in tallies.iter_mut().zip(kept) {
+        tally.largest = largest_first(kept);
     }
     Ok(tallies)
 }

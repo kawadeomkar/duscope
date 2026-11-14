@@ -30,9 +30,9 @@ fast it answers, on T2 unless `--trees` says otherwise.
 
 The result file (`<date>-<platform>-index.json` in `--results-dir`) holds the
 usual header, the runs, and `gates`: each line of plan/PROPOSAL.md's 1.0
-acceptance targets 3, 4, 6 and 7 that the numbers decide, read from T2 (the
-first tree when T2 was not measured), with its limit and whether it holds. A
-part that cannot be measured is recorded in `failures` and the rest is still
+acceptance targets 3, 4, 6 and 7 that the numbers decide, read from T2 and not
+judged when T2 was not measured, with its limit and whether it holds. A part
+that cannot be measured is recorded in `failures` and the rest is still
 measured; the command then exits 1. A gate failing is no failure of the run.
 
 Standard library only; runs on Python 3.9 and later.
@@ -158,6 +158,37 @@ def gates(values: Dict[str, Optional[float]], platform: str) -> List[Dict[str, o
         holds = None if value is None or not applies else (value <= limit if op == "<=" else value >= limit)
         out.append({"name": name, "value": value, "op": op, "limit": limit, "binds": binds, "holds": holds})
     return out
+
+
+def judged(names: Sequence[str], per_tree: Sequence[Dict[str, object]]) -> Tuple[Optional[str], Dict[str, Optional[float]]]:
+    """The tree the gates are read from and its gate values, taken out of
+    every tree's figures: T2's, or no tree and no values when T2 was not
+    measured, whatever else was (T1's and T3's figures are not the targets')."""
+    gates_tree: Optional[str] = None
+    values: Dict[str, Optional[float]] = {}
+    for name, found in zip(names, per_tree):
+        kept = found.pop("gate_values", None)
+        if name == "T2":
+            gates_tree, values = name, kept or {}
+    return gates_tree, values
+
+
+def verdicts(gates_tree: Optional[str], gate_lines: Sequence[Dict[str, object]]) -> List[str]:
+    """What the run says of each gate: its value and whether it holds (or the
+    platform it binds), or that it is not judged when T2 was not measured."""
+    said = []
+    for gate in gate_lines:
+        head = f"gate {gate['name']} {gate['op']} {gate['limit']:g}"
+        if gates_tree is None:
+            said.append(f"{head}: not judged, T2 was not measured")
+            continue
+        value = gate["value"]
+        shown = "not measured" if value is None else f"{value:g}"
+        verdict = {True: "holds", False: "FAILS", None: "-"}[gate["holds"]]
+        if value is not None and gate["holds"] is None:
+            verdict = f"binds {gate['binds']} only"
+        said.append(f"{head}: {shown} ({verdict})")
+    return said
 
 
 def matched(argv: Sequence[str], what: str) -> int:
@@ -326,10 +357,7 @@ def cmd_index(args, harness) -> int:
     finished = time.gmtime()
 
     # The gates read T2's numbers, as the targets name it.
-    judged = next((i for i, t in enumerate(tree_list) if t.name == "T2"), 0)
-    values = per_tree[judged].pop("gate_values") if per_tree else {}
-    for found in per_tree:
-        found.pop("gate_values", None)
+    gates_tree, values = judged([t.name for t in tree_list], per_tree)
     result = {
         "schema_version": harness.SCHEMA_VERSION,
         "kind": "index",
@@ -364,7 +392,7 @@ def cmd_index(args, harness) -> int:
             }
             for t, stamp, found in zip(tree_list, stamps, per_tree)
         ],
-        "gates_tree": tree_list[judged].name if tree_list else None,
+        "gates_tree": gates_tree,
         "gates": gates(values, plat),
         "failures": failures,
         "results": rows,
@@ -372,13 +400,8 @@ def cmd_index(args, harness) -> int:
     name = f"{result['date']}-{plat}-index" + (f"-x{float(args.scale):g}" if scaled else "")
     out = args.out or os.path.join(args.results_dir, f"{name}.json")
     harness.write_result(result, out)
-    for gate in result["gates"]:
-        value = gate["value"]
-        shown = "not measured" if value is None else f"{value:g}"
-        verdict = {True: "holds", False: "FAILS", None: "-"}[gate["holds"]]
-        if value is not None and gate["holds"] is None:
-            verdict = f"binds {gate['binds']} only"
-        harness.log(f"gate {gate['name']} {gate['op']} {gate['limit']:g}: {shown} ({verdict})")
+    for said in verdicts(gates_tree, result["gates"]):
+        harness.log(said)
     for failure in failures:
         harness.log(f"not measured: {failure}")
     print(out)
