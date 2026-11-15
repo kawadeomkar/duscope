@@ -1,0 +1,297 @@
+.SH "INTERACTIVE VIEWER"
+.B duscope view
+opens the treemap in a viewer that takes the whole terminal.
+It reads the newest saved scan that holds the path (the current directory
+by default), or the saved scan
+.B \-\-scan
+names; an argument that is no path but
+.B latest
+or the first digits of a saved scan's id names that scan.
+When no saved scan holds the path, it scans the path and saves the scan,
+as the list verbs do:
+.B \-\-no\-save
+keeps that scan unsaved, and
+.B \-\-no\-scan
+fails instead.
+.B \-\-color\-by
+and
+.B \-\-theme
+set the colours it starts with; without a theme, the terminal's
+background picks
+.B light
+or
+.BR mocha .
+.PP
+.B duscope scan
+.I PATH
+.B \-i
+scans first and opens the result, which is saved only with
+.BR \-\-save .
+The map takes the treemap flags of
+.BR scan :
+.BR \-\-depth ,
+.BR \-\-min\-tile ,
+.BR \-\-pool\-files ,
+.BR \-\-color\-by ,
+.B \-\-theme
+and
+.BR "\-\-treemap pixels" .
+.PP
+Both refuse to start, before any scan, with a usage error (exit 2), when
+stdout is not a terminal (a pipe, a file,
+.BR \-o ),
+when the output is one for programs
+.RB ( \-\-json ,
+.BR \-\-plain ,
+a format that
+.B \-\-format
+or
+.B DUSCOPE_FORMAT
+names other than
+.B table
+or
+.BR treemap ,
+or the agent and CI variables of ENVIRONMENT), or when the terminal is
+smaller than 80\(mu24.
+The viewer gives the terminal back as it found it when it ends: by
+.B q
+or
+.BR Ctrl\-C ,
+by an error, or by the signals
+.B SIGTERM
+and
+.BR SIGHUP .
+.SS Screen
+The top row holds the scan's path, the four views and the status; the
+second, the path from the scan's root to the selection.
+The map fills the pane under them.
+At 110 columns and wider, a column at its right holds three panes: the
+selection's facts (its size, its counts, its shares of its folder and of
+the scan, its type, when it was modified, its mode and owner); its
+siblings, the entries of its folder, largest first or in the
+.B s
+sort, which reach entries too small to have a tile; and the legend, what
+the colours stand for and how much of the map each takes.
+Narrower, the facts fold into a pane under the map.
+The last row is the key line: six keys for the view and the pane in
+focus.
+.PP
+The selection starts at the largest file, reached through the largest
+folder at each level.
+The arrow keys move it to the neighbouring tile at the same depth;
+.B Enter
+goes down the path, back to where it went before or into the folder's
+largest entry, and
+.B Backspace
+goes up it.
+.B z
+zooms the map to the folder under the cursor, and
+.B Z
+and
+.B 0
+zoom back out.
+.B Tab
+moves the arrow keys onto the siblings, then the legend.
+.B i
+grows the facts into everything known of the selection, from the scan and
+from
+.BR explain :
+what deleting it would free, the command that regenerates it, what git
+says of it.
+A click selects the tile or the row under it (on a legend row, it filters
+by the row), a double click zooms, and the mouse wheel goes up and down
+the path.
+.SS Views
+.TP
+.B 1
+The treemap: a box for each folder, a tile for each file.
+.TP
+.B 2
+The list: the entries of the selection's folder as a table, in the
+.B s
+sort.
+.TP
+.B 3
+The largest files under the map's root, as
+.B top \-\-files
+lists them;
+.B Enter
+shows a row's file on the map.
+.TP
+.B 4
+The types: the bytes of each file class under the map's root, as
+.B by\-type
+adds them up;
+.B Enter
+keeps that class's tiles on the map.
+.SS Keys
+.B ?\&
+lists these keys over the panes, in this order.
+.TP
+.BR Left ", " Down ", " Up ", " Right ", " h ", " j ", " k ", " l
+Move to the neighbouring tile, or along the list, the table or the pane in
+focus.
+.TP
+.B Enter
+Go down the path.
+In the largest files, show the row's file on the map; in the types and the
+legend, keep the row's tiles on the map.
+.TP
+.B Backspace
+Go up the path; at the map's root, zoom out one step to reach the folder
+above.
+.TP
+.B Esc
+Close the facts, the help, the filter prompt or the mark pane; else clear
+the filter; else go up the path.
+.TP
+.B z
+Zoom the map to the folder under the cursor (a file's folder).
+.TP
+.B Z
+Zoom out one step.
+.TP
+.B 0
+Zoom all the way out.
+.TP
+.BR g ", " Home
+The first sibling, or the first row.
+.TP
+.BR G ", " End
+The last sibling, or the last row.
+.TP
+.BR PgUp ", " PgDn
+A page of siblings or rows up, or down.
+.TP
+.BR 1 ", " 2 ", " 3 ", " 4
+The treemap, the list, the largest files, the types.
+.TP
+.B s
+The next sort of the siblings and the list: size, name, modified (the
+newest change under an entry first), count of files.
+.TP
+.B t
+Labels on the tiles of at least 8\(mu2 cells, on or off.
+.TP
+.B c
+The next colour mode:
+.BR type ,
+.BR folder ,
+.BR level ,
+.BR age ,
+.BR lscolors ,
+as
+.B \-\-color\-by
+names them.
+.TP
+.B p
+The next theme pack.
+.TP
+.B /
+Filter by a glob, matched as the list verbs'
+.B \-\-glob
+matches, against the path under the scan's root
+.RB ( *.zip
+at any depth,
+.B /Library/*
+from the root): the map, the list and the largest files keep what
+matches, or lies in a folder that does.
+.B Enter
+applies it, an empty glob clears it, and
+.B Esc
+leaves the prompt.
+.TP
+.B Tab
+Focus the next pane: the map (or the table in its place), the siblings,
+the legend.
+The arrow keys,
+.BR g ,
+.BR G ,
+the page keys and
+.B Enter
+act in the pane in focus; the other keys act on the map.
+.TP
+.B Shift\-Tab
+Focus the previous pane.
+.TP
+.B i
+The selection's full facts;
+.B i
+again or
+.B Esc
+closes them.
+.TP
+.B y
+Copy the selection's path to the clipboard with OSC 52, except inside
+tmux or screen, in Apple's Terminal and on the Linux console; the key line
+shows the path either way.
+.TP
+.B o
+Show the selection in the file manager, selected in its folder and never
+opened: Finder on macOS; elsewhere the freedesktop file manager, else
+.B xdg\-open
+on its folder.
+.TP
+.B d
+Mark the selection for the Trash, or unmark it.
+.TP
+.B D
+Open the mark pane.
+.TP
+.B r
+Scan the viewer's root again (not the zoomed folder alone) with the saved
+scan's options, beside the viewer, and reload when the new scan is saved,
+keeping the view, the filter, the marks and the path to the selection.
+.TP
+.B ?
+List the keys;
+.B ?\&
+or
+.B Esc
+closes the list.
+.TP
+.BR q ", " Ctrl\-C
+Quit, giving the terminal back.
+.SS "Moving to the Trash"
+.B d
+marks the selection, and unmarks it when it is marked.
+A folder's mark covers everything under it: marking a folder drops the
+marks inside it, and an entry inside a marked folder is not marked again.
+The map's root cannot be marked.
+.B D
+opens the mark pane: the plan
+.B clean
+makes of the marked paths, against the saved scan the viewer shows (see
+CLEANING UP), in the table, the line and the question
+.B clean
+writes on a terminal.
+The plan is made beside the viewer and takes as long as a scan of the
+marked folders;
+.B Esc
+gives it up.
+Typing
+.B yes
+in full, then
+.BR Enter ,
+moves the items to the Trash; any other answer closes the pane and moves
+nothing.
+A plan that refuses an item moves nothing, as
+.B clean
+does without
+.BR \-\-skip\-refused .
+The viewer never deletes: it has no
+.BR \-\-permanent .
+.PP
+What moved stays on the map as a freed tile until the viewer closes, and
+neither it nor a folder that holds it can be marked again before a
+rescan.
+When the viewer closes, stderr says what it moved, with the
+.B index_untouched
+warning: the saved scans count what moved until
+.B duscope rescan
+measures the tree again.
+A map that no saved scan holds
+.RB ( "scan \-i"
+without
+.BR \-\-save )
+cannot be planned, and the pane says so.

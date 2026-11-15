@@ -8,12 +8,14 @@ The sections clap knows nothing of are written by hand in roff, in `duscope/src/
 
 | File | Section |
 | --- | --- |
+| `viewer.roff` | INTERACTIVE VIEWER: how `view` and `scan -i` find their scan and when they refuse to start, the screen and its panes, the four views, every key, and the mark pane that moves marked entries to the Trash |
+| `clean.roff` | CLEANING UP: what `clean`'s plan holds and when it acts, each reason it refuses an item, the Trash on each platform against `--permanent`, and `--from` handles |
 | `environment.roff` | ENVIRONMENT: every variable duscope reads (the `DUSCOPE_TEST_*` knobs are never documented) |
 | `exit-status.roff` | EXIT STATUS: the exit codes of the conventions |
 | `files.roff` | FILES: theme files, classes tables, ignore and pattern files |
 | `examples.roff` | EXAMPLES |
 | `caveats.roff` | CAVEATS: where duscope differs from what a `du` user expects (`-x` inside a macOS volume group, Linux automount points not yet mounted and links that lead to them, `--exclude-caches` markers, case-sensitive patterns), what an incremental `rescan` on macOS cannot see, and the pointers to `docs/limits.md` and `docs/troubleshooting.md` |
 
-They live beside the code rather than in this directory because the published crate ships only its `src/`, and the page is built into the binary. `duscope/src/verbs/man.rs` checks that every visible flag appears in the page and no hidden one does. `mandoc -T lint` checks the roff.
+They live beside the code rather than in this directory because the published crate ships only its `src/`, and the page is built into the binary. `duscope/src/verbs/man.rs` checks that every visible flag appears in the page and no hidden one does, that the viewer's key list names the keys of its key map (`duscope_tui::key_rows`, what `?` lists) row by row, and that CLEANING UP lists every reason `clean` refuses an item for. `mandoc -T lint` checks the roff. The README's key table is held to the same key map by `duscope/tests/readme.rs`.
 
 `duscope completions bash|zsh|fish|elvish|powershell` prints the completion script for a shell. The tests check that bash, zsh and fish load it.

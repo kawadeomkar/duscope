@@ -432,6 +432,52 @@ fn item<'a>(key: &'a str, what: &'a str) -> KeyItem<'a> {
     }
 }
 
+/// One row of `?`, as the documentation gives it: the README's key table
+/// and the manual page's key list are held to these rows by their tests,
+/// so neither can name a key the viewer does not answer or leave one out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRow {
+    /// The keys as `?` writes them on a terminal with UTF-8: `⏎`, `g Home`.
+    pub label: &'static str,
+    /// Each key in words, in the row's order: `Enter`, `Shift-Tab`,
+    /// `Ctrl-C`, `h`.
+    pub names: Vec<String>,
+}
+
+/// Every row of `?`, in the order it lists them: one for each binding of
+/// the key map.
+#[must_use]
+pub fn key_rows() -> Vec<KeyRow> {
+    ALL.iter()
+        .map(|binding| KeyRow {
+            label: binding.label,
+            names: binding.strokes.iter().map(name).collect(),
+        })
+        .collect()
+}
+
+/// `stroke`'s key in words, as a manual names it.
+fn name(stroke: &Stroke) -> String {
+    match stroke.code {
+        KeyCode::Char(c) if stroke.ctrl => format!("Ctrl-{}", c.to_ascii_uppercase()),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Left => "Left".to_owned(),
+        KeyCode::Right => "Right".to_owned(),
+        KeyCode::Up => "Up".to_owned(),
+        KeyCode::Down => "Down".to_owned(),
+        KeyCode::Enter => "Enter".to_owned(),
+        KeyCode::Backspace => "Backspace".to_owned(),
+        KeyCode::Tab => "Tab".to_owned(),
+        KeyCode::BackTab => "Shift-Tab".to_owned(),
+        KeyCode::Home => "Home".to_owned(),
+        KeyCode::End => "End".to_owned(),
+        KeyCode::PageUp => "PgUp".to_owned(),
+        KeyCode::PageDown => "PgDn".to_owned(),
+        KeyCode::Esc => "Esc".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +485,30 @@ mod tests {
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn p4_doc_01_the_documented_rows_name_every_key_of_the_map() {
+        let rows = key_rows();
+        assert_eq!(rows.len(), ALL.len());
+        for (row, binding) in rows.iter().zip(ALL) {
+            assert_eq!(row.label, binding.label);
+            assert_eq!(row.names.len(), binding.strokes.len(), "{}", row.label);
+            // A key without a name of its own would be named by its Debug
+            // form, `F(1)`, which no manual writes.
+            for name in &row.names {
+                assert!(
+                    !name.is_empty() && !name.contains(['(', ' ']),
+                    "{name:?} of {}",
+                    row.label
+                );
+            }
+        }
+        assert_eq!(
+            rows[0].names,
+            ["Left", "Down", "Up", "Right", "h", "j", "k", "l"]
+        );
+        assert_eq!(rows[ALL.len() - 1].names, ["q", "Ctrl-C"]);
     }
 
     #[test]
