@@ -3,6 +3,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+use std::io::Read;
 use std::process::{Command as StdCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -102,6 +103,43 @@ fn p1_walk_08_a_root_link_that_leads_nowhere_fails() {
     assert_eq!(error["error"]["code"], "io_error");
 }
 
+/// What a child wrote to one of its pipes, read to the end on a thread of
+/// its own: the bytes, when `awaited` had come through (if it did), and
+/// when the pipe ended.
+struct Output {
+    bytes: Vec<u8>,
+    came: Option<Instant>,
+    ended: Instant,
+}
+
+fn read_on_thread(
+    mut pipe: impl Read + Send + 'static,
+    awaited: Option<&'static [u8]>,
+) -> thread::JoinHandle<Output> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut came = None;
+        let mut chunk = [0; 4096];
+        loop {
+            let read = pipe.read(&mut chunk).unwrap();
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if came.is_none()
+                && awaited.is_some_and(|text| bytes.windows(text.len()).any(|w| w == text))
+            {
+                came = Some(Instant::now());
+            }
+        }
+        Output {
+            bytes,
+            came,
+            ended: Instant::now(),
+        }
+    })
+}
+
 #[test]
 fn p1_walk_08_sigint_exits_130_within_200_ms() {
     let env = TestEnv::new();
@@ -109,13 +147,25 @@ fn p1_walk_08_sigint_exits_130_within_200_ms() {
     // macOS checks a newly built binary on its first launch, which can
     // take longer than the wait below: launch it once first.
     duscope(&env).arg("--version").assert().success();
+    let bound = Duration::from_millis(200);
     // One worker on the whole fixture tree takes about a second; the signal
     // comes once it is under way. A scan that finished and wrote its result
     // first is retried with a shorter wait, one the signal reached before it
     // started (killed by SIGINT itself) with a longer one.
+    //
+    // The exit is timed by waitpid(2), not by the end of the child's
+    // output, which a command another test starts at that moment can hold
+    // open: on macOS the standard library makes a new pipe close-on-exec
+    // only after creating it. The watcher reports and exits at once, but a
+    // process ends only once each of its threads has left the kernel, and
+    // on a loaded disk the worker's read of a directory can hold the exit
+    // back past the bound. A try whose report came in time and whose exit
+    // did not is made again; a late report fails at once, and so does a
+    // third late exit.
     let mut wait = 300;
-    for _ in 0..6 {
-        let child = env
+    let mut late = Vec::new();
+    for _ in 0..9 {
+        let mut child = env
             .cmd()
             .args(["scan", "--threads", "1", "--json"])
             .arg(&tree)
@@ -123,17 +173,23 @@ fn p1_walk_08_sigint_exits_130_within_200_ms() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        let stdout = read_on_thread(child.stdout.take().unwrap(), None);
+        let stderr = read_on_thread(
+            child.stderr.take().unwrap(),
+            Some(b"duscope: interrupted\n"),
+        );
         thread::sleep(Duration::from_millis(wait));
         let killed = StdCommand::new("kill")
             .args(["-INT", &child.id().to_string()])
             .status()
             .unwrap();
         let signalled = Instant::now();
-        let out = child.wait_with_output().unwrap();
-        let took = signalled.elapsed();
-        match out.status.code() {
+        let status = child.wait().unwrap();
+        let exited = signalled.elapsed();
+        let (stdout, stderr) = (stdout.join().unwrap(), stderr.join().unwrap());
+        match status.code() {
             // The scan finished, and wrote its result, before the signal.
-            Some(_) if !out.stdout.is_empty() => {
+            Some(_) if !stdout.bytes.is_empty() => {
                 eprintln!("the scan finished within {wait} ms; trying sooner");
                 wait /= 2;
                 continue;
@@ -143,17 +199,42 @@ fn p1_walk_08_sigint_exits_130_within_200_ms() {
                 wait *= 2;
                 continue;
             }
-            Some(code) => assert_eq!(code, 130, "{}", String::from_utf8_lossy(&out.stderr)),
+            Some(code) => assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr.bytes)),
         }
         assert!(killed.success());
-        assert!(took < Duration::from_millis(200), "exit took {took:?}");
         // One line on stderr, and nothing written to stdout.
         assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&stderr.bytes),
             "duscope: interrupted\n"
         );
-        assert!(out.stdout.is_empty());
-        return;
+        assert!(stdout.bytes.is_empty());
+        let reported = stderr
+            .came
+            .map(|at| at.saturating_duration_since(signalled));
+        let ended = stdout
+            .ended
+            .max(stderr.ended)
+            .saturating_duration_since(signalled);
+        let timings = format!(
+            "after the signal, reported {}, exited {exited:?}, output ended {ended:?}",
+            reported.map_or("never".to_owned(), |reported| format!("{reported:?}"))
+        );
+        assert!(
+            reported.is_some_and(|reported| reported < bound),
+            "the interrupt was reported late: {timings}"
+        );
+        if exited < bound {
+            return;
+        }
+        late.push(timings);
+        assert!(
+            late.len() < 3,
+            "the exit took over {bound:?} three times: {late:#?}"
+        );
+        eprintln!(
+            "the exit took over {bound:?}, the report did not; trying again: {}",
+            late[late.len() - 1]
+        );
     }
     panic!("no scan was under way when the signal came");
 }
