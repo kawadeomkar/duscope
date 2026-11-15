@@ -568,8 +568,11 @@ tokens, $10 output, $0.20 cache reads) on the order of $0.10–0.40, so $15–50
 subscription token counts against the subscription's limits instead. These are estimates: each
 run records Claude Code's own `total_cost_usd` and tokens, and `summary` sums them per cell. At 1–3
 minutes a run, 120 runs take 2–6 hours; `--jobs N` runs N at once, within the account's rate
-limits. `--resume FILE` continues an interrupted run: the runs in FILE are kept and not made
-again, provided `config.toml`, `tasks.toml` and the Claude Code release are unchanged.
+limits. Ctrl-C stops the eval: the runs not started are cancelled and the running agents ended
+(each runs in a session of its own, which the terminal's Ctrl-C does not reach), and the eval
+exits with status 130. A run cut short is not recorded. `--resume FILE` continues an interrupted
+run: the runs in FILE are kept and not made again, provided `config.toml`, `tasks.toml` and the
+Claude Code release are unchanged.
 
 **What it records.** `bench/eval/results/<date>.json` (`--out` elsewhere), rewritten after every
 run and marked `complete` at the end: the host, the commit, the hashes of both files, the Claude

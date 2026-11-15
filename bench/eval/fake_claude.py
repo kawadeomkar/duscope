@@ -10,6 +10,11 @@ DUSCOPE_EVAL_FAKE_ANSWER: the truth (`right`) or one every check refuses
 runs a command that works, so the harness sees a failed call and a recovery.
 When the duscope skill is in HOME, it loads it with the Skill tool first.
 
+The answer file's `acts` (from the tests' DUSCOPE_TEST_EVAL_FAKE, which the
+harness reads) make it misbehave as a real run can: `hang` starts a command
+and waits on it, as an agent stuck in a tool call does, and writes its own
+process id and the command's to `fake.pids` beside the answer file.
+
 Its token counts are made up and deterministic: a fixed amount a turn plus a
 quarter of the characters the tools returned.
 """
@@ -21,6 +26,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from typing import Any, Dict, List
 
 VERSION = "0.0.0 (fake Claude Code, bench/eval/fake_claude.py)"
@@ -50,6 +56,7 @@ def main(argv: List[str]) -> int:
         return 2
     with open(path, encoding="utf-8") as f:
         fake = json.load(f)
+    acts = fake.get("acts") or []
     model = option(argv, "--model", "fake-model")
     root = fake["root"]
     skill = os.path.join(os.environ.get("HOME", ""), ".claude", "skills", "duscope", "SKILL.md")
@@ -61,6 +68,14 @@ def main(argv: List[str]) -> int:
         "skills": ["duscope"] if has_skill else [], "claude_code_version": VERSION.split()[0],
         "permissionMode": "default",
     })
+    if "hang" in acts:
+        child = subprocess.Popen(["/bin/sleep", "3600"], stdin=subprocess.DEVNULL)
+        pids = os.path.join(os.path.dirname(path), "fake.pids")
+        with open(pids + ".tmp", "w", encoding="utf-8") as f:
+            f.write("%d %d\n" % (os.getpid(), child.pid))
+        os.replace(pids + ".tmp", pids)
+        time.sleep(3600)
+        return 1
 
     steps: List[Dict[str, Any]] = []
     if has_skill:

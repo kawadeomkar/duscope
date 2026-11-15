@@ -66,6 +66,10 @@ FORMATS = ("json", "plain", "table")
 FIXTURES = ("tree", "two-scans")
 # The tree's root inside a run's directory: a home directory's name.
 TREE_NAME = "alex"
+# The tests' knob for the stub agent (fake_claude.py): comma-separated acts,
+# each `ACT` for every run or `TASK:ACT` for one task's runs.
+FAKE_ACTS_VAR = "DUSCOPE_TEST_EVAL_FAKE"
+FAKE_ACTS = ("hang",)
 
 # The duscope on the agent's PATH. It runs the binary under test and appends
 # the exit status, the argument count and the arguments, NUL-separated, to
@@ -98,6 +102,46 @@ exit "$status"
 
 class EvalError(RuntimeError):
     """A problem with the configuration, the tasks or the setup: exit 2."""
+
+
+class CutShort(Exception):
+    """A run the eval stopped before it ended: it is not recorded."""
+
+
+class Agents:
+    """The agents running now, so that a stop can end them. Each runs in a
+    session of its own, which the terminal's Ctrl-C does not reach, so the
+    eval ends each one's process group itself; once it is stopping, no run
+    starts an agent."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._running: Dict[int, subprocess.Popen] = {}
+        self._cut: set = set()
+        self.stopping = False
+
+    def start(self, argv: List[str], **kw: Any) -> subprocess.Popen:
+        with self._lock:
+            if self.stopping:
+                raise CutShort()
+            proc = subprocess.Popen(argv, start_new_session=True, **kw)
+            self._running[proc.pid] = proc
+            return proc
+
+    def finish(self, proc: subprocess.Popen) -> None:
+        """Forgets an agent that has ended; raises CutShort when the stop
+        ended it."""
+        with self._lock:
+            self._running.pop(proc.pid, None)
+            if proc.pid in self._cut:
+                raise CutShort()
+
+    def stop(self) -> None:
+        with self._lock:
+            self.stopping = True
+            for pid, proc in self._running.items():
+                self._cut.add(pid)
+                _kill_group(proc, signal.SIGKILL)
 
 
 # -- configuration and tasks ---------------------------------------------------
@@ -364,6 +408,8 @@ class Settings:
         self.work_dir: Optional[str] = kw["work_dir"]
         self.keep_work: bool = kw["keep_work"]
         self.transcripts: Optional[str] = kw["transcripts"]
+        self.fake_acts: List[Tuple[Optional[str], str]] = kw.get("fake_acts") or []
+        self.agents = Agents()
 
 
 def run_one(s: Settings, task: Dict[str, Any], cell: Dict[str, Any], repeat: int) -> Dict[str, Any]:
@@ -378,6 +424,8 @@ def run_one(s: Settings, task: Dict[str, Any], cell: Dict[str, Any], repeat: int
 
 
 def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], repeat: int) -> Dict[str, Any]:
+    if s.agents.stopping:
+        raise CutShort()
     layout = Layout(work)
     now = time.time()
     evaltree.build(layout.root, now, s.scale)
@@ -421,7 +469,8 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
         )
         fake_file = os.path.join(layout.out, "fake-answer.json")
         with open(fake_file, "w", encoding="utf-8") as f:
-            json.dump({"mode": s.fake, "root": root, "answer": answer}, f)
+            acts = [act for only, act in s.fake_acts if only in (None, task["id"])]
+            json.dump({"mode": s.fake, "root": root, "answer": answer, "acts": acts}, f)
         env = dict(env, DUSCOPE_EVAL_FAKE_ANSWER=fake_file)
 
     argv = claude_argv(s.claude, s.config, prompt)
@@ -430,9 +479,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     started = time.time()
     timed_out = False
     with open(transcript, "wb") as out, open(stderr_path, "wb") as err:
-        proc = subprocess.Popen(
-            argv, cwd=layout.project, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True
-        )
+        proc = s.agents.start(argv, cwd=layout.project, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
         try:
             proc.wait(timeout=s.config["claude_code"]["timeout_s"])
         except subprocess.TimeoutExpired:
@@ -444,6 +491,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
                 _kill_group(proc, signal.SIGKILL)
                 proc.wait()
         _kill_group(proc, signal.SIGKILL)  # anything the agent left running
+    s.agents.finish(proc)
     wall = time.time() - started
 
     with open(transcript, "r", encoding="utf-8", errors="replace") as f:
@@ -504,6 +552,19 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     if fixture:
         record["fixture"] = {"old_scan": fixture["old_scan"], "new_scan": fixture["new_scan"]}
     return record
+
+
+def fake_acts(text: str) -> List[Tuple[Optional[str], str]]:
+    """DUSCOPE_TEST_EVAL_FAKE read: (task or None for every task, act)."""
+    acts: List[Tuple[Optional[str], str]] = []
+    for item in (x.strip() for x in text.split(",")):
+        if not item:
+            continue
+        only, _, act = item.rpartition(":")
+        if act.split("=", 1)[0] not in FAKE_ACTS:
+            raise EvalError("%s: unknown act %r" % (FAKE_ACTS_VAR, act))
+        acts.append((only or None, act))
+    return acts
 
 
 def shown_path(path: str) -> str:
@@ -957,6 +1018,7 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
         work_dir=args.work_dir,
         keep_work=args.keep_work,
         transcripts=transcripts,
+        fake_acts=fake_acts(base_env.get(FAKE_ACTS_VAR, "")) if args.fake else [],
     )
     # Interleaved: every cell runs a task before the next task, and every task
     # once before any runs a second time, so a slow hour or a changed rate
@@ -983,30 +1045,68 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
 
     total = len(order) + len(done)
     failures: List[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        futures = {pool.submit(run_one, settings, t, c, r): (t, c, r) for t, c, r in order}
+
+    def take(future: concurrent.futures.Future) -> None:
+        t, c, r = futures[future]
+        try:
+            record = future.result()
+        except CutShort:
+            cut.append(future)
+            return
+        except (EvalError, OSError, subprocess.SubprocessError, evalchecks.TruthError) as e:
+            if settings.agents.stopping:
+                cut.append(future)
+                return
+            failures.append("%s/%s/%d: %s" % (t["id"], c["id"], r, e))
+            print("eval: %s %s run %d could not run: %s" % (t["id"], c["id"], r + 1, e), file=sys.stderr)
+            return
+        with lock:
+            records.append(record)
+            save(False)
+            print(
+                "eval: [%d/%d] %s %s run %d: %s%s"
+                % (len(records), total, t["id"], c["id"], r + 1,
+                   "completed" if record["completed"] else "not completed",
+                   "" if record["completed"] else " (%s)" % record["failure"]),
+                file=sys.stderr,
+            )
+
+    # On Ctrl-C (or any error here) the queue is cancelled and the running
+    # agents are ended; a run cut short is not recorded, so --resume runs it.
+    cut: List[concurrent.futures.Future] = []
+    taken = set()
+    interrupted = False
+    drained = False
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs))
+    futures = {pool.submit(run_one, settings, t, c, r): (t, c, r) for t, c, r in order}
+    try:
         for future in concurrent.futures.as_completed(futures):
-            t, c, r = futures[future]
-            try:
-                record = future.result()
-            except (EvalError, OSError, subprocess.SubprocessError, evalchecks.TruthError) as e:
-                failures.append("%s/%s/%d: %s" % (t["id"], c["id"], r, e))
-                print("eval: %s %s run %d could not run: %s" % (t["id"], c["id"], r + 1, e), file=sys.stderr)
-                continue
-            with lock:
-                records.append(record)
-                save(False)
-                print(
-                    "eval: [%d/%d] %s %s run %d: %s%s"
-                    % (len(records), total, t["id"], c["id"], r + 1,
-                       "completed" if record["completed"] else "not completed",
-                       "" if record["completed"] else " (%s)" % record["failure"]),
-                    file=sys.stderr,
-                )
-    save(True)
+            taken.add(future)
+            take(future)
+        drained = True
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        if not drained:
+            settings.agents.stop()
+            pool.shutdown(wait=False, cancel_futures=True)
+        pool.shutdown(wait=True)
+    # A run that ended while the eval stopped is kept.
+    for future in futures:
+        if future not in taken and not future.cancelled():
+            take(future)
+
+    save(not interrupted)
     with open(out, encoding="utf-8") as f:
         print(format_summary(json.load(f)), file=sys.stderr)
     print(out)
+    if interrupted:
+        print(
+            "eval: interrupted: %d runs cut short and not recorded, %d not started; "
+            "the same command with --resume %s runs them" % (len(cut), sum(1 for f in futures if f.cancelled()), out),
+            file=sys.stderr,
+        )
+        return 130
     return 1 if failures else 0
 
 
@@ -1024,6 +1124,9 @@ def main(argv: Optional[List[str]] = None, environ: Optional[Dict[str, str]] = N
     except (EvalError, minitoml.TomlError) as e:
         print("eval: %s" % e, file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("eval: interrupted", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

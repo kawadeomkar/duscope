@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -668,6 +669,80 @@ class Fake(unittest.TestCase):
         self.assertEqual(again["runs"][0], kept["runs"][0])
         self.assertEqual([r["task"] for r in again["runs"]], ["largest-dir", "sql-own-files"])
         self.assertEqual(err.getvalue().count("eval: ["), 1)
+
+
+def gone(pid, wait=10.0):
+    """Whether process `pid` has ended (waiting up to `wait` seconds)."""
+    deadline = time.time() + wait
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        if time.time() > deadline:
+            return False
+        time.sleep(0.05)
+
+
+@unittest.skipIf(duscope_binary() is None, "no duscope binary: cargo build -p duscope, or set DUSCOPE_EVAL_TEST_BIN")
+class Stop(unittest.TestCase):
+    """The harness as a person runs it, stopped from the terminal."""
+
+    def test_p3_agt_03_ctrl_c_ends_the_running_agents_and_cancels_the_queue(self):
+        d = scratch()
+        self.addCleanup(shutil.rmtree, d, True)
+        work = os.path.join(d, "work")
+        os.makedirs(work)
+        out = os.path.join(d, "result.json")
+        argv = [sys.executable, "-B", "-E", "-s", os.path.join(EVAL, "agent_eval.py"), "run",
+                "--duscope", duscope_binary(), "--fake", "right", "--cells", "skill-json",
+                "--tasks", "largest-dir,largest-files,tar-gz-total,sql-own-files", "--runs", "1", "--jobs", "2",
+                "--scale", "0.015625", "--no-transcripts", "--out", out, "--work-dir", work, "--keep-work"]
+        env = {"PATH": "/usr/bin:/bin", "DUSCOPE_TEST_EVAL_FAKE": "hang"}
+        # A shell's background job inherits Ctrl-C ignored; a terminal's does not.
+        proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        pids = []
+
+        def kill_all():
+            for pid in pids + [proc.pid]:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            proc.communicate()
+
+        self.addCleanup(kill_all)
+        # Both agents are running, each in a command it waits on.
+        deadline = time.time() + 120
+        while len(pids) < 4:
+            self.assertLess(time.time(), deadline, "the two agents never started")
+            self.assertIsNone(proc.poll(), "the eval ended before the agents started")
+            time.sleep(0.1)
+            pids = []
+            for run in os.listdir(work):
+                path = os.path.join(work, run, "out", "fake.pids")
+                if os.path.exists(path):
+                    with open(path) as f:
+                        pids += [int(p) for p in f.read().split()]
+        proc.send_signal(signal.SIGINT)
+        try:
+            _, err = proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            self.fail("the eval went on after Ctrl-C")
+        err = err.decode()
+        self.assertEqual(proc.returncode, 130, err)
+        for pid in pids:
+            self.assertTrue(gone(pid), "process %d outlived the eval" % pid)
+        # The queue was cancelled: the two other tasks never started.
+        self.assertEqual(len([n for n in os.listdir(work) if n.startswith("duscope-eval-")]), 2)
+        with open(out, encoding="utf-8") as f:
+            result = json.load(f)
+        self.assertEqual((result["runs"], result["complete"]), ([], False))
+        self.assertIn("2 runs cut short", err)
+        self.assertIn("--resume " + out, err)
 
 
 if __name__ == "__main__":
