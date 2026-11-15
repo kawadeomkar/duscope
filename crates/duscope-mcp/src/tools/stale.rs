@@ -1,5 +1,5 @@
-//! `duscope_stale`: large files under a path in a saved scan left
-//! unmodified for a long time (`stale`).
+//! `duscope_stale`: large files under a path in a saved scan neither
+//! modified nor changed for a long time (`stale`).
 
 use serde_json::{Map, Value};
 
@@ -17,8 +17,10 @@ impl Tool for Stale {
     }
 
     fn description(&self) -> &'static str {
-        "Large files under a path in a saved scan left unmodified for a long time (by default \
-         10 MB and 180 days), largest first; paged with cursor."
+        "Large files under a path in a saved scan neither modified nor changed (ctime) for a long \
+         time (by default 10 MB and 180 days), largest first; paged with cursor. A file restored, \
+         or copied with its times kept, has a new change time and is not listed: for the \
+         modification time alone, use duscope_query on files.mtime (nanoseconds)."
     }
 
     fn input_schema(&self) -> &'static str {

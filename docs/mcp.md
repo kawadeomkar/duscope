@@ -63,7 +63,7 @@ The server lists them in this order; a test holds this list to its `tools/list`.
 - `duscope_scan`: Scan a directory under the roots and save the scan: its scan_id, totals and largest directories. The other tools read saved scans, so call this first; with max_age, a recent scan of the directory is returned instead of scanning again.
 - `duscope_scans`: The saved scans of directories under the roots, newest first: each one's scan_id, root, times, attributes, entry count and totals.
 - `duscope_schema`: The index's tables and columns, for duscope_query, with each table's rows in a saved scan; or, with envelope, a verb's output as JSON Schema.
-- `duscope_stale`: Large files under a path in a saved scan left unmodified for a long time (by default 10 MB and 180 days), largest first; paged with cursor.
+- `duscope_stale`: Large files under a path in a saved scan neither modified nor changed (ctime) for a long time (by default 10 MB and 180 days), largest first; paged with cursor. A file restored, or copied with its times kept, has a new change time and is not listed: for the modification time alone, use duscope_query on files.mtime (nanoseconds).
 - `duscope_summary`: Totals under a path in a saved scan: bytes on disk and apparent, files, directories, errors, the volumes, and the bytes no entry accounts for.
 - `duscope_top`: The largest directories, or files, under a path in a saved scan, largest first; narrowed by depth, size and glob, and paged with cursor.
 
