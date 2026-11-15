@@ -507,9 +507,16 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
 
 
 def shown_path(path: str) -> str:
-    """`path` relative to the checkout when it is inside it, else whole."""
+    """`path` as a result file keeps it: relative to the checkout when it is
+    inside it, else with the home directory written `~`, so that a committed
+    file names no account."""
     rel = os.path.relpath(path, REPO)
-    return path if rel.startswith("..") else rel
+    if not rel.startswith(".."):
+        return rel
+    home = os.path.expanduser("~")
+    if home not in ("", "/") and evalchecks.under(path, home):
+        return "~" + path[len(home) :]
+    return path
 
 
 def _kill_group(proc: subprocess.Popen, sig: int) -> None:
@@ -907,11 +914,11 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
             "runs_per_cell": runs,
         },
         "claude_code": {
-            "path": claude[-1] if mode == "claude" else os.path.relpath(FAKE_CLAUDE, REPO),
+            "path": shown_path(claude[-1]),
             "version": claude_version,
             "auth": [n for n in AUTH_VARS if base_env.get(n)] if mode == "claude" else [],
         },
-        "duscope": {"path": binary, "version": version_of([binary], {"PATH": "/usr/bin:/bin"})},
+        "duscope": {"path": shown_path(binary), "version": version_of([binary], {"PATH": "/usr/bin:/bin"})},
         "config": config,
         "cells": cells,
         "tasks": [

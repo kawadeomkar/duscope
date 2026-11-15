@@ -621,7 +621,7 @@ class Fake(unittest.TestCase):
             self.assertEqual((r["failed_tool_calls"], r["recovered"], r["tree_changes"]), (0, None, []))
             self.assertGreater(r["tokens"]["total"], 0)
             self.assertNotIn(d, json.dumps(r["check"]) + json.dumps(r["expected"]) + json.dumps(r["bash_commands"]))
-            self.assertTrue(os.path.isfile(os.path.join(REPO, r["transcript"])), r["transcript"])
+            self.assertTrue(os.path.isfile(os.path.join(REPO, os.path.expanduser(r["transcript"]))), r["transcript"])
         diff = next(r for r in result["runs"] if r["task"] == "diff-growth")
         self.assertEqual(diff["expected"]["path"], "{root}/Projects/ml-notebook/checkpoints/model-v2.ckpt")
         self.assertGreater(diff["expected"]["net_growth_bytes"], 0)
