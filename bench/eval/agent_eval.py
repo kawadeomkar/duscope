@@ -274,7 +274,13 @@ class Layout:
 
 
 def write_shim(layout: Layout, binary: str) -> str:
-    shutil.copy2(binary, layout.binary)
+    """The shim in bin/, running `binary` placed in the run's directory: a
+    hard link where one can be made (a new file would be scanned by macOS
+    again on its first start), else a copy."""
+    try:
+        os.link(binary, layout.binary)
+    except OSError:
+        shutil.copy2(binary, layout.binary)
     path = os.path.join(layout.bin, "duscope")
     with open(path, "w", encoding="utf-8") as f:
         f.write(
@@ -1104,134 +1110,142 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
             "--no-transcripts keeps none" % transcripts
         )
 
-    extra_dirs = tool_dirs(["claude", "node", "jq"], base_env) if mode == "claude" else tool_dirs(["jq"], base_env)
-    if mode == "claude":
-        extra_dirs = [os.path.dirname(claude[0])] + [d for d in extra_dirs if d != os.path.dirname(claude[0])]
-    settings = Settings(
-        config=config,
-        meta=meta,
-        binary=binary,
-        claude=claude,
-        fake=args.fake,
-        scale=args.scale,
-        base_env=base_env,
-        extra_dirs=extra_dirs,
-        work_dir=args.work_dir,
-        keep_work=args.keep_work,
-        transcripts=transcripts,
-        fake_acts=fake_acts(base_env.get(FAKE_ACTS_VAR, "")) if args.fake else [],
-    )
-    # Interleaved: every cell runs a task before the next task, and every task
-    # once before any runs a second time, so a slow hour or a changed rate
-    # limit falls on every cell alike.
-    order = [(t, c, r) for r in range(runs) for t in tasks for c in cells if (t["id"], c["id"], r) not in done]
-    records = list(done.values())
-    lock = threading.Lock()
-
-    task_index = {t["id"]: i for i, t in enumerate(tasks)}
-    cell_index = {c["id"]: i for i, c in enumerate(cells)}
-    wanted = {(t["id"], c["id"], r) for r in range(runs) for t in tasks for c in cells}
-
-    def save(final: bool) -> bool:
-        ordered = sorted(
-            records,
-            key=lambda x: (x["repeat"], task_index.get(x["task"], len(task_index)), cell_index.get(x["cell"], len(cell_index))),
+    # One binary for the whole eval, whatever is built meanwhile: a copy, which
+    # each run's directory links to and the harness's own calls run.
+    frozen_dir = tempfile.mkdtemp(prefix="duscope-under-test-", dir=args.work_dir)
+    try:
+        frozen = os.path.join(frozen_dir, "duscope")
+        shutil.copy2(binary, frozen)
+        extra_dirs = tool_dirs(["claude", "node", "jq"], base_env) if mode == "claude" else tool_dirs(["jq"], base_env)
+        if mode == "claude":
+            extra_dirs = [os.path.dirname(claude[0])] + [d for d in extra_dirs if d != os.path.dirname(claude[0])]
+        settings = Settings(
+            config=config,
+            meta=meta,
+            binary=frozen,
+            claude=claude,
+            fake=args.fake,
+            scale=args.scale,
+            base_env=base_env,
+            extra_dirs=extra_dirs,
+            work_dir=args.work_dir,
+            keep_work=args.keep_work,
+            transcripts=transcripts,
+            fake_acts=fake_acts(base_env.get(FAKE_ACTS_VAR, "")) if args.fake else [],
         )
-        have = {(x["task"], x["cell"], x["repeat"]) for x in ordered if not outage(x)}
-        result = dict(header, runs=ordered, complete=final and wanted <= have)
-        if final:
-            result["finished_at"] = utc_now()
-        result["summary"] = summarize(ordered, cells, tasks, config)
-        write_json(out, result)
-        return result["complete"]
+        # Interleaved: every cell runs a task before the next task, and every task
+        # once before any runs a second time, so a slow hour or a changed rate
+        # limit falls on every cell alike.
+        order = [(t, c, r) for r in range(runs) for t in tasks for c in cells if (t["id"], c["id"], r) not in done]
+        records = list(done.values())
+        lock = threading.Lock()
 
-    total = len(order) + len(done)
-    failures: List[str] = []
+        task_index = {t["id"]: i for i, t in enumerate(tasks)}
+        cell_index = {c["id"]: i for i, c in enumerate(cells)}
+        wanted = {(t["id"], c["id"], r) for r in range(runs) for t in tasks for c in cells}
 
-    def take(future: concurrent.futures.Future) -> Optional[Dict[str, Any]]:
-        t, c, r = futures[future]
-        try:
-            record = future.result()
-        except CutShort:
-            cut.append(future)
-            return None
-        except (EvalError, OSError, subprocess.SubprocessError, evalchecks.TruthError) as e:
-            if settings.agents.stopping:
+        def save(final: bool) -> bool:
+            ordered = sorted(
+                records,
+                key=lambda x: (x["repeat"], task_index.get(x["task"], len(task_index)), cell_index.get(x["cell"], len(cell_index))),
+            )
+            have = {(x["task"], x["cell"], x["repeat"]) for x in ordered if not outage(x)}
+            result = dict(header, runs=ordered, complete=final and wanted <= have)
+            if final:
+                result["finished_at"] = utc_now()
+            result["summary"] = summarize(ordered, cells, tasks, config)
+            write_json(out, result)
+            return result["complete"]
+
+        total = len(order) + len(done)
+        failures: List[str] = []
+
+        def take(future: concurrent.futures.Future) -> Optional[Dict[str, Any]]:
+            t, c, r = futures[future]
+            try:
+                record = future.result()
+            except CutShort:
                 cut.append(future)
                 return None
-            failures.append("%s/%s/%d: %s" % (t["id"], c["id"], r, e))
-            print("eval: %s %s run %d could not run: %s" % (t["id"], c["id"], r + 1, e), file=sys.stderr)
-            return None
-        with lock:
-            records.append(record)
-            save(False)
+            except (EvalError, OSError, subprocess.SubprocessError, evalchecks.TruthError) as e:
+                if settings.agents.stopping:
+                    cut.append(future)
+                    return None
+                failures.append("%s/%s/%d: %s" % (t["id"], c["id"], r, e))
+                print("eval: %s %s run %d could not run: %s" % (t["id"], c["id"], r + 1, e), file=sys.stderr)
+                return None
+            with lock:
+                records.append(record)
+                save(False)
+                print(
+                    "eval: [%d/%d] %s %s run %d: %s%s"
+                    % (len(records), total, t["id"], c["id"], r + 1,
+                       "completed" if record["completed"] else "not completed",
+                       "" if record["completed"] else " (%s)" % (record["infrastructure"] or record["failure"])),
+                    file=sys.stderr,
+                )
+            return record
+
+        # On Ctrl-C, after STOP_AFTER_OUTAGES outages in a row (or on any error
+        # here) the queue is cancelled and the running agents are ended; a run
+        # cut short is not recorded, so --resume runs it.
+        cut: List[concurrent.futures.Future] = []
+        taken = set()
+        interrupted = False
+        drained = False
+        stopped: Optional[str] = None
+        streak = 0
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs))
+        futures = {pool.submit(run_one, settings, t, c, r): (t, c, r) for t, c, r in order}
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                taken.add(future)
+                record = take(future)
+                if record is None:
+                    continue
+                streak = streak + 1 if outage(record) else 0
+                if streak >= STOP_AFTER_OUTAGES:
+                    stopped = record["infrastructure"]
+                    break
+            else:
+                drained = True
+        except KeyboardInterrupt:
+            interrupted = True
+        finally:
+            if not drained:
+                settings.agents.stop()
+                pool.shutdown(wait=False, cancel_futures=True)
+            pool.shutdown(wait=True)
+        # A run that ended while the eval stopped is kept.
+        for future in futures:
+            if future not in taken and not future.cancelled():
+                take(future)
+
+        complete = save(not interrupted and not stopped)
+        with open(out, encoding="utf-8") as f:
+            print(format_summary(json.load(f)), file=sys.stderr)
+        print(out)
+        left = "%d runs cut short and not recorded, %d not started" % (len(cut), sum(1 for f in futures if f.cancelled()))
+        if interrupted:
+            print("eval: interrupted: %s; the same command with --resume %s runs them" % (left, out), file=sys.stderr)
+            return 130
+        outages = sum(1 for x in records if outage(x))
+        if stopped:
             print(
-                "eval: [%d/%d] %s %s run %d: %s%s"
-                % (len(records), total, t["id"], c["id"], r + 1,
-                   "completed" if record["completed"] else "not completed",
-                   "" if record["completed"] else " (%s)" % (record["infrastructure"] or record["failure"])),
+                "eval: stopped after %d infrastructure failures in a row (the last: %s); %s. Once that is "
+                "fixed, the same command with --resume %s runs them and the failures again"
+                % (STOP_AFTER_OUTAGES, stopped, left, out),
                 file=sys.stderr,
             )
-        return record
-
-    # On Ctrl-C, after STOP_AFTER_OUTAGES outages in a row (or on any error
-    # here) the queue is cancelled and the running agents are ended; a run
-    # cut short is not recorded, so --resume runs it.
-    cut: List[concurrent.futures.Future] = []
-    taken = set()
-    interrupted = False
-    drained = False
-    stopped: Optional[str] = None
-    streak = 0
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs))
-    futures = {pool.submit(run_one, settings, t, c, r): (t, c, r) for t, c, r in order}
-    try:
-        for future in concurrent.futures.as_completed(futures):
-            taken.add(future)
-            record = take(future)
-            if record is None:
-                continue
-            streak = streak + 1 if outage(record) else 0
-            if streak >= STOP_AFTER_OUTAGES:
-                stopped = record["infrastructure"]
-                break
-        else:
-            drained = True
-    except KeyboardInterrupt:
-        interrupted = True
+        elif outages:
+            print(
+                "eval: %d runs failed for the infrastructure and are not counted; the same command with "
+                "--resume %s runs them again" % (outages, out),
+                file=sys.stderr,
+            )
+        return 0 if complete else 1
     finally:
-        if not drained:
-            settings.agents.stop()
-            pool.shutdown(wait=False, cancel_futures=True)
-        pool.shutdown(wait=True)
-    # A run that ended while the eval stopped is kept.
-    for future in futures:
-        if future not in taken and not future.cancelled():
-            take(future)
-
-    complete = save(not interrupted and not stopped)
-    with open(out, encoding="utf-8") as f:
-        print(format_summary(json.load(f)), file=sys.stderr)
-    print(out)
-    left = "%d runs cut short and not recorded, %d not started" % (len(cut), sum(1 for f in futures if f.cancelled()))
-    if interrupted:
-        print("eval: interrupted: %s; the same command with --resume %s runs them" % (left, out), file=sys.stderr)
-        return 130
-    outages = sum(1 for x in records if outage(x))
-    if stopped:
-        print(
-            "eval: stopped after %d infrastructure failures in a row (the last: %s); %s. Once that is "
-            "fixed, the same command with --resume %s runs them and the failures again"
-            % (STOP_AFTER_OUTAGES, stopped, left, out),
-            file=sys.stderr,
-        )
-    elif outages:
-        print(
-            "eval: %d runs failed for the infrastructure and are not counted; the same command with "
-            "--resume %s runs them again" % (outages, out),
-            file=sys.stderr,
-        )
-    return 0 if complete else 1
+        shutil.rmtree(frozen_dir, ignore_errors=True)
 
 
 def main(argv: Optional[List[str]] = None, environ: Optional[Dict[str, str]] = None) -> int:

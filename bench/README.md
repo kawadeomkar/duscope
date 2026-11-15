@@ -540,8 +540,9 @@ and the limits. Each run has a directory of its own in the system's temporary di
   which `duscope stale` also requires to be old, so the questions about files unused for a year
   ask about modification time and `stale` lists nothing on this tree. The diff task's tree also
   has two saved scans, one before and one after a few changes;
-- `PATH` with a `duscope` shim that runs a copy of the binary under test (`--duscope`, default
-  `target/release/duscope`) made in the run's directory, so that nothing the agent is shown names
+- `PATH` with a `duscope` shim that runs the binary under test (`--duscope`, default
+  `target/release/duscope`), copied once when the eval starts, so that a build made meanwhile does
+  not reach its runs, and linked into the run's directory, so that nothing the agent is shown names
   the checkout, where `evaltree.py` holds every answer; that logs each call; and that refuses
   `clean --yes` and `--allow-delete` (with which `mcp` offers its client the tool that moves paths
   to the Trash), so that no duscope call moves anything to a Trash (on macOS the Trash is the
