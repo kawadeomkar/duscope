@@ -343,7 +343,7 @@ impl Place {
 
 /// Places the directory `under`.
 pub(super) fn locate(under: &Path) -> io::Result<Place> {
-    let dir = fs::File::open(under)?;
+    let dir = open_dir(under)?;
     let fs = ffi::fstatfs(dir.as_fd())?;
     let mount: Vec<u8> = fs
         .f_mntonname
@@ -355,7 +355,7 @@ pub(super) fn locate(under: &Path) -> io::Result<Place> {
     // The mount point as given to mount(2), which can pass through a
     // firmlink (an image attached under /private/var), spelled as the path
     // is.
-    let base = fs::File::open(OsStr::from_bytes(&mount))
+    let base = open_dir(Path::new(OsStr::from_bytes(&mount)))
         .and_then(|root| ffi::nofirmlink_path(root.as_fd()))
         .unwrap_or_else(|_| mount.clone());
     let watched = relative(&path, &base).ok_or_else(|| {
@@ -375,6 +375,19 @@ pub(super) fn locate(under: &Path) -> io::Result<Place> {
         system: fs.f_flags & libc::MNT_ROOTFS.cast_unsigned() != 0
             || fs.f_flags_ext & MNT_EXT_ROOT_DATA_VOL != 0,
     })
+}
+
+/// The directory at `path`, opened to ask about it: `O_DIRECTORY`, so that
+/// anything else fails (`ENOTDIR`) unopened, as a FIFO put where a saved
+/// scan's root was, which a plain open would wait on for a writer; and
+/// `O_NONBLOCK`, so that no open waits.
+fn open_dir(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
+        .open(path)
 }
 
 /// `path` relative to the mount point `mount`, which holds it.

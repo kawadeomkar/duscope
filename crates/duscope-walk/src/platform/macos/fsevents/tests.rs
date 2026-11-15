@@ -282,6 +282,52 @@ fn p5_walk_01_a_directory_is_placed_below_its_mount_point_without_firmlinks() {
     );
 }
 
+#[test]
+fn p5_sec_01_a_fifo_at_a_saved_root_is_refused_without_blocking() {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::mpsc;
+    use std::thread;
+
+    let env = TestEnv::new();
+    // A FIFO where a saved scan's root was, with a writer blocked opening
+    // it, which only an open for reading would wake.
+    let fifo = env.tmp_dir().join("root");
+    let made = env.command("mkfifo").arg(&fifo).status().unwrap();
+    assert!(made.success(), "mkfifo {}", fifo.display());
+    let (tx, woke) = mpsc::channel();
+    let writer = {
+        let fifo = fifo.clone();
+        thread::spawn(move || {
+            let _open = OpenOptions::new().write(true).open(&fifo);
+            let _ = tx.send(());
+        })
+    };
+    thread::sleep(Duration::from_millis(100));
+    let error = locate(&fifo)
+        .err()
+        .expect("a FIFO is no directory to place");
+    assert_eq!(error.raw_os_error(), Some(libc::ENOTDIR), "{error}");
+    assert!(
+        woke.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the FIFO was opened"
+    );
+    // A file is no directory either.
+    let file = env.tmp_dir().join("file");
+    fs::write(&file, b"x").unwrap();
+    assert_eq!(
+        locate(&file).err().and_then(|e| e.raw_os_error()),
+        Some(libc::ENOTDIR)
+    );
+    // Wakes the writer.
+    let _read = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .unwrap();
+    writer.join().unwrap();
+}
+
 /// The mark's event id in the recorded events.
 const SINCE: u64 = 100;
 

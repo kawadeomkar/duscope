@@ -214,10 +214,13 @@ volume_trash: fs::symlink_metadata
 
 ## crates/duscope-walk/src/platform/macos/fsevents.rs
 
-locate: File::open x2
-  rescan --incremental: the saved scan's root and each mount point its walk
-  entered below it (from the saved scan), opened to ask fstatfs and the path
-  without firmlinks; then that volume's mount point, from fstatfs.
+open_dir: OpenOptions::new
+  For locate, on rescan --incremental (and the plain rescan and the viewer's
+  r, which try it first): the saved scan's root and each mount point its walk
+  entered below it (from the saved scan, which --trust may name from anyone),
+  then that volume's mount point, from fstatfs; each opened O_DIRECTORY |
+  O_NONBLOCK to ask fstatfs and the path without firmlinks, so a FIFO or
+  anything else that is no directory fails ENOTDIR unopened.
 no_log: fs::symlink_metadata
   .fseventsd/no_log at a volume's mount point: an lstat.
 
