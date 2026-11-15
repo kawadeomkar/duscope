@@ -1,8 +1,13 @@
-//! The one place a path from a user or an agent becomes the path duscope
-//! reads: relative to the working directory, symbolic links resolved (no
-//! other code calls `canonicalize`); and, in a saved scan, the entry at that
-//! path, found downwards from the root with the case and normalisation
-//! folding of the volume each directory is on (P2-QRY-01).
+//! Where a path a verb is given, from a person or through an MCP tool,
+//! becomes the path the verb reads: relative to the working directory,
+//! symbolic links resolved; and, in a saved scan, the entry at that path,
+//! found downwards from the root with the case and normalisation folding of
+//! the volume each directory is on (P2-QRY-01). Other code resolves paths
+//! for its own ends: the MCP server checks an agent's path against its
+//! roots before the verb gets it (`duscope-mcp`'s `roots.rs`), `--scan` and
+//! `--trust` name index files (`query::resolve`), and the walk resolves its
+//! roots and the links it follows; `duscope/tests/fs_allowlist.txt` lists
+//! each call.
 
 use std::path::{Path, PathBuf};
 
