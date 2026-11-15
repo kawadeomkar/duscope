@@ -61,7 +61,12 @@ under [Auditing](#auditing) read it again.
   required, since each run pays the vendors and waits on their uptime.
   [musl-loop.yml](../.github/workflows/musl-loop.yml) (P5-BENCH-02, the musl
   build's T2 loop) runs on a dispatch alone, never on a pull request, so none of
-  its jobs is a check here. This PUT replaces the whole
+  its jobs is a check here; nor are those of
+  [nightly-bench.yml](../.github/workflows/nightly-bench.yml) and
+  [nightly-fuzz.yml](../.github/workflows/nightly-fuzz.yml), which run on their
+  schedules and a dispatch alone: among them `coverage`, the nightly
+  `cargo llvm-cov` report on `ubuntu-24.04` and `macos-26` (P5-TEST-01), which
+  is reported and never enforced. This PUT replaces the whole
   protection of `main`, so it restates the settings above unchanged. `app_id`
   15368 is GitHub Actions, so only a workflow run can report these checks.
 
