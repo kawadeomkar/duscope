@@ -76,6 +76,12 @@ pub const LATER_LINK: u32 = 1 << 12;
 /// directory and a reader that knows no bit 13 reads it as excluded.
 pub const SKIPPED_CONTAINERS: u32 = 1 << 13;
 
+/// Flag bit 14 of `dirs.flags`: the scan listed the directory but did not
+/// enter it, because it is an automount point the kernel had not mounted,
+/// which entering would have mounted. It has no row in `scan_volumes`; a
+/// reader that knows no bit 14 reads it as an empty directory it entered.
+pub const AUTOMOUNT: u32 = 1 << 14;
+
 /// What `scan_meta` records that the arena does not hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanMeta {
@@ -643,15 +649,19 @@ fn entry_rows(
 }
 
 /// A directory's `flags`: its storage flags (`own`), then the bits the
-/// index adds: a firmlink, totals that are an upper bound, and an exclude
-/// that kept the scan out.
+/// index adds: a firmlink, totals that are an upper bound, an automount
+/// point not entered, and an exclude that kept the scan out.
 fn dir_flags(arena: &Arena, dir: DirId, own: u32, firmlink: bool) -> u32 {
     let mut flags = own;
     if firmlink {
         flags |= FIRMLINK;
     }
-    if arena.dir(dir).flags & DirRec::UPPER_BOUND != 0 {
+    let rec = arena.dir(dir);
+    if rec.flags & DirRec::UPPER_BOUND != 0 {
         flags |= UPPER_BOUND;
+    }
+    if rec.flags & DirRec::AUTOMOUNT != 0 {
+        flags |= AUTOMOUNT;
     }
     match arena.skipped().get(&dir) {
         Some(Skip::Excluded) => flags |= EXCLUDED,

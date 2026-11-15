@@ -198,9 +198,12 @@ deep directories takes grows faster than its depth.
 An automount point the kernel has not mounted yet (an NFS submount, debugfs's
 `tracing`) is listed and not entered, since opening it would mount a
 filesystem: only `--include-network` without `-x` enters it, and so mounts it.
-Nothing records the point: it has no row in `scan.volumes`, adds nothing to
-the `mounts_excluded` warning and carries no flag, so it reads as an empty
-directory.
+Such a point counts in the `mounts_excluded` warning, and its row carries the
+flag `automount`; it reads as an empty directory, which the scan did not
+enter. It has no row in `scan.volumes`: what is mounted there, and its size,
+are known only once it is mounted. A verb given the point itself does not read
+it from that saved scan: it scans the point, and so mounts it, as the root of
+any scan is read.
 
 The rule holds from Linux 4.11, whose `statx` marks such a point. Before 5.13
 (5.10.36 in the 5.10 series) the kernel sets the mark without vouching for it

@@ -666,6 +666,7 @@ fn p1_walk_07_a_skipped_directory_is_listed_not_entered() {
             *e == ScanEvent::Skipped {
                 dir: skipped,
                 reason: Skip::Firmlinked,
+                automount: false,
             }
         })
         .unwrap();
@@ -864,7 +865,7 @@ fn walk_mounts(opts: &WalkOptions) -> MountWalk {
     for event in events {
         match event {
             ScanEvent::Volume(volume) => volumes.push(volume),
-            ScanEvent::Skipped { dir, reason } => skips.push((dirs[&dir].clone(), reason)),
+            ScanEvent::Skipped { dir, reason, .. } => skips.push((dirs[&dir].clone(), reason)),
             _ => {}
         }
     }
@@ -1023,7 +1024,8 @@ fn p1_walk_06_a_same_device_bind_mount_is_still_a_cycle() {
     let skipped = id_of(&dirs, "/mem/data/sub/loop");
     assert!(events.contains(&ScanEvent::Skipped {
         dir: skipped,
-        reason: Skip::BindCycle
+        reason: Skip::BindCycle,
+        automount: false,
     }));
     assert_eq!(
         summary.mounts_excluded, 0,
@@ -1132,7 +1134,7 @@ fn p5_walk_06_an_untriggered_automount_is_entered_only_under_include_network() {
         let mut skipped: Vec<(PathBuf, Skip)> = events
             .iter()
             .filter_map(|e| match e {
-                ScanEvent::Skipped { dir, reason } => Some((dirs[dir].clone(), *reason)),
+                ScanEvent::Skipped { dir, reason, .. } => Some((dirs[dir].clone(), *reason)),
                 _ => None,
             })
             .collect();
@@ -1164,6 +1166,68 @@ fn p5_walk_06_an_untriggered_automount_is_entered_only_under_include_network() {
             u64::from(one_file_system),
             "{flags}: only the disk under -x"
         );
+    }
+}
+
+#[test]
+fn p5_walk_06_a_skipped_automount_point_is_marked_on_its_event() {
+    // /mem/auto in the root's mount and /mem/disk/auto in a local one are
+    // automount points not yet triggered, and so is /mem/skip, which an
+    // exclude matches; /mem/net is a network mount.
+    let mut tree = MemProvider::new("/mem");
+    tree.file("auto/inside", 1)
+        .file("net/a", 1)
+        .file("disk/auto/inside", 1)
+        .file("skip/inside", 1);
+    let mut provider = Mounted::new(
+        &tree,
+        vec![
+            row("/mem", 1, VolumeClass::Local),
+            row("/mem/net", 2, VolumeClass::Network),
+            row("/mem/disk", 3, VolumeClass::Local),
+        ],
+    );
+    provider.automounts = vec!["/mem/auto", "/mem/disk/auto", "/mem/skip"];
+    let mut excludes = globset::GlobSetBuilder::new();
+    excludes.add(globset::Glob::new("**/skip").unwrap());
+    let excludes = excludes.build().unwrap();
+    let (auto, inner) = (PathBuf::from("/mem/auto"), PathBuf::from("/mem/disk/auto"));
+    // The volumes not entered: the network mount, and under -x the disk.
+    for (one_file_system, include_network, marked, volumes) in [
+        (false, false, vec![&auto, &inner], 1),
+        // Under -x the walk does not reach the inner one.
+        (true, false, vec![&auto], 2),
+        (true, true, vec![&auto], 2),
+        (false, true, vec![], 0),
+    ] {
+        let flags = format!("-x {one_file_system}, --include-network {include_network}");
+        let opts = WalkOptions {
+            one_file_system,
+            include_network,
+            excludes: excludes.clone(),
+            ..WalkOptions::default()
+        };
+        let (result, events) = walk_events(&provider, tree.root_path(), &opts);
+        let summary = result.unwrap();
+        let (_, dirs) = replay(tree.root_path(), &events);
+        let mut skipped: Vec<(PathBuf, bool)> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::Skipped { dir, automount, .. } => Some((dirs[dir].clone(), *automount)),
+                _ => None,
+            })
+            .collect();
+        skipped.sort();
+        // A point not entered for a mount's reason is marked; the network
+        // mount, -x's disk and the excluded point are not, whatever they are.
+        let found: Vec<&PathBuf> = skipped.iter().filter(|s| s.1).map(|s| &s.0).collect();
+        assert_eq!(found, marked, "{flags}: {skipped:?}");
+        assert!(
+            skipped.contains(&(PathBuf::from("/mem/skip"), false)),
+            "{flags}: {skipped:?}"
+        );
+        // The walk's own count is the volumes', as before.
+        assert_eq!(summary.mounts_excluded, volumes, "{flags}");
     }
 }
 
@@ -1695,7 +1759,7 @@ fn p5_walk_05_globs_below_a_followed_link_match_the_path_it_was_reached_by() {
     let skipped: Vec<(&Path, Skip)> = events
         .iter()
         .filter_map(|event| match event {
-            ScanEvent::Skipped { dir, reason } => Some((dirs[dir].as_path(), *reason)),
+            ScanEvent::Skipped { dir, reason, .. } => Some((dirs[dir].as_path(), *reason)),
             _ => None,
         })
         .collect();

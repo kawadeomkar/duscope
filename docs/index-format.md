@@ -255,6 +255,7 @@ Created after the rows are inserted:
 | `dirs_errors` | `dirs (id) WHERE errors IS NOT NULL` | the unreadable directories of a subtree, counted without reading every row |
 | `dirs_excluded` | `dirs (id) WHERE flags & 3072 != 0` | the directories the excludes kept the scan out of (flags bits 10 and 11) |
 | `files_dataless` | `files (id) WHERE flags & 4 != 0` | the dataless files (flags bit 2), which `summary`, `explain` and the `dataless_present` warning add up without reading every file |
+| `dirs_automount` | `dirs (id) WHERE flags & 16384 != 0` | the automount points the scan did not enter (flags bit 14), which the `mounts_excluded` warning counts without reading every row |
 
 There is no name or extension index, and no path column: a path is resolved
 through `parent_id`, and a directory's own files are an id range. For the
@@ -279,7 +280,7 @@ that reveals.
 ## Flags
 
 `dirs.flags` and `files.flags` hold these bits. A bit a platform cannot set
-stays 0; bits 9 to 11 and 13 are set on directories only, and bit 12 on files only.
+stays 0; bits 9 to 11, 13 and 14 are set on directories only, and bit 12 on files only.
 
 | Bit | Value | Name | Set on | Meaning |
 | --- | --- | --- | --- | --- |
@@ -297,6 +298,7 @@ stays 0; bits 9 to 11 and 13 are set on directories only, and bit 12 on files on
 | 11 | 2048 | excluded_cache | macOS, Linux | the scan listed the directory but did not enter it, because a cache rule matched it (`--exclude-caches`) |
 | 12 | 4096 | later_link | macOS, Linux | a later link of a hard-linked file: its bytes, apparent ones too, count at its first link |
 | 13 | 8192 | skipped_containers | macOS, Linux | the scan listed the directory but did not enter it, because it is one of the home's containers (`--skip-containers`); always set beside bit 10, so a reader that knows no bit 13 reads it as excluded |
+| 14 | 16384 | automount | Linux | the scan listed the directory but did not enter it, because it is an automount point the kernel had not mounted, which entering would have mounted; it has no row in `scan_volumes`, and a reader that knows no bit 14 reads it as an empty directory |
 
 ## Accounting
 
@@ -396,4 +398,5 @@ the tables, and no reader names an index. Files written before duscope dropped
 them also hold `dirs_cum_allocated` (`dirs (cum_allocated DESC)`) and
 `files_mtime` (`files (mtime)`), which no query read. They are still 2.0 and
 answer every query the same; only a hand-written query may run slower without
-them.
+them. Files written before duscope added `dirs_automount` and flag bit 14 lack
+both; they are still 2.0, and their scans recorded no automount point.

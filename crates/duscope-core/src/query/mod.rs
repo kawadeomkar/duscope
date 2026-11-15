@@ -111,6 +111,9 @@ pub struct Node {
     pub upper_bound: bool,
     /// A directory that could not be read.
     pub unreadable: bool,
+    /// A directory the scan listed and did not enter, because it is an
+    /// automount point the kernel had not mounted.
+    pub automount: bool,
     /// A directory's last own file; the id itself for a file.
     pub files_end: u32,
     /// The last id of a directory's subtree; the id itself for a file.
@@ -264,6 +267,14 @@ pub trait TreeView {
     fn dataless(&self, dir: u32) -> Dataless {
         dataless_nodes(self, dir)
     }
+
+    /// The automount points under `dir`, itself included, that the scan
+    /// listed and did not enter (the `automount` flag), for the
+    /// `mounts_excluded` warning.
+    fn automount_points(&self, dir: u32) -> u64 {
+        let last = self.node(dir).last_id;
+        (dir..=last).filter(|&id| self.node(id).automount).count() as u64
+    }
 }
 
 /// The dataless files under `dir` of `view`, read a node at a time.
@@ -360,6 +371,7 @@ impl TreeView for ArenaView<'_> {
             flags: view.flags,
             upper_bound: false,
             unreadable: false,
+            automount: false,
             files_end: id,
             last_id: id,
         };
@@ -373,6 +385,7 @@ impl TreeView for ArenaView<'_> {
             node.max_mtime_ns = rec.max_mtime_ns;
             node.upper_bound = rec.flags & DirRec::UPPER_BOUND != 0;
             node.unreadable = rec.flags & DirRec::UNREADABLE != 0;
+            node.automount = rec.flags & DirRec::AUTOMOUNT != 0;
             node.files_end = rec.files_end;
             node.last_id = rec.last_id;
         }
@@ -468,6 +481,19 @@ impl TreeView for ArenaView<'_> {
             }
         }
         sum
+    }
+
+    /// From the directories the walk did not enter: a point is one of them.
+    fn automount_points(&self, dir: u32) -> u64 {
+        let last = self.node(dir).last_id;
+        self.arena
+            .skipped()
+            .keys()
+            .map(|&d| self.arena.dir(d))
+            .filter(|rec| rec.flags & DirRec::AUTOMOUNT != 0)
+            .map(|rec| self.rollup.id_of(EntryIdx::from_raw(rec.entry)))
+            .filter(|id| (dir..=last).contains(id))
+            .count() as u64
     }
 
     /// Through the entries' flags, as the default does, counting as `du`
@@ -634,6 +660,10 @@ impl<V: TreeView + ?Sized> TreeView for Subtree<'_, V> {
 
     fn dataless(&self, dir: u32) -> Dataless {
         self.view.dataless(dir + self.base)
+    }
+
+    fn automount_points(&self, dir: u32) -> u64 {
+        self.view.automount_points(dir + self.base)
     }
 
     fn owner(&self, id: u32) -> Option<(u32, u32)> {
@@ -893,6 +923,9 @@ pub fn flag_names(node: &Node) -> Vec<&'static str> {
     }
     if node.unreadable {
         names.push("unreadable");
+    }
+    if node.automount {
+        names.push("automount");
     }
     if !node.is_dir() && !node.charged {
         names.push("uncharged");

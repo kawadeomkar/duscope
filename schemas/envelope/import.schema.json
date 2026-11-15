@@ -348,7 +348,8 @@
                   "subvolume",
                   "upper_bound",
                   "unreadable",
-                  "uncharged"
+                  "uncharged",
+                  "automount"
                 ]
               },
               {

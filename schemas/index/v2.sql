@@ -135,3 +135,4 @@ CREATE INDEX files_allocated ON files (allocated DESC);
 CREATE INDEX dirs_errors ON dirs (id) WHERE errors IS NOT NULL;
 CREATE INDEX dirs_excluded ON dirs (id) WHERE flags & 3072 != 0;
 CREATE INDEX files_dataless ON files (id) WHERE flags & 4 != 0;
+CREATE INDEX dirs_automount ON dirs (id) WHERE flags & 16384 != 0;

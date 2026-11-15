@@ -135,6 +135,10 @@ impl DirRec {
     pub const UPPER_BOUND: u16 = 1;
     /// The directory could not be read.
     pub const UNREADABLE: u16 = 2;
+    /// The directory is an automount point not yet triggered, which the
+    /// walk listed and did not enter ([`ScanEvent::Skipped`]'s
+    /// `automount`).
+    pub const AUTOMOUNT: u16 = 4;
     /// The `entry` of a directory whose id the arena met before its entry
     /// (workers number directories as they find them, so a higher id can
     /// arrive first). A complete walk leaves none; a truncated stream can.
@@ -468,8 +472,15 @@ impl Arena {
             ScanEvent::Vanished { .. } => self.vanished += 1,
             ScanEvent::Volume(volume) => self.volumes.push(volume),
             ScanEvent::Error(error) => self.errors.push(error),
-            ScanEvent::Skipped { dir, reason } => {
+            ScanEvent::Skipped {
+                dir,
+                reason,
+                automount,
+            } => {
                 self.skipped.insert(dir, reason);
+                if automount {
+                    self.dirs.slot(dir.index()).flags |= DirRec::AUTOMOUNT;
+                }
             }
         }
         Ok(())

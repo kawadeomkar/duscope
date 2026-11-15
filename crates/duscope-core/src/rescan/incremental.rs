@@ -1533,7 +1533,11 @@ impl<'a, 's> Grafting<'a, 's> {
         };
         if let Some(reason) = skip {
             self.counts.skipped_dirs += 1;
-            self.tap.push(ScanEvent::Skipped { dir, reason });
+            self.tap.push(ScanEvent::Skipped {
+                dir,
+                reason,
+                automount: false,
+            });
             self.tap.push(ScanEvent::DirClosed { dir, errno: None });
         } else if let Some(errno) = row.errors {
             self.counts.unreadable_dirs += 1;

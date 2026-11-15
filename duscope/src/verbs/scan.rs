@@ -456,15 +456,18 @@ pub(super) fn scan_options(walk: &WalkArgs, excludes: &[String]) -> ScanOptions 
 /// The scan's warnings.
 pub fn warnings(scanned: &Scanned) -> Vec<Warning> {
     let summary = &scanned.summary;
+    let view = scanned.view();
     let mut warnings = quality_warnings(
         summary.unreadable_dirs,
-        summary.mounts_excluded,
+        Mounts {
+            volumes: summary.mounts_excluded,
+            automount_points: view.automount_points(0),
+        },
         scanned.arena.vanished(),
     );
     warnings.extend(clones_unavailable(
         scanned.clones_asked && summary.clones_unavailable,
     ));
-    let view = scanned.view();
     warnings.extend(upper_bound(view.node(0).upper_bound));
     warnings.extend(dataless_present(view.dataless(0)));
     if scanned.full_disk_access_missing {
@@ -551,10 +554,20 @@ pub fn clones_unavailable(unavailable: bool) -> Option<Warning> {
 /// it ([`offer_strict`]).
 const PARTIAL_READ_HINT: &str = "Rerun duscope as a user who can read them";
 
+/// What a scan did not enter for a mount's reason, for `mounts_excluded`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Mounts {
+    /// The volumes it met and did not enter, which `scan.volumes` names.
+    pub volumes: u64,
+    /// The automount points the kernel had not mounted, which have no
+    /// volume of their own and carry the flag `automount`.
+    pub automount_points: u64,
+}
+
 /// What a scan says of its own totals, in a fresh scan or a saved one:
-/// directories it could not read, volumes it did not enter, and entries
+/// directories it could not read, mounts it did not enter, and entries
 /// that vanished while it read them.
-pub fn quality_warnings(unreadable_dirs: u64, mounts_excluded: u64, vanished: u64) -> Vec<Warning> {
+pub fn quality_warnings(unreadable_dirs: u64, mounts: Mounts, vanished: u64) -> Vec<Warning> {
     let mut warnings = Vec::new();
     if unreadable_dirs > 0 {
         warnings.push(Warning {
@@ -567,13 +580,24 @@ pub fn quality_warnings(unreadable_dirs: u64, mounts_excluded: u64, vanished: u6
             hint: Some(PARTIAL_READ_HINT.to_owned()),
         });
     }
+    let mounts_excluded = mounts.volumes + mounts.automount_points;
     if mounts_excluded > 0 {
+        let volumes = format!(
+            "{} mounted filesystems were not entered (scan.volumes says why)",
+            thousands(mounts.volumes)
+        );
+        let points = format!(
+            "{} automount points the kernel had not mounted (each flagged automount)",
+            thousands(mounts.automount_points)
+        );
+        let message = match (mounts.volumes, mounts.automount_points) {
+            (_, 0) => volumes,
+            (0, _) => format!("{points} were not entered"),
+            _ => format!("{volumes}, nor {points}"),
+        };
         warnings.push(Warning {
             code: "mounts_excluded",
-            message: format!(
-                "{} mounted filesystems were not entered (scan.volumes says why)",
-                thousands(mounts_excluded)
-            ),
+            message,
             count: Some(mounts_excluded),
             hint: Some(
                 "Rerun duscope scan with --include-network, or without -x, to enter them"
@@ -1302,7 +1326,7 @@ mod tests {
     use crate::cli::{Cli, Verb};
     use crate::out::{Format, Output, Units};
     use crate::verbs::query::top_envelope;
-    use crate::verbs::source::saved_block;
+    use crate::verbs::source::{Source, saved_block};
 
     /// A scan of a small in-memory tree; without its volume when `volume`
     /// is false.
@@ -1492,6 +1516,139 @@ mod tests {
         // A scan without placeholders warns of none.
         let plain = scanned(true);
         assert!(warnings(&plain).is_empty());
+    }
+
+    /// A tree whose directories named `auto` read as Linux reads an
+    /// automount point not yet triggered.
+    struct Points<'a>(&'a MemProvider);
+
+    impl duscope_walk::Provider for Points<'_> {
+        fn read_dir(
+            &self,
+            dir: &duscope_walk::DirHandle,
+            opts: &WalkOptions,
+            out: &mut Vec<duscope_walk::Entry>,
+            errs: &mut Vec<duscope_walk::ScanError>,
+        ) -> std::io::Result<()> {
+            let start = out.len();
+            self.0.read_dir(dir, opts, out, errs)?;
+            for entry in &mut out[start..] {
+                if entry.name.as_bytes() == b"auto" {
+                    entry.boundary = duscope_walk::Boundary::Mount;
+                }
+            }
+            Ok(())
+        }
+
+        fn untriggered_automount(&self, entry: &duscope_walk::Entry) -> bool {
+            entry.boundary == duscope_walk::Boundary::Mount
+        }
+
+        fn volume(&self, path: &Path) -> std::io::Result<duscope_walk::VolumeInfo> {
+            self.0.volume(path)
+        }
+
+        fn root(&self, path: &Path, opts: &WalkOptions) -> std::io::Result<duscope_walk::Entry> {
+            self.0.root(path, opts)
+        }
+    }
+
+    #[test]
+    fn p5_walk_06_skipped_automount_points_count_in_mounts_excluded() {
+        let mut tree = MemProvider::new("/t");
+        tree.file("auto/inside", 10)
+            .file("a/auto/inside", 10)
+            .file("a/x/f", 10);
+        let mut arena = Arena::new(Attrs::Basic);
+        let summary = walk_with(
+            &Points(&tree),
+            Path::new("/t"),
+            &WalkOptions::default(),
+            |event| arena.push(event).unwrap(),
+        )
+        .unwrap();
+        let rollup = roll_up(&mut arena);
+        let mut scanned = scanned(true);
+        (scanned.arena, scanned.rollup, scanned.summary) = (arena, rollup, summary);
+        let mounts = |found: Vec<super::Warning>| {
+            let mut found: Vec<_> = found
+                .into_iter()
+                .filter(|w| w.code == "mounts_excluded")
+                .collect();
+            assert!(found.len() <= 1, "{found:?}");
+            found.pop().map(|w| (w.count, w.message))
+        };
+        let both = Some((
+            Some(2),
+            "2 automount points the kernel had not mounted (each flagged automount) were not \
+             entered"
+                .to_owned(),
+        ));
+        // The scan run now, and the same scan saved, read at its root.
+        assert_eq!(mounts(warnings(&scanned)), both);
+        let Some(Verb::Scan(args)) = Cli::try_parse_from(["duscope", "scan", "/t"]).unwrap().verb
+        else {
+            panic!("not scan");
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let id = ScanId::new(b"/t", 0, [0; 8]);
+        write_index(&scanned, &args.walk, &[], &id, dir.path()).unwrap();
+        let saved = |rel: &[&[u8]]| {
+            let index = Index::open(&index_path(dir.path(), &id)).unwrap();
+            let base = index.lookup(rel.iter().copied()).unwrap();
+            let source = Source::Saved {
+                index: Box::new(index),
+                base,
+                unreadable: 0,
+                stale: None,
+            };
+            mounts(source.warnings(&args.walk))
+        };
+        assert_eq!(saved(&[]), both);
+        // Read at a path, a saved scan counts the points under it.
+        assert_eq!(
+            saved(&[b"a"]),
+            Some((
+                Some(1),
+                "1 automount points the kernel had not mounted (each flagged automount) were \
+                 not entered"
+                    .to_owned()
+            ))
+        );
+        assert_eq!(saved(&[b"a", b"x"]), None);
+        // Beside volumes not entered, each is named for what it is.
+        let mixed = super::quality_warnings(
+            0,
+            super::Mounts {
+                volumes: 3,
+                automount_points: 2,
+            },
+            0,
+        );
+        assert_eq!(
+            mounts(mixed),
+            Some((
+                Some(5),
+                "3 mounted filesystems were not entered (scan.volumes says why), nor 2 automount \
+                 points the kernel had not mounted (each flagged automount)"
+                    .to_owned()
+            ))
+        );
+        let volumes = super::quality_warnings(
+            0,
+            super::Mounts {
+                volumes: 3,
+                automount_points: 0,
+            },
+            0,
+        );
+        assert_eq!(
+            mounts(volumes),
+            Some((
+                Some(3),
+                "3 mounted filesystems were not entered (scan.volumes says why)".to_owned()
+            ))
+        );
     }
 
     #[test]
