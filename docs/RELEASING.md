@@ -78,6 +78,25 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    Each binary archive and `.deb` carries an attestation; `source.tar.gz`, cargo-dist's source
    archive, carries none, so the loop leaves it out.
 
+   Then check that each archive holds the binary its source builds (DEV-188). On the runner
+   image the tag's `build-local-artifacts` job used for the target (the target's runner in
+   [dist-workspace.toml](../dist-workspace.toml), at the image version its log names under
+   "Runner Image"), check the tag out twice, at two paths, and run `just repro-dist <target>`
+   in each, with the target installed (`rustup target add`) and, for a musl target,
+   `musl-tools`, as the job installs them. The two builds print one SHA-256, and the
+   archive's binary has it too:
+
+   ```sh
+   just repro-dist aarch64-apple-darwin      # in each checkout of the tag: the same SHA-256
+   tar -xJOf /tmp/duscope-vX.Y.Z/duscope-aarch64-apple-darwin.tar.xz \
+     duscope-aarch64-apple-darwin/duscope | shasum -a 256     # and the archive's binary
+   ```
+
+   The recipe runs what cargo-dist runs, under the same environment; the toolchain is
+   `rust-toolchain.toml`'s anywhere, but the linker and SDK are the image's, so a build on
+   another machine may differ. v0.2.0 cannot be rebuilt this way (Rust 1.88, another linker):
+   the first tag checked is the next one.
+
    crates.io takes five new crates at once and about one every ten minutes after that, so a
    release that adds crates may need `publish-crates` re-run after the wait (DEV-12).
 

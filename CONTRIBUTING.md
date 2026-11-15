@@ -81,6 +81,7 @@ disagree, so a pin changes in both places in the same pull request.
 | `just test-crate duscope-core` | the tests of one crate |
 | `just size [TARGET]` | release build and the stripped binary size against the budget (`size_budget`, 10 MB) |
 | `just repro` | the reproducible release build, printing the binary's SHA-256 |
+| `just repro-dist TARGET` | a release archive's binary for `TARGET`, built as `release.yml` builds it, printing its SHA-256 (`docs/RELEASING.md` compares it with the archive's) |
 | `just fixtures` | build the reference fixture tree under `target/fixtures.noindex` |
 | `just golden` | regenerate the golden files after an intended output change |
 | `just bench` | the hyperfine harness on the seeded trees |
