@@ -115,17 +115,52 @@ struct Mounted<'a> {
 impl Drop for Mounted<'_> {
     fn drop(&mut self) {
         for point in self.points.iter().rev() {
-            let program = if cfg!(target_os = "macos") {
-                "hdiutil"
-            } else {
-                "umount"
-            };
-            let mut cmd = self.env.command(program);
-            if cfg!(target_os = "macos") {
-                cmd.arg("detach").arg("-force");
-            }
-            let _ = cmd.arg(point).output();
+            unmount(self.env, point);
         }
+    }
+}
+
+/// Detaches the image mounted at `point`.
+#[cfg(target_os = "macos")]
+fn unmount(env: &TestEnv, point: &Path) {
+    let _ = env
+        .command("hdiutil")
+        .arg("detach")
+        .arg("-force")
+        .arg(point)
+        .output();
+}
+
+/// Unmounts `point`. When `umount` fails and leaves it mounted, it is tried
+/// once more lazily (`umount -l`, which detaches even a busy mount) and
+/// stderr says so; a mount still left is kept by the removal of the test's
+/// directory (`mktree::remove_tree`).
+#[cfg(target_os = "linux")]
+fn unmount(env: &TestEnv, point: &Path) {
+    let umount = |lazy: bool| {
+        let mut cmd = env.command("umount");
+        if lazy {
+            cmd.arg("-l");
+        }
+        match cmd.arg(point).output() {
+            Ok(out) if out.status.success() => None,
+            Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_owned()),
+            Err(e) => Some(e.to_string()),
+        }
+    };
+    // Not mounted any more: the test unmounted it itself.
+    let Some(why) = umount(false).filter(|_| !mounted_at(point).is_empty()) else {
+        return;
+    };
+    match umount(true) {
+        None => eprintln!(
+            "umount {} failed ({why}); unmounted lazily (umount -l)",
+            point.display()
+        ),
+        Some(lazy) => eprintln!(
+            "umount {} failed ({why}), and so did umount -l ({lazy}): left mounted",
+            point.display()
+        ),
     }
 }
 
