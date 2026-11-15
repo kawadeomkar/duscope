@@ -146,10 +146,9 @@ fn share(kind: Kind, nlink: u64) -> Share {
 /// `attrs`. A filesystem without creation times leaves `btime` empty.
 pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
     let kind = kind(u32::from(stx.stx_mode));
-    let attribute = |bit: c_int| {
-        let bit = u64::from(bit.cast_unsigned());
-        stx.stx_attributes_mask & bit != 0 && stx.stx_attributes & bit != 0
-    };
+    let set = |bit: c_int| stx.stx_attributes & u64::from(bit.cast_unsigned()) != 0;
+    let attribute =
+        |bit: c_int| stx.stx_attributes_mask & u64::from(bit.cast_unsigned()) != 0 && set(bit);
     let mut flags = Flags::empty();
     flags.set(Flags::COMPRESSED, attribute(libc::STATX_ATTR_COMPRESSED));
     let mount_root = attribute(libc::STATX_ATTR_MOUNT_ROOT);
@@ -157,9 +156,10 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
     // An automount point not yet triggered is a mount boundary too: what
     // lies beneath it is another filesystem. The kernel sets the attribute
     // from statx's first version (4.11), but vouches for it in the mask only
-    // from 5.13 (5.10.36 in the 5.10 series): before, it is not read, and
-    // such a point reads as a plain directory.
-    let automount = attribute(libc::STATX_ATTR_AUTOMOUNT);
+    // from 5.13 (5.10.36 in the 5.10 series); a kernel that does not know
+    // the attribute never sets it. A set one is read whatever the mask says,
+    // as the removal's statx reads it.
+    let automount = set(libc::STATX_ATTR_AUTOMOUNT);
     let mnt_id = if stx.stx_mask & (libc::STATX_MNT_ID | libc::STATX_MNT_ID_UNIQUE) != 0 {
         stx.stx_mnt_id
     } else {
@@ -201,10 +201,11 @@ pub(super) fn entry(name: NameRef, stx: &libc::statx, attrs: Attrs) -> Entry {
 /// `S_AUTOMOUNT` (an NFS submount or referral, debugfs's `tracing`),
 /// which `statx` reports as `STATX_ATTR_AUTOMOUNT` with the
 /// mount around it; a triggered one reads as the root of what was mounted
-/// on it. Before Linux 5.13 (5.10.36 in the 5.10 series) the kernel does
-/// not vouch for the attribute in `stx_attributes_mask`, so [`entry`] does
-/// not read it: no point is found, and the walk enters one as a directory,
-/// which mounts it. autofs marks its triggers on the dentry, not
+/// on it. The kernel sets the attribute from Linux 4.11, `statx`'s first
+/// version, though it vouches for it in `stx_attributes_mask` only from
+/// 5.13 (5.10.36 in the 5.10 series), and a kernel that does not know it
+/// never sets it: [`entry`] reads a set one whatever the mask says, so a
+/// point is found from 4.11. autofs marks its triggers on the dentry, not
 /// the inode, so they carry no attribute: a direct map's is the root of an
 /// `autofs` mount, classified as a network one.
 pub(super) fn untriggered_automount(entry: &Entry) -> bool {

@@ -202,11 +202,10 @@ Nothing records the point: it has no row in `scan.volumes`, adds nothing to
 the `mounts_excluded` warning and carries no flag, so it reads as an empty
 directory.
 
-The rule holds from Linux 5.13 (5.10.36 in the 5.10 series), the first kernel
-whose `statx` vouches for its automount mark in `stx_attributes_mask`. An
-older kernel sets the mark without vouching for it, and duscope does not read
-it: there such a point reads as a plain directory, and a scan enters it, and
-so mounts it, whatever `-x` and `--include-network` say.
+The rule holds from Linux 4.11, whose `statx` marks such a point. Before 5.13
+(5.10.36 in the 5.10 series) the kernel sets the mark without vouching for it
+in `stx_attributes_mask`; duscope reads it all the same, since a kernel that
+does not know the mark never sets it.
 
 Under `--follow-symlinks`, a symbolic link that leads to such a point mounts
 it when the scan follows the link, whatever `-x` and `--include-network` say;

@@ -420,13 +420,14 @@ fn p1_walk_02_statx_attributes_become_flags_and_boundaries() {
     assert!(!auto.flags.contains(crate::Flags::MOUNT_ROOT));
     let packed = with(&stx, libc::STATX_ATTR_COMPRESSED);
     assert!(packed.flags.contains(crate::Flags::COMPRESSED));
-    // An attribute the kernel does not vouch for in the mask is not read.
+    // An attribute the kernel does not vouch for in the mask is not read,
+    // the automount bit aside (P5-WALK-06).
     let mut unvouched = stx;
-    unvouched.stx_attributes |= u64::from(libc::STATX_ATTR_AUTOMOUNT.cast_unsigned());
-    assert_eq!(
-        super::statx::entry(NameRef::from("d"), &unvouched, crate::Attrs::Basic).boundary,
-        crate::Boundary::None
-    );
+    unvouched.stx_attributes |=
+        u64::from((libc::STATX_ATTR_MOUNT_ROOT | libc::STATX_ATTR_COMPRESSED).cast_unsigned());
+    let read = super::statx::entry(NameRef::from("d"), &unvouched, crate::Attrs::Basic);
+    assert_eq!(read.boundary, crate::Boundary::None);
+    assert!(read.flags.is_empty());
 }
 
 #[test]
@@ -457,6 +458,39 @@ fn p5_walk_06_linux_an_automount_attribute_off_a_mount_root_is_untriggered() {
     // Where the mask vouches for no mount root, the attribute decides.
     assert!(untriggered(&[auto], &[auto]));
     assert!(!untriggered(&[auto], &[]));
+}
+
+#[test]
+fn p5_walk_06_linux_an_automount_attribute_is_read_without_the_mask() {
+    // SAFETY: statx is plain data; all zeros is a valid value.
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    stx.stx_mode = u16::try_from(libc::S_IFDIR).unwrap();
+    let bit = |b: libc::c_int| u64::from(b.cast_unsigned());
+    let read = |vouched: &[libc::c_int], set: &[libc::c_int]| {
+        let mut stx = stx;
+        for &b in vouched {
+            stx.stx_attributes_mask |= bit(b);
+        }
+        for &b in set {
+            stx.stx_attributes |= bit(b);
+        }
+        let entry = super::statx::entry(NameRef::from("d"), &stx, crate::Attrs::Basic);
+        let untriggered = LinuxProvider::default().untriggered_automount(&entry);
+        (entry.boundary, untriggered)
+    };
+    let (root, auto) = (libc::STATX_ATTR_MOUNT_ROOT, libc::STATX_ATTR_AUTOMOUNT);
+    let point = (crate::Boundary::Mount, true);
+    let plain = (crate::Boundary::None, false);
+    // Linux 5.8 to 5.12 sets the automount bit and vouches for the mount
+    // root's alone; 4.11 to 5.7, for neither. A kernel that does not know
+    // the bit never sets it, so a set one is a point whatever the mask says.
+    assert_eq!(read(&[root], &[auto]), point);
+    assert_eq!(read(&[], &[auto]), point);
+    // An unset bit, unvouched, is a plain directory as before; a mount root
+    // is the root of what was mounted.
+    assert_eq!(read(&[root], &[]), plain);
+    assert_eq!(read(&[], &[]), plain);
+    assert_eq!(read(&[root], &[root]), (crate::Boundary::Mount, false));
 }
 
 #[test]
