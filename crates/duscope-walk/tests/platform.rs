@@ -473,6 +473,23 @@ fn p1_walk_06_linux_mount_ids_hold_for_same_device_binds_and_reused_ids() {
     );
 }
 
+/// The superblock's options of the first mount of `fs_type` in
+/// `/proc/self/mountinfo` (the field after the source): for cgroup2, `rw`
+/// and the hierarchy's root flags.
+#[cfg(target_os = "linux")]
+fn live_options(fs_type: &str) -> Option<String> {
+    fs::read_to_string("/proc/self/mountinfo")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut after = line.split(' ').skip_while(|&f| f != "-").skip(1);
+            if after.next()? != fs_type {
+                return None;
+            }
+            after.nth(1).map(str::to_owned)
+        })
+}
+
 /// The types of the filesystems mounted at `point`, in mount order (the one
 /// on top last), from `/proc/self/mountinfo`.
 #[cfg(target_os = "linux")]
@@ -1555,7 +1572,24 @@ fn p5_test_01_linux_kernel_filesystems_are_listed_and_never_entered() {
     ] {
         let point = root.join(fs_type);
         fs::create_dir(&point).unwrap();
-        match attempt(&env, "mount", &[&"-t", &fs_type, &fs_type, &point]) {
+        // There is one cgroup2 hierarchy, and a mount sets its root flags
+        // (nsdelegate, memory_recursiveprot, …) from its own options, for the
+        // whole system until it restarts: with no options, it would clear
+        // them. The second mount takes the options the live one shows, which
+        // are those flags, so they stay as they are.
+        let options = if fs_type == "cgroup2" {
+            let Some(options) = live_options(fs_type) else {
+                duscope_testkit::skip_fs(fs_type, "no cgroup2 mounted here to take options from");
+                continue;
+            };
+            vec!["-o".to_owned(), options]
+        } else {
+            Vec::new()
+        };
+        let mut args: Vec<&dyn AsRef<std::ffi::OsStr>> = vec![&"-t", &fs_type];
+        args.extend(options.iter().map(|o| o as &dyn AsRef<std::ffi::OsStr>));
+        args.extend([&fs_type as &dyn AsRef<std::ffi::OsStr>, &point]);
+        match attempt(&env, "mount", &args) {
             Ok(()) => {
                 mounted.points.push(point);
                 types.push(fs_type);
