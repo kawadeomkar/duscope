@@ -1,0 +1,9 @@
+[ext]
+"tar.gz" = "archives"
+rs = "code"
+heic = "media"
+
+[dir]
+node_modules = "code"
+".git/objects" = "data"
+"*.app/Contents/MacOS" = "binaries"

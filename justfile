@@ -179,8 +179,9 @@ clippy:
     cargo clippy --workspace --all-targets -- -D clippy::all
 
 # Run one fuzz target for `seconds` (60: CI's fuzz-smoke; nightly-fuzz.yml runs 600) on the
-# pinned nightly. The corpus grows in fuzz/corpus/<target>/ and a crash lands in
-# fuzz/artifacts/<target>/, both ignored by git; an input slower than 30 s fails the run.
+# pinned nightly. The corpus grows in fuzz/corpus/<target>/ from the seed-* files committed
+# there, and a crash lands in fuzz/artifacts/<target>/; git ignores what a run adds to either.
+# An input slower than 30 s fails the run.
 fuzz target seconds="60":
     cd fuzz && cargo +{{fuzz_toolchain}} fuzz run {{target}} -- -max_total_time={{seconds}} -timeout=30
 

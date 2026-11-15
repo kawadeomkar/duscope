@@ -7,7 +7,10 @@
 # fuzz/Cargo.toml the same.
 #
 # Each target's corpus is kept between runs in the Actions cache, so a night
-# starts where the last one stopped; it is never committed (fuzz/.gitignore).
+# starts where the last one stopped. It starts from the seeds committed in
+# fuzz/corpus/<target>/seed-* (P5-SEC-01), which the checkout holds, so a night
+# whose cache is gone starts from them; what a run adds is never committed
+# (fuzz/.gitignore).
 #
 # A crash, leak, timeout or out-of-memory input fails its job, which uploads the
 # input as the artifact `crash-<target>`. The report job then files it as an

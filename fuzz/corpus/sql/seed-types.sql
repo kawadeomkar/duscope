@@ -1,0 +1,1 @@
+SELECT ext, n, allocated FROM type_stats ORDER BY allocated DESC

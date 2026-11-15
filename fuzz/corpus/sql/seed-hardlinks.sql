@@ -1,0 +1,1 @@
+SELECT * FROM hardlinks UNION ALL SELECT * FROM clones

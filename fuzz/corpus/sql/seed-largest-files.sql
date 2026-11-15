@@ -1,0 +1,1 @@
+SELECT name, allocated FROM files ORDER BY allocated DESC LIMIT 5

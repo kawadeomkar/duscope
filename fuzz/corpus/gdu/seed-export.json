@@ -1,0 +1,8 @@
+[1,2,{"progname":"gdu","progver":"v5.31.0","timestamp":2114380800},
+[{"name":"/srv/data","asize":1000000,"dsize":1000000,"items":5,"mtime":2114380000},
+{"name":"big.iso","asize":700000,"dsize":704512,"mtime":2114370000},
+{"name":"note.txt","asize":12,"dsize":4096,"mtime":2114370000},
+[{"name":"logs","asize":500000,"dsize":500000,"items":3,"mtime":2114370000},
+{"name":"a.log","asize":3000,"dsize":4096,"ino":42,"hlnkc":true,"mtime":2114370000},
+{"name":"b.log","asize":3000,"dsize":4096,"ino":42,"hlnkc":true,"mtime":2114370000},
+{"name":"current","notreg":true}]]]
