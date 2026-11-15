@@ -316,40 +316,97 @@ pub fn disarm(root: &Path, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
-/// Gives the owner `rwx` on every directory under `path` that lacks it, so
-/// the tree can be removed.
-pub fn make_removable(path: &Path) -> Result<()> {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return Ok(());
+/// Removes a tree, giving the owner `rwx` first on each directory that
+/// denies it (an armed fixture tree, a test's unreadable directory).
+///
+/// The removal never leaves the device `path` is on. A directory on another
+/// one is a mount: a test's that a failed `umount` or `hdiutil detach` left
+/// behind, which can be the system's own (a second mount of `devtmpfs` is
+/// the machine's `/dev`), and `rm -rf` would delete what it holds. It is
+/// left in place with the directories that lead to it, everything else is
+/// removed, and the error names each directory left. A bind mount of the
+/// same device is entered like any directory; a btrfs subvolume, which has
+/// a device number of its own, is left.
+pub fn remove_tree(path: &Path) -> Result<()> {
+    remove_tree_on(path, &|_, meta| meta.dev())
+}
+
+/// [`remove_tree`], with the device of each directory as `device` gives it.
+fn remove_tree_on(path: &Path, device: &dyn Fn(&Path, &fs::Metadata) -> u64) -> Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(io_err("stat", path, &err)),
     };
     if !meta.is_dir() {
+        return removed(fs::remove_file(path)).map_err(|err| io_err("remove", path, &err));
+    }
+    let mut left = Vec::new();
+    remove_dir_on(path, &meta, device(path, &meta), device, &mut left)?;
+    if left.is_empty() {
         return Ok(());
     }
+    let left: Vec<String> = left.iter().map(|dir| dir.display().to_string()).collect();
+    Err(Error::new(format!(
+        "remove {}: left in place, on another device than the tree (a mount): {}",
+        path.display(),
+        left.join(", ")
+    )))
+}
+
+/// Removes the directory `dir`, whose metadata is `meta`, and everything
+/// under it on the device `dev`. A directory on another device is added to
+/// `left` and kept, and so is each directory above it.
+fn remove_dir_on(
+    dir: &Path,
+    meta: &fs::Metadata,
+    dev: u64,
+    device: &dyn Fn(&Path, &fs::Metadata) -> u64,
+    left: &mut Vec<PathBuf>,
+) -> Result<()> {
     if meta.mode() & 0o700 != 0o700 {
-        fs::set_permissions(path, Permissions::from_mode(meta.mode() & 0o7777 | 0o700))
-            .map_err(|err| io_err("chmod", path, &err))?;
+        fs::set_permissions(dir, Permissions::from_mode(meta.mode() & 0o7777 | 0o700))
+            .map_err(|err| io_err("chmod", dir, &err))?;
     }
-    let entries = fs::read_dir(path).map_err(|err| io_err("read_dir", path, &err))?;
+    // Listed whole before anything is removed: a directory read while it
+    // shrinks may skip entries.
+    let entries = fs::read_dir(dir)
+        .and_then(Iterator::collect::<io::Result<Vec<_>>>)
+        .map_err(|err| io_err("read_dir", dir, &err))?;
+    let kept = left.len();
     for entry in entries {
-        let entry = entry.map_err(|err| io_err("read_dir", path, &err))?;
-        if entry.file_type().is_ok_and(|t| t.is_dir()) {
-            make_removable(&entry.path())?;
+        let path = entry.path();
+        let is_dir = entry
+            .file_type()
+            .map_err(|err| io_err("stat", &path, &err))?
+            .is_dir();
+        if !is_dir {
+            removed(fs::remove_file(&path)).map_err(|err| io_err("remove", &path, &err))?;
+            continue;
         }
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(io_err("stat", &path, &err)),
+        };
+        if device(&path, &meta) == dev {
+            remove_dir_on(&path, &meta, dev, device, left)?;
+        } else {
+            left.push(path);
+        }
+    }
+    if left.len() == kept {
+        removed(fs::remove_dir(dir)).map_err(|err| io_err("remove", dir, &err))?;
     }
     Ok(())
 }
 
-/// Removes a tree, restoring permissions first where a directory denies
-/// its owner (an armed fixture tree, a test's unreadable directory).
-pub fn remove_tree(path: &Path) -> Result<()> {
-    if fs::symlink_metadata(path).is_err() {
-        return Ok(());
+/// A removal's result, with an entry already gone counted as removed.
+fn removed(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
     }
-    if fs::remove_dir_all(path).is_ok() {
-        return Ok(());
-    }
-    make_removable(path)?;
-    fs::remove_dir_all(path).map_err(|err| io_err("remove", path, &err))
 }
 
 /// Whether a process id is alive (`kill -0`).
@@ -646,5 +703,51 @@ entries = [
         assert!(!DirLock::take_over(&lock));
         let _held = DirLock::acquire(lock.clone()).unwrap();
         assert_eq!(fs::read_to_string(lock.join("pid")).unwrap(), me);
+    }
+
+    /// A directory on another device than the tree's, as a mount left by a
+    /// failed `umount` is, is kept with what it holds and the directories
+    /// above it; the rest goes, an unreadable directory and a link to the
+    /// kept one among it, and the error names the directory kept.
+    #[test]
+    fn p5_test_01_a_tree_removal_stops_at_a_directory_on_another_device() {
+        let temp = tempfile::tempdir().unwrap();
+        let tree = temp.path().join("tree");
+        let mount = tree.join("a/mnt");
+        fs::create_dir_all(mount.join("deeper")).unwrap();
+        fs::write(mount.join("inside"), b"mounted").unwrap();
+        fs::write(tree.join("a/beside"), b"beside").unwrap();
+        fs::create_dir_all(tree.join("b/closed")).unwrap();
+        fs::write(tree.join("b/closed/file"), b"closed").unwrap();
+        fs::set_permissions(tree.join("b/closed"), Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink(&mount, tree.join("link")).unwrap();
+        fs::write(tree.join("top"), b"top").unwrap();
+
+        // The mount's device as a stat of its directory gives it: the
+        // directories below it are on its device too.
+        let other =
+            |path: &Path, meta: &fs::Metadata| meta.dev() + u64::from(path.starts_with(&mount));
+        let err = remove_tree_on(&tree, &other).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "remove {}: left in place, on another device than the tree (a mount): {}",
+                tree.display(),
+                mount.display()
+            )
+        );
+        assert_eq!(fs::read(mount.join("inside")).unwrap(), b"mounted");
+        assert!(mount.join("deeper").is_dir());
+        let mut kept: Vec<String> = fs::read_dir(&tree)
+            .unwrap()
+            .chain(fs::read_dir(tree.join("a")).unwrap())
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["a", "mnt"]);
+
+        // Once it is unmounted, the rest goes.
+        remove_tree(&tree).unwrap();
+        assert!(!tree.exists());
     }
 }

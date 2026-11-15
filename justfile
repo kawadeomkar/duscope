@@ -160,12 +160,13 @@ platform-tests:
       p5_test_01_linux_iso_9660_and_erofs_images_are_read_only
       p5_test_01_linux_f2fs_is_local_with_links_and_btime_as_statx_reports
       p5_test_01_linux_hfsplus_is_foreign_with_links_and_case_unknown
+      tests::p5_test_01_macos_an_image_left_attached_in_a_test_directory_is_kept
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Each platform builds its own share of the list: twenty-seven on macOS and thirty on Linux.
+    # Each platform builds its own share of the list: twenty-eight on macOS and thirty on Linux.
     # A renamed test must not drop out unnoticed.
     case "$(uname -s)" in
-      Darwin) expected=27 ;;
+      Darwin) expected=28 ;;
       *) expected=30 ;;
     esac
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
