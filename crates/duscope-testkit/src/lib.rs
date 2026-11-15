@@ -344,6 +344,13 @@ pub fn replace_values(text: &mut String, key: &str, end: char, placeholder: &str
 /// six tries over 30 seconds, for a disk still busy after the first few.
 const DETACH_WAITS: [u64; 5] = [1, 2, 4, 8, 15];
 
+/// The waits, in seconds, before each of Disk Arbitration's ejects of an
+/// image's whole disk that finish a `detach` whose tries have all failed
+/// ([`TestEnv::hdiutil`]): about half a minute in all, as the report's own
+/// eject, some 20 seconds after the last try, has ejected disks that one
+/// made at once did not.
+const EJECT_WAITS: [u64; 4] = [0, 5, 10, 15];
+
 /// Held through every [`TestEnv::hdiutil`] call, so that a test binary, whose
 /// tests run on threads of one process, creates, attaches and detaches one
 /// image at a time.
@@ -628,13 +635,15 @@ impl TestEnv {
     /// where every one of the six `hdiutil detach` tries over the half
     /// minute before had met "Resource busy"; the test failed all the same.
     /// So once every try has failed and the image is still attached, a
-    /// `detach` asks for that eject, cut short after 30 seconds as the
-    /// report's commands are. If `hdiutil info` then lists the image no
-    /// more, the detach is done, and one line on stderr says so, so that the
-    /// log of a run that passed still shows the tries failed. An image still
-    /// attached fails as before, the report's own `diskutil eject` giving the
-    /// second answer, which names the process that refuses the eject when
-    /// there is one.
+    /// `detach` asks for that eject, each cut short after 30 seconds as the
+    /// report's commands are, and asks again over about half a minute
+    /// (`EJECT_WAITS`): an eject made at once has failed where the report's,
+    /// some 20 seconds later, ejected the disk. When `hdiutil info` lists the
+    /// image no more, the detach is done, and one line on stderr says so, so
+    /// that the log of a run that passed still shows the tries failed. An
+    /// image still attached fails as before, with every eject's answer, and
+    /// the report's own `diskutil eject`, which names the process that
+    /// refuses the eject when there is one.
     ///
     /// # Panics
     ///
@@ -717,28 +726,41 @@ impl TestEnv {
                 std::thread::sleep(std::time::Duration::from_secs(*wait));
             }
         }
+        let mut ejects = Vec::new();
         if let Some(Some(Some((image, places)))) = &detaching
             && let Some(disk) = places.first()
         {
-            // Disk Arbitration's eject of the whole disk, cut short as the
-            // report's commands are; what it answers is read from whether
-            // the image is still attached.
-            let mut eject = self.command("diskutil");
-            eject.arg("eject").arg(disk);
-            let _ = output_within(eject, Duration::from_secs(30));
-            if self.detached(image) {
-                return Some(format!(
-                    "duscope-testkit: hdiutil {} failed {} times; diskutil eject ejected {}",
-                    shown.join(" "),
-                    failures.len(),
-                    disk.display()
+            // Disk Arbitration's eject of the whole disk, tried after each of
+            // `EJECT_WAITS`, each cut short as the report's commands are;
+            // whether it ejected is read from whether the image is still
+            // attached, and each answer is kept for the report.
+            for (tries, wait) in EJECT_WAITS.iter().enumerate() {
+                std::thread::sleep(Duration::from_secs(*wait));
+                let mut eject = self.command("diskutil");
+                eject.arg("eject").arg(disk);
+                let answer = output_within(eject, Duration::from_secs(30)).unwrap_or_else(|e| e);
+                ejects.push(format!(
+                    "eject {} after {wait} s: {}",
+                    tries + 1,
+                    answer.trim_end()
                 ));
+                if self.detached(image) {
+                    return Some(format!(
+                        "duscope-testkit: hdiutil {} failed {} times; diskutil eject ejected {}",
+                        shown.join(" "),
+                        failures.len(),
+                        disk.display()
+                    ));
+                }
             }
         }
         let held = match &detaching {
-            Some(Some(Some((_, places)))) => {
-                format!("{}{}", self.holders(places), self.disk_state(places))
-            }
+            Some(Some(Some((_, places)))) => format!(
+                "\n--- diskutil eject after the tries:\n{}{}{}",
+                ejects.join("\n"),
+                self.holders(places),
+                self.disk_state(places)
+            ),
             _ => String::new(),
         };
         panic!(
