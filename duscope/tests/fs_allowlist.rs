@@ -1,10 +1,11 @@
-//! P5-SEC-01: the external-input audit. Every call that reaches the
-//! filesystem by a path or a name, in the code the binary is built from, is
-//! on `fs_allowlist.txt` beside this file: its file, the function it is in
-//! and the call, with what reaches it, from whom, and why that is safe. A
-//! call the list does not hold fails the test until it is reviewed and
-//! listed, and so does a listed call that is gone, so the list stays the
-//! code's.
+//! P5-SEC-01: the external-input audit. The calls that reach the
+//! filesystem by a path or a name, and the programs started, in the code the
+//! binary is built from, are on `fs_allowlist.txt` beside this file: its
+//! file, the function it is in and the call, with what reaches it, from whom,
+//! and why that is safe. A call the list does not hold fails the test until
+//! it is reviewed and listed, and so does a listed call that is gone, and an
+//! entry whose reason is missing or still the placeholder the failure prints,
+//! so the list stays the code's.
 //!
 //! The calls:
 //! - `std::fs`'s functions by any path to them (`std::fs::read`, or
@@ -14,24 +15,35 @@
 //! - the constructors that open or make an entry by its path: `File::open`,
 //!   `create`, `create_new` and `options`, `OpenOptions::new` and
 //!   `DirBuilder::new`;
-//! - the methods of `Path` and `DirEntry` that call into `std::fs`, each
-//!   called with no argument: `canonicalize`, `read_dir`, `read_link`,
-//!   `metadata`, `symlink_metadata`, `exists` and `try_exists` (a method of
-//!   the same name that takes one, as `Provider::read_dir` does, is
-//!   another's);
-//! - the opens outside `std` that take a path or a name: rusqlite's
-//!   `Connection::open` and `open_with_flags`, and the libc calls that open,
-//!   make, rename or remove an entry (`open`, `openat`, `mkdirat`,
-//!   `unlinkat`, `renameat`, and the `renameat2` and `openat2` system calls),
-//!   which only `duscope-walk`'s platform modules make.
+//! - the methods of `Path` and `DirEntry` that call into `std::fs`:
+//!   `canonicalize`, `read_dir`, `read_link`, `metadata`, `symlink_metadata`,
+//!   `exists` and `try_exists`, each called with no argument (a method of the
+//!   same name that takes one, as `Provider::read_dir` does, is another's) or
+//!   named by its type, `Path`, `PathBuf` or `DirEntry`, as a call or passed
+//!   as a value (`resolve_with(path, Path::canonicalize)`); a function of the
+//!   other kinds passed as a value (`.map(File::open)`, `.and_then(fs::read)`)
+//!   is seen by its name already;
+//! - the programs started: `Command::new`;
+//! - the calls outside `std` that take a path, or a name in a directory open
+//!   on a descriptor: rusqlite's `Connection::open` and `open_with_flags`;
+//!   the libc calls that open, make, rename or remove an entry (`open`,
+//!   `openat`, `mkdirat`, `unlinkat`, `renameat`, and the `renameat2` and
+//!   `openat2` system calls) and those that read its metadata or ask about it
+//!   (`access`, `lstat`, `fstatat`, `statfs`, `statvfs`, `pathconf`,
+//!   `getattrlist`, `getattrlistat`, and the `statx` and `name_to_handle_at`
+//!   system calls), which only `duscope-walk`'s platform modules make; and
+//!   macOS's move to the Trash, `NSFileManager`'s
+//!   `trashItemAtURL:resultingItemURL:error:`.
 //!
 //! Left out: `Path::is_file`, `is_dir` and `is_symlink`, a `stat` each, are
 //! named as `Metadata`'s and `FileType`'s methods are, which read nothing, so
 //! the text cannot tell them apart; calls on a descriptor (`File::from`,
-//! `read`, `getdents64`), which reach only what a listed call opened; and the
-//! scanner's own metadata reads through libc (`fstatat`, `statx`,
-//! `getattrlistbulk` and the like), which read what a scan exists to read and
-//! open nothing.
+//! `read`, `fstat`, `fstatfs`, `getdents64`, `getattrlistbulk`, the FIEMAP
+//! `ioctl`), which reach only what a listed call opened; a call made through
+//! a function of duscope's own is seen once, where that function makes it,
+//! and its entry says who calls it; and what a dependency does inside a call
+//! (`SQLite`'s own temporary files, the terminal library's) is not code read
+//! here.
 //!
 //! The code read: each crate of the workspace the binary links (its normal
 //! dependencies, followed from its manifest), from the crate's root module
@@ -69,10 +81,37 @@ const METHODS: [&str; 7] = [
     "exists",
     "try_exists",
 ];
-/// The libc calls that open, make, rename or remove an entry by its name.
-const LIBC: [&str; 5] = ["open", "openat", "mkdirat", "unlinkat", "renameat"];
-/// The system calls of the same kind libc has no wrapper for.
-const SYSCALLS: [&str; 2] = ["SYS_renameat2", "SYS_openat2"];
+/// The types whose methods of [`METHODS`] call into `std::fs`, named when
+/// a method is passed as a value (`Path::canonicalize`).
+const METHOD_TYPES: [&str; 3] = ["Path", "PathBuf", "DirEntry"];
+/// The libc calls that take a path, or a name in a directory open on a
+/// descriptor: those that open, make, rename or remove an entry, and those
+/// that read its metadata or ask about it.
+const LIBC: [&str; 13] = [
+    "open",
+    "openat",
+    "mkdirat",
+    "unlinkat",
+    "renameat",
+    "access",
+    "lstat",
+    "fstatat",
+    "statfs",
+    "statvfs",
+    "pathconf",
+    "getattrlist",
+    "getattrlistat",
+];
+/// The system calls of the same kinds libc may have no wrapper for.
+const SYSCALLS: [&str; 4] = [
+    "SYS_renameat2",
+    "SYS_openat2",
+    "SYS_statx",
+    "SYS_name_to_handle_at",
+];
+/// The methods outside `std` that act on an entry by its path, called with
+/// arguments: macOS's move to the Trash (`NSFileManager`).
+const PATH_METHODS: [&str; 1] = ["trashItemAtURL_resultingItemURL_error"];
 
 /// A token of Rust source, as much as the audit needs: literals and
 /// lifetimes stand for themselves, comments are gone.
@@ -377,6 +416,12 @@ fn path_call(segments: &[&str], next: Option<&Tok>) -> Option<String> {
         return Some(format!("{ty}::{method}"));
     }
     match segments {
+        // A method named by its type, called so or passed as a value.
+        [.., ty, m] if METHOD_TYPES.contains(ty) && METHODS.contains(m) => {
+            Some(format!("{ty}::{m}"))
+        }
+        // A program started.
+        [.., "Command", "new"] if is(next, '(') => Some("Command::new".to_owned()),
         ["libc", f] if LIBC.contains(f) && is(next, '(') => Some(format!("libc::{f}")),
         ["libc", f] if SYSCALLS.contains(f) => Some(format!("libc::{f}")),
         [.., "Connection", f]
@@ -598,6 +643,12 @@ fn scan(toks: &[Tok]) -> FileScan {
                 {
                     found.calls.push((w.func(), format!(".{m}()")));
                 }
+                if let Some(m) = word(next)
+                    && PATH_METHODS.contains(&m)
+                    && is(toks.get(i + 2), '(')
+                {
+                    found.calls.push((w.func(), format!(".{m}(..)")));
+                }
             }
             Tok::Punct(c @ ('{' | '(' | '[')) => w.open(*c),
             Tok::Punct(c @ ('}' | ')' | ']')) => w.close(*c),
@@ -793,15 +844,21 @@ fn entry_line(func: &str, calls: &BTreeMap<String, usize>) -> String {
     format!("{func}: {}", calls.join(", "))
 }
 
-#[test]
-fn p5_sec_01_every_fs_call_is_on_the_allow_list_with_its_reason() {
-    let found = inventory();
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fs_allowlist.txt");
-    let list = allow_list(&fs::read_to_string(&path).unwrap());
+/// The reason the failure prints for a call the list does not hold, in the
+/// list's own format: pasted, it is no review, and fails until it is
+/// replaced by one.
+const PLACEHOLDER: &str = "(new: what reaches it, from whom, why it is safe)";
+
+/// How the list differs from the code: the lines to review, in the list's
+/// format, for the calls it does not hold or holds a different number of;
+/// the entries whose calls are gone; and those with no reason, or the
+/// placeholder for one. Empty when the list is the code's.
+fn differences(found: &Inventory, list: &BTreeMap<(String, String), Entry>) -> String {
     let mut unreviewed = String::new();
     let mut gone = String::new();
+    let mut unexplained = String::new();
     let mut file = "";
-    for ((f, func), calls) in &found {
+    for ((f, func), calls) in found {
         let listed = list.get(&(f.clone(), func.clone()));
         if listed.is_some_and(|entry| entry.calls == *calls) {
             continue;
@@ -814,25 +871,134 @@ fn p5_sec_01_every_fs_call_is_on_the_allow_list_with_its_reason() {
         let _ = writeln!(
             unreviewed,
             "  {}",
-            listed.map_or("(new: what reaches it, from whom, why it is safe)", |e| {
-                &e.reason
-            })
+            listed.map_or(PLACEHOLDER, |e| &e.reason)
         );
     }
-    for ((f, func), entry) in &list {
-        assert!(
-            !entry.reason.is_empty(),
-            "{f}: {func}: an entry without a reason"
-        );
+    for ((f, func), entry) in list {
+        if entry.reason.is_empty() || entry.reason == PLACEHOLDER {
+            let _ = writeln!(unexplained, "{f}: {func}");
+        }
         if !found.contains_key(&(f.clone(), func.clone())) {
             let _ = writeln!(gone, "{f}: {}", entry_line(func, &entry.calls));
         }
     }
-    assert!(
-        unreviewed.is_empty() && gone.is_empty(),
+    if unreviewed.is_empty() && gone.is_empty() && unexplained.is_empty() {
+        return String::new();
+    }
+    format!(
         "fs_allowlist.txt is not the code's: review each call and write it there\n\
          calls the list does not hold, or holds a different number of:\n{unreviewed}\n\
-         entries for calls that are gone:\n{gone}"
+         entries for calls that are gone:\n{gone}\n\
+         entries whose reason is missing or the placeholder:\n{unexplained}"
+    )
+}
+
+#[test]
+fn p5_sec_01_every_fs_call_is_on_the_allow_list_with_its_reason() {
+    let found = inventory();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fs_allowlist.txt");
+    let list = allow_list(&fs::read_to_string(&path).unwrap());
+    let differences = differences(&found, &list);
+    assert!(differences.is_empty(), "{differences}");
+}
+
+#[test]
+fn p5_sec_01_a_reason_left_as_the_placeholder_or_empty_fails() {
+    let mut found = Inventory::new();
+    found
+        .entry(("a.rs".to_owned(), "f".to_owned()))
+        .or_default()
+        .insert("fs::read".to_owned(), 1);
+    // The failure's lines, pasted as they are, do not pass.
+    let failure = differences(&found, &BTreeMap::new());
+    let mut pasted = String::new();
+    for line in failure
+        .lines()
+        .skip_while(|line| !line.starts_with("## "))
+        .take_while(|line| !line.is_empty())
+    {
+        pasted.push_str(line);
+        pasted.push('\n');
+    }
+    assert_eq!(pasted, format!("## a.rs\nf: fs::read\n  {PLACEHOLDER}\n"));
+    let failure = differences(&found, &allow_list(&pasted));
+    assert!(
+        failure.contains("missing or the placeholder:\na.rs: f\n"),
+        "{failure}"
+    );
+    let failure = differences(&found, &allow_list("## a.rs\nf: fs::read\n"));
+    assert!(
+        failure.contains("missing or the placeholder:\na.rs: f\n"),
+        "{failure}"
+    );
+    let reviewed = allow_list("## a.rs\nf: fs::read\n  A fixed path.\n");
+    assert_eq!(differences(&found, &reviewed), "");
+}
+
+#[test]
+fn p5_sec_01_the_audit_sees_calls_by_value_programs_and_libc_by_name() {
+    let src = r#"
+        fn resolve(path: &Path) -> PathBuf {
+            resolve_with(path, Path::canonicalize)
+        }
+        fn values(paths: &[PathBuf], entries: Vec<DirEntry>) {
+            let _ = paths.iter().filter(|p| p.is_dir()).map(std::path::Path::exists);
+            let _ = entries.iter().map(fs::DirEntry::metadata);
+            let _ = paths.iter().map(PathBuf::try_exists);
+            let _ = paths.iter().map(Path::new);
+        }
+        fn start(program: &OsStr) {
+            let _ = Command::new(program).spawn();
+            let _ = std::process::Command::new("kill").status();
+            let cmd = clap::Command::default();
+        }
+        fn by_name(dir: BorrowedFd<'_>, name: &CStr, path: &CStr) {
+            let mut buf = MaybeUninit::<libc::statfs>::uninit();
+            let _ = unsafe { libc::access(path.as_ptr(), libc::W_OK) };
+            let _ = unsafe { libc::lstat(path.as_ptr(), stat) };
+            let _ = unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) };
+            let _ = unsafe { libc::statfs(path.as_ptr(), buf.as_mut_ptr()) };
+            let _ = unsafe { libc::pathconf(path.as_ptr(), 0) };
+            let _ = unsafe { libc::getattrlist(path.as_ptr(), a, b, 0, 0) };
+            let _ = unsafe { libc::getattrlistat(dir, name.as_ptr(), a, b, 0, 0) };
+            let _ = unsafe { libc::fstatat(dir, name.as_ptr(), stat, 0) };
+            let _ = unsafe { libc::syscall(libc::SYS_statx, dir, name.as_ptr()) };
+            let _ = unsafe { libc::syscall(libc::SYS_name_to_handle_at, dir, name.as_ptr()) };
+            let _ = unsafe { libc::fstat(dir, stat) };
+            let _ = unsafe { libc::fstatfs(dir, buf.as_mut_ptr()) };
+            let _ = unsafe { libc::getattrlistbulk(dir, a, b, 0, 0) };
+        }
+        fn move_item(url: &NSURL) {
+            let _ = NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(url, None);
+        }
+    "#;
+    let found = scan(&lex(src));
+    let calls: Vec<(&str, &str)> = found
+        .calls
+        .iter()
+        .map(|(f, c)| (f.as_str(), c.as_str()))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("resolve", "Path::canonicalize"),
+            ("values", "Path::exists"),
+            ("values", "DirEntry::metadata"),
+            ("values", "PathBuf::try_exists"),
+            ("start", "Command::new"),
+            ("start", "Command::new"),
+            ("by_name", "libc::access"),
+            ("by_name", "libc::lstat"),
+            ("by_name", "libc::statvfs"),
+            ("by_name", "libc::statfs"),
+            ("by_name", "libc::pathconf"),
+            ("by_name", "libc::getattrlist"),
+            ("by_name", "libc::getattrlistat"),
+            ("by_name", "libc::fstatat"),
+            ("by_name", "libc::SYS_statx"),
+            ("by_name", "libc::SYS_name_to_handle_at"),
+            ("move_item", ".trashItemAtURL_resultingItemURL_error(..)"),
+        ]
     );
 }
 

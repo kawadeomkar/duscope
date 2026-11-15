@@ -1,9 +1,11 @@
-# The external-input audit (P5-SEC-01): every call that reaches the filesystem
-# by a path or a name in the code the binary is built from, and why each is
-# safe: what reaches it, from whom, and what bounds or checks it. fs_allowlist.rs
-# says which calls count and which code is read, and fails on a call this list
-# does not hold or holds a different number of, and on an entry whose calls are
-# gone. A new call is reviewed, then written here.
+# The external-input audit (P5-SEC-01): the calls that reach the filesystem by a
+# path or a name in the code the binary is built from, and the programs it
+# starts, and why each is safe: what reaches it, from whom, and what bounds or
+# checks it. fs_allowlist.rs says which calls count, which it cannot see, and
+# which code is read; it fails on a call this list does not hold or holds a
+# different number of, on an entry whose calls are gone, and on an entry whose
+# reason is missing or the placeholder its failure prints. A new call is
+# reviewed, then written here.
 #
 # Format: `## <file>`, then for each function a line
 # `<function>: <call>[ xN][, <call>[ xN]]…` (`(item)` outside any function) and
@@ -80,6 +82,10 @@ build: Connection::open, File::open, OpenOptions::new
   created empty with O_CREAT|O_EXCL and mode 0600 (no link followed, whatever
   the umask), filled by SQLite, then synced. The scan id names it; no client
   path reaches it.
+kill_before_rename: Command::new
+  Debug builds only (DUSCOPE_TEST_KILL_BEFORE_RENAME, a test's knob): kill(1),
+  found through PATH, given -KILL and this process's own id. No path from a
+  person, an agent or the tree reaches it.
 write_file_until: fs::remove_file
   That temporary file, removed before a second build with the sort in memory.
 write_in: DirBuilder::new, File::open, fs::remove_file, fs::rename
@@ -145,12 +151,27 @@ resolve_path: fs::canonicalize
 new: .canonicalize()
   The server's --roots, named by the person who starts duscope mcp: resolved
   once at start; each must be a directory.
+resolve: Path::canonicalize
+  Every path an agent supplies, once its length and its `..` components have
+  passed: passed to resolve_with, which asks it of the path and the parts above
+  it, by bisection, for the deepest part that exists; the path so resolved is
+  then held to --roots. A realpath of each part: links followed, nothing
+  opened to read, nothing changed.
 
 ## crates/duscope-tui/src/term.rs
 
 background: OpenOptions::new
   /dev/tty, a fixed path: the terminal, opened non-blocking to ask its
   background colour, read for a bounded wait.
+start_next: Command::new
+  The viewer's o, pressed by a person at the terminal: the program of each
+  command line duscope_walk::reveal_commands gives for the entry under the
+  cursor, tried in order and found through PATH (open -R on macOS; dbus-send,
+  then xdg-open on the folder holding it, elsewhere). The entry's absolute
+  path, from the scan, is an argument, never read by a shell and never as an
+  option (a path that is not absolute gets no command); started detached,
+  with stdin, stdout and stderr null, in a process group of its own. Under
+  DUSCOPE_TEST_OPENER (debug builds) nothing is started.
 
 ## crates/duscope-walk/src/lib.rs
 
@@ -191,6 +212,15 @@ real: fs::canonicalize
 volume: fs::canonicalize
   The root of each volume the walk enters, resolved to find its mount.
 
+## crates/duscope-walk/src/platform/linux/statx.rs
+
+statx_with: libc::SYS_statx
+  The Linux walk's read of each entry of the tree: statx(2) of its name in its
+  directory's descriptor, never following a final link nor triggering an
+  automount; and by path, of the walk's root and each volume it enters, whose
+  automount is triggered as opening it would, and of the paths the mount
+  checks ask about. Metadata only: nothing opened.
+
 ## crates/duscope-walk/src/platform/linux/trash.rs
 
 nearest_dev: fs::metadata x2
@@ -211,6 +241,24 @@ usable: DirBuilder::new, fs::symlink_metadata
 volume_trash: fs::symlink_metadata
   The volume's shared .Trash: an lstat, used only as a sticky directory, never
   a link (the freedesktop specification's rule).
+
+## crates/duscope-walk/src/platform/macos/ffi.rs
+
+getattrlist: libc::getattrlist
+  The macOS walk's read of one entry by its path (stat.rs entry_of_path): the
+  walk's root, and the sources /usr/share/firmlinks lists, for the Data
+  volume's device. Not following a final link; metadata only, nothing opened.
+getattrlistat: libc::getattrlistat
+  The macOS walk's read of one entry by name in its directory's descriptor
+  (stat.rs entry_at: an entry the bulk read leaves to it, a mount point among
+  them), not following a final link. Metadata only.
+pathconf: libc::pathconf
+  The mount point statfs names for a volume: whether the volume compares
+  names with case (_PC_CASE_SENSITIVE). Nothing read or changed.
+statfs: libc::statfs
+  The volume holding a path (volume.rs of): the walk's root and each volume
+  it enters, and in a test run an item for the Trash; its size, free bytes,
+  mount point and flags. Nothing read or changed.
 
 ## crates/duscope-walk/src/platform/macos/fsevents.rs
 
@@ -235,6 +283,12 @@ real_root: fs::canonicalize
 
 ## crates/duscope-walk/src/platform/macos/trash.rs
 
+move_item: .trashItemAtURL_resultingItemURL_error(..)
+  clean's move to the Trash (a person's paths or handles, an agent's through
+  duscope_delete within --roots): NSFileManager moves the entry by its path,
+  as a file URL, into the account's Trash. trash checks first that the path is
+  UTF-8 (an NSString changes one that is not), that its directory is writable,
+  and by an lstat that the entry is still the one the plan saw.
 trash: fs::symlink_metadata
   An item clean moves to the Trash: an lstat just before NSFileManager's move,
   which goes by path, its (dev, ino) compared with the plan's.
@@ -257,6 +311,17 @@ cachedir_tag: .metadata(), OpenOptions::new, fs::symlink_metadata
   regular file of 43 bytes or more), opened O_NOFOLLOW|O_NONBLOCK and checked
   again through the descriptor, then 43 bytes read: the scanner's one read of
   contents.
+lstat: libc::lstat
+  lstat(2) of a path: the walk's root for the fallback provider, the volume
+  holding a path and an entry read by path on macOS, and scans --check's
+  sweep of a directory by its path. Never follows a final link; metadata only.
+lstat_at: libc::fstatat
+  fstatat(2) of a name in a directory's descriptor, not following a final
+  link: each entry for the fallback provider and an entry macOS's attribute
+  read cannot answer for; clean's check that an entry is still the one the
+  plan saw (unlink.rs stat_at on macOS, and on Linux without statx) and the
+  Linux Trash's look for a name before a plain rename (DEV-181); scans
+  --check's sweep. Metadata only: nothing opened.
 open_with: libc::openat
   Every directory the walk reads (the tree), opened O_DIRECTORY|O_NOFOLLOW
   relative to its parent's descriptor; the staleness sweep of a scan that
@@ -271,6 +336,30 @@ read_regular: .metadata(), OpenOptions::new, fs::metadata, fs::symlink_metadata
   cap; opened O_NONBLOCK|O_NOCTTY, O_NOFOLLOW unless following; checked again
   through the descriptor; read to the cap and no further. A FIFO or a device
   is refused unopened.
+statvfs: libc::statvfs
+  statvfs(3) of a path: the volume holding an item clean plans, refused when
+  it is mounted read-only, and on Linux each volume the walk meets, for its
+  size and free bytes. Nothing read or changed.
+writable: libc::access
+  access(2) with W_OK of a directory: on macOS the directory holding an item
+  the Trash would move out of, on Linux the `files` and `info` of a volume's
+  Trash that an lstat showed is this user's directory, to tell whether the
+  move can be made. Follows links, as a move by path does; it decides only whether to
+  try, and the move still checks the entry itself (trash.rs, unlink.rs).
+  Nothing read or changed.
+
+## crates/duscope-walk/src/platform/posix/stamp.rs
+
+stamp_at: libc::SYS_statx, libc::getattrlistat
+  scans --check's sweep: each directory the saved scan holds (a saved scan's
+  paths, which --trust may name from anyone), its type and two times read by
+  path or by name in an opened piece of a long path (statx on Linux,
+  getattrlistat on macOS), with the walk's flags: no final link followed but
+  under a scan that followed links, no automount triggered. Metadata only.
+stat_following: libc::fstatat
+  The same sweep on macOS where getattrlistat cannot answer, for a scan that
+  followed links (--follow-symlinks): a stat that follows a final link, as
+  that scan's walk did. Metadata only.
 
 ## crates/duscope-walk/src/platform/posix/unlink.rs
 
@@ -281,6 +370,11 @@ create_at: libc::openat
 make_dir_at: libc::mkdirat
   A Trash's `files` and `info`, made 0700 through the Trash's descriptor and
   opened O_NOFOLLOW.
+mount_id_at: libc::SYS_name_to_handle_at
+  Linux: the mount id of a directory clean reaches through descriptors, or of
+  a name in it, not following a final link nor triggering an automount, to
+  tell a mount that --permanent must not cross and the Trash must not move
+  where statx does not say. No handle is used to open anything.
 remove_at: libc::unlinkat
   clean --permanent: each entry removed through its directory's descriptor,
   reached from `/` without following a link, once its (dev, ino) matches the
@@ -291,6 +385,11 @@ renameat: libc::renameat
 renameat2_noreplace: libc::SYS_renameat2
   The Linux Trash's move: through descriptors, never over an entry already
   there.
+statx: libc::SYS_statx
+  Linux: clean's check of each entry it moves or deletes, by name in its
+  directory's descriptor (or the descriptor itself), not following a final
+  link nor triggering an automount: its (dev, ino) against the plan's, and
+  the mount-root attribute that tells a bind mount. Metadata only.
 
 ## duscope/src/agent/mod.rs
 
