@@ -714,6 +714,40 @@ class Fake(unittest.TestCase):
         self.assertEqual([r["task"] for r in again["runs"]], ["largest-dir", "sql-own-files"])
         self.assertEqual(err.getvalue().count("eval: ["), 1)
 
+    def test_p3_agt_03_a_second_start_refuses_an_existing_result_file(self):
+        common = ("--fake", "right", "--cells", "skill-json", "--tasks", "largest-dir")
+        result, d = self.run_eval(*common)
+        out = os.path.join(d, "result.json")
+        with open(out, "rb") as f:
+            before = f.read()
+        self.run_eval(*common, status=2, d=d)
+        self.assertIn("result.json exists: --resume", self.err)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), before)
+        # Nor does another file take the first one's transcripts.
+        other = os.path.join(d, "other.json")
+        self.run_eval(*common, "--out", other, status=2, d=d)
+        self.assertIn("holds the transcripts of another run", self.err)
+        self.assertFalse(os.path.exists(other))
+        # --resume continues the file, and has nothing left to run.
+        again, _ = self.run_eval(*common, "--resume", out, d=d)
+        self.assertEqual((again["runs"], again["complete"]), (result["runs"], True))
+        self.assertNotIn("eval: [", self.err)
+
+    def test_p3_agt_03_resume_refuses_another_commit_or_duscope_version(self):
+        common = ("--fake", "right", "--cells", "skill-json", "--tasks", "largest-dir,sql-own-files")
+        result, d = self.run_eval(*common)
+        for key, field, said in (("harness", "commit", "at another commit"), ("duscope", "version", "with another duscope")):
+            old = json.loads(json.dumps(result))
+            old["runs"] = old["runs"][:1]
+            old[key][field] = "something else"
+            path = os.path.join(d, "old-%s.json" % field)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(old, f)
+            self.run_eval(*common, "--resume", path, "--out", path, status=2, d=d)
+            self.assertIn(said, self.err)
+            self.assertNotIn("eval: [", self.err)
+
     def test_p3_agt_03_an_outage_is_recorded_apart_and_left_out_of_the_figures(self):
         result, _ = self.run_eval("--fake", "right", "--cells", "skill-json", "--jobs", "1",
                                   "--tasks", "largest-dir,largest-files,sql-own-files",

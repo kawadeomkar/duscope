@@ -582,23 +582,27 @@ limits. Ctrl-C stops the eval: the runs not started are cancelled and the runnin
 (each runs in a session of its own, which the terminal's Ctrl-C does not reach), and the eval
 exits with status 130. A run cut short is not recorded. `--resume FILE` continues an interrupted
 run: the runs in FILE are kept and not made again, but for those that failed for the
-infrastructure, provided `config.toml`, `tasks.toml` and the Claude Code release are unchanged.
+infrastructure, provided `config.toml`, `tasks.toml`, the Claude Code release, the commit and
+duscope's version are unchanged, so that one file measures one binary.
 The eval exits with status 0 when every run is recorded and none failed for the infrastructure,
 1 when some are left for `--resume`, and 2 on a problem with its configuration or setup.
 
 **What it records.** `bench/eval/results/<date>.json` (`--out` elsewhere), rewritten after every
-run and marked `complete` at the end: the host, the commit, the hashes of both files, the Claude
-Code and duscope versions, the configuration, each task's prompt (`{root}` for the tree), and one
-record per run with its verdict and the reasons, the expected and the given answer, the models the
-stream names, tokens (`total`: the pinned model's input, cache creation, cache reads and output,
-from `modelUsage`, else the result's `usage`, else the sum of the messages'; `all_models` with any
-other model Claude Code called), the cost, turns, tool calls, failed calls and whether a later one worked
-(`recovered`), permission denials, whether the skill was loaded, the duscope calls (verbs, the tier
-they belong to, formats asked for, `--jq`, the briefing read with `duscope agent`), and the commands
-it ran. A field the stream lacks is null, never 0 or false, and so is a token total that needs
-it. The `summary` holds each cell's figures, its runs that failed for the infrastructure, each
-task's completion per cell, and the decisions. Each run's transcript stays in `bench/eval/.runs/<date>/`, which git ignores. The fake
-agent's files are `<date>-fake-right.json` and `<date>-fake-wrong.json`, also ignored.
+run and marked `complete` at the end. A second start refuses a result file that exists, so a second
+run on the same UTC day needs `--resume` that file or another `--out`; it also refuses a
+transcripts directory that holds another run's. The file holds the host, the commit, the hashes of
+both files, the Claude Code and duscope versions, the configuration, each task's prompt (`{root}`
+for the tree), and one record per run with its verdict and the reasons, the expected and the given
+answer, the models the stream names, tokens (`total`: the pinned model's input, cache creation,
+cache reads and output, from `modelUsage`, else the result's `usage`, else the sum of the
+messages'; `all_models` with any other model Claude Code called), the cost, turns, tool calls,
+failed calls and whether a later one worked (`recovered`), permission denials, whether the skill
+was loaded, the duscope calls (verbs, the tier they belong to, formats asked for, `--jq`, the
+briefing read with `duscope agent`), and the commands it ran. A field the stream lacks is null,
+never 0 or false, and so is a token total that needs it. The `summary` holds each cell's figures,
+its runs that failed for the infrastructure, each task's completion per cell, and the decisions.
+Each run's transcript stays in `bench/eval/.runs/<date>/`, which git ignores. The fake agent's
+files are `<date>-fake-right.json` and `<date>-fake-wrong.json`, also ignored.
 
 **The decisions.** The criterion is the row's: the cells with the skill against those without, both
 formats pooled, the skill being recommended with a higher completion rate, or with an equal one and

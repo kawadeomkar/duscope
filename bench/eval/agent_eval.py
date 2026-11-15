@@ -971,8 +971,10 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
     date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     suffix = "" if mode == "claude" else "-" + mode
     out = args.out or os.path.join(args.results_dir, "%s%s.json" % (date, suffix))
+    # A second start on the same day would overwrite the first's runs.
+    if os.path.exists(out) and not (args.resume and os.path.realpath(args.resume) == os.path.realpath(out)):
+        raise EvalError("%s exists: --resume %s continues it, --out names another file" % (out, out))
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    transcripts = None if args.no_transcripts else (args.transcripts or os.path.join(HERE, ".runs", date + suffix))
 
     header = {
         "schema_version": SCHEMA_VERSION,
@@ -1020,11 +1022,30 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
                 raise EvalError("%s was run with another %s: start a new file" % (args.resume, key))
         if old["mode"] != mode or old["claude_code"]["version"] != claude_version:
             raise EvalError("%s was run with another agent: start a new file" % args.resume)
+        # One file, one binary: the runs it keeps and those it adds must
+        # measure the same duscope.
+        if old["harness"].get("commit") != header["harness"]["commit"]:
+            raise EvalError(
+                "%s was run at another commit (%s; this checkout is at %s): start a new file"
+                % (args.resume, old["harness"].get("commit"), header["harness"]["commit"])
+            )
+        if old["duscope"].get("version") != header["duscope"]["version"]:
+            raise EvalError(
+                "%s was run with another duscope (%s; this one is %s): start a new file"
+                % (args.resume, old["duscope"].get("version"), header["duscope"]["version"])
+            )
         for r in old["runs"]:
             if not outage(r):
                 done[(r["task"], r["cell"], r["repeat"])] = r
         header["started_at"] = old["started_at"]
         header["date"] = old["date"]
+
+    transcripts = None if args.no_transcripts else (args.transcripts or os.path.join(HERE, ".runs", header["date"] + suffix))
+    if transcripts and not args.resume and os.path.isdir(transcripts) and os.listdir(transcripts):
+        raise EvalError(
+            "%s holds the transcripts of another run: --transcripts names another directory, "
+            "--no-transcripts keeps none" % transcripts
+        )
 
     extra_dirs = tool_dirs(["claude", "node", "jq"], base_env) if mode == "claude" else tool_dirs(["jq"], base_env)
     if mode == "claude":
