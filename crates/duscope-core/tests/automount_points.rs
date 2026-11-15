@@ -1,7 +1,8 @@
 //! P5-WALK-06: an automount point the walk did not enter is flagged on its
 //! directory (bit 14, `automount`), in the arena and in a saved scan, which
 //! count such points under a path for the `mounts_excluded` warning and read
-//! them as not entered.
+//! them as not entered; an ncdu export marks one as ncdu marks a filesystem
+//! it did not enter.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -11,12 +12,14 @@ use std::path::{Path, PathBuf};
 
 use duscope_core::arena::Arena;
 use duscope_core::index::{AUTOMOUNT, Index, IndexWriter, ScanId, ScanMeta, index_path};
+use duscope_core::interchange::import::{ImportFormat, import};
+use duscope_core::interchange::ncdu::{self, NcduOpts};
 use duscope_core::query::{ArenaView, Subtree, TreeView, flag_names};
 use duscope_core::rollup::roll_up;
 use duscope_testkit::TestEnv;
 use duscope_walk::{
-    Boundary, DirHandle, Entry, Flags, MemProvider, Provider, ScanError, VolumeInfo, WalkOptions,
-    walk_with,
+    Boundary, DirHandle, Entry, Flags, Kind, MemProvider, Provider, ScanError, Skip, VolumeInfo,
+    WalkOptions, walk_with,
 };
 
 /// The tree, whose directories named `auto` read as Linux reads an
@@ -178,4 +181,70 @@ fn p5_walk_06_a_skipped_automount_point_is_flagged_and_counted() {
     let entered = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
     assert_eq!(entered.automount_points(0), 0);
     assert!(!entered.node(id_of(&entered, "auto")).automount);
+}
+
+/// The line of `export` that holds the entry named `name`.
+fn line<'a>(export: &'a str, name: &str) -> &'a str {
+    let key = format!("{{\"name\":\"{name}\"");
+    export
+        .lines()
+        .find(|line| line.contains(&key))
+        .unwrap_or_else(|| panic!("no {name} in {export}"))
+}
+
+#[test]
+fn p5_walk_06_an_ncdu_export_marks_a_skipped_automount_point_otherfs() {
+    let env = TestEnv::new();
+    let mut tree = MemProvider::new("/r");
+    tree.file("auto/inside", 4096).file("a/plain/x", 4096);
+    let provider = Points(&tree);
+    let mut arena = Arena::new(duscope_walk::Attrs::Basic);
+    walk_with(&provider, tree.root_path(), &WalkOptions::default(), |e| {
+        arena.push(e).unwrap();
+    })
+    .unwrap();
+    let rollup = roll_up(&mut arena);
+    let meta = meta(tree.root_path());
+    let dir = env.tmp_dir().join("scan");
+    fs::create_dir_all(&dir).unwrap();
+    IndexWriter::write(&arena, &rollup, &meta, &dir).unwrap();
+    let saved = Index::open(&index_path(&dir, &meta.scan_id)).unwrap();
+    let mut out = Vec::new();
+    let opts = NcduOpts {
+        progver: "0.0.0",
+        timestamp: 1,
+    };
+    ncdu::write(&saved, 0, &opts, &mut out).unwrap();
+    let export = String::from_utf8(out).unwrap();
+
+    // The point, as ncdu writes a filesystem it did not enter: an info
+    // object, not a directory's array, marked otherfs.
+    let auto = line(&export, "auto");
+    assert!(auto.starts_with('{'), "{auto}");
+    assert!(auto.contains(r#""excluded":"otherfs""#), "{auto}");
+    // A directory the scan entered is an array, unmarked.
+    let plain = line(&export, "plain");
+    assert!(plain.starts_with('['), "{plain}");
+    assert!(!plain.contains("excluded"), "{plain}");
+
+    // Imported again, the point is a directory listed and not entered for
+    // a mount's reason, with the sizes the scan gave it.
+    let imported = import(export.as_bytes(), Some(ImportFormat::Ncdu)).unwrap();
+    assert_eq!((imported.skipped_dirs, imported.mounts_excluded), (1, 1));
+    let skipped: Vec<Skip> = imported.arena.skipped().values().copied().collect();
+    assert_eq!(skipped, [Skip::OneFileSystem]);
+    let mut back = imported.arena;
+    let rollup = roll_up(&mut back);
+    let dir = env.tmp_dir().join("back");
+    fs::create_dir_all(&dir).unwrap();
+    IndexWriter::write(&back, &rollup, &meta, &dir).unwrap();
+    let back = Index::open(&index_path(&dir, &meta.scan_id)).unwrap();
+    let (was, now) = (id_of(&saved, "auto"), id_of(&back, "auto"));
+    let (was, now) = (saved.node(was), back.node(now));
+    assert_eq!(now.kind, Kind::Dir);
+    assert_eq!(
+        (now.apparent, now.allocated, now.file_count, now.dir_count),
+        (was.apparent, was.allocated, was.file_count, was.dir_count)
+    );
+    assert_eq!(back.node(0).allocated, saved.node(0).allocated);
 }

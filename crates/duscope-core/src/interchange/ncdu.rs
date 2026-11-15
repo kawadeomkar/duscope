@@ -14,9 +14,9 @@
 //!   as they are, so a name that is not UTF-8 survives the round trip
 //!   (strict JSON readers need UTF-8 names).
 //! - **A directory the scan did not enter** is an info object with
-//!   `excluded`: `pattern`, `otherfs`, `kernfs`, or `frmlink` for the
-//!   volume a macOS scan reaches through its firmlinks; one it could not
-//!   read has `read_error`.
+//!   `excluded`: `pattern`, `otherfs` (an automount point it did not mount
+//!   too), `kernfs`, or `frmlink` for the volume a macOS scan reaches
+//!   through its firmlinks; one it could not read has `read_error`.
 //! - **`dev`** is on the root and on each directory whose device differs
 //!   from its parent's; `mtime` (whole seconds) on every entry, and `uid`,
 //!   `gid` and `mode` where the scan collected them.
