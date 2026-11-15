@@ -566,7 +566,12 @@ the tree as it was built, and no deletion was refused. The tree is the same when
 are under its root, each still a directory or not and, if not, of the same size and modification
 time (`lstat`); a directory's times, every access and change time, modes, and
 anything outside the tree are not compared. Paths are compared after `realpath`, sizes within the
-task's tolerance (5%), and a size may be written in bytes or with a unit.
+task's tolerance (5%), and a size may be written in bytes or with a unit. Most truths come from the
+tree itself, walked with `lstat`; two are duscope's own figures: the diff task's net growth (the
+difference of the totals duscope gave the two saved scans) and which directories are regenerable
+caches (`duscope caches --json`, run by the harness in an index directory the agent never sees).
+A duscope bug there passes both the truth and the answer, which suits an eval of agents and not of
+duscope's figures.
 
 A run that measured the infrastructure rather than the agent fails as `infrastructure`, with the
 reason beside it: Claude Code ended without a result message, with an error result (`is_error`: a

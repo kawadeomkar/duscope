@@ -5,7 +5,7 @@ other bench tests by `duscope/tests/bench_harness.rs`:
 
 Nothing here calls a model or Claude Code. The end-to-end tests run the
 harness with its stub agent (`--fake right|wrong`) and need a duscope binary:
-DUSCOPE_EVAL_TEST_BIN, else the newest of target/{debug,release}/duscope
+DUSCOPE_TEST_EVAL_BIN, else the newest of target/{debug,release}/duscope
 (`cargo test` builds the debug one before it runs the bench tests); without
 one they skip.
 """
@@ -46,7 +46,7 @@ except ImportError:  # Python before 3.11
 
 
 def duscope_binary():
-    explicit = os.environ.get("DUSCOPE_EVAL_TEST_BIN")
+    explicit = os.environ.get("DUSCOPE_TEST_EVAL_BIN")
     if explicit:
         return explicit
     target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(REPO, "target")
@@ -697,7 +697,7 @@ class Setup(unittest.TestCase):
             shutil.rmtree(d)
 
 
-@unittest.skipIf(duscope_binary() is None, "no duscope binary: cargo build -p duscope, or set DUSCOPE_EVAL_TEST_BIN")
+@unittest.skipIf(duscope_binary() is None, "no duscope binary: cargo build -p duscope, or set DUSCOPE_TEST_EVAL_BIN")
 class Fake(unittest.TestCase):
     """The harness end to end, with the stub agent and a small tree."""
 
@@ -886,7 +886,7 @@ def gone(pid, wait=10.0):
         time.sleep(0.05)
 
 
-@unittest.skipIf(duscope_binary() is None, "no duscope binary: cargo build -p duscope, or set DUSCOPE_EVAL_TEST_BIN")
+@unittest.skipIf(duscope_binary() is None, "no duscope binary: cargo build -p duscope, or set DUSCOPE_TEST_EVAL_BIN")
 class Stop(unittest.TestCase):
     """The harness as a person runs it, stopped from the terminal."""
 
