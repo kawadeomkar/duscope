@@ -157,14 +157,19 @@ pub(super) fn whole(
         name.to_string_lossy(),
         std::process::id()
     ));
-    let written = fs::File::create(&part)
+    // Made only where nothing is at the name (O_CREAT|O_EXCL), which anyone
+    // who may write the directory can guess: a symbolic link there is never
+    // followed. Its failure names the temporary file, the rest the output.
+    let written = fs::File::create_new(&part)
+        .map_err(|e| (part.as_path(), e))
         .and_then(|file| {
             let mut out = io::BufWriter::new(file);
-            write(&mut out)?;
-            out.flush()
-        })
-        .and_then(|()| fs::rename(&part, path));
-    written.map_err(|e| {
+            write(&mut out)
+                .and_then(|()| out.flush())
+                .and_then(|()| fs::rename(&part, path))
+                .map_err(|e| (path, e))
+        });
+    written.map_err(|(failed, e)| {
         if let Err(gone) = fs::remove_file(&part)
             && gone.kind() != io::ErrorKind::NotFound
         {
@@ -173,7 +178,7 @@ pub(super) fn whole(
         Failure::new(
             Exit::Runtime,
             "io_error",
-            format!("cannot write {}: {e}", path.display()),
+            format!("cannot write {}: {e}", failed.display()),
         )
     })
 }
