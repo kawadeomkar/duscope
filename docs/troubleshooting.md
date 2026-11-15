@@ -558,10 +558,12 @@ cannot tell is not a mount point, under an item: that item fails
 `duscope mcp`, a path outside `--roots`, or longer than 4096 bytes, is refused
 with this code ([mcp.md](mcp.md#the---roots-rule)).
 
-What to do: `--skip-refused` acts on the other items. For a mount point met while
-acting, unmount it first, as the hint says. A btrfs subvolume is a mount point
-to `clean`, but one that is not mounted on its own cannot be unmounted: for one
-under an item, the hint names `btrfs subvolume delete`, which deletes it
+What to do: `--skip-refused` acts on the other items. `duscope_delete` takes no
+such parameter, though the hint names the flag: call it again without the
+refused items. For a mount point met while acting, unmount it first, as the
+hint says. A btrfs subvolume is a mount point to `clean`, but one that is not
+mounted on its own cannot be unmounted: for one under an item, the hint names
+`btrfs subvolume delete`, which deletes it
 ([limits.md](limits.md#a-btrfs-subvolume-is-a-mount-point-to-clean-linux)).
 
 ### `expectation_mismatch`

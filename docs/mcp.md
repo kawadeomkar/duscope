@@ -86,6 +86,12 @@ is a dry run unless `dry_run` is `false`, and one refused item stops the whole c
 `_meta["anthropic/requiresUserInteraction"]: true`; a client that honours it asks before every
 call.
 
+A refused item stops the call before anything moves, and the tool takes no `skip_refused` to move
+the others. The `refused_path` error's hint still offers `--skip-refused`: it is `duscope clean`'s
+flag on the command line, which no parameter of the tool sets, and not a command to run in a shell
+in the tool's place. To move the other items, call the tool again without the refused ones; the
+plan gives each its `reason`.
+
 ## Limits
 
 The server runs one call at a time; the rest wait in order. A client that sends requests faster

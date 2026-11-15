@@ -409,7 +409,7 @@ result (`--dry-run`); `false` is `--yes`.
 | `--permanent` | — | the Trash only, over MCP |
 | `--expect-bytes` | — | a whole plan's figure: `expect_bytes` is per item |
 | `--no-input` | — | a tool run has no terminal: `--json` never prompts |
-| `--skip-refused` | — | a refused item stops the call |
+| `--skip-refused` | — | a refused item stops the call before anything moves; the `refused_path` hint names the flag all the same, and a client calls again without the refused items |
 | `--scan` | — | the scan the handle names, else the newest that holds its path |
 | `--max-age` | — | the plan warns of an old scan; a client cannot act on the flag |
 | `--trust` | — | names an index file outside the index directory; a client names saved scans by id |
