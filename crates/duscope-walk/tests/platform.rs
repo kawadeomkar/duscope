@@ -1,6 +1,9 @@
 //! P1-WALK-06: mounts on real filesystems; P5-WALK-02: btrfs subvolumes
 //! and reflinks, XFS reflinks, overlayfs, exFAT, FAT, NTFS and squashfs on
-//! Linux; P5-WALK-06: automount points on Linux.
+//! Linux; P5-WALK-06: automount points on Linux; P5-TEST-01: the platform
+//! matrix's other cells, under both providers: the kernel's
+//! pseudo-filesystems, ramfs, devtmpfs, FUSE, ISO 9660, EROFS, F2FS and HFS+
+//! on Linux, and FAT32, HFS+, ISO 9660, UDF, devfs and autofs on macOS.
 //! These tests mount filesystems,
 //! so they are ignored by default and run with `DUSCOPE_TEST_PLATFORM=1`
 //! (`just check-full`; the CI platform job runs them under sudo). On Linux
@@ -1186,4 +1189,690 @@ fn p5_walk_02_linux_a_squashfs_image_is_read_only() {
     // What clean asks before it moves an item.
     assert!(duscope_walk::read_only_volume(&root.join("image/dir/file")).unwrap());
     assert!(!duscope_walk::read_only_volume(&root.join("plain")).unwrap());
+}
+
+// P5-TEST-01: the platform matrix's cells the tests above leave open. Each
+// walk runs under both providers, the platform's own and the fallback, which
+// classify a mount alike.
+
+/// The walk of `root` under `opts`, under the platform's provider and then
+/// the fallback, each with a label for the assertions' messages.
+fn walk_both(root: &Path, opts: &WalkOptions) -> Vec<(String, Seen)> {
+    [false, true]
+        .into_iter()
+        .map(|fallback| {
+            let opts = WalkOptions {
+                fallback,
+                ..opts.clone()
+            };
+            let label = format!(
+                "fallback {fallback}, -x {}, --include-network {}",
+                opts.one_file_system, opts.include_network
+            );
+            (label, walk_root(root, &opts))
+        })
+        .collect()
+}
+
+/// The volume a walk met mounted at `point`.
+fn volume_at<'s>(seen: &'s Seen, point: &Path, label: &str) -> &'s VolumeInfo {
+    seen.volumes
+        .iter()
+        .find(|v| v.mount_point == point)
+        .unwrap_or_else(|| {
+            panic!(
+                "{label}: no volume at {}: {:?}",
+                point.display(),
+                seen.volumes
+            )
+        })
+}
+
+/// Whether the walk read anything below `point`.
+fn read_below(seen: &Seen, point: &Path) -> bool {
+    seen.paths
+        .iter()
+        .any(|p| p.starts_with(point) && p != point)
+}
+
+/// Attaches `image` at `point`, made first, as every test's image is
+/// attached (`-nobrowse`), recording it in `mounted`.
+#[cfg(target_os = "macos")]
+fn attach(env: &TestEnv, mounted: &mut Mounted<'_>, image: &Path, point: &Path) {
+    fs::create_dir_all(point).unwrap();
+    env.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &point, &image]);
+    mounted.points.push(point.to_owned());
+}
+
+/// Under -x, through both providers: each of `points` is left out unread,
+/// and `excluded` volumes are met and not entered.
+fn assert_confined(root: &Path, points: &[PathBuf], excluded: u64) {
+    let opts = WalkOptions {
+        one_file_system: true,
+        ..WalkOptions::default()
+    };
+    for (label, seen) in walk_both(root, &opts) {
+        for point in points {
+            let at = point.display();
+            assert_eq!(
+                seen.skipped.get(point),
+                Some(&Skip::OneFileSystem),
+                "{at}, {label}"
+            );
+            assert!(!read_below(&seen, point), "{at}, {label}");
+        }
+        assert_eq!(seen.summary.mounts_excluded, excluded, "{label}");
+    }
+}
+
+/// The foreign images macOS makes: hdiutil's name for the filesystem, the
+/// mount point's name, the type statfs reports, whether names differ by
+/// case alone, and whether a file can be linked.
+#[cfg(target_os = "macos")]
+const FOREIGN_IMAGES: [(&str, &str, &str, bool, bool); 3] = [
+    ("MS-DOS FAT32", "fat", "msdos", false, false),
+    ("HFS+", "hfs", "hfs", false, true),
+    ("Case-sensitive HFS+", "hfsx", "hfs", true, true),
+];
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "attaches FAT32, HFS+ and case-sensitive HFS+ images; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_test_01_macos_fat_and_hfs_images_are_foreign_with_their_own_case_and_links() {
+    use duscope_walk::{Normalization, Share};
+
+    let env = TestEnv::new();
+    if !platform_tests() {
+        return;
+    }
+    let work = fs::canonicalize(env.tmp_dir()).unwrap().join("foreign");
+    let root = work.join("root");
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    for (fs_name, dir, _, _, links) in FOREIGN_IMAGES {
+        let image = work.join(format!("{dir}.dmg"));
+        fs::create_dir_all(&work).unwrap();
+        env.hdiutil(&[
+            &"create",
+            &"-ov",
+            &"-size",
+            &"40m",
+            &"-fs",
+            &fs_name,
+            &"-volname",
+            &"DUSCOPE",
+            &image,
+        ]);
+        let point = root.join(dir);
+        attach(&env, &mut mounted, &image, &point);
+        fs::write(point.join("file"), b"foreign").unwrap();
+        let linked = fs::hard_link(point.join("file"), point.join("link")).is_ok();
+        assert_eq!(linked, links, "{fs_name}: hard links");
+    }
+
+    for (label, seen) in walk_both(&root, &WalkOptions::default()) {
+        for (fs_name, dir, fs_type, case, links) in FOREIGN_IMAGES {
+            let point = root.join(dir);
+            let volume = volume_at(&seen, &point, &label);
+            let normalization = if fs_type == "hfs" {
+                Normalization::Insensitive
+            } else {
+                Normalization::None
+            };
+            assert_eq!(
+                (volume.fs_type.as_str(), volume.class, volume.entered()),
+                (fs_type, VolumeClass::Foreign, true),
+                "{fs_name}, {label}"
+            );
+            assert_eq!(
+                (volume.case_sensitive, volume.normalization),
+                (Some(case), normalization),
+                "{fs_name}, {label}"
+            );
+            let file = &seen.entries[&point.join("file")];
+            let want = if links {
+                (2, Share::Hardlink)
+            } else {
+                (1, Share::None)
+            };
+            assert_eq!((file.nlink, file.share), want, "{fs_name}, {label}");
+        }
+        assert_eq!(seen.summary.mounts_excluded, 0, "{label}");
+    }
+    let points: Vec<PathBuf> = FOREIGN_IMAGES.iter().map(|c| root.join(c.1)).collect();
+    assert_confined(&root, &points, 3);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "attaches ISO 9660 and UDF images; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_test_01_macos_iso_9660_and_udf_images_are_read_only() {
+    let env = TestEnv::new();
+    if !platform_tests() {
+        return;
+    }
+    let work = fs::canonicalize(env.tmp_dir()).unwrap().join("images");
+    let root = work.join("root");
+    let source = work.join("source");
+    fs::create_dir_all(source.join("dir")).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(source.join("dir/file"), vec![3u8; 8192]).unwrap();
+    fs::write(root.join("plain"), b"writable").unwrap();
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    // makehybrid's options, the mount point's name, the type statfs
+    // reports. Joliet names keep the source's: ISO 9660's own are 8.3 and
+    // upper case.
+    let cases = [
+        (&["-iso", "-joliet"][..], "iso", "cd9660"),
+        (&["-udf"][..], "udf", "udf"),
+    ];
+    for (options, dir, _) in cases {
+        let image = work.join(format!("{dir}.iso"));
+        let mut args: Vec<&dyn AsRef<std::ffi::OsStr>> = vec![&"makehybrid"];
+        args.extend(options.iter().map(|o| o as &dyn AsRef<std::ffi::OsStr>));
+        args.extend([&"-o" as &dyn AsRef<std::ffi::OsStr>, &image, &source]);
+        env.hdiutil(&args);
+        attach(&env, &mut mounted, &image, &root.join(dir));
+    }
+
+    for (label, seen) in walk_both(&root, &WalkOptions::default()) {
+        for (_, dir, fs_type) in cases {
+            let point = root.join(dir);
+            assert!(
+                seen.paths.contains(&point.join("dir/file")),
+                "{dir}, {label}"
+            );
+            let volume = volume_at(&seen, &point, &label);
+            assert_eq!(
+                (
+                    volume.fs_type.as_str(),
+                    volume.class,
+                    volume.read_only,
+                    volume.entered()
+                ),
+                (fs_type, VolumeClass::ReadOnlyImage, true, true),
+                "{label}"
+            );
+        }
+    }
+    // What clean asks before it moves an item.
+    for (_, dir, _) in cases {
+        assert!(duscope_walk::read_only_volume(&root.join(dir).join("dir/file")).unwrap());
+    }
+    assert!(!duscope_walk::read_only_volume(&root.join("plain")).unwrap());
+}
+
+/// The walk of `root` that reads the way to the directory `name` below it
+/// alone, as `--ignore-from` does with `/*` and `!/name/`, under `opts`.
+#[cfg(target_os = "macos")]
+fn walk_to(root: &Path, name: &str, opts: &WalkOptions) -> Vec<(String, Seen)> {
+    let mut ignore = duscope_walk::IgnoreRules::new();
+    ignore
+        .add(format!("/*\n!/{name}/\n").as_bytes(), "only")
+        .unwrap();
+    let opts = WalkOptions {
+        ignore,
+        ..opts.clone()
+    };
+    walk_both(root, &opts)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "reads / and the Data volume's top directory; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_test_01_macos_devfs_is_never_entered_and_autofs_only_listed() {
+    let env = TestEnv::new();
+    if !platform_tests() {
+        return;
+    }
+    // macOS mounts devfs on /dev and, from /etc/auto_master, the auto_home
+    // map on the Data volume's home: the kernel and network classes there
+    // are, without a server or root to mount another.
+    let dev = Path::new("/dev");
+    let home = Path::new("/System/Volumes/Data/home");
+    let mounts = env.command("mount").output().unwrap();
+    let mounts = String::from_utf8_lossy(&mounts.stdout);
+    let has_home = mounts
+        .lines()
+        .any(|line| line.contains(" on /System/Volumes/Data/home (autofs,"));
+
+    for (one_file_system, include_network) in [(false, false), (true, false), (false, true)] {
+        let opts = WalkOptions {
+            one_file_system,
+            include_network,
+            ..WalkOptions::default()
+        };
+        for (label, seen) in walk_to(Path::new("/"), "dev", &opts) {
+            assert_eq!(seen.skipped.get(dev), Some(&Skip::Kernel), "{label}");
+            assert!(!read_below(&seen, dev), "{label}");
+            let volume = volume_at(&seen, dev, &label);
+            assert_eq!(
+                (volume.fs_type.as_str(), volume.class, volume.entered()),
+                ("devfs", VolumeClass::Kernel, false),
+                "{label}"
+            );
+            // Every volume met and not entered counts, a kernel one too.
+            assert_eq!(seen.summary.mounts_excluded, 1, "{label}");
+        }
+    }
+
+    if !has_home {
+        duscope_testkit::skip("no auto_home map mounted on /System/Volumes/Data/home");
+        return;
+    }
+    // Not with --include-network: entering the map's mount would ask
+    // automountd for it.
+    for one_file_system in [false, true] {
+        let opts = WalkOptions {
+            one_file_system,
+            ..WalkOptions::default()
+        };
+        for (label, seen) in walk_to(Path::new("/System/Volumes/Data"), "home", &opts) {
+            // A network mount is left out before -x is asked.
+            assert_eq!(seen.skipped.get(home), Some(&Skip::Network), "{label}");
+            assert!(!read_below(&seen, home), "{label}");
+            let volume = volume_at(&seen, home, &label);
+            assert_eq!(
+                (volume.fs_type.as_str(), volume.class, volume.entered()),
+                ("autofs", VolumeClass::Network, false),
+                "{label}"
+            );
+            assert_eq!(seen.summary.mounts_excluded, 1, "{label}");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts the kernel's pseudo-filesystems as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_test_01_linux_kernel_filesystems_are_listed_and_never_entered() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let root = env.tmp_dir().join("kernel");
+    fs::create_dir_all(root.join("plain")).unwrap();
+    fs::write(root.join("plain/file"), b"plain").unwrap();
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    // The kernel class's types that a running system lets root mount once
+    // more. selinuxfs needs SELinux enforcing, and a cgroup v1 hierarchy is
+    // not mounted beside v2: the class's unit test keeps their names.
+    let mut types = Vec::new();
+    for fs_type in [
+        "proc",
+        "sysfs",
+        "cgroup2",
+        "devpts",
+        "debugfs",
+        "tracefs",
+        "bpf",
+        "securityfs",
+        "pstore",
+        "binfmt_misc",
+    ] {
+        let point = root.join(fs_type);
+        fs::create_dir(&point).unwrap();
+        match attempt(&env, "mount", &[&"-t", &fs_type, &fs_type, &point]) {
+            Ok(()) => {
+                mounted.points.push(point);
+                types.push(fs_type);
+            }
+            Err(why) => duscope_testkit::skip_fs(fs_type, &format!("no {fs_type} here ({why})")),
+        }
+    }
+    let count = u64::try_from(types.len()).unwrap();
+    // Never entered, whatever the flags: neither -x nor --include-network
+    // changes the reason.
+    for (one_file_system, include_network) in [(false, false), (true, false), (false, true)] {
+        let opts = WalkOptions {
+            one_file_system,
+            include_network,
+            ..WalkOptions::default()
+        };
+        for (label, seen) in walk_both(&root, &opts) {
+            assert!(seen.paths.contains(&root.join("plain/file")), "{label}");
+            for &fs_type in &types {
+                let point = root.join(fs_type);
+                assert_eq!(
+                    seen.skipped.get(&point),
+                    Some(&Skip::Kernel),
+                    "{fs_type}, {label}"
+                );
+                assert!(!read_below(&seen, &point), "{fs_type}, {label}");
+                let volume = volume_at(&seen, &point, &label);
+                assert_eq!(
+                    (volume.fs_type.as_str(), volume.class, volume.entered()),
+                    (fs_type, VolumeClass::Kernel, false),
+                    "{label}"
+                );
+            }
+            // Every volume met and not entered counts, a kernel one too.
+            assert_eq!(seen.summary.mounts_excluded, count, "{label}");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts ramfs and devtmpfs as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_test_01_linux_ramfs_and_devtmpfs_are_entered_as_memory() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let root = env.tmp_dir().join("memory");
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    // The type, and an entry inside: a file written to ramfs, and the
+    // device node every devtmpfs holds.
+    let cases = [("ramfs", "inside"), ("devtmpfs", "null")];
+    for (fs_type, _) in cases {
+        let point = root.join(fs_type);
+        fs::create_dir_all(&point).unwrap();
+        run(&env, "mount", &[&"-t", &fs_type, &fs_type, &point]);
+        mounted.points.push(point);
+    }
+    fs::write(root.join("ramfs/inside"), b"memory").unwrap();
+
+    for (label, seen) in walk_both(&root, &WalkOptions::default()) {
+        for (fs_type, inside) in cases {
+            let point = root.join(fs_type);
+            assert!(
+                seen.paths.contains(&point.join(inside)),
+                "{fs_type}, {label}"
+            );
+            let volume = volume_at(&seen, &point, &label);
+            assert_eq!(
+                (volume.fs_type.as_str(), volume.class, volume.entered()),
+                (fs_type, VolumeClass::Memory, true),
+                "{label}"
+            );
+        }
+        assert_eq!(seen.summary.mounts_excluded, 0, "{label}");
+    }
+    let points: Vec<PathBuf> = cases.iter().map(|c| root.join(c.0)).collect();
+    assert_confined(&root, &points, 2);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts NTFS images through ntfs-3g (FUSE) as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_test_01_linux_fuse_is_network_and_fuse_on_a_block_device_foreign() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let work = env.tmp_dir().join("fuse");
+    let root = work.join("root");
+    let (fuse, fuseblk) = (root.join("fuse"), root.join("fuseblk"));
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    // ntfs-3g serves an image file through FUSE as `fuse`, and a loop device
+    // as `fuseblk`, a local disk. Two images, so neither is mounted twice.
+    let mkfs = ["mkfs.ntfs", "-q", "-F", "-f"];
+    if let Err(why) = loop_mount(
+        &env,
+        &mut mounted,
+        &work.join("fuseblk.img"),
+        "32M",
+        &mkfs,
+        &["-t", "ntfs-3g"],
+        &fuseblk,
+    ) {
+        duscope_testkit::skip_fs("fuseblk", &format!("no ntfs-3g here ({why})"));
+        return;
+    }
+    let image = work.join("fuse.img");
+    fs::create_dir_all(&fuse).unwrap();
+    run(&env, "truncate", &[&"-s", &"32M", &image]);
+    run(&env, mkfs[0], &[&mkfs[1], &mkfs[2], &mkfs[3], &image]);
+    run(&env, "ntfs-3g", &[&image, &fuse]);
+    mounted.points.push(fuse.clone());
+    assert_eq!(mounted_at(&fuse), ["fuse"]);
+    assert_eq!(mounted_at(&fuseblk), ["fuseblk"]);
+    fs::write(fuse.join("inside"), b"fuse").unwrap();
+    fs::write(fuseblk.join("inside"), b"fuseblk").unwrap();
+
+    // -x, --include-network, and the reasons each mount is left out for: a
+    // network mount before -x is asked, as for any mount.
+    for (one_file_system, include_network, fuse_skip, fuseblk_skip) in [
+        (false, false, Some(Skip::Network), None),
+        (false, true, None, None),
+        (true, false, Some(Skip::Network), Some(Skip::OneFileSystem)),
+        (
+            true,
+            true,
+            Some(Skip::OneFileSystem),
+            Some(Skip::OneFileSystem),
+        ),
+    ] {
+        let opts = WalkOptions {
+            one_file_system,
+            include_network,
+            ..WalkOptions::default()
+        };
+        for (label, seen) in walk_both(&root, &opts) {
+            for (point, fs_type, class, skip) in [
+                (&fuse, "fuse", VolumeClass::Network, fuse_skip),
+                (&fuseblk, "fuseblk", VolumeClass::Foreign, fuseblk_skip),
+            ] {
+                assert_eq!(seen.skipped.get(point), skip.as_ref(), "{fs_type}, {label}");
+                assert_eq!(
+                    seen.paths.contains(&point.join("inside")),
+                    skip.is_none(),
+                    "{fs_type}, {label}"
+                );
+                let volume = volume_at(&seen, point, &label);
+                assert_eq!(
+                    (volume.fs_type.as_str(), volume.class, volume.entered()),
+                    (fs_type, class, skip.is_none()),
+                    "{label}"
+                );
+            }
+            let left_out = u64::from(fuse_skip.is_some()) + u64::from(fuseblk_skip.is_some());
+            assert_eq!(seen.summary.mounts_excluded, left_out, "{label}");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts ISO 9660 and EROFS images as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_test_01_linux_iso_9660_and_erofs_images_are_read_only() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let work = env.tmp_dir().join("images");
+    let root = work.join("root");
+    let source = work.join("source");
+    fs::create_dir_all(source.join("dir")).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(source.join("dir/file"), vec![3u8; 8192]).unwrap();
+    fs::write(root.join("plain"), b"writable").unwrap();
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    // The type and the command that makes an image of `source`, its options
+    // before the image and the source. Rock Ridge names keep the source's:
+    // ISO 9660's own are 8.3 and upper case.
+    let cases = [
+        ("iso9660", &["genisoimage", "-quiet", "-R", "-o"][..]),
+        ("erofs", &["mkfs.erofs", "--quiet"][..]),
+    ];
+    let mut met = Vec::new();
+    for (fs_type, make) in cases {
+        let image = work.join(format!("{fs_type}.img"));
+        let point = root.join(fs_type);
+        fs::create_dir_all(&point).unwrap();
+        let (program, options) = make.split_first().unwrap();
+        let mut args: Vec<&dyn AsRef<std::ffi::OsStr>> = options
+            .iter()
+            .map(|a| a as &dyn AsRef<std::ffi::OsStr>)
+            .collect();
+        args.extend([&image as &dyn AsRef<std::ffi::OsStr>, &source]);
+        // A tool this machine lacks skips its image, except in CI.
+        if let Err(why) = attempt(&env, program, &args) {
+            duscope_testkit::skip(&format!("no {fs_type} image made here ({why})"));
+            continue;
+        }
+        match attempt(&env, "mount", &[&"-o", &"loop", &image, &point]) {
+            Ok(()) => {
+                mounted.points.push(point);
+                met.push(fs_type);
+            }
+            Err(why) => duscope_testkit::skip_fs(fs_type, &format!("no {fs_type} here ({why})")),
+        }
+    }
+
+    for (label, seen) in walk_both(&root, &WalkOptions::default()) {
+        for &fs_type in &met {
+            let point = root.join(fs_type);
+            assert!(
+                seen.paths.contains(&point.join("dir/file")),
+                "{fs_type}, {label}"
+            );
+            let volume = volume_at(&seen, &point, &label);
+            assert_eq!(
+                (
+                    volume.fs_type.as_str(),
+                    volume.class,
+                    volume.read_only,
+                    volume.entered()
+                ),
+                (fs_type, VolumeClass::ReadOnlyImage, true, true),
+                "{label}"
+            );
+        }
+    }
+    // What clean asks before it moves an item.
+    for &fs_type in &met {
+        assert!(duscope_walk::read_only_volume(&root.join(fs_type).join("dir/file")).unwrap());
+    }
+    assert!(!duscope_walk::read_only_volume(&root.join("plain")).unwrap());
+}
+
+/// On the volume mounted at `point`: a file and a hard link to it, read
+/// as one inode with two links, its creation time what `statx` reports;
+/// returns the volume, as both providers report it alike.
+#[cfg(target_os = "linux")]
+fn linked_and_created(point: &Path, fs_type: &str) -> VolumeInfo {
+    use duscope_walk::Share;
+
+    fs::write(point.join("a"), b"linked").unwrap();
+    fs::hard_link(point.join("a"), point.join("b")).unwrap();
+    let seen = walk_full(point);
+    let (a, b) = (
+        &seen.entries[&point.join("a")],
+        &seen.entries[&point.join("b")],
+    );
+    assert_eq!((a.nlink, a.share), (2, Share::Hardlink), "{fs_type}");
+    assert_eq!((b.nlink, b.share), (2, Share::Hardlink), "{fs_type}");
+    assert_eq!((a.dev, a.ino), (b.dev, b.ino), "{fs_type}: one inode");
+    assert_eq!(
+        a.full.unwrap().btime_ns,
+        created(&point.join("a")),
+        "{fs_type}: btime where statx has it"
+    );
+    let volume = seen.volumes.first().unwrap().clone();
+    for (label, seen) in walk_both(point, &WalkOptions::default()) {
+        let other = seen.volumes.first().unwrap();
+        assert_eq!(
+            (&other.fs_type, other.class, other.case_sensitive),
+            (&volume.fs_type, volume.class, volume.case_sensitive),
+            "{fs_type}, {label}"
+        );
+    }
+    volume
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts an F2FS image as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_test_01_linux_f2fs_is_local_with_links_and_btime_as_statx_reports() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let work = env.tmp_dir().join("f2fs");
+    let point = work.join("mnt");
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    if let Err(why) = loop_mount(
+        &env,
+        &mut mounted,
+        &work.join("f2fs.img"),
+        "64M",
+        &["mkfs.f2fs", "-q"],
+        &["-t", "f2fs"],
+        &point,
+    ) {
+        duscope_testkit::skip_fs("f2fs", &format!("no F2FS here ({why})"));
+        return;
+    }
+    let volume = linked_and_created(&point, "f2fs");
+    assert_eq!(
+        (
+            volume.fs_type.as_str(),
+            volume.class,
+            volume.case_sensitive,
+            volume.entered()
+        ),
+        ("f2fs", VolumeClass::Local, Some(true), true)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts an HFS+ image as root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_test_01_linux_hfsplus_is_foreign_with_links_and_case_unknown() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let work = env.tmp_dir().join("hfsplus");
+    let point = work.join("mnt");
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    if let Err(why) = loop_mount(
+        &env,
+        &mut mounted,
+        &work.join("hfsplus.img"),
+        "32M",
+        &["mkfs.hfsplus", "-v", "DUSCOPE"],
+        &["-t", "hfsplus"],
+        &point,
+    ) {
+        duscope_testkit::skip_fs("hfsplus", &format!("no HFS+ here ({why})"));
+        return;
+    }
+    // Only the volume header says whether it is the case-sensitive HFSX
+    // variant, so case is unknown.
+    let volume = linked_and_created(&point, "hfsplus");
+    assert_eq!(
+        (
+            volume.fs_type.as_str(),
+            volume.class,
+            volume.case_sensitive,
+            volume.entered()
+        ),
+        ("hfsplus", VolumeClass::Foreign, None, true)
+    );
 }
