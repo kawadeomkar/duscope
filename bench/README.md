@@ -540,9 +540,13 @@ system's temporary directory (`--work-dir` elsewhere), removed after it (`--keep
   which `duscope stale` also requires to be old, so the questions about files unused for a year
   ask about modification time and `stale` lists nothing on this tree. The diff task's tree also
   has two saved scans, one before and one after a few changes;
-- `PATH` with a `duscope` that runs the binary under test (`--duscope`, default
-  `target/release/duscope`), logs each call, and refuses `clean --yes` and `--permanent`, so no
-  run moves anything to a Trash (on macOS the Trash is the account's own);
+- `PATH` with a `duscope` shim that runs a copy of the binary under test (`--duscope`, default
+  `target/release/duscope`) made in the run's directory, so that nothing the agent is shown names
+  the checkout, where `evaltree.py` holds every answer; that logs each call; and that refuses
+  `clean --yes` and `--allow-delete` (with which `mcp` offers its client the tool that moves paths
+  to the Trash), so that no duscope call moves anything to a Trash (on macOS the Trash is the
+  account's own). `clean` without `--yes`, with `--permanent` or not, only shows its plan, and
+  passes;
 - `claude -p PROMPT --output-format stream-json --verbose --model MODEL --max-turns 30
   --allowedTools ... --disallowedTools ... --strict-mcp-config`, in an empty working directory.
   Only the variables `config.toml`'s `pass_env` names reach it, and the credential:
@@ -550,9 +554,18 @@ system's temporary directory (`--work-dir` elsewhere), removed after it (`--keep
   the runner stops before it runs anything. Print mode cannot ask, so a tool outside
   `allowed_tools` (duscope, `jq` after a pipe, Read, Grep, Glob and Skill) is denied and recorded.
 
+Past the shim, what holds a run is Claude Code's matching of `Bash(duscope:*)` and nothing else:
+there is no sandbox, the network is not cut off, and Read (with Grep and Glob) is not limited to
+the tree, so it reaches any file the account can read. Whether that matching refuses
+`duscope x; rm -rf y`, a redirection or a here-document is not known until a run shows it. A run
+that changes the tree fails as `tree changed`, and its transcript keeps the commands.
+
 A run is completed when its answer is right, it stayed within 600 s and 2,000,000 tokens, it left
-the tree as it was built, and no deletion was refused. Paths are compared after `realpath`, sizes
-within the task's tolerance (5%), and a size may be written in bytes or with a unit.
+the tree as it was built, and no deletion was refused. The tree is the same when the same entries
+are under its root, each still a directory or not and, if not, of the same size and modification
+time (`lstat`); a directory's times, every access and change time, modes, and
+anything outside the tree are not compared. Paths are compared after `realpath`, sizes within the
+task's tolerance (5%), and a size may be written in bytes or with a unit.
 
 A run that measured the infrastructure rather than the agent fails as `infrastructure`, with the
 reason beside it: Claude Code ended without a result message, with an error result (`is_error`: a

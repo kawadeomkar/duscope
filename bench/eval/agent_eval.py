@@ -8,7 +8,7 @@
 Each run gets a directory of its own: a scratch HOME (with the duscope skill
 written by `duscope agent --skill` in the cells that have it), the tree the
 tasks ask about, built fresh, and a `duscope` on PATH that logs each call and
-refuses `clean --yes`. Claude Code runs headless in it (`claude -p` with
+refuses `clean --yes` and `--allow-delete`. Claude Code runs headless in it (`claude -p` with
 stream-json output), and the run records whether the answer was right (the
 task's check against the truth worked out from the tree), the tokens, the
 turns and whether a failed tool call was followed by one that worked. The
@@ -76,25 +76,35 @@ FAKE_ACTS = ("hang", "api-error", "crash", "model", "no-skills", "bare")
 INFRASTRUCTURE = "infrastructure"
 STOP_AFTER_OUTAGES = 3
 
-# The duscope on the agent's PATH. It runs the binary under test and appends
-# the exit status, the argument count and the arguments, NUL-separated, to
-# the log; it refuses `clean` with `--yes` or `--permanent`, so no run moves
-# anything to the Trash (which on macOS is the real account's).
+# The duscope on the agent's PATH. It runs a copy of the binary under test in
+# the run's directory, so that its text names no checkout (where
+# evaltree.py holds every answer), and appends the exit status, the argument
+# count and the arguments, NUL-separated, to the log. It refuses `clean`
+# with `--yes` (without it, `--permanent` too, clean only shows its plan)
+# and `--allow-delete`, with which `mcp` offers a client the tool that moves
+# paths to the Trash: no duscope call of a run moves anything to the Trash
+# (which on macOS is the real account's). Past the shim, a run is held only
+# by Claude Code's matching of `Bash(duscope:*)` (bench/README.md).
 SHIM = """#!/bin/sh
 # duscope as the agent runs it in the eval (bench/eval/agent_eval.py): the
-# binary under test, each call logged; clean --yes and --permanent refused.
+# binary under test, each call logged; clean --yes and --allow-delete refused.
 real={real}
 log={log}
 clean=0
-deleting=0
+yes=0
+allow=0
 for arg in "$@"; do
   case $arg in
     clean) clean=1 ;;
-    --yes|--permanent) deleting=1 ;;
+    --yes) yes=1 ;;
+    --allow-delete|--allow-delete=*) allow=1 ;;
   esac
 done
-if [ "$clean" = 1 ] && [ "$deleting" = 1 ]; then
-  echo 'duscope-eval: this evaluation refuses clean --yes and --permanent; nothing was moved' >&2
+if [ "$clean" = 1 ] && [ "$yes" = 1 ]; then
+  echo 'duscope-eval: this evaluation refuses clean --yes; nothing was moved' >&2
+  status={refused}
+elif [ "$allow" = 1 ]; then
+  echo 'duscope-eval: this evaluation refuses --allow-delete; nothing was started' >&2
   status={refused}
 else
   "$real" "$@"
@@ -238,14 +248,16 @@ def render_prompt(meta: Dict[str, Any], task: Dict[str, Any], root: str, scale: 
 
 
 class Layout:
-    """A run's directory: home/ (HOME), bin/ (the shim), project/ (the
-    agent's working directory), tmp/, disk/alex (the tree), truth/ (the
-    harness's own index directory) and out/ (the logs)."""
+    """A run's directory: home/ (HOME), bin/ (the shim), under-test/ (the
+    copy of the binary the shim runs), project/ (the agent's working
+    directory), tmp/, disk/alex (the tree), truth/ (the harness's own index
+    directory) and out/ (the logs)."""
 
     def __init__(self, work: str) -> None:
         self.work = os.path.realpath(work)
         self.home = os.path.join(self.work, "home")
         self.bin = os.path.join(self.work, "bin")
+        self.binary = os.path.join(self.work, "under-test", "duscope")
         self.project = os.path.join(self.work, "project")
         self.tmp = os.path.join(self.work, "tmp")
         self.disk = os.path.join(self.work, "disk")
@@ -253,18 +265,19 @@ class Layout:
         self.truth = os.path.join(self.work, "truth")
         self.out = os.path.join(self.work, "out")
         self.shim_log = os.path.join(self.out, "duscope-calls.log")
-        for d in (self.home, self.bin, self.project, self.tmp, self.disk, self.truth, self.out):
+        for d in (self.home, self.bin, os.path.dirname(self.binary), self.project, self.tmp, self.disk, self.truth, self.out):
             os.makedirs(d, exist_ok=True)
         for sub in (".config", ".cache", ".local/share", ".local/state"):
             os.makedirs(os.path.join(self.home, sub), exist_ok=True)
 
 
 def write_shim(layout: Layout, binary: str) -> str:
+    shutil.copy2(binary, layout.binary)
     path = os.path.join(layout.bin, "duscope")
     with open(path, "w", encoding="utf-8") as f:
         f.write(
             SHIM.format(
-                real=shlex.quote(binary), log=shlex.quote(layout.shim_log), refused=evaltranscript.REFUSED_STATUS
+                real=shlex.quote(layout.binary), log=shlex.quote(layout.shim_log), refused=evaltranscript.REFUSED_STATUS
             )
         )
     os.chmod(path, 0o755)

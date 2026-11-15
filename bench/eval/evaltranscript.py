@@ -32,7 +32,7 @@ VERBS = {
     "man", "completions", "help",
 }
 
-# The status the shim answers a refused `clean --yes` or `--permanent` with.
+# The status the shim answers a refused `clean --yes` or `--allow-delete` with.
 REFUSED_STATUS = 97
 # The model Claude Code names on the messages it makes itself (an API
 # error's text), which no model wrote.

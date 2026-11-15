@@ -479,26 +479,42 @@ class Transcript(unittest.TestCase):
 
 
 class Shim(unittest.TestCase):
-    def test_p3_agt_03_the_shim_logs_each_call_and_refuses_clean_yes(self):
+    def test_p3_agt_03_the_shim_logs_each_call_and_refuses_what_deletes(self):
         d = scratch()
         try:
-            layout = agent_eval.Layout(d)
-            real = os.path.join(d, "real duscope")
+            layout = agent_eval.Layout(os.path.join(d, "run"))
+            checkout = os.path.join(d, "checkout")
+            os.makedirs(checkout)
+            real = os.path.join(checkout, "real duscope")
             marker = os.path.join(d, "ran")
             with open(real, "w") as f:
                 f.write("#!/bin/sh\necho \"$@\" >>'%s'\nexit 3\n" % marker)
             os.chmod(real, 0o755)
             shim = agent_eval.write_shim(layout, real)
-            out = subprocess.run([shim, "top", "a b", "--json"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            self.assertEqual(out.returncode, 3)
-            out = subprocess.run([shim, "clean", "x", "--yes"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # The shim runs a copy in the run's directory, and names no checkout.
+            with open(shim) as f:
+                text = f.read()
+            self.assertNotIn(checkout, text)
+            self.assertNotIn(os.path.realpath(checkout), text)
+            self.assertIn(layout.binary, text)
+            self.assertTrue(evalchecks.under(layout.binary, layout.work))
+
+            def run(*args):
+                return subprocess.run([shim] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            self.assertEqual(run("top", "a b", "--json").returncode, 3)
+            out = run("clean", "x", "--yes")
             self.assertEqual(out.returncode, evaltranscript.REFUSED_STATUS)
             self.assertIn(b"refuses clean --yes", out.stderr)
-            out = subprocess.run([shim, "clean", "x", "--permanent", "--yes"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(run("clean", "x", "--permanent", "--yes").returncode, evaltranscript.REFUSED_STATUS)
+            out = run("mcp", "--roots", "x", "--allow-delete")
             self.assertEqual(out.returncode, evaltranscript.REFUSED_STATUS)
-            subprocess.run([shim, "clean", "x"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertIn(b"--allow-delete", out.stderr)
+            # Without --yes, clean only shows its plan: --permanent alone passes.
+            self.assertEqual(run("clean", "x", "--permanent").returncode, 3)
+            self.assertEqual(run("clean", "x").returncode, 3)
             with open(marker) as f:
-                self.assertEqual(f.read(), "top a b --json\nclean x\n")
+                self.assertEqual(f.read(), "top a b --json\nclean x --permanent\nclean x\n")
             with open(layout.shim_log, "rb") as f:
                 calls = evaltranscript.parse_shim_log(f.read())
             self.assertEqual(
@@ -507,6 +523,8 @@ class Shim(unittest.TestCase):
                     {"status": 3, "args": ["top", "a b", "--json"]},
                     {"status": 97, "args": ["clean", "x", "--yes"]},
                     {"status": 97, "args": ["clean", "x", "--permanent", "--yes"]},
+                    {"status": 97, "args": ["mcp", "--roots", "x", "--allow-delete"]},
+                    {"status": 3, "args": ["clean", "x", "--permanent"]},
                     {"status": 3, "args": ["clean", "x"]},
                 ],
             )
