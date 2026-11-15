@@ -1,0 +1,9 @@
+# Each run's transcript (agent_eval.py --transcripts), kept beside the
+# checkout for reading, never committed: the result file holds what counts.
+/.runs/
+
+# Result files of the fake agent (run --fake), which test the harness.
+/results/*-fake-*.json
+/results/*.tmp
+
+__pycache__/
