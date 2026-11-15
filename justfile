@@ -121,6 +121,7 @@ platform-tests:
       p0_test_01_macos_a_detach_that_leaves_the_image_attached_fails
       p0_test_03_macos_a_detach_busy_for_six_seconds_succeeds
       p0_test_03_macos_a_detach_that_stays_busy_names_what_holds_it
+      tests::p0_test_03_macos_an_image_hdiutil_cannot_detach_is_ejected
       platform::macos::fsevents::tests::p5_walk_01_macos_no_log_on_an_image_gives_fsevents_disabled
       platform::macos::fsevents::tests::p5_walk_01_macos_a_remount_since_the_mark_voids_a_replay_below_the_root
       macos::p5_core_01_macos_an_incremental_rescan_equals_a_full_scan_of_the_fixture_tree
@@ -149,8 +150,8 @@ platform-tests:
       platform::posix::unlink::tests::p5_core_10_linux_a_bound_file_is_a_mount_point_and_an_overlays_file_is_not
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Twenty-three are built on Linux and twenty-one on macOS; a renamed test must not drop out unnoticed.
-    expected=$([[ $(uname -s) == Darwin ]] && echo 21 || echo 23)
+    # Twenty-three are built on Linux and twenty-two on macOS; a renamed test must not drop out unnoticed.
+    expected=$([[ $(uname -s) == Darwin ]] && echo 22 || echo 23)
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
     [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
     cargo_test -- --ignored --exact "${tests[@]}"
