@@ -299,6 +299,8 @@ pub struct CleanArgs {
     ///
     /// Default: the newest saved scan that holds the first item; clean needs one
     ///
+    /// Given only --from handles, the saved scan explain read for them
+    ///
     /// An item changed since that scan is measured from the tree (changed_since_scan)
     #[arg(long, value_name = "SCAN", help_heading = "Saved scans")]
     pub scan: Option<String>,

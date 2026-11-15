@@ -67,7 +67,7 @@ pub enum Toggled {
     Marked,
     /// The entry was marked and is not now.
     Unmarked,
-    /// Nothing changed: the map's root cannot be marked.
+    /// Nothing changed: the viewer's root cannot be marked.
     Root,
     /// Nothing changed: this marked folder covers the entry.
     Inside(u32),

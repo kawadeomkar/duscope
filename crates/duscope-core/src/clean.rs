@@ -294,7 +294,8 @@ pub struct CleanOutcome {
 /// ([`CoreError::ScanNotFound`], [`CoreError::PathChanged`]), as does an
 /// item from a handle that has changed since the scan
 /// ([`CoreError::PathChanged`]) and an item named twice or inside another
-/// ([`CoreError::CleanOverlap`]): `clean` acts on all or none of a list.
+/// ([`CoreError::CleanOverlap`]): each fails the whole list, before
+/// anything moves. [`clean_execute`] then goes on past an item that fails.
 pub fn clean_plan(
     items: &[CleanItem],
     index: &Index,
