@@ -44,16 +44,24 @@ upgrade.
 ### What is protected
 
 - **The user's files.** duscope never writes to the trees it scans, apart from the index
-  directory when a tree holds it. `clean` is the only command that changes anything, and only
-  what it is told to change.
+  directory when a tree holds it. Outside the index directory it changes only what it is told
+  to: `clean` moves or deletes the entries it is given, `-o FILE` writes that file, and
+  `agent --skill` writes the skill's files into `.agents/skills/duscope/` and
+  `.claude/skills/duscope/` under `--dir` or the working directory. Inside it, `scans --prune`
+  removes saved scans past keeping, the temporary files of index writes that will not finish,
+  and spilled envelopes over a week old, and nothing else: a file in `out` without a spill's
+  name stays, and an `out` that is a symbolic link is refused.
 - **What the scans reveal.** Every path a scan measured, and its sizes and times, stays private
   to the user who ran the scan, and to the MCP clients that user starts `duscope mcp` for,
   within its `--roots`.
 - **The machine.** No input makes duscope run code it does not ship or write outside its index
   directory and the outputs it is asked for, apart from the temporary sort file of a save and
-  the index of a scan not kept ([Index files](#3-index-files)). Each input's memory and time are
-  bounded by a fixed limit or by the size of the tree or saved scan it asked about, as
-  [Limits on memory and time](#limits-on-memory-and-time) sets out.
+  the index of a scan not kept ([Index files](#3-index-files)). The only programs it starts ask
+  the system's file manager to show an entry (`open -R` on macOS; `dbus-send`, then `xdg-open`,
+  on Linux), when a person presses `o` in the viewer, with the entry's path as an argument.
+  Each untrusted input's memory and time are bounded by a fixed limit or by the size of the tree
+  or saved scan it asked about, as [Limits on memory and time](#limits-on-memory-and-time) sets
+  out.
 
 ### What is not protected
 
@@ -75,6 +83,7 @@ A fixed limit bounds what a client or a file can make duscope hold or do:
 | A running tool call | 10 minutes for `duscope_scan`, 30 seconds for the other tools, counted from before its arguments are checked. The answer comes at the deadline; a verb that reads a saved scan has no point at which to stop and runs to its end, for a time that grows with the scan, and the next call waits for it |
 | SQL | 5 s by default, 60 s at most, and SQLite's heap capped at 256 MiB |
 | git's files, for `explain` | The caps under [The scanned tree](#4-the-scanned-tree) |
+| A file a scan's options name (`--exclude-from`, `--ignore-from`, `[caches] extra`), which `rescan` reads again from a saved scan | 1 MiB each, and only a regular file: a FIFO, a device or a directory is refused unopened |
 | An index file | The limits under [Index files](#3-index-files) |
 | A compressed import | 1 GiB once decompressed |
 
@@ -90,6 +99,9 @@ applies:
   36 s on macOS; at 3,000 levels a walker that builds no paths took as long as duscope, so that
   time is the kernel's for each open of a deep directory.
 - **A query or a verb on a saved scan** takes time and memory that grow with the scan.
+- **The files a person names for duscope's settings** (the configuration file, `--classes`
+  and `[classes] extra`, `--theme`) are read whole: the user's own, which no MCP tool and no
+  saved scan names.
 
 ### The four untrusted inputs
 
@@ -204,7 +216,10 @@ virtual tables and crafted pages.
   owns, but it prints a warning on stderr with the `chmod` that fixes it.
 - **A scan not kept.** A verb that scans a tree without saving the scan (`--no-save`, or no index
   directory) writes its index to a directory of its own in the temporary directory,
-  `duscope-<verb>-<pid>-<n>`, made 0700 where nothing was, and removes it once done with it.
+  `duscope-<verb>-<pid>-<n>`, made 0700 where nothing was. It removes the directory when the verb
+  ends, whether it succeeds or fails, and so on Ctrl-C, which duscope handles. A run ended any
+  other way (killed by another signal, such as `SIGTERM` or `SIGKILL`, or a crash) leaves the
+  directory and the index in it, still 0700, until something else removes them.
 - **The sort's temporary files.** While a save builds an index file's indexes, SQLite sorts their
   keys in about 2 MB of memory and writes the rest to a temporary file, in sorted runs. Past 16
   runs, a tree of more than about a million files, it opens a second file to merge them. Both go
@@ -271,6 +286,26 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
   - Names must be names: no `/` or NUL, not `.` or `..`, at most 64 KiB, and unique in their
     directory.
   - Each format has a fuzz target in `fuzz/`.
+
+### The filesystem calls
+
+`duscope/tests/fs_allowlist.txt` lists, function by function, the calls in the code the binary
+is built from that reach the filesystem by a path or a name, and the programs it starts, each with
+what reaches it, from whom and why that is safe. A test (`duscope/tests/fs_allowlist.rs`) reads
+the code and fails on a call the list does not hold, on an entry whose calls are gone, and on an
+entry with no reason written.
+
+- **Covered:** `std::fs`; the `File`, `OpenOptions` and `DirBuilder` constructors; the `Path` and
+  `DirEntry` methods that read the filesystem, called or passed as a value; the programs started
+  (`Command::new`); SQLite's opens; the libc calls and system calls that take a path, or a name
+  in a directory open on a descriptor, from those that open, make, rename or remove an entry to
+  the metadata reads of the walk, `clean`'s checks and `scans --check`; and macOS's move to the
+  Trash.
+- **Not covered:** calls on a descriptor (the walk's listing of a directory, `fstat`), which reach
+  only what a listed call opened; `Path::is_file`, `is_dir` and `is_symlink`, which the test
+  cannot tell from methods of the same names that read nothing; and what a dependency does inside
+  a call, such as SQLite's own temporary files. A call made through one of duscope's own
+  functions is listed once, where that function makes it, with who calls it.
 
 ### The MCP server
 
