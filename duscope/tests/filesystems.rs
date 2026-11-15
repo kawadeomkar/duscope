@@ -1,8 +1,9 @@
 //! P5-WALK-02: the verbs on Linux filesystems the scan sees more of than
 //! `du`: `explain --clones` sizing a reflink's shared extents on btrfs and
 //! XFS, `summary`'s sidebar of btrfs subvolumes, and `clean` refusing an
-//! item on a read-only squashfs image. Platform tests: they mount images as
-//! root, so they are ignored by default and run with
+//! item on a read-only squashfs image; P5-CORE-03: `clean --permanent`
+//! stopping at a btrfs subvolume, with a hint of its own. Platform tests:
+//! they mount images as root, so they are ignored by default and run with
 //! `DUSCOPE_TEST_PLATFORM=1` (`just platform-tests`; CI's platform job runs
 //! them under sudo). A filesystem that cannot be mounted fails a test in CI
 //! unless the platform job found the kernel has no driver for it and named
@@ -333,4 +334,128 @@ fn p5_walk_02_linux_clean_refuses_an_item_on_a_read_only_image() {
         (&Value::from("refused"), &Value::from("read_only_volume"))
     );
     assert!(file.exists());
+}
+
+/// Runs `clean` with `args` and the scan `id`; its envelope, which a run
+/// that refuses or fails an item ends with exit 1 and `refused_path`.
+fn refused(env: &TestEnv, args: &[&dyn AsRef<OsStr>], id: &str) -> Value {
+    let mut all: Vec<&dyn AsRef<OsStr>> = vec![&"clean"];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&[&"--scan", &id, &"--json"]);
+    let out = duscope(env, &all);
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{value}");
+    assert_eq!(value["error"]["code"], "refused_path", "{value}");
+    value
+}
+
+/// `clean --permanent` stops at a btrfs subvolume under an item, as at a
+/// mount point, and leaves it with the folders above it (`refused_path`);
+/// the hint names what removes it: `btrfs subvolume delete` for a
+/// subvolume that is no mount's root, `umount` for a mount point, a bind
+/// mount of the same filesystem or a subvolume mounted on its own (another
+/// device and a mount's root both). A subvolume named as an item is refused
+/// in the plan (`mount_point`), and that hint names no `umount` either.
+#[test]
+#[ignore = "mounts a btrfs image, a subvolume of it and a bind mount as root; \
+            DUSCOPE_TEST_PLATFORM=1"]
+fn p5_core_03_linux_a_subvolume_is_left_to_btrfs_subvolume_delete_and_a_mount_to_umount() {
+    let env = TestEnv::new();
+    if !as_root(&env) {
+        return;
+    }
+    let point = fs::canonicalize(env.tmp_dir()).unwrap().join("btrfs");
+    let mut mounted = Mounted {
+        env: &env,
+        points: Vec::new(),
+    };
+    if let Err(why) = loop_mount(&env, &mut mounted, "256M", &["mkfs.btrfs", "-q"], &point) {
+        duscope_testkit::skip_fs("btrfs", &format!("no btrfs here ({why})"));
+        return;
+    }
+    // A subvolume in a folder; a folder holding a bind mount of another
+    // folder of the filesystem; a folder holding a subvolume mounted on
+    // its own.
+    let (data, bound, holder) = (
+        point.join("data"),
+        point.join("bound"),
+        point.join("holder"),
+    );
+    let (sub, bind, own) = (data.join("sub"), bound.join("m"), holder.join("mnt"));
+    for dir in [&data, &bind, &own, &point.join("outside")] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    for subvolume in [&sub, &point.join("own")] {
+        run(&env, "btrfs", &[&"-q", &"subvolume", &"create", subvolume]);
+    }
+    for (file, len) in [
+        (data.join("a.bin"), 3000),
+        (sub.join("b.bin"), 5000),
+        (bound.join("c.bin"), 2000),
+        (point.join("outside/target.bin"), 4000),
+        (point.join("own/d.bin"), 1000),
+    ] {
+        write_synced(&file, len);
+    }
+    let source = env
+        .command("findmnt")
+        .args(["-n", "-o", "SOURCE"])
+        .arg(&point)
+        .output()
+        .unwrap();
+    let source = String::from_utf8_lossy(&source.stdout).trim().to_owned();
+    run(&env, "mount", &[&"--bind", &point.join("outside"), &bind]);
+    mounted.points.push(bind.clone());
+    run(&env, "mount", &[&"-o", &"subvol=/own", &source, &own]);
+    mounted.points.push(own.clone());
+    let saved = ok(&duscope(&env, &[&"scan", &point, &"--save", &"--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+
+    // The subvolume named as an item: refused in the plan.
+    let value = refused(&env, &[&sub, &"--permanent"], &id);
+    let item = &value["result"]["plan"]["items"][0];
+    assert_eq!(
+        (&item["action"], &item["reason"]),
+        (&Value::from("refused"), &Value::from("mount_point")),
+        "{value}"
+    );
+    let hint = value["error"]["hint"].as_str().unwrap();
+    assert!(!hint.contains("umount"), "{hint}");
+
+    // Under an item: the deletion stops there, it and its folder stay
+    // (what is beside it goes only if it came first), and the hint names
+    // the command that deletes a subvolume.
+    let value = refused(&env, &[&data, &"--permanent", &"--yes"], &id);
+    let error = &value["result"]["plan"]["items"][0]["error"];
+    assert_eq!(error["code"], "refused_path", "{value}");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(&format!("{} is a btrfs subvolume", sub.display())),
+        "{message}"
+    );
+    let delete = format!(
+        "Run btrfs subvolume delete {} first, then duscope clean again",
+        sub.display()
+    );
+    assert_eq!(error["hint"], delete.as_str(), "{value}");
+    assert_eq!(value["error"]["hint"], delete.as_str(), "{value}");
+    assert_eq!(fs::read(sub.join("b.bin")).unwrap().len(), 5000);
+
+    // A mount point under an item, a bind mount or a subvolume mounted on
+    // its own: the hint is umount's.
+    for (folder, mount) in [(&bound, &bind), (&holder, &own)] {
+        let value = refused(&env, &[folder, &"--permanent", &"--yes"], &id);
+        let umount = format!(
+            "Run umount {} first, then duscope clean again",
+            mount.display()
+        );
+        assert_eq!(value["error"]["hint"], umount.as_str(), "{value}");
+        assert!(mount.is_dir(), "{}", mount.display());
+    }
+    assert_eq!(
+        fs::read(point.join("outside/target.bin")).unwrap().len(),
+        4000
+    );
+    assert_eq!(fs::read(own.join("d.bin")).unwrap().len(), 1000);
+    drop(mounted);
 }

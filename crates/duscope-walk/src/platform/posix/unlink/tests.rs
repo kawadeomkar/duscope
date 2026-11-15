@@ -422,6 +422,100 @@ fn p5_core_03_linux_a_mount_under_the_directory_is_never_crossed() {
     }
 }
 
+/// A btrfs subvolume under the directory, not mounted on its own: another
+/// device, never entered, and no mount's root, however the kernel tells
+/// one (`Subvolume`); a subvolume mounted on its own is a mount point
+/// (`Mount`). Where nothing tells, the directory holding it is not entered.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mounts a btrfs image and a subvolume of it; root; DUSCOPE_TEST_PLATFORM=1"]
+fn p5_core_03_linux_a_subvolume_under_the_directory_is_told_from_a_mount() {
+    let env = TestEnv::new();
+    if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1")
+        || crate::effective_uid() != 0
+    {
+        eprintln!("skipped: run as root with DUSCOPE_TEST_PLATFORM=1");
+        return;
+    }
+    let base = fs::canonicalize(env.tmp_dir()).unwrap();
+    let (image, point) = (base.join("btrfs.img"), base.join("btrfs"));
+    fs::create_dir_all(&point).unwrap();
+    let made = [
+        vec!["truncate", "-s", "256M", path(&image)],
+        vec!["mkfs.btrfs", "-q", path(&image)],
+    ]
+    .iter()
+    .all(|args| {
+        env.command(args[0])
+            .args(&args[1..])
+            .output()
+            .is_ok_and(|out| out.status.success())
+    });
+    if !made {
+        duscope_testkit::skip_fs("btrfs", "no mkfs.btrfs here");
+        return;
+    }
+    mount(&env, &["-o", "loop", path(&image), path(&point)]);
+    let _unmount = Unmount(&env, point.clone());
+    // `item` holds a subvolume and nothing else, `holder` the subvolume
+    // `own` mounted on its own: a removal of either removes nothing.
+    let (item, holder) = (point.join("item"), point.join("holder"));
+    let (sub, own) = (item.join("sub"), holder.join("mnt"));
+    for dir in [&item, &own] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    for subvolume in [&sub, &point.join("own")] {
+        let out = env
+            .command("btrfs")
+            .args(["-q", "subvolume", "create", path(subvolume)])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+    fs::write(sub.join("in.bin"), vec![7u8; 1000]).unwrap();
+    let source = env
+        .command("findmnt")
+        .args(["-n", "-o", "SOURCE", path(&point)])
+        .output()
+        .unwrap();
+    let source = String::from_utf8_lossy(&source.stdout).trim().to_owned();
+    mount(&env, &["-o", "subvol=/own", &source, path(&own)]);
+    let _unmount_own = Unmount(&env, own.clone());
+
+    let mut kernels = vec![hook::Kernel::default()];
+    kernels.extend(old_kernels());
+    for kernel in kernels {
+        let _kernel = hook::as_kernel(kernel);
+        let parent = CheckedDir::open(&point).unwrap();
+        let mut freed = 0;
+        let err =
+            remove_dir_checked(&parent, OsStr::new("item"), ident(&item), &mut freed).unwrap_err();
+        assert!(
+            matches!(&err, RemoveError::Subvolume { path } if *path == sub),
+            "{kernel:?}: {err:?}"
+        );
+        let err = remove_dir_checked(&parent, OsStr::new("holder"), ident(&holder), &mut freed)
+            .unwrap_err();
+        assert!(
+            matches!(&err, RemoveError::Mount { path } if *path == own),
+            "{kernel:?}: {err:?}"
+        );
+        assert_eq!(freed, 0, "{kernel:?}");
+        assert_eq!(fs::read(sub.join("in.bin")).unwrap(), [7u8; 1000]);
+    }
+    for kernel in nothing_tells() {
+        let _kernel = hook::as_kernel(kernel);
+        let parent = CheckedDir::open(&point).unwrap();
+        let err =
+            remove_dir_checked(&parent, OsStr::new("item"), ident(&item), &mut 0).unwrap_err();
+        assert!(
+            matches!(&err, RemoveError::MountUnknown { path, .. } if *path == item),
+            "{kernel:?}: {err:?}"
+        );
+    }
+    assert!(sub.join("in.bin").exists() && own.is_dir());
+}
+
 /// The kernels that do not flag a mount point, each with an answer left:
 /// before 5.8 (no mount-root attribute) and without `statx`, each with
 /// file handles, then with the mount table alone.
