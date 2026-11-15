@@ -28,7 +28,7 @@ use serde::Serialize;
 
 pub use args::{ColorWhen, FormatArg, OutputArgs};
 pub use fields::Fields;
-pub use spill::DEFAULT_MAX_CHARS;
+pub use spill::{DEFAULT_MAX_CHARS, is_spill_name};
 
 /// A floating-point value as the JSON writes it (`3.0`, `1e300`); empty
 /// for one the JSON writes as null.

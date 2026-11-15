@@ -364,13 +364,18 @@ check: fs::canonicalize
 list: fs::metadata
   Each index file's size, for the listing.
 old_spills: fs::read_dir
-  The index directory's `out`: regular files older than a week, for --prune.
+  The index directory's `out`, which prune has checked is no link: regular
+  files with a spill's name (out/spill.rs is_spill_name) older than a week,
+  for --prune; nothing else there is removed.
+prune: fs::symlink_metadata
+  The index directory's `out`: an lstat, so that --prune refuses an `out` that
+  is a symbolic link before it removes anything.
 older_than: .metadata()
   An entry of `scans` or `out`, for its modification time.
 remove: fs::metadata, fs::remove_file
   scans --prune (a person's; no MCP tool prunes): the index files, temporary
-  files and spills the listing chose, all in the index directory; unlink
-  removes a link, never what it leads to.
+  files and spills the listing chose, each by the name its writer gives it,
+  all in the index directory; unlink removes a link, never what it leads to.
 stray_temporaries: fs::read_dir
   The index directory's `scans`: <id>.db.tmp-<pid> files whose process is gone
   or that are older than a day.
