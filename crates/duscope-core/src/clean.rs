@@ -91,7 +91,7 @@ use duscope_walk::{
 use crate::CoreError;
 use crate::envelope::{CleanPlan, ErrorObject, Explain, PlanItem, name_fields, path_fields};
 use crate::index::Index;
-use crate::index::writer::{EXCLUDED, EXCLUDED_CACHE, FIRMLINK};
+use crate::index::writer::{AUTOMOUNT, EXCLUDED, EXCLUDED_CACHE, FIRMLINK};
 use crate::query::{ExplainQuery, TreeView, explain, explain_unindexed, kind_name};
 
 /// An item to plan: its path, absolute, with every symbolic link above its
@@ -677,8 +677,8 @@ struct Unentered {
 
 /// The directories under `id` (to `last`) the scan listed without entering
 /// them (an exclude, a cache rule, a container, an unreadable directory, a
-/// mount it did not cross), in id order: the scan holds nothing under them
-/// to compare a walk with.
+/// mount it did not cross, an automount point it did not mount), in id
+/// order: the scan holds nothing under them to compare a walk with.
 fn unentered(index: &Index, id: u32, last: u32) -> Result<Vec<Unentered>, CoreError> {
     let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
         file: index.file().display().to_string(),
@@ -691,7 +691,7 @@ fn unentered(index: &Index, id: u32, last: u32) -> Result<Vec<Unentered>, CoreEr
              AND (flags & ?3 != 0 OR errors IS NOT NULL) ORDER BY id",
         )
         .map_err(corrupt)?;
-    let skipped = EXCLUDED | EXCLUDED_CACHE | Flags::MOUNT_ROOT.bits() | FIRMLINK;
+    let skipped = EXCLUDED | EXCLUDED_CACHE | Flags::MOUNT_ROOT.bits() | FIRMLINK | AUTOMOUNT;
     let candidates: Vec<(u32, u32)> = stmt
         .query_map([id, last, skipped], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(corrupt)?
