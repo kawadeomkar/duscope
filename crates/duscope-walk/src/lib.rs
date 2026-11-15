@@ -760,9 +760,11 @@ pub fn cachedir_tag(dir: &Path) -> bool {
 /// absent ([`io::ErrorKind::NotFound`]), as git reads an in-tree
 /// `.gitignore` since 2.32.
 ///
-/// `explain` is its only caller, for git's files. The scanner reads no
+/// Its callers: `explain`, for git's files, and the binary, for the files a
+/// scan's options name (`--exclude-from`, `--ignore-from`, `[caches]
+/// extra`), which a rescan takes from a saved scan. The scanner reads no
 /// file's contents: the repository's invariant lists each exception, and
-/// this is one.
+/// `explain`'s reads are one.
 pub fn read_regular(path: &Path, cap: u64, follow: bool) -> io::Result<Vec<u8>> {
     platform::read_regular(path, cap, follow)
 }

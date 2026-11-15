@@ -129,7 +129,9 @@ options_unchanged: fs::metadata
   The files the saved scan's options name (--exclude-from, --ignore-from,
   [caches] extra), stat'ed to tell whether they changed since the scan. The
   names come from the saved scan, which --trust may name from anyone: a stat
-  reads no contents, but follows links.
+  reads no contents, but follows links, and opens nothing, so a FIFO cannot
+  block it. The read that follows refuses anything but a regular file within
+  its cap (duscope_walk::read_regular).
 
 ## crates/duscope-core/src/resolve.rs
 
@@ -258,10 +260,14 @@ open_with: libc::openat
   followed links opens the pieces of a long path without O_NOFOLLOW, as that
   scan read them.
 read_regular: .metadata(), OpenOptions::new, fs::metadata, fs::symlink_metadata
-  explain's reads of git's files (DEV-154): a stat, an lstat unless following,
-  refused unless a regular file within its cap; opened O_NONBLOCK|O_NOCTTY,
-  O_NOFOLLOW unless following; checked again through the descriptor; read to
-  the cap and no further.
+  explain's reads of git's files (DEV-154), and the files a scan's options name
+  (--exclude-from, --ignore-from, [caches] extra: a person's, or on rescan the
+  saved scan's, which --trust may name from anyone; duscope/src/verbs/scan.rs
+  read_flag_file and cache_rules, rescan.rs same_in_a_folder, 1 MiB each): a
+  stat, an lstat unless following, refused unless a regular file within its
+  cap; opened O_NONBLOCK|O_NOCTTY, O_NOFOLLOW unless following; checked again
+  through the descriptor; read to the cap and no further. A FIFO or a device
+  is refused unopened.
 
 ## crates/duscope-walk/src/platform/posix/unlink.rs
 
@@ -344,18 +350,9 @@ classes: fs::read_to_string
 folder_alone: fs::canonicalize
   The folder rescan is asked about (a person's path), resolved to tell one
   reached through a link.
-same_in_a_folder: fs::read
-  The --exclude-from and --ignore-from files the saved scan's options name, read
-  to tell whether each pattern names one component.
 
 ## duscope/src/verbs/scan.rs
 
-cache_rules: fs::read_to_string
-  The [caches] extra file: the configuration's (a person's), or on rescan the
-  saved scan's options'. Read whole and parsed as TOML.
-read_flag_file: fs::read
-  The --exclude-from and --ignore-from files: a person's, or on rescan the saved
-  scan's options' (rescan.rs).
 unresolved_link: fs::metadata, fs::symlink_metadata
   The scan's root (a person's or an agent's path): an lstat and a stat, to tell
   a link that leads nowhere or loops.

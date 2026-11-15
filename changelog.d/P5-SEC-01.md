@@ -1,0 +1,2 @@
+### Fixed
+- `rescan`, and every command that reads `--exclude-from`, `--ignore-from` or the configuration's `[caches] extra` table, no longer waits for ever on a FIFO, or fills memory from a device, named as one of those files: each is read only when it is a regular file of at most 1 MiB, links followed, and is otherwise refused as a usage error that names the file and why (`not a regular file`, `is a directory`, or the cap). The viewer's `r` judges such a file the same way.
