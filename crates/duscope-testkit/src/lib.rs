@@ -36,7 +36,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, Permissions};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -344,6 +344,13 @@ pub fn replace_values(text: &mut String, key: &str, end: char, placeholder: &str
 /// six tries over 30 seconds, for a disk still busy after the first few.
 const DETACH_WAITS: [u64; 5] = [1, 2, 4, 8, 15];
 
+/// The waits, in seconds, before each of Disk Arbitration's ejects of an
+/// image's whole disk that finish a `detach` whose tries have all failed
+/// ([`TestEnv::hdiutil`]): about half a minute in all, as the report's own
+/// eject, some 20 seconds after the last try, has ejected disks that one
+/// made at once did not.
+const EJECT_WAITS: [u64; 4] = [0, 5, 10, 15];
+
 /// Held through every [`TestEnv::hdiutil`] call, so that a test binary, whose
 /// tests run on threads of one process, creates, attaches and detaches one
 /// image at a time.
@@ -622,11 +629,41 @@ impl TestEnv {
     /// (`HDIUTIL`) and a binary's images are made, attached and detached one
     /// at a time.
     ///
+    /// In six of eight such failures on the runners, the last step of the
+    /// failure's report, Disk Arbitration's eject of the image's whole disk
+    /// (`diskutil eject`), ejected it at once ("Disk /dev/disk7 ejected"),
+    /// where every one of the six `hdiutil detach` tries over the half
+    /// minute before had met "Resource busy"; the test failed all the same.
+    /// So once every try has failed and the image is still attached, a
+    /// `detach` asks for that eject, each cut short after 30 seconds as the
+    /// report's commands are, and asks again over about half a minute
+    /// (`EJECT_WAITS`): an eject made at once has failed where the report's,
+    /// some 20 seconds later, ejected the disk. When `hdiutil info` lists the
+    /// image no more, the detach is done, and one line on stderr says so, so
+    /// that the log of a run that passed still shows the tries failed. An
+    /// image still attached fails as before, with every eject's answer, and
+    /// the report's own `diskutil eject`, which names the process that
+    /// refuses the eject when there is one.
+    ///
     /// # Panics
     ///
-    /// When every try fails, with each try's output, and for a `detach` what
-    /// holds the image.
+    /// When every try fails, and for a `detach` when Disk Arbitration's eject
+    /// leaves the image attached too: with each try's output, and for a
+    /// `detach` what holds the image.
     pub fn hdiutil(&self, args: &[&dyn AsRef<OsStr>]) {
+        if let Some(note) = self.run_hdiutil("hdiutil", args) {
+            // To the process's stderr itself: the test harness keeps back
+            // what `eprintln!` prints in a test that passes, and this line is
+            // for the log of a run that passed.
+            let _ = writeln!(std::io::stderr(), "{note}");
+        }
+    }
+
+    /// [`TestEnv::hdiutil`], each try running `program`: `hdiutil`, or in
+    /// this crate's test of the eject a program that always fails. Returns
+    /// the line for stderr when Disk Arbitration's eject finished a
+    /// `detach`, `None` when a try did.
+    fn run_hdiutil(&self, program: &str, args: &[&dyn AsRef<OsStr>]) -> Option<String> {
         let _one = HDIUTIL.lock().unwrap_or_else(PoisonError::into_inner);
         let shown: Vec<String> = args
             .iter()
@@ -657,12 +694,12 @@ impl TestEnv {
         let mut failures = Vec::new();
         for tries in 1..=waits.len() + 1 {
             let out = self
-                .command("hdiutil")
+                .command(program)
                 .args(&tried)
                 .output()
-                .unwrap_or_else(|e| panic!("duscope-testkit: run hdiutil: {e}"));
+                .unwrap_or_else(|e| panic!("duscope-testkit: run {program}: {e}"));
             if out.status.success() {
-                return;
+                return None;
             }
             let named = tried.last().map_or_else(String::new, |last| {
                 last.as_ref().to_string_lossy().into_owned()
@@ -674,11 +711,10 @@ impl TestEnv {
                 String::from_utf8_lossy(&out.stderr).trim_end()
             ));
             match &detaching {
-                Some(Some(None)) => return,
+                Some(Some(None)) => return None,
                 Some(Some(Some((image, places)))) => {
-                    let images = self.images();
-                    if images.is_some_and(|images| images.iter().all(|(i, _)| i != image)) {
-                        return;
+                    if self.detached(image) {
+                        return None;
                     }
                     if let (Some(last), Some(disk)) = (tried.last_mut(), places.first()) {
                         *last = disk;
@@ -690,10 +726,41 @@ impl TestEnv {
                 std::thread::sleep(std::time::Duration::from_secs(*wait));
             }
         }
-        let held = match &detaching {
-            Some(Some(Some((_, places)))) => {
-                format!("{}{}", self.holders(places), self.disk_state(places))
+        let mut ejects = Vec::new();
+        if let Some(Some(Some((image, places)))) = &detaching
+            && let Some(disk) = places.first()
+        {
+            // Disk Arbitration's eject of the whole disk, tried after each of
+            // `EJECT_WAITS`, each cut short as the report's commands are;
+            // whether it ejected is read from whether the image is still
+            // attached, and each answer is kept for the report.
+            for (tries, wait) in EJECT_WAITS.iter().enumerate() {
+                std::thread::sleep(Duration::from_secs(*wait));
+                let mut eject = self.command("diskutil");
+                eject.arg("eject").arg(disk);
+                let answer = output_within(eject, Duration::from_secs(30)).unwrap_or_else(|e| e);
+                ejects.push(format!(
+                    "eject {} after {wait} s: {}",
+                    tries + 1,
+                    answer.trim_end()
+                ));
+                if self.detached(image) {
+                    return Some(format!(
+                        "duscope-testkit: hdiutil {} failed {} times; diskutil eject ejected {}",
+                        shown.join(" "),
+                        failures.len(),
+                        disk.display()
+                    ));
+                }
             }
+        }
+        let held = match &detaching {
+            Some(Some(Some((_, places)))) => format!(
+                "\n--- diskutil eject after the tries:\n{}{}{}",
+                ejects.join("\n"),
+                self.holders(places),
+                self.disk_state(places)
+            ),
             _ => String::new(),
         };
         panic!(
@@ -745,8 +812,9 @@ impl TestEnv {
         ps.args(["-axo", "pid,ppid,etime,command"]);
         parts.push(("processes at work on disks", ps, Some(&DISK_WORKERS[..])));
         // Disk Arbitration's eject names the process that refuses it ("dissented
-        // by PID"), where hdiutil says "Resource busy" alone. Last, as it may
-        // eject the disk after all.
+        // by PID"), where hdiutil says "Resource busy" alone. The detach has
+        // tried it once, and the image stayed attached: this second answer is
+        // the one the message keeps. Last, as it may eject the disk after all.
         if let Some(disk) = places.first() {
             let mut eject = self.command("diskutil");
             eject.arg("eject").arg(disk);
@@ -777,6 +845,13 @@ impl TestEnv {
             state.push(format!("\n--- {title}:\n{text}"));
         }
         state.concat()
+    }
+
+    /// Whether `hdiutil info` lists `image` no more; not when it cannot be
+    /// read.
+    fn detached(&self, image: &str) -> bool {
+        self.images()
+            .is_some_and(|images| images.iter().all(|(i, _)| i != image))
     }
 
     /// The images `hdiutil info` lists: each one's `image-path`, with the
@@ -1074,5 +1149,67 @@ mod tests {
     #[should_panic(expected = "skipped in CI, which must run this check: no NTFS")]
     fn p5_walk_02_a_missing_driver_ci_did_not_name_fails_the_test() {
         skip_fs_when(true, None, "ntfs3", "no NTFS");
+    }
+
+    /// Every try of a `detach` fails, each one running `false` in place of
+    /// `hdiutil`, and nothing holds the image: Disk Arbitration's eject of
+    /// its whole disk detaches it, and the detach is done, with the line
+    /// for stderr that says how.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
+    fn p0_test_03_macos_an_image_hdiutil_cannot_detach_is_ejected() {
+        use super::TestEnv;
+        use std::fs;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let env = TestEnv::new();
+        if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+            eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+            return;
+        }
+        let work = fs::canonicalize(env.tmp_dir()).unwrap().join("image");
+        let mount = work.join("mnt");
+        fs::create_dir_all(&mount).unwrap();
+        let image = work.join("image.dmg");
+        env.hdiutil(&[
+            &"create",
+            &"-ov",
+            &"-size",
+            &"16m",
+            &"-fs",
+            &"APFS",
+            &"-volname",
+            &"EJECT",
+            &image,
+        ]);
+        env.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &mount, &image]);
+        let attached = || {
+            env.images()
+                .unwrap()
+                .into_iter()
+                .find(|(_, places)| places.contains(&mount))
+        };
+        let disk = attached()
+            .expect("the image is not attached at its mount")
+            .1[0]
+            .clone();
+        let ejected = catch_unwind(AssertUnwindSafe(|| {
+            env.run_hdiutil("false", &[&"detach", &mount])
+        }));
+        let left = attached();
+        if left.is_some() {
+            env.hdiutil(&[&"detach", &"-force", &mount]);
+        }
+        let note = ejected.expect("the eject did not finish the detach");
+        assert!(left.is_none(), "still attached: {left:?}");
+        assert_eq!(
+            note,
+            Some(format!(
+                "duscope-testkit: hdiutil detach {} failed 6 times; diskutil eject ejected {}",
+                mount.display(),
+                disk.display()
+            ))
+        );
     }
 }

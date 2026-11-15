@@ -1,7 +1,8 @@
 //! P0-TEST-03: the testkit's `hdiutil` helper tries a `detach` six times
 //! over about half a minute, so a disk busy for longer than the first few
-//! seconds is detached all the same, and a `detach` that still fails says
-//! what holds the image open and what state the disks are in.
+//! seconds is detached all the same, then asks Disk Arbitration to eject
+//! the image's disk, and a `detach` that still fails says what holds the
+//! image open and what state the disks are in.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![cfg(target_os = "macos")]
@@ -91,11 +92,12 @@ fn p0_test_03_macos_a_detach_busy_for_six_seconds_succeeds() {
 }
 
 /// A file held open on the volume throughout and no `-force`: every try is
-/// "Resource busy", six of them, and the message names this process as
-/// what holds the volume, as `lsof` lists it, then gives the disks' state:
-/// the images attached, the volumes mounted, the image's whole disk, the
-/// processes at work on disks, and `diskutil eject` naming this process as
-/// the one that refuses the eject.
+/// "Resource busy", six of them, Disk Arbitration's eject after them is
+/// refused too, and the message names this process as what holds the
+/// volume, as `lsof` lists it, then gives the disks' state: the images
+/// attached, the volumes mounted, the image's whole disk, the processes at
+/// work on disks, and `diskutil eject` naming this process as the one that
+/// refuses the eject.
 #[test]
 #[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
 fn p0_test_03_macos_a_detach_that_stays_busy_names_what_holds_it() {
@@ -132,10 +134,11 @@ fn p0_test_03_macos_a_detach_that_stays_busy_names_what_holds_it() {
         "\n--- processes at work on disks:\n",
         "diskarbitrationd",
         "\n--- diskutil eject:\n",
-        dissenter.as_str(),
     ] {
         assert!(message.contains(each), "{each:?} not in: {message}");
     }
+    let eject = message.rsplit("\n--- diskutil eject:\n").next().unwrap();
+    assert!(eject.contains(&dissenter), "{dissenter:?} not in: {eject}");
 }
 
 /// Whether `mount` is a mount point: its device differs from its parent's.
