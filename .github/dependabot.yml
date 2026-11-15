@@ -12,6 +12,14 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+    ignore:
+      # crossterm 0.29 depends on signal-hook 0.3, and duscope-tui uses the
+      # same version (DEV-170): 0.4 beside it would be a second copy of the
+      # crate, which deny.toml's `multiple-versions = "deny"` refuses. Lift
+      # this in the update that moves crossterm to a release on signal-hook
+      # 0.4, and move signal-hook with it.
+      - dependency-name: signal-hook
+        versions: [">= 0.4"]
 
   - package-ecosystem: github-actions
     directory: /
