@@ -265,9 +265,9 @@ gives the terminal back as it found it when it ends.
 
 The map fills the screen; from 110 columns a column at its right holds the
 selection's facts, its siblings and the legend of the colours. The selection
-starts at the largest file. The line at the bottom shows six keys for what is
-in focus, and `?` lists them all, as this table does (`⏎` is Enter, `⌫`
-Backspace and `⇥` Tab):
+starts on the file reached by taking the largest entry at every level. The line
+at the bottom shows six keys for what is in focus, and `?` lists them all, as
+this table does (`⏎` is Enter, `⌫` Backspace and `⇥` Tab):
 
 | Keys | What they do |
 | --- | --- |
