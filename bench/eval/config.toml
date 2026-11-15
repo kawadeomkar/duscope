@@ -5,7 +5,8 @@
 
 [model]
 # The model every run uses (`claude --model`), pinned so that runs on
-# different days compare. The author confirms it before the first real run.
+# different days compare; the decisions hold for it, and the summary and
+# the checklist lines name it.
 id = "claude-sonnet-5-5"
 
 [claude_code]
@@ -47,9 +48,12 @@ format = ["json", "plain"]
 runs = 3
 
 [decision]
-# The row's criterion: the skill is recommended with a higher completion, or
-# at equal completion with at least this fraction fewer tokens (the mean per
-# run). The same rule, json against plain, revises the non-TTY default.
+# The row's criterion (DEV-185): the skill is recommended when its arm
+# completed at least completion_margin_runs runs more than the arm without
+# it; within that margin the two count as equal, and it is recommended with
+# at least min_token_reduction fewer tokens (the mean of a completed run).
+# The same rule, json against plain, revises the non-TTY default.
+completion_margin_runs = 3
 min_token_reduction = 0.20
 # --jq's absence (D36) is revisited when at least this many runs passed
 # --jq to duscope.

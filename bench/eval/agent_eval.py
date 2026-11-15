@@ -181,6 +181,8 @@ def load_config(path: str = CONFIG) -> Dict[str, Any]:
         need(bool(cells["format"]) and all(v in FORMATS for v in cells["format"]), "cells.format")
         need(isinstance(cells["runs"], int) and cells["runs"] > 0, "cells.runs")
         need(0 < float(decision["min_token_reduction"]) < 1, "decision.min_token_reduction")
+        margin = decision["completion_margin_runs"]
+        need(isinstance(margin, int) and not isinstance(margin, bool) and margin >= 0, "decision.completion_margin_runs")
         need(isinstance(decision["jq_attempt_runs_to_revisit"], int), "decision.jq_attempt_runs_to_revisit")
     except (KeyError, TypeError) as e:
         raise EvalError("%s: missing or bad setting %s" % (path, e))
@@ -622,7 +624,8 @@ def stats(every: List[Dict[str, Any]]) -> Dict[str, Any]:
     """A set of runs' figures. The runs that failed for the infrastructure
     are counted apart and left out of every figure but the cost."""
     runs = [r for r in every if not outage(r)]
-    tokens = [r["tokens"]["total"] for r in runs if r["tokens"]["total"] is not None]
+    # Tokens at equal completion: the runs that completed their task alone.
+    tokens = [r["tokens"]["total"] for r in runs if r["completed"] and r["tokens"]["total"] is not None]
     costs = [r["cost_usd"] for r in every if isinstance(r.get("cost_usd"), (int, float))]
     turns = [r["turns"] for r in runs if isinstance(r.get("turns"), int)]
     tiers: Dict[str, int] = {}
@@ -649,8 +652,16 @@ def stats(every: List[Dict[str, Any]]) -> Dict[str, Any]:
         "tiers": dict(sorted(tiers.items())),
         "jq_flag_runs": sum(1 for r in runs if jq_flag(r)),
         "jq_pipe_runs": sum(1 for r in runs if r["jq_pipe"]),
+        "default_format_runs": sum(1 for r in runs if took_default(r)),
         "failures": _count(r["failure"] for r in runs if r["failure"]),
     }
+
+
+def took_default(record: Dict[str, Any]) -> bool:
+    """Whether a run called duscope and passed no format in any call, so
+    that every answer came in the cell's format."""
+    formats = record["duscope"].get("formats") or {}
+    return bool(formats) and set(formats) == {"default"}
 
 
 def jq_flag(record: Dict[str, Any]) -> bool:
@@ -666,40 +677,47 @@ def _count(values) -> Dict[str, int]:
     return dict(sorted(out.items()))
 
 
-def criterion(treated: Dict[str, Any], baseline: Dict[str, Any], min_reduction: float) -> Dict[str, Any]:
-    """The row's criterion for `treated` against `baseline`: better when its
-    completion is higher, or equal with at least `min_reduction` fewer tokens
-    (the mean per run). Undecided when either has no runs or neither
+def criterion(treated: Dict[str, Any], baseline: Dict[str, Any], min_reduction: float, margin: int) -> Dict[str, Any]:
+    """The row's criterion for `treated` against `baseline`: better when it
+    completed at least `margin` runs more, not better when as many fewer.
+    Within the margin the arms count as equal, and it is better with at
+    least `min_reduction` fewer tokens (the mean of a completed run). Arms
+    of unequal size (a run left for --resume) compare as rates, the margin
+    taken at their mean size. Undecided when either has no runs or neither
     completed anything."""
     if not treated["runs"] or not baseline["runs"]:
         return {"verdict": "undecided", "reason": "no runs to compare"}
     if not treated["completed"] and not baseline["completed"]:
         return {"verdict": "undecided", "reason": "no run completed its task"}
-    ours = treated["completed"] * baseline["runs"]
-    theirs = baseline["completed"] * treated["runs"]
-    if ours > theirs:
-        return {"verdict": "better", "reason": "higher completion"}
-    if ours < theirs:
-        return {"verdict": "not better", "reason": "lower completion"}
+    n, m = treated["runs"], baseline["runs"]
+    ahead = (treated["completed"] / n - baseline["completed"] / m) * (n + m) / 2
+    apart = round(abs(ahead), 1)
+    runs = "%g run%s" % (apart, "" if apart == 1 else "s")
+    if apart > 0 and apart >= margin:
+        if ahead > 0:
+            return {"verdict": "better", "reason": "higher completion, %s ahead with a margin of %d" % (runs, margin)}
+        return {"verdict": "not better", "reason": "lower completion, %s behind with a margin of %d" % (runs, margin)}
+    within = "completion %s apart, within the margin of %d" % (runs, margin)
     a, b = treated["tokens_mean"], baseline["tokens_mean"]
     if a is None or b is None or b == 0:
-        return {"verdict": "undecided", "reason": "equal completion and no token counts"}
+        return {"verdict": "undecided", "reason": within + "; no token counts"}
     reduction = 1 - a / b
     if reduction >= min_reduction - 1e-12:
-        return {"verdict": "better", "reason": "equal completion, %.1f%% fewer tokens" % (reduction * 100)}
+        return {"verdict": "better", "reason": "%s; %.1f%% fewer tokens" % (within, reduction * 100)}
     if reduction >= 0:
-        why = "equal completion, only %.1f%% fewer tokens" % (reduction * 100)
+        why = "%s; only %.1f%% fewer tokens" % (within, reduction * 100)
     else:
-        why = "equal completion, %.1f%% more tokens" % (-reduction * 100)
+        why = "%s; %.1f%% more tokens" % (within, -reduction * 100)
     return {"verdict": "not better", "reason": why}
 
 
 def decide(runs: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]:
     d = config["decision"]
     reduction = float(d["min_token_reduction"])
+    margin = int(d["completion_margin_runs"])
     with_skill = stats([r for r in runs if r["skill"]])
     without = stats([r for r in runs if not r["skill"]])
-    skill = criterion(with_skill, without, reduction)
+    skill = criterion(with_skill, without, reduction, margin)
     skill_decision = {
         "better": "recommended",
         "not better": "optional: the skill stays optional and its description is rewritten",
@@ -708,7 +726,7 @@ def decide(runs: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]
 
     json_runs = stats([r for r in runs if r["format"] == "json"])
     plain_runs = stats([r for r in runs if r["format"] == "plain"])
-    fmt = criterion(json_runs, plain_runs, reduction)
+    fmt = criterion(json_runs, plain_runs, reduction, margin)
     if not json_runs["runs"] or not plain_runs["runs"]:
         fmt_decision = "not measured: the cells lack json or plain"
     elif fmt["verdict"] == "better":
@@ -727,10 +745,17 @@ def decide(runs: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]
     else:
         jq_decision = "confirmed: %d of %d runs passed --jq" % (flagged, len(runs))
     return {
+        "model": config["model"]["id"],
+        "margin_runs": margin,
         "skill": {"with": with_skill, "without": without, "criterion": skill, "decision": skill_decision},
         "format": {"json": json_runs, "plain": plain_runs, "criterion": fmt, "decision": fmt_decision},
         "jq": {"runs": len(runs), "flag_runs": flagged, "pipe_runs": piped, "threshold": threshold, "decision": jq_decision},
     }
+
+
+# When both arms complete at least this share of their runs (58 of 60),
+# completion cannot separate them, and the skill line says so.
+CEILING = (58, 60)
 
 
 def checklist_lines(decisions: Dict[str, Any]) -> List[str]:
@@ -744,15 +769,28 @@ def checklist_lines(decisions: Dict[str, Any]) -> List[str]:
     def tokens(s: Dict[str, Any]) -> str:
         return "{:,.0f}".format(s["tokens_mean"]) if s["tokens_mean"] is not None else "n/a"
 
+    def no_format(s: Dict[str, Any]) -> str:
+        return "%d of %d runs passed no format" % (s.get("default_format_runs", 0), s["runs"])
+
+    def at_ceiling(s: Dict[str, Any]) -> bool:
+        return bool(s["runs"]) and s["completed"] * CEILING[1] >= CEILING[0] * s["runs"]
+
     sk, fm, jq = decisions["skill"], decisions["format"], decisions["jq"]
+    model = "model `%s`" % decisions.get("model")
+    skill_line = (
+        "Decision gate **skill recommendation** (P3-AGT-03, %s): completion with/without %s / %s, higher with a "
+        "margin of %d runs ; tokens %s / %s (mean per completed run) ; decision: %s (%s)"
+        % (model, completion(sk["with"]), completion(sk["without"]), decisions.get("margin_runs"),
+           tokens(sk["with"]), tokens(sk["without"]), sk["decision"], sk["criterion"]["reason"])
+    )
+    if at_ceiling(sk["with"]) and at_ceiling(sk["without"]):
+        skill_line += "; both arms completed %d of %d or more: the eval measured tokens alone" % CEILING
     return [
-        "Decision gate **skill recommendation** (P3-AGT-03): completion with/without %s / %s ; "
-        "tokens %s / %s (mean per run) ; decision: %s (%s)"
-        % (completion(sk["with"]), completion(sk["without"]), tokens(sk["with"]), tokens(sk["without"]),
-           sk["decision"], sk["criterion"]["reason"]),
-        "Decision gate **non-TTY default `plain`** (D27): confirmed/revised: %s; json %s, %s tokens; "
-        "plain %s, %s tokens" % (fm["decision"], completion(fm["json"]), tokens(fm["json"]),
-                                 completion(fm["plain"]), tokens(fm["plain"])),
+        skill_line,
+        "Decision gate **non-TTY default `plain`** (D27; P3-AGT-03, %s): confirmed/revised: %s; json %s, %s tokens, "
+        "%s; plain %s, %s tokens, %s" % (model, fm["decision"], completion(fm["json"]), tokens(fm["json"]),
+                                         no_format(fm["json"]), completion(fm["plain"]), tokens(fm["plain"]),
+                                         no_format(fm["plain"])),
         "`--jq` absent (D36): %s; %d runs piped duscope to jq" % (jq["decision"], jq["pipe_runs"]),
     ]
 
@@ -776,13 +814,18 @@ def format_summary(result: Dict[str, Any]) -> str:
     lines = ["%s, %s, model %s, %d runs%s" % (
         result["date"], result["mode"], result["model"], len(result["runs"]),
         "" if result["complete"] else " (incomplete)")]
+    d = result["config"]["decision"]
+    lines.append(
+        "criterion: higher completion by %s runs, or within that margin %.0f%% fewer tokens (the mean of a "
+        "completed run)" % (d.get("completion_margin_runs", "-"), 100 * float(d["min_token_reduction"]))
+    )
     lines.append("")
-    head = "%-18s %10s %12s %9s %7s %10s %9s %7s" % (
-        "cell", "completed", "tokens", "cost", "turns", "recovered", "skill", "infra")
+    head = "%-18s %10s %12s %9s %7s %10s %9s %10s %7s" % (
+        "cell", "completed", "tokens", "cost", "turns", "recovered", "skill", "no format", "infra")
     lines.append(head)
     for cid in cells:
         c = s["cells"][cid]
-        lines.append("%-18s %10s %12s %9s %7s %10s %9s %7s" % (
+        lines.append("%-18s %10s %12s %9s %7s %10s %9s %10s %7s" % (
             cid,
             "%d/%d" % (c["completed"], c["runs"]),
             "{:,.0f}".format(c["tokens_mean"]) if c["tokens_mean"] is not None else "-",
@@ -790,6 +833,7 @@ def format_summary(result: Dict[str, Any]) -> str:
             c["turns_mean"] if c["turns_mean"] is not None else "-",
             "%d/%d" % (c["recovered_runs"], c["runs_with_failed_calls"]),
             c["skill_invoked_runs"],
+            c.get("default_format_runs", "-"),
             c.get("infrastructure", 0),
         ))
     lines.append("")

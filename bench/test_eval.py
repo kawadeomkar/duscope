@@ -136,6 +136,7 @@ class Files(unittest.TestCase):
             ["no-skill-json", "no-skill-plain", "skill-json", "skill-plain"],
         )
         self.assertEqual(config["decision"]["min_token_reduction"], 0.20)
+        self.assertEqual(config["decision"]["completion_margin_runs"], 3)
         # The Claude Code release is the one the MCP smoke test installs.
         smoke = os.path.join(REPO, "crates", "duscope-mcp", "tests", "smoke", "claude-code.sh")
         with open(smoke, encoding="utf-8") as f:
@@ -532,41 +533,83 @@ class Shim(unittest.TestCase):
             shutil.rmtree(d)
 
 
-def run_record(skill, fmt, completed, tokens, jq=False, pipe=False):
+def run_record(skill, fmt, completed, tokens, jq=False, pipe=False, formats=None):
     return {
         "skill": skill, "format": fmt, "completed": completed, "failure": None if completed else "wrong answer",
         "tokens": {"total": tokens}, "cost_usd": 0.1, "turns": 3, "failed_tool_calls": 0, "recovered": None,
         "permission_denials": 0, "skill_invoked": skill, "jq_pipe": pipe, "jq_flag_in_commands": False,
-        "duscope": {"tier": "verbs", "briefing_read": False, "jq_flag": 1 if jq else 0},
+        "duscope": {"tier": "verbs", "briefing_read": False, "jq_flag": 1 if jq else 0,
+                    "formats": {"default": 1} if formats is None else formats},
     }
 
 
 class Decision(unittest.TestCase):
-    CONFIG = {"decision": {"min_token_reduction": 0.20, "jq_attempt_runs_to_revisit": 1}}
+    CONFIG = {
+        "model": {"id": "claude-sonnet-5-5"},
+        "decision": {"min_token_reduction": 0.20, "completion_margin_runs": 3, "jq_attempt_runs_to_revisit": 1},
+    }
+    OPTIONAL = "optional: the skill stays optional and its description is rewritten"
 
-    def runs(self, with_skill, without, tokens_with=100, tokens_without=100):
+    def runs(self, with_skill, without, tokens_with=100, tokens_without=100, n=6):
         out = []
-        for i in range(6):
+        for i in range(n):
             out.append(run_record(True, "json" if i % 2 else "plain", i < with_skill, tokens_with))
             out.append(run_record(False, "json" if i % 2 else "plain", i < without, tokens_without))
         return out
 
     def test_p3_agt_03_the_criterion_recommends_on_completion_or_tokens(self):
         cases = [
-            (self.runs(5, 4), "recommended", "higher completion"),
-            (self.runs(3, 4, 50, 100), "optional: the skill stays optional and its description is rewritten", "lower completion"),
-            (self.runs(4, 4, 80, 100), "recommended", "equal completion, 20.0% fewer tokens"),
-            (self.runs(4, 4, 81, 100), "optional: the skill stays optional and its description is rewritten", "equal completion, only 19.0% fewer tokens"),
-            (self.runs(4, 4, 120, 100), "optional: the skill stays optional and its description is rewritten", "equal completion, 20.0% more tokens"),
+            (self.runs(6, 3), "recommended", "higher completion, 3 runs ahead with a margin of 3"),
+            (self.runs(3, 6, 50, 100), self.OPTIONAL, "lower completion, 3 runs behind with a margin of 3"),
+            (self.runs(4, 4, 80, 100), "recommended", "completion 0 runs apart, within the margin of 3; 20.0% fewer tokens"),
+            (self.runs(4, 4, 81, 100), self.OPTIONAL, "completion 0 runs apart, within the margin of 3; only 19.0% fewer tokens"),
+            (self.runs(4, 4, 120, 100), self.OPTIONAL, "completion 0 runs apart, within the margin of 3; 20.0% more tokens"),
             (self.runs(0, 0, 10, 100), "undecided", "no run completed its task"),
         ]
         for runs, decision, reason in cases:
             d = agent_eval.decide(runs, self.CONFIG)
             self.assertEqual((d["skill"]["decision"], d["skill"]["criterion"]["reason"]), (decision, reason))
 
+    def test_p3_agt_03_inside_the_margin_the_arms_are_equal_and_tokens_decide(self):
+        cases = [
+            # Two runs ahead is inside a margin of three: the tokens decide.
+            (self.runs(5, 3, 100, 100), self.OPTIONAL, "completion 2 runs apart, within the margin of 3; only 0.0% fewer tokens"),
+            (self.runs(3, 5, 50, 100), "recommended", "completion 2 runs apart, within the margin of 3; 50.0% fewer tokens"),
+            (self.runs(2, 0), "undecided", "completion 2 runs apart, within the margin of 3; no token counts"),
+        ]
+        for runs, decision, reason in cases:
+            d = agent_eval.decide(runs, self.CONFIG)
+            self.assertEqual((d["skill"]["decision"], d["skill"]["criterion"]["reason"]), (decision, reason))
+        # Arms of unequal size compare as rates, the margin at their mean size:
+        # 6 of 6 against 2 of 4 is 2.5 runs ahead in arms of 5.
+        treated = {"runs": 6, "completed": 6, "tokens_mean": 100}
+        baseline = {"runs": 4, "completed": 2, "tokens_mean": 100}
+        self.assertEqual(agent_eval.criterion(treated, baseline, 0.2, 3)["reason"],
+                         "completion 2.5 runs apart, within the margin of 3; only 0.0% fewer tokens")
+        self.assertEqual(agent_eval.criterion(treated, baseline, 0.2, 2)["reason"],
+                         "higher completion, 2.5 runs ahead with a margin of 2")
+
+    def test_p3_agt_03_the_token_mean_is_over_completed_runs(self):
+        runs = [run_record(True, "json", True, 100), run_record(True, "json", True, 200),
+                run_record(True, "json", False, 10), run_record(True, "json", False, None)]
+        s = agent_eval.stats(runs)
+        self.assertEqual((s["tokens_mean"], s["tokens_median"], s["completed"], s["runs"]), (150, 150, 2, 4))
+
+    def test_p3_agt_03_each_cell_counts_the_runs_that_passed_no_format(self):
+        cells = [{"id": "skill-json", "skill": True, "format": "json"}, {"id": "skill-plain", "skill": True, "format": "plain"}]
+        runs = [dict(run_record(True, "json", True, 100, formats=f), cell="skill-json", task="t", repeat=i)
+                for i, f in enumerate([{"default": 3}, {"default": 1, "json": 1}, {}])]
+        runs += [dict(run_record(True, "plain", True, 100, formats=f), cell="skill-plain", task="t", repeat=i)
+                 for i, f in enumerate([{"default": 2}, {"plain": 2}])]
+        summary = agent_eval.summarize(runs, cells, [{"id": "t"}], self.CONFIG)
+        self.assertEqual([summary["cells"][c["id"]]["default_format_runs"] for c in cells], [1, 1])
+        self.assertIn("json 3/3 (100.0%), 100 tokens, 1 of 3 runs passed no format; "
+                      "plain 2/2 (100.0%), 100 tokens, 1 of 2 runs passed no format", summary["checklist"][1])
+
     def test_p3_agt_03_json_must_beat_plain_to_revise_the_default(self):
-        runs = [run_record(s, f, f == "json" or i == 0, 100) for s in (True, False) for f in ("json", "plain") for i in range(3)]
-        self.assertEqual(agent_eval.decide(runs, self.CONFIG)["format"]["decision"], "revise: json beat plain (higher completion)")
+        runs = [run_record(s, f, f == "json" or i == 0, 100) for s in (True, False) for f in ("json", "plain") for i in range(6)]
+        self.assertEqual(agent_eval.decide(runs, self.CONFIG)["format"]["decision"],
+                         "revise: json beat plain (higher completion, 10 runs ahead with a margin of 3)")
         runs = [run_record(s, f, True, 100 if f == "json" else 90) for s in (True, False) for f in ("json", "plain") for i in range(3)]
         self.assertTrue(agent_eval.decide(runs, self.CONFIG)["format"]["decision"].startswith("confirmed: json did not beat plain"))
 
@@ -577,14 +620,21 @@ class Decision(unittest.TestCase):
         runs.append(run_record(False, "json", True, 100, jq=True))
         self.assertEqual(agent_eval.decide(runs, self.CONFIG)["jq"]["decision"], "revisit: agents passed --jq in 1 of 5 runs")
 
-    def test_p3_agt_03_the_checklist_lines_carry_the_numbers(self):
+    def test_p3_agt_03_the_checklist_lines_carry_the_numbers_and_the_model(self):
         lines = agent_eval.checklist_lines(agent_eval.decide(self.runs(5, 4, 1000, 2000), self.CONFIG))
         self.assertEqual(
             lines[0],
-            "Decision gate **skill recommendation** (P3-AGT-03): completion with/without 5/6 (83.3%) / 4/6 (66.7%) ; "
-            "tokens 1,000 / 2,000 (mean per run) ; decision: recommended (higher completion)",
+            "Decision gate **skill recommendation** (P3-AGT-03, model `claude-sonnet-5-5`): completion with/without "
+            "5/6 (83.3%) / 4/6 (66.7%), higher with a margin of 3 runs ; tokens 1,000 / 2,000 (mean per completed run) ; "
+            "decision: recommended (completion 1 run apart, within the margin of 3; 50.0% fewer tokens)",
         )
-        self.assertTrue(lines[1].startswith("Decision gate **non-TTY default `plain`** (D27): confirmed/revised: "))
+        self.assertTrue(lines[1].startswith(
+            "Decision gate **non-TTY default `plain`** (D27; P3-AGT-03, model `claude-sonnet-5-5`): confirmed/revised: "))
+        # When both arms complete 58 of 60 or more, completion cannot separate them.
+        lines = agent_eval.checklist_lines(agent_eval.decide(self.runs(59, 58, 100, 100, n=60), self.CONFIG))
+        self.assertTrue(lines[0].endswith("; both arms completed 58 of 60 or more: the eval measured tokens alone"), lines[0])
+        self.assertNotIn("measured tokens alone", agent_eval.checklist_lines(
+            agent_eval.decide(self.runs(59, 57, 100, 100, n=60), self.CONFIG))[0])
 
 
 class Setup(unittest.TestCase):

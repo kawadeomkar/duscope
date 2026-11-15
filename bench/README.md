@@ -526,10 +526,10 @@ task's answer.
 **What a run is.** `tasks.toml` lists the tasks in the row's order: the prompt (a preamble that
 names the tree and says to use `duscope` and change nothing, the question, and the shape of the
 `ANSWER:` line of JSON the reply must end with), the fixture, how the answer is worked out and how
-the reply is checked. `config.toml` pins the model (`claude-sonnet-5-5`, which the author
-confirms), the Claude Code release (2.1.319, the one the MCP smoke test installs; the runner
-refuses another), the tools, the cells and the limits. Each run has a directory of its own in the
-system's temporary directory (`--work-dir` elsewhere), removed after it (`--keep-work` keeps it):
+the reply is checked. `config.toml` pins the model (`claude-sonnet-5-5`), the Claude Code release
+(2.1.319, the one the MCP smoke test installs; the runner refuses another), the tools, the cells
+and the limits. Each run has a directory of its own in the system's temporary directory
+(`--work-dir` elsewhere), removed after it (`--keep-work` keeps it):
 
 - a scratch `HOME` and XDG directories, so the author's Claude Code settings, memory, MCP servers
   and saved scans are not read, and the run's scans go to its own index directory; in the cells
@@ -617,15 +617,27 @@ its runs that failed for the infrastructure, each task's completion per cell, an
 Each run's transcript stays in `bench/eval/.runs/<date>/`, which git ignores. The fake agent's
 files are `<date>-fake-right.json` and `<date>-fake-wrong.json`, also ignored.
 
-**The decisions.** The criterion is the row's: the cells with the skill against those without, both
-formats pooled, the skill being recommended with a higher completion rate, or with an equal one and
-a mean of tokens per run at least 20% lower (otherwise it stays optional and its description is
-rewritten, as PROPOSAL's Agent workflows says). The same rule, json against plain with and without
-the skill pooled, revises D27 when json wins and confirms `plain` otherwise. A run that passes
-`--jq` to duscope counts as reaching for it, and one such run revisits D36. When no run completed
-anything the decisions are `undecided`. `run.sh summary FILE` prints the table and the checklist's
-two lines, filled, with a line for `--jq`; the author pastes them into plan/SPEC.md's Gate 3 → 4
-checklist, records a changed default as a Deviation entry, and commits the result file.
+**The decisions.** The criterion is the row's (DEV-185): the cells with the skill against those
+without, both formats pooled. The skill is recommended when its arm completed at least three runs
+more than the other (`completion_margin_runs` in `config.toml`: 5 points of 60; one run is 1.7
+points, and a single rate-limited call can be that run). Within the margin the arms count as equal,
+and the skill is recommended when the mean tokens of a completed run are at least 20% lower;
+otherwise it stays optional and its description is rewritten, as PROPOSAL's Agent workflows says.
+The mean is over completed runs alone, since a timeout's partial count or a failed call's zero is
+not "tokens at equal completion". Arms of unequal size (a run still left for `--resume`) compare
+as completion rates, the margin taken at their mean size. The same rule, json against plain with
+and without the skill pooled, revises D27 when json wins and confirms `plain` otherwise; since an
+agent's own `--json` or `--plain` wins over the cell's format, each cell also counts the runs whose
+duscope calls passed no format (`default_format_runs`, from each run's `duscope.formats`), the runs
+that read the cell's format alone. A run that passes `--jq` to duscope counts as reaching for it,
+and one such run revisits D36. When no run completed anything the decisions are `undecided`.
+
+The decisions hold for the pinned model, `claude-sonnet-5-5`, which the summary's first line and
+both checklist lines name; when both arms complete 58 of 60 runs or more, the skill line adds that
+the eval measured tokens alone. `run.sh summary FILE` prints the criterion with its margin, the
+table and the checklist's two lines, filled, with a line for `--jq`; the author pastes them into
+plan/SPEC.md's Gate 3 → 4 checklist, records a changed default as a Deviation entry, and commits
+the result file.
 
 ## Files
 
