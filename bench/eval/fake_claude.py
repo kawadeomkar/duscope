@@ -5,7 +5,7 @@ writes a stream-json transcript of the shape `claude -p --output-format
 stream-json --verbose` writes: the init message, tool calls whose commands it
 really runs (so the duscope shim logs them), and the result message with a
 usage block. Its reply ends with the answer the harness left for it in
-DUSCOPE_EVAL_FAKE_ANSWER: the truth (`right`) or one every check refuses
+DUSCOPE_TEST_EVAL_FAKE_ANSWER: the truth (`right`) or one every check refuses
 (`wrong`). A wrong run first passes duscope a `--jq` it does not have, then
 runs a command that works, so the harness sees a failed call and a recovery.
 When the duscope skill is in HOME, it loads it with the Skill tool first.
@@ -55,9 +55,9 @@ def main(argv: List[str]) -> int:
     if "-p" not in argv or option(argv, "--output-format") != "stream-json" or "--verbose" not in argv:
         print("fake claude: expects -p PROMPT --output-format stream-json --verbose", file=sys.stderr)
         return 2
-    path = os.environ.get("DUSCOPE_EVAL_FAKE_ANSWER")
+    path = os.environ.get("DUSCOPE_TEST_EVAL_FAKE_ANSWER")
     if not path:
-        print("fake claude: DUSCOPE_EVAL_FAKE_ANSWER is not set", file=sys.stderr)
+        print("fake claude: DUSCOPE_TEST_EVAL_FAKE_ANSWER is not set", file=sys.stderr)
         return 2
     with open(path, encoding="utf-8") as f:
         fake = json.load(f)

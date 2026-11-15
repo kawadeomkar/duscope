@@ -497,7 +497,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
         with open(fake_file, "w", encoding="utf-8") as f:
             acts = [act for only, act in s.fake_acts if only in (None, task["id"])]
             json.dump({"mode": s.fake, "root": root, "answer": answer, "acts": acts}, f)
-        env = dict(env, DUSCOPE_EVAL_FAKE_ANSWER=fake_file)
+        env = dict(env, DUSCOPE_TEST_EVAL_FAKE_ANSWER=fake_file)
 
     argv = claude_argv(s.claude, s.config, prompt)
     transcript = os.path.join(layout.out, "transcript.jsonl")
