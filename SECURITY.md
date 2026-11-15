@@ -50,9 +50,9 @@ upgrade.
   to the user who ran the scan, and to the MCP clients that user starts `duscope mcp` for,
   within its `--roots`.
 - **The machine.** No input makes duscope run code it does not ship or write outside its index
-  directory and the outputs it is asked for, apart from the temporary sort file of a save
-  ([Index files](#3-index-files)). Each input's memory and time are bounded by a fixed
-  limit or by the size of the tree or saved scan it asked about, as
+  directory and the outputs it is asked for, apart from the temporary sort file of a save and
+  the index of a scan not kept ([Index files](#3-index-files)). Each input's memory and time are
+  bounded by a fixed limit or by the size of the tree or saved scan it asked about, as
   [Limits on memory and time](#limits-on-memory-and-time) sets out.
 
 ### What is not protected
@@ -146,9 +146,9 @@ with one exception a person opts into: a server started with `--allow-delete` of
     root and its totals.
 - **Deletes.** `clean` acts on the paths a person names and on handles that verify (`--from`).
   - It is a dry run unless `--yes` is given or a person at a terminal types `yes` when it asks.
-  - It moves entries to the trash by default. It refuses a folder that holds a mount point, or
-    whose mounts the system cannot tell, since a move would take the mounted volume into the
-    trash with it; the mount table is read again just before each move.
+  - It moves entries to the trash by default. It refuses an entry that is a mount point, and a
+    folder that holds one or whose mounts the system cannot tell, since a move would take the
+    mounted volume into the trash with it; the mount table is read again just before each move.
   - On Linux the move goes through descriptors, as `--permanent` does: the entry is renamed out
     of a directory reached from `/` without following a link, only when its device and inode
     are still what the plan saw, and never over an entry already in the trash. On macOS,
@@ -198,9 +198,13 @@ virtual tables and crafted pages.
 - **Indexes are snapshots.** Each index is written to a temporary file and renamed into place.
   Nothing edits an index after that.
 - **Permissions.** The index directory and its `scans` and `out` directories are 0700. Each
-  index file, each spill file in `out` and the handle key are 0600. duscope still reads a looser
-  directory, a looser index file, or one another user owns, but it prints a warning on stderr
-  with the `chmod` that fixes it.
+  index file, each spill file in `out` and the handle key are 0600. duscope gives each its mode as
+  it makes it, whatever the umask, and makes each directory on the way to the index directory
+  0700 too. duscope still reads a looser directory, a looser index file, or one another user
+  owns, but it prints a warning on stderr with the `chmod` that fixes it.
+- **A scan not kept.** A verb that scans a tree without saving the scan (`--no-save`, or no index
+  directory) writes its index to a directory of its own in the temporary directory,
+  `duscope-<verb>-<pid>-<n>`, made 0700 where nothing was, and removes it once done with it.
 - **The sort's temporary files.** While a save builds an index file's indexes, SQLite sorts their
   keys in about 2 MB of memory and writes the rest to a temporary file, in sorted runs. Past 16
   runs, a tree of more than about a million files, it opens a second file to merge them. Both go
@@ -235,7 +239,9 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
   read them as data, whatever they say.
 - **Links.** The scanner never follows symbolic links unless `--follow-symlinks` is given. It
   does not cross onto another filesystem with `-x`, and it does not enter network filesystems
-  without `--include-network`.
+  without `--include-network`. On Linux it does not enter an automount point the kernel has not
+  mounted, which reading would mount: under `-x` never, and otherwise only with
+  `--include-network`, as a network filesystem.
 - **No reads of contents.** The scanner reads file metadata only, never file contents. There are
   two exceptions:
   - the 43-byte `CACHEDIR.TAG` check;
