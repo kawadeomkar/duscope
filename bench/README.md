@@ -554,6 +554,16 @@ A run is completed when its answer is right, it stayed within 600 s and 2,000,00
 the tree as it was built, and no deletion was refused. Paths are compared after `realpath`, sizes
 within the task's tolerance (5%), and a size may be written in bytes or with a unit.
 
+A run that measured the infrastructure rather than the agent fails as `infrastructure`, with the
+reason beside it: Claude Code ended without a result message, with an error result (`is_error`: a
+rate limit, an expired token, a failed request), or with another exit status than 0; the stream
+names a model other than the pinned one, or none; or a run of a cell with the skill lists no
+`duscope` skill. A run that used all its turns is the agent's own failure, though Claude Code marks
+it an error; a timeout, a changed tree and a refused deletion stay the agent's too. Such a run is
+recorded and counted apart, and left out of every figure but the cost: completion, tokens and the
+decisions read the other runs alone. Three in a row stop the eval as Ctrl-C does, so an account
+that cannot reach the model does not spend the queue; `--resume` makes each one again.
+
 The cells are with and without the skill, crossed with the output format duscope gives when the
 agent passes none (`DUSCOPE_FORMAT`): `json`, what the agent detection gives under Claude Code,
 and `plain`, the non-TTY default. An agent's own `--json` still wins, and the result counts how
@@ -571,20 +581,23 @@ minutes a run, 120 runs take 2–6 hours; `--jobs N` runs N at once, within the 
 limits. Ctrl-C stops the eval: the runs not started are cancelled and the running agents ended
 (each runs in a session of its own, which the terminal's Ctrl-C does not reach), and the eval
 exits with status 130. A run cut short is not recorded. `--resume FILE` continues an interrupted
-run: the runs in FILE are kept and not made again, provided `config.toml`, `tasks.toml` and the
-Claude Code release are unchanged.
+run: the runs in FILE are kept and not made again, but for those that failed for the
+infrastructure, provided `config.toml`, `tasks.toml` and the Claude Code release are unchanged.
+The eval exits with status 0 when every run is recorded and none failed for the infrastructure,
+1 when some are left for `--resume`, and 2 on a problem with its configuration or setup.
 
 **What it records.** `bench/eval/results/<date>.json` (`--out` elsewhere), rewritten after every
 run and marked `complete` at the end: the host, the commit, the hashes of both files, the Claude
 Code and duscope versions, the configuration, each task's prompt (`{root}` for the tree), and one
-record per run with its verdict and the reasons, the expected and the given answer, tokens
-(`total`: the pinned model's input, cache creation, cache reads and output, from `modelUsage`,
-else the result's `usage`, else the sum of the messages'; `all_models` with any other model Claude
-Code called), the cost, turns, tool calls, failed calls and whether a later one worked
+record per run with its verdict and the reasons, the expected and the given answer, the models the
+stream names, tokens (`total`: the pinned model's input, cache creation, cache reads and output,
+from `modelUsage`, else the result's `usage`, else the sum of the messages'; `all_models` with any
+other model Claude Code called), the cost, turns, tool calls, failed calls and whether a later one worked
 (`recovered`), permission denials, whether the skill was loaded, the duscope calls (verbs, the tier
 they belong to, formats asked for, `--jq`, the briefing read with `duscope agent`), and the commands
-it ran. The `summary` holds each cell's figures, each task's completion per cell, and the
-decisions. Each run's transcript stays in `bench/eval/.runs/<date>/`, which git ignores. The fake
+it ran. A field the stream lacks is null, never 0 or false, and so is a token total that needs
+it. The `summary` holds each cell's figures, its runs that failed for the infrastructure, each
+task's completion per cell, and the decisions. Each run's transcript stays in `bench/eval/.runs/<date>/`, which git ignores. The fake
 agent's files are `<date>-fake-right.json` and `<date>-fake-wrong.json`, also ignored.
 
 **The decisions.** The criterion is the row's: the cells with the skill against those without, both

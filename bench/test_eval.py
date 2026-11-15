@@ -417,6 +417,43 @@ class Transcript(unittest.TestCase):
         s = evaltranscript.summarize_stream(evaltranscript.parse_stream(""), "m")
         self.assertEqual((s["tokens"]["total"], s["turns"], s["result_subtype"]), (None, None, None))
 
+    def test_p3_agt_03_a_field_the_stream_lacks_is_null_not_zero(self):
+        partial = {"claude-sonnet-5-5": {"inputTokens": 10, "outputTokens": 20, "cacheCreationInputTokens": 4}}
+        text = stream({"type": "result", "subtype": "success", "is_error": False, "result": "x", "modelUsage": partial})
+        s = evaltranscript.summarize_stream(evaltranscript.parse_stream(text), "claude-sonnet-5-5")
+        t = s["tokens"]
+        self.assertEqual((t["source"], t["input_tokens"], t["cache_read_input_tokens"], t["total"]), ("modelUsage", 10, None, None))
+        self.assertEqual((t["all_models"], s["permission_denials"], s["cost_usd"], s["turns"]), (None, None, None, None))
+        usage = {"input_tokens": 1, "output_tokens": 2}
+        s = evaltranscript.summarize_stream(evaltranscript.parse_stream(stream({"type": "result", "usage": usage})), "m")
+        self.assertEqual((s["tokens"]["output_tokens"], s["tokens"]["cache_creation_input_tokens"], s["tokens"]["total"]), (2, None, None))
+
+    def test_p3_agt_03_an_outage_is_told_apart_from_the_agents_failure(self):
+        model = "claude-sonnet-5-5"
+        init = {"type": "system", "subtype": "init", "model": model, "skills": ["duscope"]}
+        ok = {"type": "result", "subtype": "success", "is_error": False, "result": "ANSWER: {}"}
+
+        def why(result, status=0, skill=True, first=init, *more):
+            messages = [first] + list(more) + ([result] if result else [])
+            s = evaltranscript.summarize_stream(evaltranscript.parse_stream(stream(*messages)), model)
+            return evaltranscript.infrastructure(s, status, model, skill)
+
+        said = {"type": "assistant", "message": {"id": "m1", "model": model + "-20261101", "content": [{"type": "text", "text": "x"}]}}
+        synthetic = {"type": "assistant", "message": {"id": "m2", "model": "<synthetic>", "content": []}}
+        self.assertIsNone(why(ok, 0, True, init, said, synthetic))
+        # Every turn used is the agent's own failure, though Claude Code marks it an error.
+        self.assertIsNone(why(dict(ok, subtype="error_max_turns", is_error=True), 1))
+        self.assertIn("rate_limit_error", why(dict(ok, is_error=True, result="API Error: 429 rate_limit_error"), 1))
+        self.assertIn("status 3", why(None, 3))
+        self.assertIn("status 1", why(ok, 1))
+        self.assertIn("claude-opus-5-5", why(ok, 0, True, dict(init, model="claude-opus-5-5")))
+        other = {"type": "assistant", "message": {"id": "m3", "model": "claude-haiku-5-5", "content": []}}
+        self.assertIn("claude-haiku-5-5", why(ok, 0, True, init, other))
+        self.assertIn("names no model", why(ok, 0, True, dict(init, model=None)))
+        self.assertIn("lists no duscope skill", why(ok, 0, True, dict(init, skills=[])))
+        self.assertIn("lists no duscope skill", why(ok, 0, True, {k: v for k, v in init.items() if k != "skills"}))
+        self.assertIsNone(why(ok, 0, False, dict(init, skills=[])))
+
     def test_p3_agt_03_the_shim_log_gives_verbs_tier_formats_and_refusals(self):
         def record(status, *args):
             return b"".join(x.encode() + b"\0" for x in [str(status), str(len(args))] + list(args))
@@ -596,16 +633,23 @@ class Setup(unittest.TestCase):
 class Fake(unittest.TestCase):
     """The harness end to end, with the stub agent and a small tree."""
 
-    def run_eval(self, *extra):
-        d = scratch()
-        self.addCleanup(shutil.rmtree, d)
+    def run_eval(self, *extra, status=0, fake=None, d=None):
+        """Runs the eval in `d` (a new scratch directory when None) and
+        returns the result file and `d`; its stderr is left in self.err."""
+        if d is None:
+            d = scratch()
+            self.addCleanup(shutil.rmtree, d)
         out = os.path.join(d, "result.json")
         args = ["run", "--duscope", duscope_binary(), "--out", out, "--runs", "1", "--jobs", "4",
                 "--scale", "0.015625", "--transcripts", os.path.join(d, "transcripts"), "--work-dir", d] + list(extra)
+        environ = {"PATH": "/usr/bin:/bin"}
+        if fake:
+            environ["DUSCOPE_TEST_EVAL_FAKE"] = fake
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-            status = agent_eval.main(args, {"PATH": "/usr/bin:/bin"})
-        self.assertEqual(status, 0, err.getvalue())
+            got = agent_eval.main(args, environ)
+        self.err = err.getvalue()
+        self.assertEqual(got, status, self.err)
         with open(out, encoding="utf-8") as f:
             return json.load(f), d
 
@@ -669,6 +713,60 @@ class Fake(unittest.TestCase):
         self.assertEqual(again["runs"][0], kept["runs"][0])
         self.assertEqual([r["task"] for r in again["runs"]], ["largest-dir", "sql-own-files"])
         self.assertEqual(err.getvalue().count("eval: ["), 1)
+
+    def test_p3_agt_03_an_outage_is_recorded_apart_and_left_out_of_the_figures(self):
+        result, _ = self.run_eval("--fake", "right", "--cells", "skill-json", "--jobs", "1",
+                                  "--tasks", "largest-dir,largest-files,sql-own-files",
+                                  status=1, fake="largest-dir:api-error,sql-own-files:crash")
+        runs = {r["task"]: r for r in result["runs"]}
+        self.assertEqual([runs[t]["failure"] for t in ("largest-dir", "largest-files", "sql-own-files")],
+                         ["infrastructure", None, "infrastructure"])
+        self.assertIn("rate_limit_error", runs["largest-dir"]["infrastructure"])
+        self.assertIn("status 3", runs["sql-own-files"]["infrastructure"])
+        self.assertIsNone(runs["largest-files"]["infrastructure"])
+        cell = result["summary"]["cells"]["skill-json"]
+        self.assertEqual((cell["runs"], cell["completed"], cell["infrastructure"]), (1, 1, 2))
+        self.assertEqual(cell["tokens_mean"], runs["largest-files"]["tokens"]["total"])
+        self.assertEqual(result["summary"]["tasks"]["largest-dir"]["skill-json"], "0/0")
+        self.assertFalse(result["complete"])
+        self.assertIn("2 runs failed for the infrastructure", self.err)
+
+    def test_p3_agt_03_three_outages_in_a_row_stop_the_eval_and_resume_retries_them(self):
+        tasks = "largest-dir,largest-files,tar-gz-total,same-name,sql-own-files"
+        common = ("--fake", "right", "--cells", "skill-json", "--jobs", "1", "--tasks", tasks)
+        result, d = self.run_eval(*common, status=1, fake="api-error")
+        self.assertIn("stopped after 3 infrastructure failures in a row", self.err)
+        # The third stops it; a fourth may end as it stops, and is kept.
+        self.assertIn(len(result["runs"]), (3, 4))
+        self.assertEqual({r["failure"] for r in result["runs"]}, {"infrastructure"})
+        self.assertFalse(result["complete"])
+        again, _ = self.run_eval(*common, "--resume", os.path.join(d, "result.json"), d=d)
+        self.assertTrue(again["complete"])
+        self.assertEqual([r["completed"] for r in again["runs"]], [True] * 5)
+        self.assertEqual(self.err.count("eval: ["), 5)
+
+    def test_p3_agt_03_another_model_or_an_unlisted_skill_fails_as_infrastructure(self):
+        result, _ = self.run_eval("--fake", "right", "--cells", "no-skill-json,skill-json", "--jobs", "1",
+                                  "--tasks", "largest-dir,sql-own-files", status=1,
+                                  fake="largest-dir:model=claude-haiku-5-5,sql-own-files:no-skills")
+        runs = {(r["task"], r["cell"]): r for r in result["runs"]}
+        for cell in ("no-skill-json", "skill-json"):
+            r = runs[("largest-dir", cell)]
+            self.assertEqual(r["failure"], "infrastructure", cell)
+            self.assertIn("claude-haiku-5-5", r["infrastructure"])
+        r = runs[("sql-own-files", "skill-json")]
+        self.assertEqual(r["failure"], "infrastructure")
+        self.assertIn("lists no duscope skill", r["infrastructure"])
+        self.assertTrue(runs[("sql-own-files", "no-skill-json")]["completed"])
+
+    def test_p3_agt_03_a_field_the_stream_lacks_is_recorded_as_null(self):
+        result, _ = self.run_eval("--fake", "right", "--cells", "no-skill-json", "--tasks", "largest-dir", fake="bare")
+        r = result["runs"][0]
+        self.assertTrue(r["completed"], r["check"])
+        self.assertGreater(r["tokens"]["input_tokens"], 0)
+        self.assertEqual((r["tokens"]["cache_read_input_tokens"], r["tokens"]["total"]), (None, None))
+        self.assertEqual((r["cost_usd"], r["permission_denials"]), (None, None))
+        self.assertIsNone(result["summary"]["cells"]["no-skill-json"]["tokens_mean"])
 
 
 def gone(pid, wait=10.0):

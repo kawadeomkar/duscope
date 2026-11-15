@@ -69,7 +69,12 @@ TREE_NAME = "alex"
 # The tests' knob for the stub agent (fake_claude.py): comma-separated acts,
 # each `ACT` for every run or `TASK:ACT` for one task's runs.
 FAKE_ACTS_VAR = "DUSCOPE_TEST_EVAL_FAKE"
-FAKE_ACTS = ("hang",)
+FAKE_ACTS = ("hang", "api-error", "crash", "model", "no-skills", "bare")
+# The failure of a run that measured the infrastructure, not the agent
+# (evaltranscript.infrastructure): recorded, left out of every figure, and
+# made again by --resume. This many in a row stop the eval.
+INFRASTRUCTURE = "infrastructure"
+STOP_AFTER_OUTAGES = 3
 
 # The duscope on the agent's PATH. It runs the binary under test and appends
 # the exit status, the argument count and the arguments, NUL-separated, to
@@ -505,15 +510,20 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
 
     max_tokens = s.config["claude_code"]["max_tokens"]
     total = stream["tokens"]["total"]
+    outage = None if timed_out else evaltranscript.infrastructure(stream, proc.returncode, s.config["model"]["id"], cell["skill"])
+    # What the agent did to the tree outranks an outage, which --resume
+    # would otherwise make again and so hide.
     failure = None
     if timed_out:
         failure = "timeout"
-    elif stream["reply"] is None:
-        failure = "no reply"
     elif changes:
         failure = "tree changed"
     elif duscope["deletion_refused"]:
         failure = "deletion refused"
+    elif outage:
+        failure = INFRASTRUCTURE
+    elif stream["reply"] is None:
+        failure = "no reply"
     elif total is not None and total > max_tokens:
         failure = "over the token limit"
     elif not verdict["passed"]:
@@ -535,6 +545,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
         "repeat": repeat,
         "completed": failure is None,
         "failure": failure,
+        "infrastructure": evalchecks.portable(outage, root) if outage else None,
         "check": verdict,
         "expected": evalchecks.portable(truth.expected, root),
         "exit_status": proc.returncode,
@@ -590,9 +601,16 @@ def _kill_group(proc: subprocess.Popen, sig: int) -> None:
 # -- the summary and the decisions ----------------------------------------------
 
 
-def stats(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def outage(record: Dict[str, Any]) -> bool:
+    return record["failure"] == INFRASTRUCTURE
+
+
+def stats(every: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """A set of runs' figures. The runs that failed for the infrastructure
+    are counted apart and left out of every figure but the cost."""
+    runs = [r for r in every if not outage(r)]
     tokens = [r["tokens"]["total"] for r in runs if r["tokens"]["total"] is not None]
-    costs = [r["cost_usd"] for r in runs if isinstance(r.get("cost_usd"), (int, float))]
+    costs = [r["cost_usd"] for r in every if isinstance(r.get("cost_usd"), (int, float))]
     turns = [r["turns"] for r in runs if isinstance(r.get("turns"), int)]
     tiers: Dict[str, int] = {}
     for r in runs:
@@ -602,6 +620,7 @@ def stats(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     done = sum(1 for r in runs if r["completed"])
     return {
         "runs": n,
+        "infrastructure": len(every) - n,
         "completed": done,
         "completion": round(done / n, 4) if n else None,
         "tokens_mean": round(statistics.mean(tokens), 1) if tokens else None,
@@ -686,6 +705,7 @@ def decide(runs: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]
     else:
         fmt_decision = "undecided (%s)" % fmt["reason"]
 
+    runs = [r for r in runs if not outage(r)]
     flagged = sum(1 for r in runs if jq_flag(r))
     piped = sum(1 for r in runs if r["jq_pipe"])
     threshold = d["jq_attempt_runs_to_revisit"]
@@ -730,7 +750,7 @@ def summarize(runs: List[Dict[str, Any]], cells: List[Dict[str, Any]], tasks: Li
     for t in tasks:
         row = {}
         for c in cells:
-            mine = [r for r in runs if r["task"] == t["id"] and r["cell"] == c["id"]]
+            mine = [r for r in runs if r["task"] == t["id"] and r["cell"] == c["id"] and not outage(r)]
             row[c["id"]] = "%d/%d" % (sum(1 for r in mine if r["completed"]), len(mine))
         by_task[t["id"]] = row
     decisions = decide(runs, config)
@@ -744,11 +764,12 @@ def format_summary(result: Dict[str, Any]) -> str:
         result["date"], result["mode"], result["model"], len(result["runs"]),
         "" if result["complete"] else " (incomplete)")]
     lines.append("")
-    head = "%-18s %10s %12s %9s %7s %10s %9s" % ("cell", "completed", "tokens", "cost", "turns", "recovered", "skill")
+    head = "%-18s %10s %12s %9s %7s %10s %9s %7s" % (
+        "cell", "completed", "tokens", "cost", "turns", "recovered", "skill", "infra")
     lines.append(head)
     for cid in cells:
         c = s["cells"][cid]
-        lines.append("%-18s %10s %12s %9s %7s %10s %9s" % (
+        lines.append("%-18s %10s %12s %9s %7s %10s %9s %7s" % (
             cid,
             "%d/%d" % (c["completed"], c["runs"]),
             "{:,.0f}".format(c["tokens_mean"]) if c["tokens_mean"] is not None else "-",
@@ -756,6 +777,7 @@ def format_summary(result: Dict[str, Any]) -> str:
             c["turns_mean"] if c["turns_mean"] is not None else "-",
             "%d/%d" % (c["recovered_runs"], c["runs_with_failed_calls"]),
             c["skill_invoked_runs"],
+            c.get("infrastructure", 0),
         ))
     lines.append("")
     lines.append("%-16s " % "task" + " ".join("%-14s" % cid for cid in cells))
@@ -999,7 +1021,8 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
         if old["mode"] != mode or old["claude_code"]["version"] != claude_version:
             raise EvalError("%s was run with another agent: start a new file" % args.resume)
         for r in old["runs"]:
-            done[(r["task"], r["cell"], r["repeat"])] = r
+            if not outage(r):
+                done[(r["task"], r["cell"], r["repeat"])] = r
         header["started_at"] = old["started_at"]
         header["date"] = old["date"]
 
@@ -1031,35 +1054,36 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
     cell_index = {c["id"]: i for i, c in enumerate(cells)}
     wanted = {(t["id"], c["id"], r) for r in range(runs) for t in tasks for c in cells}
 
-    def save(final: bool) -> None:
+    def save(final: bool) -> bool:
         ordered = sorted(
             records,
             key=lambda x: (x["repeat"], task_index.get(x["task"], len(task_index)), cell_index.get(x["cell"], len(cell_index))),
         )
-        have = {(x["task"], x["cell"], x["repeat"]) for x in ordered}
+        have = {(x["task"], x["cell"], x["repeat"]) for x in ordered if not outage(x)}
         result = dict(header, runs=ordered, complete=final and wanted <= have)
         if final:
             result["finished_at"] = utc_now()
         result["summary"] = summarize(ordered, cells, tasks, config)
         write_json(out, result)
+        return result["complete"]
 
     total = len(order) + len(done)
     failures: List[str] = []
 
-    def take(future: concurrent.futures.Future) -> None:
+    def take(future: concurrent.futures.Future) -> Optional[Dict[str, Any]]:
         t, c, r = futures[future]
         try:
             record = future.result()
         except CutShort:
             cut.append(future)
-            return
+            return None
         except (EvalError, OSError, subprocess.SubprocessError, evalchecks.TruthError) as e:
             if settings.agents.stopping:
                 cut.append(future)
-                return
+                return None
             failures.append("%s/%s/%d: %s" % (t["id"], c["id"], r, e))
             print("eval: %s %s run %d could not run: %s" % (t["id"], c["id"], r + 1, e), file=sys.stderr)
-            return
+            return None
         with lock:
             records.append(record)
             save(False)
@@ -1067,23 +1091,34 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
                 "eval: [%d/%d] %s %s run %d: %s%s"
                 % (len(records), total, t["id"], c["id"], r + 1,
                    "completed" if record["completed"] else "not completed",
-                   "" if record["completed"] else " (%s)" % record["failure"]),
+                   "" if record["completed"] else " (%s)" % (record["infrastructure"] or record["failure"])),
                 file=sys.stderr,
             )
+        return record
 
-    # On Ctrl-C (or any error here) the queue is cancelled and the running
-    # agents are ended; a run cut short is not recorded, so --resume runs it.
+    # On Ctrl-C, after STOP_AFTER_OUTAGES outages in a row (or on any error
+    # here) the queue is cancelled and the running agents are ended; a run
+    # cut short is not recorded, so --resume runs it.
     cut: List[concurrent.futures.Future] = []
     taken = set()
     interrupted = False
     drained = False
+    stopped: Optional[str] = None
+    streak = 0
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs))
     futures = {pool.submit(run_one, settings, t, c, r): (t, c, r) for t, c, r in order}
     try:
         for future in concurrent.futures.as_completed(futures):
             taken.add(future)
-            take(future)
-        drained = True
+            record = take(future)
+            if record is None:
+                continue
+            streak = streak + 1 if outage(record) else 0
+            if streak >= STOP_AFTER_OUTAGES:
+                stopped = record["infrastructure"]
+                break
+        else:
+            drained = True
     except KeyboardInterrupt:
         interrupted = True
     finally:
@@ -1096,18 +1131,29 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
         if future not in taken and not future.cancelled():
             take(future)
 
-    save(not interrupted)
+    complete = save(not interrupted and not stopped)
     with open(out, encoding="utf-8") as f:
         print(format_summary(json.load(f)), file=sys.stderr)
     print(out)
+    left = "%d runs cut short and not recorded, %d not started" % (len(cut), sum(1 for f in futures if f.cancelled()))
     if interrupted:
+        print("eval: interrupted: %s; the same command with --resume %s runs them" % (left, out), file=sys.stderr)
+        return 130
+    outages = sum(1 for x in records if outage(x))
+    if stopped:
         print(
-            "eval: interrupted: %d runs cut short and not recorded, %d not started; "
-            "the same command with --resume %s runs them" % (len(cut), sum(1 for f in futures if f.cancelled()), out),
+            "eval: stopped after %d infrastructure failures in a row (the last: %s); %s. Once that is "
+            "fixed, the same command with --resume %s runs them and the failures again"
+            % (STOP_AFTER_OUTAGES, stopped, left, out),
             file=sys.stderr,
         )
-        return 130
-    return 1 if failures else 0
+    elif outages:
+        print(
+            "eval: %d runs failed for the infrastructure and are not counted; the same command with "
+            "--resume %s runs them again" % (outages, out),
+            file=sys.stderr,
+        )
+    return 0 if complete else 1
 
 
 def main(argv: Optional[List[str]] = None, environ: Optional[Dict[str, str]] = None) -> int:

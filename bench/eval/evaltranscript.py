@@ -8,7 +8,11 @@ call failed: a non-zero exit, a denied permission), and a last `result`
 message with the reply (`result`), `num_turns`, `usage`, `modelUsage` (per
 model: input, output, cache read and cache creation tokens, cost),
 `total_cost_usd` and `permission_denials`. Fields this module does not find
-are recorded as null, never guessed.
+are recorded as null, never guessed or counted as 0.
+
+`infrastructure` tells a run that measured Claude Code or the service (a
+rate limit, an expired token, a crash, another model, a skill not listed)
+from one that measured the agent.
 
 The duscope the agent runs is a shim (agent_eval.SHIM) that logs each call as
 NUL-separated fields: the exit status, the argument count, the arguments.
@@ -30,6 +34,9 @@ VERBS = {
 
 # The status the shim answers a refused `clean --yes` or `--permanent` with.
 REFUSED_STATUS = 97
+# The model Claude Code names on the messages it makes itself (an API
+# error's text), which no model wrote.
+SYNTHETIC_MODEL = "<synthetic>"
 
 _JQ_PIPE = re.compile(r"\|\s*jq\b")
 _TOKEN_FIELDS = (
@@ -66,11 +73,15 @@ def summarize_stream(parsed: Dict[str, Any], model: str) -> Dict[str, Any]:
     by_id: Dict[str, Dict[str, Any]] = {}
     assistant_usage: Dict[str, Dict[str, Any]] = {}
     texts: List[str] = []
+    models = {init["model"]} if isinstance(init.get("model"), str) and init["model"] else set()
     for m in messages:
         body = m.get("message") or {}
         content = body.get("content")
         if m.get("type") == "assistant":
-            if body.get("id") and isinstance(body.get("usage"), dict):
+            synthetic = body.get("model") == SYNTHETIC_MODEL
+            if isinstance(body.get("model"), str) and body["model"] and not synthetic:
+                models.add(body["model"])
+            if body.get("id") and isinstance(body.get("usage"), dict) and not synthetic:
                 assistant_usage[body["id"]] = body["usage"]
             for block in content if isinstance(content, list) else []:
                 if block.get("type") == "tool_use":
@@ -94,6 +105,7 @@ def summarize_stream(parsed: Dict[str, Any], model: str) -> Dict[str, Any]:
         reply = texts[-1]
     return {
         "model_seen": init.get("model"),
+        "models_seen": sorted(models),
         "claude_code_version": init.get("claude_code_version"),
         "skills_listed": init.get("skills"),
         "result_subtype": result.get("subtype") if result else None,
@@ -108,7 +120,9 @@ def summarize_stream(parsed: Dict[str, Any], model: str) -> Dict[str, Any]:
         "tool_names": sorted({c["name"] for c in calls if c["name"]}),
         "failed_tool_calls": len(failed),
         "recovered": recovered,
-        "permission_denials": len(result.get("permission_denials") or []) if result else None,
+        "permission_denials": len(result["permission_denials"])
+        if result and isinstance(result.get("permission_denials"), list)
+        else None,
         "skill_invoked": any(skill_call(c) for c in calls),
         "bash_commands": commands,
         "jq_flag_in_commands": any("--jq" in c for c in commands if "duscope" in c),
@@ -132,31 +146,75 @@ def tokens(result: Optional[Dict[str, Any]], assistant_usage: Dict[str, Dict[str
     wrote (input, cache creation, cache reads, output) over the run; it comes
     from `modelUsage`'s entry for that model, else the result's `usage`, else
     the sum of each assistant message's usage. `all_models` adds any other
-    model Claude Code called (`modelUsage`)."""
+    model Claude Code called (`modelUsage`). A count the source lacks is
+    null, and so is a total that needs it."""
     out: Dict[str, Any] = {"source": None, "total": None, "all_models": None}
     for field, _ in _TOKEN_FIELDS:
         out[field] = None
     model_usage = (result or {}).get("modelUsage") or {}
-    mine = {k: v for k, v in model_usage.items() if isinstance(v, dict) and k.startswith(model)}
+    mine = [v for k, v in model_usage.items() if isinstance(v, dict) and k.startswith(model)]
     if mine:
         out["source"] = "modelUsage"
         for field, camel in _TOKEN_FIELDS:
-            out[field] = sum(int(v.get(camel) or 0) for v in mine.values())
+            out[field] = _sum(mine, camel)
     elif isinstance((result or {}).get("usage"), dict):
         out["source"] = "usage"
         for field, _ in _TOKEN_FIELDS:
-            out[field] = int(result["usage"].get(field) or 0)  # type: ignore[index]
+            out[field] = _sum([result["usage"]], field)  # type: ignore[index]
     elif assistant_usage:
         out["source"] = "assistant_messages"
         for field, _ in _TOKEN_FIELDS:
-            out[field] = sum(int(u.get(field) or 0) for u in assistant_usage.values())
-    if out["source"]:
-        out["total"] = sum(out[field] for field, _ in _TOKEN_FIELDS)
+            out[field] = _sum(list(assistant_usage.values()), field)
+    counts = [out[field] for field, _ in _TOKEN_FIELDS]
+    if out["source"] and None not in counts:
+        out["total"] = sum(counts)
     if model_usage:
-        out["all_models"] = sum(
-            int(v.get(camel) or 0) for v in model_usage.values() if isinstance(v, dict) for _, camel in _TOKEN_FIELDS
-        )
+        entries = [v for v in model_usage.values() if isinstance(v, dict)]
+        each = [_sum(entries, camel) for _, camel in _TOKEN_FIELDS]
+        out["all_models"] = None if None in each else sum(each)
     return out
+
+
+def _sum(entries: List[Dict[str, Any]], key: str) -> Optional[int]:
+    """`key` summed over `entries`, or None when one of them lacks it."""
+    values = [e.get(key) for e in entries]
+    if not values or any(isinstance(v, bool) or not isinstance(v, int) for v in values):
+        return None
+    return sum(values)
+
+
+def lists_skill(skills: Any, name: str = "duscope") -> bool:
+    """Whether the init message's `skills` (names) holds `name`."""
+    return isinstance(skills, list) and any(s == name or (isinstance(s, dict) and s.get("name") == name) for s in skills)
+
+
+def infrastructure(stream: Dict[str, Any], exit_status: Optional[int], model: str, skill: bool) -> Optional[str]:
+    """Why a run that ended before its time limit measured the infrastructure
+    rather than the agent, or None. The stream (`summarize_stream`) ended
+    without a result, or with an error result (a rate limit, an expired
+    token, a failed request: `is_error`), or Claude Code exited with another
+    status than 0; a model other than the pinned one answered, or none is
+    named; or a run of a cell with the skill lists no duscope skill. A run
+    that used every turn is the agent's own failure, though Claude Code
+    marks its result an error."""
+    subtype = stream["result_subtype"]
+    if subtype == "error_max_turns":
+        return None
+    if subtype is None:
+        return "no result: Claude Code exited with status %s" % exit_status
+    if stream["result_is_error"]:
+        text = stream["reply"] if isinstance(stream["reply"], str) else ""
+        return "Claude Code ended with an error (%s): %s" % (subtype, text.strip()[:300])
+    if exit_status != 0:
+        return "Claude Code exited with status %s" % exit_status
+    if not stream["models_seen"]:
+        return "the stream names no model"
+    other = [m for m in stream["models_seen"] if not m.startswith(model)]
+    if other:
+        return "the stream names %s, not the pinned %s" % (", ".join(other), model)
+    if skill and not lists_skill(stream["skills_listed"]):
+        return "the run lists no duscope skill"
+    return None
 
 
 def parse_shim_log(data: bytes) -> List[Dict[str, Any]]:
