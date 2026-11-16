@@ -417,10 +417,10 @@ result (`--dry-run`); `false` is `--yes`.
 
 ## Conformance oracle (P3-MCP-06)
 
-Oracle: rmcp 3.9.0, the protocol's Rust SDK, whose client the conformance suite
+Oracle: rmcp 3.10.0, the protocol's Rust SDK, whose client the conformance suite
 runs against `duscope mcp`.
 
-The workspace's `Cargo.toml` pins it with `=3.9.0`, a dev-dependency of
+The workspace's `Cargo.toml` pins it with `=3.10.0`, a dev-dependency of
 `duscope-mcp` alone, and `deny.toml` bans it, with the tokio it runs on, from
 everything else, so no build the project ships holds it (D36, DEV-104). A
 `p3_mcp_06_*` test holds the line above to that pin and to the version
