@@ -576,8 +576,10 @@ duscope's figures.
 A run that measured the infrastructure rather than the agent fails as `infrastructure`, with the
 reason beside it: Claude Code ended without a result message, with an error result (`is_error`: a
 rate limit, an expired token, a failed request), or with another exit status than 0; the stream
-names a model other than the pinned one, or none; or a run of a cell with the skill lists no
-`duscope` skill. A run that used all its turns is the agent's own failure, though Claude Code marks
+names a model other than the pinned one, or none; a run of a cell with the skill lists no
+`duscope` skill; or the stream has a shape the harness cannot read, whose transcript is kept for a
+look. Events Claude Code streams besides messages, such as a notice whose `message` is text, are
+passed over. A run that used all its turns is the agent's own failure, though Claude Code marks
 it an error; a timeout, a changed tree and a refused deletion stay the agent's too. Such a run is
 recorded and counted apart, and left out of every figure but the cost: completion, tokens and the
 decisions read the other runs alone. Three in a row stop the eval as Ctrl-C does, so an account
@@ -590,14 +592,16 @@ often it passed one. Three runs of each task in each cell are 120 runs, made in 
 order: every cell runs a task before the next task, and every task runs once before any runs
 again.
 
-**What it costs.** 120 runs, each up to 30 turns. Headless Claude Code reads its system prompt and
-tools from the prompt cache on every turn, so most of a run's tokens are cache reads: a run of
-6–10 turns is a few hundred thousand tokens, and at Sonnet 5.5's prices ($2 a million input
-tokens, $10 output, $0.20 cache reads) on the order of $0.10–0.40, so $15–50 for the eval; a
-subscription token counts against the subscription's limits instead. These are estimates: each
-run records Claude Code's own `total_cost_usd` and tokens, and `summary` sums them per cell. At 1–3
-minutes a run, 120 runs take 2–6 hours; `--jobs N` runs N at once, within the account's rate
-limits. Ctrl-C stops the eval: the runs not started are cancelled and the running agents ended
+**What it costs.** 120 runs, each up to 30 turns. With a Claude subscription's token
+(`CLAUDE_CODE_OAUTH_TOKEN`) the runs count against the plan's usage limits, and are billed only past
+them where the plan buys usage on demand; with an API key they are billed per token. Headless Claude
+Code reads its system prompt and tools from the prompt cache on every turn, so most of a run's
+tokens are cache reads. Measured on 2026-11-16 (the first two tasks, every cell): 50,000–90,000
+tokens and 3–5 turns a run, which Claude Code prices at $0.05–0.11 at Sonnet 5.5's API rates ($2 a
+million input tokens, $10 output, $0.20 cache reads), so roughly $7–15 for the eval at those rates;
+the later tasks take more turns. `total_cost_usd` in each record is that price, not a bill, and
+`summary` sums it per cell. A run took under a minute; `--jobs N` runs N at once, within the
+account's rate limits. Ctrl-C stops the eval: the runs not started are cancelled and the running agents ended
 (each runs in a session of its own, which the terminal's Ctrl-C does not reach), and the eval
 exits with status 130. A run cut short is not recorded. `--resume FILE` continues an interrupted
 run: the runs in FILE are kept and not made again, but for those that failed for the

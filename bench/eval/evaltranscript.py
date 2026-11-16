@@ -75,15 +75,20 @@ def summarize_stream(parsed: Dict[str, Any], model: str) -> Dict[str, Any]:
     texts: List[str] = []
     models = {init["model"]} if isinstance(init.get("model"), str) and init["model"] else set()
     for m in messages:
-        body = m.get("message") or {}
+        # Claude Code also streams events whose `message` is text (a notice)
+        # rather than a message; they hold no turn, call or reply.
+        body = m.get("message")
+        if not isinstance(body, dict):
+            body = {}
         content = body.get("content")
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
         if m.get("type") == "assistant":
             synthetic = body.get("model") == SYNTHETIC_MODEL
             if isinstance(body.get("model"), str) and body["model"] and not synthetic:
                 models.add(body["model"])
             if body.get("id") and isinstance(body.get("usage"), dict) and not synthetic:
                 assistant_usage[body["id"]] = body["usage"]
-            for block in content if isinstance(content, list) else []:
+            for block in blocks:
                 if block.get("type") == "tool_use":
                     call = {"id": block.get("id"), "name": block.get("name"), "input": block.get("input") or {}, "is_error": None}
                     calls.append(call)
@@ -92,7 +97,7 @@ def summarize_stream(parsed: Dict[str, Any], model: str) -> Dict[str, Any]:
                 elif block.get("type") == "text":
                     texts.append(block.get("text") or "")
         elif m.get("type") == "user":
-            for block in content if isinstance(content, list) else []:
+            for block in blocks:
                 if block.get("type") == "tool_result" and block.get("tool_use_id") in by_id:
                     by_id[block["tool_use_id"]]["is_error"] = bool(block.get("is_error"))
     failed = [i for i, c in enumerate(calls) if c["is_error"]]

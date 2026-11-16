@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EVAL = os.path.join(HERE, "eval")
@@ -407,6 +408,20 @@ class Transcript(unittest.TestCase):
         self.assertTrue(s["skill_invoked"] and s["jq_flag_in_commands"] and s["jq_pipe"])
         self.assertEqual(s["skills_listed"], ["duscope"])
 
+    def test_p3_agt_03_an_event_whose_message_is_text_is_passed_over(self):
+        text = stream(
+            {"type": "system", "subtype": "init", "model": "m"},
+            {"type": "system", "subtype": "notice", "message": "Usage is close to the limit"},
+            {"type": "assistant", "message": "a notice, not a message"},
+            {"type": "user", "message": {"content": ["a block as text"]}},
+            {"type": "assistant", "message": {"id": "m1", "content": ["text alone", {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "duscope top"}}]}},
+            self.result(1, False),
+            {"type": "result", "subtype": "success", "num_turns": 2, "result": "ANSWER: {}"},
+        )
+        s = evaltranscript.summarize_stream(evaltranscript.parse_stream(text), "m")
+        self.assertEqual((s["turns"], s["tool_calls"], s["failed_tool_calls"], s["reply"]), (2, 1, 0, "ANSWER: {}"))
+        self.assertEqual(s["bash_commands"], ["duscope top"])
+
     def test_p3_agt_03_tokens_fall_back_to_usage_then_to_the_messages(self):
         usage = {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4}
         s = evaltranscript.summarize_stream(evaltranscript.parse_stream(stream({"type": "result", "usage": usage})), "m")
@@ -750,6 +765,33 @@ class Fake(unittest.TestCase):
         self.assertEqual(decisions["jq"]["flag_runs"], 0)
         self.assertEqual(set(result["prompts"]), {t["id"] for t in result["tasks"]})
         self.assertIn("{root}", result["prompts"]["largest-dir"])
+
+    def test_p3_agt_03_notices_in_the_stream_leave_a_run_as_it_was(self):
+        result, _ = self.run_eval("--fake", "right", "--cells", "skill-json", "--tasks", "largest-dir,cache-savings", fake="notices")
+        self.assertTrue(result["complete"])
+        self.assertEqual([(r["task"], r["completed"], r["infrastructure"]) for r in result["runs"]],
+                         [("largest-dir", True, None), ("cache-savings", True, None)])
+
+    def test_p3_agt_03_a_stream_the_reader_cannot_read_is_an_outage_kept_for_resume(self):
+        real = agent_eval.evaltranscript.summarize_stream
+
+        def broken(parsed, model):
+            if parsed["messages"]:
+                raise AttributeError("'str' object has no attribute 'get'")
+            return real(parsed, model)
+
+        with mock.patch.object(agent_eval.evaltranscript, "summarize_stream", side_effect=broken):
+            result, d = self.run_eval("--fake", "right", "--cells", "skill-json", "--tasks", "largest-dir", status=1)
+        self.assertFalse(result["complete"])
+        (r,) = result["runs"]
+        self.assertEqual(r["failure"], "infrastructure")
+        self.assertIn("the transcript could not be read: AttributeError", r["infrastructure"])
+        self.assertTrue(os.path.isfile(os.path.join(REPO, os.path.expanduser(r["transcript"]))), r["transcript"])
+        # --resume makes it again with a reader that works.
+        result, _ = self.run_eval("--fake", "right", "--cells", "skill-json", "--tasks", "largest-dir",
+                                  "--resume", os.path.join(d, "result.json"), d=d)
+        self.assertTrue(result["complete"])
+        self.assertTrue(result["runs"][0]["completed"])
 
     def test_p3_agt_03_the_fake_agent_answering_wrong_completes_none(self):
         result, _ = self.run_eval("--fake", "wrong", "--cells", "no-skill-json")
