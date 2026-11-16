@@ -517,6 +517,22 @@ pub fn cachedir_tag(dir: &Path) -> bool {
     platform::cachedir_tag(dir)
 }
 
+/// The regular file at `path`, read whole, a final symbolic link followed:
+/// refused with [`io::ErrorKind::FileTooLarge`] when it holds more than
+/// `cap` bytes (never truncated), [`io::ErrorKind::IsADirectory`] for a
+/// directory and [`io::ErrorKind::InvalidInput`] for anything else that is
+/// not a regular file, so a FIFO cannot block the read and a device cannot
+/// fill memory.
+///
+/// Its caller is the binary, for the files a scan's options name
+/// (`--exclude-from`, `--ignore-from`, `[caches] extra`), which a rescan
+/// takes from a saved scan. They are not the scanned tree's: the scanner
+/// still reads no file's contents but those the repository's invariant
+/// lists.
+pub fn read_regular(path: &Path, cap: u64) -> io::Result<Vec<u8>> {
+    platform::read_regular(path, cap)
+}
+
 /// Whether the process with id `pid` is running (`scans --prune` keeps the
 /// temporary file of a write still in progress).
 pub fn process_alive(pid: u32) -> bool {
