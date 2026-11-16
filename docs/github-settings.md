@@ -217,7 +217,12 @@ under [Auditing](#auditing) read it again.
   `GITHUB_TOKEN` cannot create one. release.yml's `verify-tag` job checks the
   signature as well, so a tag pushed past the rule still releases nothing.
   `actor_id` 5 is the built-in admin role. Applied on 2026-10-24 as ruleset
-  25776511, "Release tags".
+  25776511, "Release tags". The rule goes by the tag's name alone, so the
+  author creates a patch's tag on its `hotfix/vX.Y.Z` branch
+  ([RELEASING.md](RELEASING.md#from-a-hotfix-branch)) as on `main`. No ruleset
+  or protection covers `hotfix/*` branches (read on 2026-11-15), so pushing one
+  needs no setting either, and no check is required before a pull request into
+  one merges.
 
   ```sh
   gh api -X POST repos/kawadeomkar/duscope/rulesets --input - <<'EOF'
