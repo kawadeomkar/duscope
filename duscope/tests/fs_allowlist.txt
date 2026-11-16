@@ -319,14 +319,17 @@ lstat_at: libc::fstatat
   fstatat(2) of a name in a directory's descriptor, not following a final
   link: each entry for the fallback provider and an entry macOS's attribute
   read cannot answer for; clean's check that an entry is still the one the
-  plan saw (unlink.rs stat_at on macOS, and on Linux without statx) and the
-  Linux Trash's look for a name before a plain rename (DEV-181); scans
-  --check's sweep. Metadata only: nothing opened.
+  plan saw (unlink.rs stat_at on macOS, and on Linux without statx), and the
+  same check of each file scans --prune removes; the Linux Trash's look for a
+  name before a plain rename (DEV-181); scans --check's sweep. Metadata only:
+  nothing opened.
 open_with: libc::openat
   Every directory the walk reads (the tree), opened O_DIRECTORY|O_NOFOLLOW
   relative to its parent's descriptor; the staleness sweep of a scan that
   followed links opens the pieces of a long path without O_NOFOLLOW, as that
-  scan read them.
+  scan read them. unlink.rs CheckedDir::open's way from `/`, O_NOFOLLOW each
+  component, to the directory clean removes from and to the index directory's
+  `scans` and `out` scans --prune removes from.
 read_regular: .metadata(), OpenOptions::new, fs::metadata, fs::symlink_metadata
   explain's reads of git's files (DEV-154), and the files a scan's options name
   (--exclude-from, --ignore-from, [caches] extra: a person's, or on rescan the
@@ -378,7 +381,10 @@ mount_id_at: libc::SYS_name_to_handle_at
 remove_at: libc::unlinkat
   clean --permanent: each entry removed through its directory's descriptor,
   reached from `/` without following a link, once its (dev, ino) matches the
-  plan's (P5-CORE-03); unlinkat never follows a final link.
+  plan's (P5-CORE-03); unlinkat never follows a final link. scans --prune
+  (duscope/src/verbs/scans.rs remove): each index file, temporary file and
+  spill the same way, through `scans` or `out` opened once, while its (dev,
+  ino) is the listing's.
 renameat: libc::renameat
   The Linux Trash's move where RENAME_NOREPLACE is refused: through
   descriptors, after an lstat finds nothing at the new name (DEV-181).
@@ -389,7 +395,8 @@ statx: libc::SYS_statx
   Linux: clean's check of each entry it moves or deletes, by name in its
   directory's descriptor (or the descriptor itself), not following a final
   link nor triggering an automount: its (dev, ino) against the plan's, and
-  the mount-root attribute that tells a bind mount. Metadata only.
+  the mount-root attribute that tells a bind mount; scans --prune's of each
+  file it removes, against the listing's. Metadata only.
 
 ## duscope/src/agent/mod.rs
 
@@ -467,29 +474,37 @@ unresolved_link: fs::metadata, fs::symlink_metadata
 
 ## duscope/src/verbs/scans.rs
 
+at: fs::symlink_metadata
+  An index file --prune removes (a regular file of `scans` named <id>.db, as
+  query/resolve.rs index_files lists it): an lstat for the (dev, ino) its
+  removal must find through the folder's descriptor.
 check: fs::canonicalize
   The index directory, resolved to leave it out of scans --check's sweep.
+folder: fs::canonicalize, fs::symlink_metadata
+  scans --prune (a person's; no MCP tool prunes): the index directory's `scans`
+  and `out`, each refused when an lstat shows a symbolic link, before anything
+  is removed; else the index directory resolved, and the folder opened from
+  `/` a component at a time without following a link (duscope-walk's
+  CheckedDir::open). Every file --prune removes goes through that descriptor
+  (duscope_walk::unlink_checked, by name, only while the name is the (dev, ino)
+  listed), so a folder swapped for a link later leads no removal elsewhere.
 list: fs::metadata
   Each index file's size, for the listing.
-no_link: fs::symlink_metadata
-  The index directory's `scans` and `out`: an lstat of each, so that --prune
-  refuses one that is a symbolic link before it removes anything.
 old_spills: fs::read_dir
-  The index directory's `out`, which prune has checked is no link: regular
-  files with a spill's name (out/spill.rs is_spill_name) older than a week,
-  for --prune; nothing else there is removed.
-older_than: .metadata()
-  An entry of `scans` or `out`, for its modification time.
-remove: fs::metadata, fs::remove_file
-  scans --prune (a person's; no MCP tool prunes): the index files, temporary
-  files and spills the listing chose, each by the name its writer gives it,
-  all in the index directory; unlink removes a link, never what it leads to.
+  The index directory's `out`: regular files with a spill's name
+  (out/spill.rs is_spill_name) older than a week, for --prune; nothing else
+  there is removed. Listed by path: what a link swapped in leads to may be
+  listed, but its (dev, ino) is not the folder's entry, so it is not removed.
+regular: .metadata()
+  An entry of `scans` or `out` that --prune lists: an lstat (DirEntry's
+  metadata never follows a link), for its type, (dev, ino), size and
+  modification time.
 stray_temporaries: fs::read_dir
-  The index directory's `scans`, which prune has checked is no link: regular
-  files (by the entry's own type, so no link) named as the index writer names
-  its temporary files, <id>.db.tmp-<pid> with a scan id and a decimal pid,
-  whose process is gone or that are older than a day; nothing else there is
-  taken.
+  The index directory's `scans`: regular files (by the entry's own lstat, so
+  no link) named as the index writer names its temporary files,
+  <id>.db.tmp-<pid> with a scan id and a decimal pid, whose process is gone or
+  that are older than a day; nothing else there is taken. Listed by path, and
+  removed as old_spills' are.
 
 ## duscope/src/verbs/schema.rs
 
