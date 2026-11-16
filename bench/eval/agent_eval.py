@@ -576,7 +576,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
         "repeat": repeat,
         "completed": failure is None,
         "failure": failure,
-        "infrastructure": evalchecks.portable(outage, root) if outage else None,
+        "infrastructure": evalchecks.portable(outage, root, work) if outage else None,
         "check": verdict,
         "expected": evalchecks.portable(truth.expected, root),
         "exit_status": proc.returncode,
@@ -585,11 +585,11 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
         "skill_installed": skill_installed,
     }
     record.update(stream)
-    record["reply"] = evalchecks.portable(reply[-2000:], root) if isinstance(reply, str) else None
-    record["bash_commands"] = [evalchecks.portable(c, root) for c in commands]
+    record["reply"] = evalchecks.portable(reply[-2000:], root, work) if isinstance(reply, str) else None
+    record["bash_commands"] = [evalchecks.portable(c, root, work) for c in commands]
     record["duscope"] = duscope
     record["tree_changes"] = changes
-    record["claude_stderr_tail"] = evalchecks.portable(stderr_tail, root) if stderr_tail.strip() else None
+    record["claude_stderr_tail"] = evalchecks.portable(stderr_tail, root, work) if stderr_tail.strip() else None
     record["transcript"] = shown_path(saved) if saved else None
     if fixture:
         record["fixture"] = {"old_scan": fixture["old_scan"], "new_scan": fixture["new_scan"]}

@@ -376,6 +376,26 @@ def stream(*messages):
     return "\n".join(json.dumps(m) for m in messages) + "\n"
 
 
+class Portable(unittest.TestCase):
+    def test_p3_agt_03_a_record_names_no_path_of_the_run_s_directory(self):
+        work = tempfile.mkdtemp(prefix="duscope-eval-")
+        self.addCleanup(shutil.rmtree, work)
+        root = os.path.join(work, "disk", "alex")
+        os.makedirs(root)
+        skill = os.path.join(os.path.realpath(work), "home", ".claude", "skills", "duscope", "references", "sql.md")
+        commands = [
+            "cat %s; duscope top %s" % (skill, os.path.realpath(root)),
+            "cd %s && duscope tree ." % os.path.join(work, "disk"),
+        ]
+        self.assertEqual(
+            evalchecks.portable(commands, root, work),
+            ["cat {work}/home/.claude/skills/duscope/references/sql.md; duscope top {root}",
+             "cd {work}/disk && duscope tree ."],
+        )
+        # Without the run's directory, only the root is written for it.
+        self.assertIn(os.path.realpath(work), evalchecks.portable(commands, root)[0])
+
+
 class Transcript(unittest.TestCase):
     def tool(self, n, name, inp):
         return {"type": "assistant", "message": {"id": "m%d" % n, "content": [{"type": "tool_use", "id": "t%d" % n, "name": name, "input": inp}], "usage": {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4}}}

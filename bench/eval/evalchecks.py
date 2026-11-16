@@ -473,17 +473,22 @@ def check(name: str, text: Optional[str], truth: Truth, tolerance: float, ctx: C
     return {"passed": not reasons, "reasons": reasons, "answer": portable(answer, ctx.root)}
 
 
-def portable(value: Any, root: str) -> Any:
-    """`value` with the root's path written `{root}` wherever it appears, so
-    a result file reads the same whichever directory a run was in."""
+def portable(value: Any, root: str, work: Optional[str] = None) -> Any:
+    """`value` with the root's path written `{root}` wherever it appears, and
+    the run's own directory (its scratch HOME, the skill in it, the disk
+    image's folder) `{work}`, so a result file reads the same whichever
+    directory a run was in and names no path of the account that ran it."""
     if isinstance(value, str):
-        for prefix in sorted({os.path.realpath(root), os.path.normpath(root)}, key=len, reverse=True):
-            value = value.replace(prefix, "{root}")
+        names = {p: "{root}" for p in (os.path.realpath(root), os.path.normpath(root))}
+        if work:
+            names.update({p: "{work}" for p in (os.path.realpath(work), os.path.normpath(work))})
+        for prefix in sorted(names, key=len, reverse=True):
+            value = value.replace(prefix, names[prefix])
         return value
     if isinstance(value, list):
-        return [portable(v, root) for v in value]
+        return [portable(v, root, work) for v in value]
     if isinstance(value, dict):
-        return {k: portable(v, root) for k, v in value.items()}
+        return {k: portable(v, root, work) for k, v in value.items()}
     return value
 
 
