@@ -307,6 +307,16 @@ viewer and `clean` in full.
 
 ## With an AI agent
 
+`duscope agent --skill` writes a skill that Claude Code and other agents' clients load by
+themselves when a question is about disk space: the briefing an agent reads before it uses
+duscope (which verb answers which question, the handle `clean` checks, the exit and error codes,
+the SQL tables), in `.agents/skills/duscope/` and `.claude/skills/duscope/` under the working
+directory or `--dir`. The skill is recommended: in the project's evaluation, 120 runs of ten
+disk-hygiene tasks through Claude Code, agents completed every task with it and without it, and
+used 29.5% fewer tokens with it ([bench/README.md](bench/README.md#the-agent-eval),
+[the results](bench/eval/results/2026-11-16.json)). `duscope agent` prints the same briefing on
+stdout, and run by an agent's client every verb writes JSON.
+
 `duscope mcp` serves scans to MCP clients over stdio, and they reach nothing
 outside the directories given to `--roots` (v0.2.0's server offers no tools;
 they come with v0.3). Each client takes one line:

@@ -1,0 +1,121 @@
+.SH "MCP SERVER"
+.B duscope mcp
+serves saved scans to a Model Context Protocol client over stdin and
+stdout, in JSON\-RPC, one message a line, in both the 2026\-07\-28 and the
+2025\-11\-25 revisions of the protocol.
+It answers from the same saved scans, in the same JSON envelope, as the
+command line, in the index directory the command line would use, and opens
+no network socket.
+Nothing but the protocol's messages goes to stdout; the log goes to
+stderr, at the level
+.B \-\-log\-level
+sets.
+.SS Roots
+.B \-\-roots
+is required and names the directories the client may reach; it can be
+given several.
+A path outside the roots, one that holds
+.BR .. ,
+or one longer than 4096 bytes is refused with
+.BR refused_path .
+A path is resolved as the file system resolves it before it is compared
+with the roots, so a link inside a root that leads out of it is refused
+too.
+A saved scan of a directory under a root is seen as it is, one of a
+directory above a root is read at that root, and any other is not seen.
+.SS Tools
+The server lists the tools below.
+A result is the
+.B \-\-json
+envelope of the verb of the same name, and a tool takes each flag it
+exposes as the parameter of the same name in snake case:
+.B \-\-min\-size
+is
+.BR min_size .
+.TP
+.B duscope_scan
+Scan a directory under the roots and save the scan: the other tools read
+saved scans.
+With
+.BR max_age ,
+a recent scan of the directory is returned instead.
+.TP
+.B duscope_scans
+The saved scans of directories under the roots, newest first.
+.TP
+.B duscope_summary
+Totals under a path in a saved scan.
+.TP
+.B duscope_top
+The largest directories, or files, under a path.
+.TP
+.B duscope_by_type
+The bytes under a path by kind of file.
+.TP
+.B duscope_stale
+Large files neither modified nor changed for a long time.
+.TP
+.B duscope_caches
+The regenerable caches under a path, with what regenerates each.
+.TP
+.B duscope_diff
+What changed between two saved scans of one tree.
+.TP
+.B duscope_explain
+The facts about one file or directory, with the
+.B handle
+.B duscope_delete
+asks for.
+.TP
+.B duscope_schema
+The index's tables, for
+.BR duscope_query ,
+or a verb's output as JSON Schema.
+.TP
+.B duscope_query
+One read\-only SQL SELECT over a saved scan, in the command line's
+sandbox.
+.TP
+.B duscope_delete
+Only with
+.BR \-\-allow\-delete :
+move entries under the roots to the Trash, never deleting them.
+Each item names a
+.B handle
+from
+.B duscope_explain
+and the bytes it should free; a figure off by more than 1% refuses it, and
+one refused item stops the call.
+A call is a dry run unless
+.B dry_run
+is false, and the tool asks the client to have a person confirm each call,
+which a client that honours it does.
+.SS Limits
+One call runs at a time, and the rest wait in order.
+.B duscope_scan
+has 10 minutes and the other tools 30 seconds; a call past its deadline
+is answered
+.BR deadline_exceeded ,
+and a scan past it, or cancelled, saves nothing.
+A message is at most 1 MiB.
+At most 64 requests, holding 32 MiB between them, wait behind the running
+call; one more is answered at once with the JSON\-RPC error \-31000, the
+server is busy.
+If duscope panics, the server answers the running call and every one
+waiting with an internal error (\-32603) before it ends.
+.SS Registering
+Each client takes one command:
+.PP
+.nf
+.RS 4
+claude mcp add \-\-transport stdio duscope \-\- duscope mcp \-\-roots ~
+codex mcp add duscope \-\- duscope mcp \-\-roots ~
+gemini mcp add \-\-scope user duscope duscope mcp \-\- \-\-roots ~
+.RE
+.fi
+.PP
+Each tool's parameters, and a Claude Code hook that asks before
+.B duscope clean
+runs, are in
+.IR docs/mcp.md ,
+in the source distribution.

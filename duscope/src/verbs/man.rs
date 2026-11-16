@@ -22,12 +22,14 @@ use crate::cli::{Cli, visible_verbs};
 use crate::out::emit_bytes;
 
 /// The page's date, changed with its hand-written prose.
-const DATE: &str = "2026-11-15";
+const DATE: &str = "2026-11-16";
 
 /// The hand-written sections, in order.
-const SECTIONS: [&str; 7] = [
+const SECTIONS: [&str; 9] = [
     include_str!("man/viewer.roff"),
     include_str!("man/clean.roff"),
+    include_str!("man/mcp.roff"),
+    include_str!("man/agent.roff"),
     include_str!("man/environment.roff"),
     include_str!("man/exit-status.roff"),
     include_str!("man/files.roff"),
@@ -297,6 +299,37 @@ mod tests {
     }
 
     #[test]
+    fn p3_doc_01_the_tools_in_the_page_are_the_server_s() {
+        let text = page().unwrap();
+        let mut listed: Vec<String> = tags(&part(&text, "MCP SERVER", Some("Tools")))
+            .into_iter()
+            .flatten()
+            .collect();
+        listed.sort();
+        let mut shipped: Vec<String> = duscope_mcp::tools::shipped()
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        shipped.sort();
+        assert_eq!(
+            listed, shipped,
+            "MCP SERVER's tools against the tools the server ships"
+        );
+    }
+
+    #[test]
+    fn p3_doc_01_the_skill_s_folders_in_the_page_are_the_ones_it_writes() {
+        let text = page().unwrap();
+        let skill = part(&text, "AGENTS", Some("The skill")).join("\n");
+        for folder in crate::agent::SKILL_DIRS {
+            assert!(
+                skill.contains(&format!(".I {folder}/")),
+                "AGENTS names {folder}/:\n{skill}"
+            );
+        }
+    }
+
+    #[test]
     fn p4_doc_01_the_page_s_parts_and_tags_are_read_as_roff_writes_them() {
         let roff = ".SH NAME\nx\n.SH \"A B\"\ntext\n.SS Keys\n.TP\n.BR q \", \" Ctrl\\-C\n\
                     Quit.\n.TP\n.B /\nFilter.\n.SS Other\n.TP\n.B z\n.SH C\n";
@@ -365,6 +398,8 @@ mod tests {
                 "VERBS",
                 "INTERACTIVE VIEWER",
                 "CLEANING UP",
+                "MCP SERVER",
+                "AGENTS",
                 "ENVIRONMENT",
                 "EXIT STATUS",
                 "FILES",
