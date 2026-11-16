@@ -19,7 +19,7 @@
 # ubuntu-24.04 and macos-26; docs; schemas; size on macos-26 and ubuntu-24.04,
 # and size-comment; build-time; repro; pixels on macos-26 and ubuntu-24.04;
 # changelog. Not required: intel-mac (best effort), quick, and mcp-smoke, which
-# runs on the schedule and a dispatch alone.
+# runs on a dispatch alone until its vendor keys are set (phase 5).
 #
 # Scope (DEV-73): a stack of pull requests runs every job of each of them again
 # at each push, and a macOS runner is the scarce one (five at a time on this
@@ -974,16 +974,18 @@ jobs:
   mcp-smoke:
     # Claude Code, Codex CLI and Gemini CLI each register `duscope mcp` with
     # the command its documentation gives and make three tool calls through
-    # it (P3-MCP-06, crates/duscope-mcp/tests/smoke/). On the schedule and a
-    # dispatch alone, never on a pull request, and not required: each run
-    # pays the three vendors and waits on their uptime. Each client's step
+    # it (P3-MCP-06, crates/duscope-mcp/tests/smoke/). On a dispatch alone,
+    # never on a pull request, and not required: each run pays the three
+    # vendors and waits on their uptime. The keys are set before 1.0 (the
+    # Gate 5 checklist), and the schedule comes back with them: until then a
+    # scheduled run would fail every day for want of them. Each client's step
     # gets its own key from the repository secrets (docs/RELEASING.md) and no
     # other step gets one; a key that is not set fails its step. Every step
     # runs whatever failed before it once the build has passed, and the three
     # logs are kept as an artifact, which the author commits beside the
     # scripts.
     name: mcp-smoke
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
