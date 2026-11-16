@@ -160,12 +160,13 @@ platform-tests:
       p5_test_01_linux_iso_9660_and_erofs_images_are_read_only
       p5_test_01_linux_f2fs_is_local_with_links_and_btime_as_statx_reports
       p5_test_01_linux_hfsplus_is_foreign_with_links_and_case_unknown
+      tests::p5_test_01_macos_an_image_left_attached_in_a_test_directory_is_kept
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Each platform builds its own share of the list: twenty-seven on macOS and thirty on Linux.
+    # Each platform builds its own share of the list: twenty-eight on macOS and thirty on Linux.
     # A renamed test must not drop out unnoticed.
     case "$(uname -s)" in
-      Darwin) expected=27 ;;
+      Darwin) expected=28 ;;
       *) expected=30 ;;
     esac
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
@@ -250,7 +251,7 @@ size target="":
     awk -v b="$bytes" -v l={{size_budget}} 'BEGIN { printf "duscope: %d bytes stripped, %.2f MB of the %.2f MB budget\n", b, b / 1e6, l / 1e6 }'
     (( bytes <= {{size_budget}} )) || { echo "size: over budget" >&2; exit 1; }
 
-# The reproducible release build CI and releases use; prints the binary's SHA-256
+# The reproducible release build CI's repro job compares; prints the binary's SHA-256
 repro target_dir="target/repro":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -258,6 +259,27 @@ repro target_dir="target/repro":
     while IFS= read -r line; do export "$line"; done <<< "$env_lines"
     cargo build --release --locked -p duscope --target-dir '{{target_dir}}'
     if command -v sha256sum >/dev/null; then sha256sum '{{target_dir}}/release/duscope'; else shasum -a 256 '{{target_dir}}/release/duscope'; fi
+
+# The binary of a release archive, built as release.yml's cargo-dist builds it under the
+# repro environment: what cargo-dist 0.33.1 runs (its build/cargo.rs, with precise-builds),
+# `cargo auditable build --profile dist --target <target> --package duscope`, and for a musl
+# target the two flags it adds after the environment's RUSTFLAGS. `repro` cannot equal an
+# archive's binary: another profile and target, and no dependency list embedded. The default
+# target directory is release.yml's. Made twice at a tag on the release's runner image, the
+# build equals the archive's binary (docs/RELEASING.md).
+# The release archive's binary for `target`, as release.yml builds it; prints its SHA-256
+repro-dist target target_dir="target":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    env_lines=$('{{just_executable()}}' --justfile '{{justfile()}}' repro-env '{{target_dir}}')
+    while IFS= read -r line; do export "$line"; done <<< "$env_lines"
+    target={{quote(target)}}
+    if [[ $target == *-musl ]]; then
+      RUSTFLAGS+=" -Ctarget-feature=+crt-static -Clink-self-contained=yes"
+    fi
+    cargo auditable build --profile dist --locked --target "$target" --package duscope --target-dir '{{target_dir}}'
+    binary='{{target_dir}}'/"$target"/dist/duscope
+    if command -v sha256sum >/dev/null; then sha256sum "$binary"; else shasum -a 256 "$binary"; fi
 
 # The environment of the reproducible build as KEY=value lines: repro builds under it, and release.yml's cargo-dist builds too
 repro-env target_dir="target/repro":

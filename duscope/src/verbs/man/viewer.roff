@@ -76,8 +76,8 @@ Narrower, the facts fold into a pane under the map.
 The last row is the key line: six keys for the view and the pane in
 focus.
 .PP
-The selection starts at the largest file, reached through the largest
-folder at each level.
+The selection starts on the file reached from the viewer's root by taking
+the largest entry at every level, which need not be the largest file.
 The arrow keys move it to the neighbouring tile at the same depth;
 .B Enter
 goes down the path, back to where it went before or into the folder's
@@ -257,7 +257,7 @@ Quit, giving the terminal back.
 marks the selection, and unmarks it when it is marked.
 A folder's mark covers everything under it: marking a folder drops the
 marks inside it, and an entry inside a marked folder is not marked again.
-The map's root cannot be marked.
+The viewer's root cannot be marked.
 .B D
 opens the mark pane: the plan
 .B clean
@@ -282,9 +282,10 @@ does without
 The viewer never deletes: it has no
 .BR \-\-permanent .
 .PP
-What moved stays on the map as a freed tile until the viewer closes, and
-neither it nor a folder that holds it can be marked again before a
-rescan.
+What moved stays on the map as a freed tile until
+.B r
+reloads the map from a new scan or the viewer closes, and until then
+neither it nor a folder that holds it can be marked again.
 When the viewer closes, stderr says what it moved, with the
 .B index_untouched
 warning: the saved scans count what moved until

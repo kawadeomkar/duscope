@@ -7,7 +7,12 @@ Scan the current directory and draw its treemap.
 The ten largest directories two levels under the home folder.
 .TP
 .B duscope stale ~/Downloads \-\-older\-than 180d \-\-min\-size 100M
-Large downloads nobody has changed for half a year.
+Large downloads neither modified nor changed (their ctime) for half a year.
+A file restored, or copied with its times kept, has a new change time and
+is not listed.
+.TP
+.B duscope top ~/Downloads \-\-files \-\-older\-than 180d \-\-min\-size 100M
+Large downloads not modified for half a year, whatever their change time.
 .TP
 .B duscope by\-type . \-\-examples 3
 Bytes by file class, with the three largest files of each.

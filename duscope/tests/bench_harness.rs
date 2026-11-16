@@ -7,7 +7,11 @@
 //! the pull request reports and in the nightly job. No pinned competitor is
 //! installed (`--competitors none`), so nothing touches the network: an ad-hoc
 //! `find` command plays the competitor. They read repository files and run
-//! Python; they never run the duscope binary.
+//! Python. Of the Python tests, `bench/test_eval.py`'s end-to-end tests also
+//! run the duscope binary: the agent eval with its stub agent, which calls no
+//! model, against `DUSCOPE_TEST_EVAL_BIN` or the newest of
+//! `target/{debug,release}/duscope` (`cargo test` builds the debug one), and
+//! they skip without one.
 //!
 //! The interpreter is `$PYTHON` when it is set, else `/usr/bin/python3` when it
 //! exists, else `python3` from `PATH`, which is how `bench/run.sh` picks it.

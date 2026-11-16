@@ -66,13 +66,19 @@ question from it in milliseconds, one JSON envelope per command.
 | --- | --- |
 | What is eating my disk? | `duscope top ~ --depth 2 --json` |
 | The largest files | `duscope top ~ --files --json` |
-| Large files not touched in months | `duscope stale ~ --older-than 180d --min-size 100M --json` |
+| Large files not modified in months | `duscope top ~ --files --older-than 180d --min-size 100M --json` |
+| Large files neither modified nor changed in months | `duscope stale ~ --older-than 180d --min-size 100M --json` |
 | Which node_modules or build caches are largest? | `duscope caches ~ --by-project --json` |
 | Space by file type | `duscope by-type ~ --json` |
 | Is this safe to delete? | `duscope explain PATH --json` (facts, not a verdict) |
 | What changed since last week? | `duscope scans --json`, then `duscope diff OLD NEW --json` |
 | Totals per volume, as `du` counts them | `duscope summary ~ --json` |
 | Anything else | `duscope query ~ --sql "SELECT …" --json` (below) |
+
+`stale` wants the change time (ctime) older than `--older-than` as well as the
+modification time: a tree restored, or copied with its times kept, has new
+change times, and `stale` lists nothing in it, whatever the modification times
+say. For the modification time alone, use `top --files --older-than`.
 
 ## The commands
 

@@ -149,7 +149,16 @@ pub enum Verb {
     Tree(TreeArgs),
     /// Bytes and counts by file class, with the largest examples
     ByType(ByTypeArgs),
-    /// Large files not modified (or accessed) since a date
+    /// Large files neither modified nor changed (ctime) for a while
+    #[command(
+        long_about = "Large files neither modified nor changed (ctime) for a while.\n\n\
+                      A file is listed when its modification time and its change time\n\
+                      (ctime) are both older than --older-than (180d by default), and\n\
+                      with --atime its access time too. A file restored, or copied with\n\
+                      its times kept, has a new change time and is not listed, whatever\n\
+                      its modification time. For the modification time alone:\n\
+                      duscope top --files --older-than AGE"
+    )]
     Stale(StaleArgs),
     /// Regenerable caches (node_modules, target, .venv, …) and their projects
     Caches(CachesArgs),
@@ -289,6 +298,8 @@ pub struct CleanArgs {
     /// The saved scan the sizes come from: latest, an id prefix or an index file
     ///
     /// Default: the newest saved scan that holds the first item; clean needs one
+    ///
+    /// Given only --from handles, the saved scan explain read for them
     ///
     /// An item changed since that scan is measured from the tree (changed_since_scan)
     #[arg(long, value_name = "SCAN", help_heading = "Saved scans")]

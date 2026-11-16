@@ -526,10 +526,10 @@ task's answer.
 **What a run is.** `tasks.toml` lists the tasks in the row's order: the prompt (a preamble that
 names the tree and says to use `duscope` and change nothing, the question, and the shape of the
 `ANSWER:` line of JSON the reply must end with), the fixture, how the answer is worked out and how
-the reply is checked. `config.toml` pins the model (`claude-sonnet-5-5`, which the author
-confirms), the Claude Code release (2.1.319, the one the MCP smoke test installs; the runner
-refuses another), the tools, the cells and the limits. Each run has a directory of its own in the
-system's temporary directory (`--work-dir` elsewhere), removed after it (`--keep-work` keeps it):
+the reply is checked. `config.toml` pins the model (`claude-sonnet-5-5`), the Claude Code release
+(2.1.319, the one the MCP smoke test installs; the runner refuses another), the tools, the cells
+and the limits. Each run has a directory of its own in the system's temporary directory
+(`--work-dir` elsewhere), removed after it (`--keep-work` keeps it):
 
 - a scratch `HOME` and XDG directories, so the author's Claude Code settings, memory, MCP servers
   and saved scans are not read, and the run's scans go to its own index directory; in the cells
@@ -540,9 +540,14 @@ system's temporary directory (`--work-dir` elsewhere), removed after it (`--keep
   which `duscope stale` also requires to be old, so the questions about files unused for a year
   ask about modification time and `stale` lists nothing on this tree. The diff task's tree also
   has two saved scans, one before and one after a few changes;
-- `PATH` with a `duscope` that runs the binary under test (`--duscope`, default
-  `target/release/duscope`), logs each call, and refuses `clean --yes` and `--permanent`, so no
-  run moves anything to a Trash (on macOS the Trash is the account's own);
+- `PATH` with a `duscope` shim that runs the binary under test (`--duscope`, default
+  `target/release/duscope`), copied once when the eval starts, so that a build made meanwhile does
+  not reach its runs, and linked into the run's directory, so that nothing the agent is shown names
+  the checkout, where `evaltree.py` holds every answer; that logs each call; and that refuses
+  `clean --yes` and `--allow-delete` (with which `mcp` offers its client the tool that moves paths
+  to the Trash), so that no duscope call moves anything to a Trash (on macOS the Trash is the
+  account's own). `clean` without `--yes`, with `--permanent` or not, only shows its plan, and
+  passes;
 - `claude -p PROMPT --output-format stream-json --verbose --model MODEL --max-turns 30
   --allowedTools ... --disallowedTools ... --strict-mcp-config`, in an empty working directory.
   Only the variables `config.toml`'s `pass_env` names reach it, and the credential:
@@ -550,9 +555,33 @@ system's temporary directory (`--work-dir` elsewhere), removed after it (`--keep
   the runner stops before it runs anything. Print mode cannot ask, so a tool outside
   `allowed_tools` (duscope, `jq` after a pipe, Read, Grep, Glob and Skill) is denied and recorded.
 
+Past the shim, what holds a run is Claude Code's matching of `Bash(duscope:*)` and nothing else:
+there is no sandbox, the network is not cut off, and Read (with Grep and Glob) is not limited to
+the tree, so it reaches any file the account can read. Whether that matching refuses
+`duscope x; rm -rf y`, a redirection or a here-document is not known until a run shows it. A run
+that changes the tree fails as `tree changed`, and its transcript keeps the commands.
+
 A run is completed when its answer is right, it stayed within 600 s and 2,000,000 tokens, it left
-the tree as it was built, and no deletion was refused. Paths are compared after `realpath`, sizes
-within the task's tolerance (5%), and a size may be written in bytes or with a unit.
+the tree as it was built, and no deletion was refused. The tree is the same when the same entries
+are under its root, each still a directory or not and, if not, of the same size and modification
+time (`lstat`); a directory's times, every access and change time, modes, and
+anything outside the tree are not compared. Paths are compared after `realpath`, sizes within the
+task's tolerance (5%), and a size may be written in bytes or with a unit. Most truths come from the
+tree itself, walked with `lstat`; two are duscope's own figures: the diff task's net growth (the
+difference of the totals duscope gave the two saved scans) and which directories are regenerable
+caches (`duscope caches --json`, run by the harness in an index directory the agent never sees).
+A duscope bug there passes both the truth and the answer, which suits an eval of agents and not of
+duscope's figures.
+
+A run that measured the infrastructure rather than the agent fails as `infrastructure`, with the
+reason beside it: Claude Code ended without a result message, with an error result (`is_error`: a
+rate limit, an expired token, a failed request), or with another exit status than 0; the stream
+names a model other than the pinned one, or none; or a run of a cell with the skill lists no
+`duscope` skill. A run that used all its turns is the agent's own failure, though Claude Code marks
+it an error; a timeout, a changed tree and a refused deletion stay the agent's too. Such a run is
+recorded and counted apart, and left out of every figure but the cost: completion, tokens and the
+decisions read the other runs alone. Three in a row stop the eval as Ctrl-C does, so an account
+that cannot reach the model does not spend the queue; `--resume` makes each one again.
 
 The cells are with and without the skill, crossed with the output format duscope gives when the
 agent passes none (`DUSCOPE_FORMAT`): `json`, what the agent detection gives under Claude Code,
@@ -568,31 +597,53 @@ tokens, $10 output, $0.20 cache reads) on the order of $0.10–0.40, so $15–50
 subscription token counts against the subscription's limits instead. These are estimates: each
 run records Claude Code's own `total_cost_usd` and tokens, and `summary` sums them per cell. At 1–3
 minutes a run, 120 runs take 2–6 hours; `--jobs N` runs N at once, within the account's rate
-limits. `--resume FILE` continues an interrupted run: the runs in FILE are kept and not made
-again, provided `config.toml`, `tasks.toml` and the Claude Code release are unchanged.
+limits. Ctrl-C stops the eval: the runs not started are cancelled and the running agents ended
+(each runs in a session of its own, which the terminal's Ctrl-C does not reach), and the eval
+exits with status 130. A run cut short is not recorded. `--resume FILE` continues an interrupted
+run: the runs in FILE are kept and not made again, but for those that failed for the
+infrastructure, provided `config.toml`, `tasks.toml`, the Claude Code release, the commit and
+duscope's version are unchanged, so that one file measures one binary.
+The eval exits with status 0 when every run is recorded and none failed for the infrastructure,
+1 when some are left for `--resume`, and 2 on a problem with its configuration or setup.
 
 **What it records.** `bench/eval/results/<date>.json` (`--out` elsewhere), rewritten after every
-run and marked `complete` at the end: the host, the commit, the hashes of both files, the Claude
-Code and duscope versions, the configuration, each task's prompt (`{root}` for the tree), and one
-record per run with its verdict and the reasons, the expected and the given answer, tokens
-(`total`: the pinned model's input, cache creation, cache reads and output, from `modelUsage`,
-else the result's `usage`, else the sum of the messages'; `all_models` with any other model Claude
-Code called), the cost, turns, tool calls, failed calls and whether a later one worked
-(`recovered`), permission denials, whether the skill was loaded, the duscope calls (verbs, the tier
-they belong to, formats asked for, `--jq`, the briefing read with `duscope agent`), and the commands
-it ran. The `summary` holds each cell's figures, each task's completion per cell, and the
-decisions. Each run's transcript stays in `bench/eval/.runs/<date>/`, which git ignores. The fake
-agent's files are `<date>-fake-right.json` and `<date>-fake-wrong.json`, also ignored.
+run and marked `complete` at the end. A second start refuses a result file that exists, so a second
+run on the same UTC day needs `--resume` that file or another `--out`; it also refuses a
+transcripts directory that holds another run's. The file holds the host, the commit, the hashes of
+both files, the Claude Code and duscope versions, the configuration, each task's prompt (`{root}`
+for the tree), and one record per run with its verdict and the reasons, the expected and the given
+answer, the models the stream names, tokens (`total`: the pinned model's input, cache creation,
+cache reads and output, from `modelUsage`, else the result's `usage`, else the sum of the
+messages'; `all_models` with any other model Claude Code called), the cost, turns, tool calls,
+failed calls and whether a later one worked (`recovered`), permission denials, whether the skill
+was loaded, the duscope calls (verbs, the tier they belong to, formats asked for, `--jq`, the
+briefing read with `duscope agent`), and the commands it ran. A field the stream lacks is null,
+never 0 or false, and so is a token total that needs it. The `summary` holds each cell's figures,
+its runs that failed for the infrastructure, each task's completion per cell, and the decisions.
+Each run's transcript stays in `bench/eval/.runs/<date>/`, which git ignores. The fake agent's
+files are `<date>-fake-right.json` and `<date>-fake-wrong.json`, also ignored.
 
-**The decisions.** The criterion is the row's: the cells with the skill against those without, both
-formats pooled, the skill being recommended with a higher completion rate, or with an equal one and
-a mean of tokens per run at least 20% lower (otherwise it stays optional and its description is
-rewritten, as PROPOSAL's Agent workflows says). The same rule, json against plain with and without
-the skill pooled, revises D27 when json wins and confirms `plain` otherwise. A run that passes
-`--jq` to duscope counts as reaching for it, and one such run revisits D36. When no run completed
-anything the decisions are `undecided`. `run.sh summary FILE` prints the table and the checklist's
-two lines, filled, with a line for `--jq`; the author pastes them into plan/SPEC.md's Gate 3 → 4
-checklist, records a changed default as a Deviation entry, and commits the result file.
+**The decisions.** The criterion is the row's (DEV-185): the cells with the skill against those
+without, both formats pooled. The skill is recommended when its arm completed at least three runs
+more than the other (`completion_margin_runs` in `config.toml`: 5 points of 60; one run is 1.7
+points, and a single rate-limited call can be that run). Within the margin the arms count as equal,
+and the skill is recommended when the mean tokens of a completed run are at least 20% lower;
+otherwise it stays optional and its description is rewritten, as PROPOSAL's Agent workflows says.
+The mean is over completed runs alone, since a timeout's partial count or a failed call's zero is
+not "tokens at equal completion". Arms of unequal size (a run still left for `--resume`) compare
+as completion rates, the margin taken at their mean size. The same rule, json against plain with
+and without the skill pooled, revises D27 when json wins and confirms `plain` otherwise; since an
+agent's own `--json` or `--plain` wins over the cell's format, each cell also counts the runs whose
+duscope calls passed no format (`default_format_runs`, from each run's `duscope.formats`), the runs
+that read the cell's format alone. A run that passes `--jq` to duscope counts as reaching for it,
+and one such run revisits D36. When no run completed anything the decisions are `undecided`.
+
+The decisions hold for the pinned model, `claude-sonnet-5-5`, which the summary's first line and
+both checklist lines name; when both arms complete 58 of 60 runs or more, the skill line adds that
+the eval measured tokens alone. `run.sh summary FILE` prints the criterion with its margin, the
+table and the checklist's two lines, filled, with a line for `--jq`; the author pastes them into
+plan/SPEC.md's Gate 3 → 4 checklist, records a changed default as a Deviation entry, and commits
+the result file.
 
 ## Files
 

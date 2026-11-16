@@ -427,7 +427,10 @@ fn output_within(mut cmd: Command, limit: Duration) -> Result<String, String> {
 }
 
 /// A test's private environment. Dropping it removes its temporary
-/// directory (restoring permissions first) and releases the fixture tree.
+/// directory (restoring permissions first) and releases the fixture tree. A
+/// mount left in the directory stays, with what it holds and the
+/// directories that lead to it, and a line on stderr names it
+/// ([`mktree::remove_tree`]).
 #[derive(Debug)]
 pub struct TestEnv {
     temp: Option<tempfile::TempDir>,
@@ -925,9 +928,12 @@ impl Drop for TestEnv {
             Fixtures::shared().release();
         }
         if let Some(temp) = self.temp.take() {
-            // Restore permissions a test may have removed, then remove.
+            // Restores permissions a test may have removed, and leaves a
+            // mount the test failed to unmount, with what it holds.
             let path = temp.keep();
-            let _ = mktree::remove_tree(&path);
+            if let Err(err) = mktree::remove_tree(&path) {
+                eprintln!("duscope-testkit: {err}");
+            }
         }
     }
 }
@@ -1218,5 +1224,58 @@ mod tests {
                 disk.display()
             ))
         );
+    }
+
+    /// An image left attached in a test's directory, as a failed `hdiutil
+    /// detach` or `umount` leaves one: dropping the test's environment
+    /// removes everything else and leaves the mounted volume, with what it
+    /// holds, and the directories that lead to it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "attaches a disk image; DUSCOPE_TEST_PLATFORM=1"]
+    fn p5_test_01_macos_an_image_left_attached_in_a_test_directory_is_kept() {
+        use super::TestEnv;
+        use std::fs;
+
+        // Holds the image, and detaches it once the other is dropped.
+        let holder = TestEnv::new();
+        if std::env::var_os("DUSCOPE_TEST_PLATFORM").is_none_or(|v| v != "1") {
+            eprintln!("skipped: set DUSCOPE_TEST_PLATFORM=1");
+            return;
+        }
+        let image = holder.tmp_dir().join("image.dmg");
+        holder.hdiutil(&[
+            &"create",
+            &"-ov",
+            &"-size",
+            &"16m",
+            &"-fs",
+            &"APFS",
+            &"-volname",
+            &"KEPT",
+            &image,
+        ]);
+        let env = TestEnv::new();
+        let root = env.root().to_owned();
+        let mount = env.tmp_dir().join("mnt");
+        fs::create_dir_all(&mount).unwrap();
+        fs::write(env.tmp_dir().join("beside"), b"beside").unwrap();
+        holder.hdiutil(&[&"attach", &"-nobrowse", &"-mountpoint", &mount, &image]);
+        fs::write(mount.join("inside"), b"inside").unwrap();
+
+        drop(env);
+        let inside = fs::read(mount.join("inside")).ok();
+        let mut kept: Vec<String> = [root.clone(), root.join("tmp")]
+            .iter()
+            .flat_map(|dir| fs::read_dir(dir).into_iter().flatten())
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        holder.hdiutil(&[&"detach", &"-force", &mount]);
+        let rest = mktree::remove_tree(&root);
+        assert_eq!(inside.as_deref(), Some(&b"inside"[..]));
+        assert_eq!(kept, ["mnt", "tmp"]);
+        rest.unwrap();
+        assert!(!root.exists());
     }
 }

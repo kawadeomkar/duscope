@@ -3,8 +3,9 @@
 //!
 //! The items are paths and `--from` handles from `explain --json`: a
 //! handle's MAC and expiry are checked, and its path must still hold the
-//! device and inode it names. The plan is made against a saved scan, the
-//! newest that holds the first item (or `--scan`): its root bounds what may
+//! device and inode it names. The plan is made against a saved scan:
+//! `--scan`'s; else, with handles alone, the one `explain` read for them;
+//! else the newest that holds the first item. Its root bounds what may
 //! move, and its sizes are the plan's for each item still as it saw it. An
 //! item that has changed since is measured from the tree, and a
 //! `changed_since_scan` warning counts them, with the rescan that measures

@@ -228,8 +228,9 @@ fn bind_cycle_below(index: &Index, folder: &Path) -> bool {
 /// path relative to the scan's root, so one anchored there (`/build`) or
 /// naming more than one component (`proj/build`) would leave out something
 /// else; one name at any depth (`node_modules`, `*.tmp`) leaves out the
-/// same. A file of patterns that cannot be read is no such file: the walk
-/// reports it. The walk's rule for macOS's Data volume rests on where it
+/// same. A file of patterns that cannot be read, or that the walk refuses
+/// (not a regular file, or past [`scan::OPTION_FILE_CAP`]), is no such
+/// file: the walk reports it. The walk's rule for macOS's Data volume rests on where it
 /// starts ([`duscope_walk::walk_differs_below`]), the same rule then
 /// reading another tree in the folder; so does a bind cycle, which
 /// [`folder_alone`] asks of the saved scan's volumes.
@@ -245,7 +246,10 @@ fn same_in_a_folder(options: &ScanOptions, root: &Path, folder: &Path) -> bool {
             .exclude_files
             .iter()
             .chain(&options.ignore_files)
-            .all(|file| std::fs::read(file).is_ok_and(|text| lines_one_name(&text)))
+            .all(|file| {
+                duscope_walk::read_regular(Path::new(file), scan::OPTION_FILE_CAP, true)
+                    .is_ok_and(|text| lines_one_name(&text))
+            })
 }
 
 /// Whether every pattern of a pattern file, its lines read as the walk reads
@@ -506,7 +510,11 @@ mod tests {
     use duscope_core::rollup::roll_up;
     use duscope_walk::{Attrs, MemProvider, ScanEvent, Skip, WalkOptions, walk_with};
 
+    use duscope_testkit::TestEnv;
+
     use super::{Parent, folder_alone, how, lines_one_name, one_name, same_in_a_folder};
+    use crate::verbs::scan::OPTION_FILE_CAP;
+    use crate::verbs::scan::tests::Witness;
 
     #[test]
     fn p4_tui_06_a_pattern_of_one_name_leaves_out_the_same_in_a_folder() {
@@ -734,6 +742,34 @@ mod tests {
         // One that cannot be read: the rescan of the saved scan reports it.
         excluded.exclude_files = vec![text(&dir.path().join("gone"))];
         assert!(!same(&excluded));
+    }
+
+    #[test]
+    fn p5_sec_01_a_pattern_file_that_is_not_a_regular_file_leaves_no_folder_alone() {
+        let env = TestEnv::new();
+        let dir = env.tmp_dir();
+        let text = |path: &Path| path.to_str().unwrap().to_owned();
+        let mut excluded: ScanOptions = serde_json::from_str("{}").unwrap();
+        // A FIFO is refused without being opened, so it never blocks: the
+        // rescan of the saved scan reports it.
+        let fifo = Witness::new(&env, dir.join("fifo"));
+        excluded.exclude_files = vec![text(&fifo.fifo)];
+        assert!(!alone_under(&excluded, "/tree", "/tree/proj"));
+        assert!(!fifo.opened(), "the FIFO was opened");
+        let mut ignored: ScanOptions = serde_json::from_str("{}").unwrap();
+        ignored.ignore_files = vec![text(&fifo.fifo)];
+        assert!(!alone_under(&ignored, "/tree", "/tree/proj"));
+        assert!(!fifo.opened(), "the FIFO was opened");
+        // One name a line, past the cap.
+        let long = dir.join("long");
+        let line = b"node_modules\n";
+        let lines = usize::try_from(OPTION_FILE_CAP).unwrap() / line.len() + 1;
+        std::fs::write(&long, line.repeat(lines)).unwrap();
+        excluded.exclude_files = vec![text(&long)];
+        assert!(!alone_under(&excluded, "/tree", "/tree/proj"));
+        // The same names within it.
+        std::fs::write(&long, line.repeat(lines - 1)).unwrap();
+        assert!(alone_under(&excluded, "/tree", "/tree/proj"));
     }
 
     #[test]

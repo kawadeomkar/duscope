@@ -1180,6 +1180,142 @@ fn p5_core_04_expect_bytes_fails_against_live_bytes() {
     assert_eq!(value["warnings"], serde_json::json!([]), "{value}");
 }
 
+/// Each entry of the fixture tree's `cases/compressed`, the folder first, as
+/// `lstat` reports it now and as the index of saved scan `id` holds it: what
+/// [`p5_core_04_an_unchanged_fixture_tree_keeps_index_figures`] prints when
+/// it fails, so that a change the scan did not see is named. The case is
+/// where it once failed on a macOS runner, its cause unknown. Times are
+/// seconds and nanoseconds since the epoch; `st_flags` is macOS's (0x20 is
+/// `UF_COMPRESSED`), the index's `flags` duscope's own.
+fn compressed_figures(env: &TestEnv, root: &Path, id: &str) -> String {
+    use std::fmt::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let case = root.join("cases/compressed");
+    let mut text = format!("{} now, by lstat:\n", case.display());
+    let mut paths = vec![case.clone()];
+    let mut names: Vec<PathBuf> = fs::read_dir(&case)
+        .map(|dir| dir.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    names.sort();
+    paths.extend(names);
+    for path in &paths {
+        let name = path.strip_prefix(&case).unwrap_or(path).display();
+        let _ = match fs::symlink_metadata(path) {
+            Ok(m) => writeln!(
+                text,
+                "  {name:<12} size {} blocks {} ({} bytes) mtime {}.{:09} ctime {}.{:09} nlink {}{}",
+                m.len(),
+                m.blocks(),
+                m.blocks() * 512,
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime(),
+                m.ctime_nsec(),
+                m.nlink(),
+                st_flags(&m)
+            ),
+            Err(e) => writeln!(text, "  {name:<12} {e}"),
+        };
+    }
+    text.push_str("in the index:\n");
+    match indexed_figures(env, id) {
+        Ok(rows) => {
+            for row in rows {
+                let _ = writeln!(text, "  {row}");
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(text, "  {e}");
+        }
+    }
+    text
+}
+
+/// macOS's `st_flags` of `meta`, as a field of [`compressed_figures`]'s line.
+#[cfg(target_os = "macos")]
+fn st_flags(meta: &fs::Metadata) -> String {
+    use std::os::macos::fs::MetadataExt as _;
+    format!(" st_flags {:#x}", meta.st_flags())
+}
+
+/// No `st_flags` outside macOS: Linux's inode flags take an ioctl.
+#[cfg(not(target_os = "macos"))]
+fn st_flags(_meta: &fs::Metadata) -> String {
+    String::new()
+}
+
+/// The rows of `cases/compressed` in the index of saved scan `id`, the
+/// folder's first, each as a line of [`compressed_figures`].
+fn indexed_figures(env: &TestEnv, id: &str) -> rusqlite::Result<Vec<String>> {
+    use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
+
+    let time = |ns: i64| {
+        format!(
+            "{}.{:09}",
+            ns.div_euclid(1_000_000_000),
+            ns.rem_euclid(1_000_000_000)
+        )
+    };
+    let file = env.index_dir().join("scans").join(format!("{id}.db"));
+    let db = Connection::open_with_flags(&file, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut dir: Option<i64> = db
+        .query_row("SELECT id FROM dirs WHERE parent_id IS NULL", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    for name in ["cases", "compressed"] {
+        let Some(parent) = dir else { break };
+        dir = db
+            .query_row(
+                "SELECT id FROM dirs WHERE parent_id = ?1 AND name = ?2",
+                rusqlite::params![parent, name.as_bytes()],
+                |r| r.get(0),
+            )
+            .optional()?;
+    }
+    let Some(dir) = dir else {
+        return Ok(vec![format!("no cases/compressed in {}", file.display())]);
+    };
+    let mut rows = vec![db.query_row(
+        "SELECT apparent, allocated, mtime, ctime, n_files, flags FROM dirs WHERE id = ?1",
+        [dir],
+        |r| {
+            Ok(format!(
+                "{:<12} apparent {} allocated {} mtime {} ctime {} n_files {} flags {:#x}",
+                "(folder)",
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                time(r.get(2)?),
+                time(r.get(3)?),
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?
+            ))
+        },
+    )?];
+    let mut stmt = db.prepare(
+        "SELECT name, apparent, allocated, mtime, ctime, nlink, kind, flags FROM files \
+         WHERE parent_id = ?1 ORDER BY name",
+    )?;
+    let files = stmt.query_map([dir], |r| {
+        Ok(format!(
+            "{:<12} apparent {} allocated {} mtime {} ctime {} nlink {} kind {} flags {:#x}",
+            String::from_utf8_lossy(&r.get::<_, Vec<u8>>(0)?),
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            time(r.get(3)?),
+            time(r.get(4)?),
+            r.get::<_, i64>(5)?,
+            r.get::<_, String>(6)?,
+            r.get::<_, i64>(7)?
+        ))
+    })?;
+    for file in files {
+        rows.push(file?);
+    }
+    Ok(rows)
+}
+
 #[test]
 fn p5_core_04_an_unchanged_fixture_tree_keeps_index_figures() {
     let env = TestEnv::new();
@@ -1222,8 +1358,9 @@ fn p5_core_04_an_unchanged_fixture_tree_keeps_index_figures() {
             let warnings = value["warnings"].as_array().unwrap();
             assert!(
                 warnings.iter().all(|w| w["code"] != "changed_since_scan"),
-                "{}: {value}",
-                path.display()
+                "{}: {value}\n{}",
+                path.display(),
+                compressed_figures(&env, &root, &id)
             );
             planned += 1;
         }
@@ -1274,7 +1411,8 @@ fn p5_core_04_an_unchanged_fixture_tree_keeps_index_figures() {
     let warnings = value["warnings"].as_array().unwrap();
     assert!(
         warnings.iter().all(|w| w["code"] != "changed_since_scan"),
-        "{warnings:?}"
+        "{warnings:?}\n{}",
+        compressed_figures(&env, &root, &id)
     );
 }
 

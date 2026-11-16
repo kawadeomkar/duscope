@@ -7,7 +7,8 @@
 //! `--prune` keeps the five newest scans of each root and every scan under
 //! seven days old, a temporary file (`<id>.db.tmp-<pid>`) while its writer
 //! runs and for 24 hours, and a spill file for seven days. A file it cannot
-//! read as an index is left alone. `--check` runs `PRAGMA quick_check`, a
+//! read as an index is left alone, and so is a file in `out` that does not
+//! have a spill's name; an `out` that is a symbolic link is refused. `--check` runs `PRAGMA quick_check`, a
 //! damaged file exiting 5 (`index_corrupt`), then sweeps every directory
 //! the scan holds (`duscope_core::check`): one that changed since makes the
 //! scan `structurally_stale`, exiting 1 (`index_stale`) with the row
@@ -35,7 +36,7 @@ use super::next::{self, Hints};
 use super::source::{core_failure, scanned};
 use super::{Exit, Failure};
 use crate::cli::ScansArgs;
-use crate::out::{Output, iso8601, thousands};
+use crate::out::{Output, is_spill_name, iso8601, thousands};
 
 /// Scans of one root `--prune` keeps whatever their age.
 const KEEP_NEWEST: usize = 5;
@@ -189,8 +190,22 @@ fn list(dir: &Path, paths: &[PathBuf], output: &Output) -> Result<(), Failure> {
     output.listing(&listed, &footer)
 }
 
-/// `--prune`.
+/// `--prune`. An `out` that is a symbolic link is refused before anything
+/// is removed: spills are removed from the index directory's own folder,
+/// never from one a link leads to.
 fn prune(dir: &Path, now: i64, output: &Output) -> Result<(), Failure> {
+    let out = dir.join("out");
+    if fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(Failure::new(
+            Exit::Runtime,
+            "refused_path",
+            format!(
+                "{} is a symbolic link, not the index directory's own folder of spills",
+                out.display()
+            ),
+        )
+        .hint("Remove the link, then run duscope scans --prune again"));
+    }
     let mut removed = Vec::new();
     // The scans of each root, newest first: the first five stay, and any
     // younger than a week.
@@ -277,13 +292,15 @@ fn stray_temporaries(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// The spill files (`out/` under the index directory) older than a week.
+/// The spill files (`out/` under the index directory) older than a week:
+/// regular files with the names a spill is given, and nothing else.
 fn old_spills(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir.join("out")) else {
         return Vec::new();
     };
     let mut files: Vec<PathBuf> = entries
         .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_str().is_some_and(is_spill_name))
         .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
         .filter(|entry| older_than(entry, Duration::from_secs(KEEP_DAYS * 86_400)))
         .map(|entry| entry.path())

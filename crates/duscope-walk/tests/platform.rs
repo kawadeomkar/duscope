@@ -115,17 +115,52 @@ struct Mounted<'a> {
 impl Drop for Mounted<'_> {
     fn drop(&mut self) {
         for point in self.points.iter().rev() {
-            let program = if cfg!(target_os = "macos") {
-                "hdiutil"
-            } else {
-                "umount"
-            };
-            let mut cmd = self.env.command(program);
-            if cfg!(target_os = "macos") {
-                cmd.arg("detach").arg("-force");
-            }
-            let _ = cmd.arg(point).output();
+            unmount(self.env, point);
         }
+    }
+}
+
+/// Detaches the image mounted at `point`.
+#[cfg(target_os = "macos")]
+fn unmount(env: &TestEnv, point: &Path) {
+    let _ = env
+        .command("hdiutil")
+        .arg("detach")
+        .arg("-force")
+        .arg(point)
+        .output();
+}
+
+/// Unmounts `point`. When `umount` fails and leaves it mounted, it is tried
+/// once more lazily (`umount -l`, which detaches even a busy mount) and
+/// stderr says so; a mount still left is kept by the removal of the test's
+/// directory (`mktree::remove_tree`).
+#[cfg(target_os = "linux")]
+fn unmount(env: &TestEnv, point: &Path) {
+    let umount = |lazy: bool| {
+        let mut cmd = env.command("umount");
+        if lazy {
+            cmd.arg("-l");
+        }
+        match cmd.arg(point).output() {
+            Ok(out) if out.status.success() => None,
+            Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_owned()),
+            Err(e) => Some(e.to_string()),
+        }
+    };
+    // Not mounted any more: the test unmounted it itself.
+    let Some(why) = umount(false).filter(|_| !mounted_at(point).is_empty()) else {
+        return;
+    };
+    match umount(true) {
+        None => eprintln!(
+            "umount {} failed ({why}); unmounted lazily (umount -l)",
+            point.display()
+        ),
+        Some(lazy) => eprintln!(
+            "umount {} failed ({why}), and so did umount -l ({lazy}): left mounted",
+            point.display()
+        ),
     }
 }
 
@@ -436,6 +471,23 @@ fn p1_walk_06_linux_mount_ids_hold_for_same_device_binds_and_reused_ids() {
         (kernel.fs_type.as_str(), kernel.class),
         ("proc", VolumeClass::Kernel)
     );
+}
+
+/// The superblock's options of the first mount of `fs_type` in
+/// `/proc/self/mountinfo` (the field after the source): for cgroup2, `rw`
+/// and the hierarchy's root flags.
+#[cfg(target_os = "linux")]
+fn live_options(fs_type: &str) -> Option<String> {
+    fs::read_to_string("/proc/self/mountinfo")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut after = line.split(' ').skip_while(|&f| f != "-").skip(1);
+            if after.next()? != fs_type {
+                return None;
+            }
+            after.nth(1).map(str::to_owned)
+        })
 }
 
 /// The types of the filesystems mounted at `point`, in mount order (the one
@@ -1520,7 +1572,24 @@ fn p5_test_01_linux_kernel_filesystems_are_listed_and_never_entered() {
     ] {
         let point = root.join(fs_type);
         fs::create_dir(&point).unwrap();
-        match attempt(&env, "mount", &[&"-t", &fs_type, &fs_type, &point]) {
+        // There is one cgroup2 hierarchy, and a mount sets its root flags
+        // (nsdelegate, memory_recursiveprot, …) from its own options, for the
+        // whole system until it restarts: with no options, it would clear
+        // them. The second mount takes the options the live one shows, which
+        // are those flags, so they stay as they are.
+        let options = if fs_type == "cgroup2" {
+            let Some(options) = live_options(fs_type) else {
+                duscope_testkit::skip_fs(fs_type, "no cgroup2 mounted here to take options from");
+                continue;
+            };
+            vec!["-o".to_owned(), options]
+        } else {
+            Vec::new()
+        };
+        let mut args: Vec<&dyn AsRef<std::ffi::OsStr>> = vec![&"-t", &fs_type];
+        args.extend(options.iter().map(|o| o as &dyn AsRef<std::ffi::OsStr>));
+        args.extend([&fs_type as &dyn AsRef<std::ffi::OsStr>, &point]);
+        match attempt(&env, "mount", &args) {
             Ok(()) => {
                 mounted.points.push(point);
                 types.push(fs_type);

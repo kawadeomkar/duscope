@@ -291,14 +291,17 @@ jobs:
       - name: Probe the kernel's filesystems
         if: runner.os == 'Linux'
         run: |
-          # Each filesystem the platform tests mount, loaded if it is a module.
-          # One the kernel has no driver for is named in a warning here and in
-          # DUSCOPE_TEST_MISSING_FS, and the part of a test that mounts it
-          # skips; a mount that fails for any other reason fails its test
-          # (DEV-58).
+          # Each filesystem the platform tests mount, loaded if it is a module:
+          # the images', the kernel's own (proc to binfmt_misc) and ntfs-3g's
+          # fuseblk. One the kernel has no driver for is named in a warning
+          # here and in DUSCOPE_TEST_MISSING_FS, and the part of a test that
+          # mounts it skips; a mount that fails for any other reason fails its
+          # test (DEV-58). A module is asked for by its name, then as the
+          # kernel asks for it (fs-fuseblk is fuse's).
           missing=()
-          for fs in btrfs xfs exfat vfat ntfs3 squashfs overlay f2fs hfsplus iso9660 erofs; do
-            grep -qw "$fs" /proc/filesystems || sudo modprobe -q "$fs" || true
+          for fs in btrfs xfs exfat vfat ntfs3 squashfs overlay f2fs hfsplus iso9660 erofs \
+              proc sysfs cgroup2 devpts debugfs tracefs bpf securityfs pstore binfmt_misc fuseblk; do
+            grep -qw "$fs" /proc/filesystems || sudo modprobe -q "$fs" || sudo modprobe -q "fs-$fs" || true
             if grep -qw "$fs" /proc/filesystems; then
               echo "$fs: the kernel has a driver"
             else

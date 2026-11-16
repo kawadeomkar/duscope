@@ -556,7 +556,9 @@ just before its move, lists a mount point in, or cannot be read for; and
 cannot tell is not a mount point, under an item: that item fails
 `refused_path`, and what was removed before it stays removed. Under
 `duscope mcp`, a path outside `--roots`, or longer than 4096 bytes, is refused
-with this code ([mcp.md](mcp.md#the---roots-rule)).
+with this code ([mcp.md](mcp.md#the---roots-rule)). `scans --prune` refuses an
+index directory whose `out` is a symbolic link, before it removes anything: it
+removes spills from the index directory's own folder alone.
 
 What to do: `--skip-refused` acts on the other items. `duscope_delete` takes no
 such parameter, though the hint names the flag: call it again without the
@@ -565,6 +567,8 @@ hint says. A btrfs subvolume is a mount point to `clean`, but one that is not
 mounted on its own cannot be unmounted: for one under an item, the hint names
 `btrfs subvolume delete`, which deletes it
 ([limits.md](limits.md#a-btrfs-subvolume-is-a-mount-point-to-clean-linux)).
+For `scans --prune`, remove the link; duscope makes `out` again when it next
+spills.
 
 ### `expectation_mismatch`
 

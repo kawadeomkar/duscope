@@ -235,7 +235,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--newer-than` | — | the tool lists what is old |
 | `--since` | — | the tool lists what is old |
 | `--until` | — | `older_than` |
-| `--time` | — | the tool measures the modification time, and the access time with `atime` |
+| `--time` | — | the tool measures the modification and change times, and the access time with `atime` |
 | `--type` | — | the tool lists files |
 | `--sort` | — | the tool lists the largest first |
 | `--reverse` | — | the tool lists the largest first |

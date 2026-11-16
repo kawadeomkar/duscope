@@ -9,10 +9,11 @@ or a
 .B yes
 typed at its question: without either, nothing moves.
 .SS "The plan"
-A plan is made against one saved scan: the newest that holds the first
-item, or the one
+A plan is made against one saved scan: the one
 .B \-\-scan
-names.
+names; else, when only handles name the items (see Handles), the scan
+.B explain
+read for them; else the newest that holds the first item.
 The scan's root bounds what may go, and its sizes are the plan's.
 With no saved scan,
 .B clean
@@ -36,8 +37,7 @@ warning; a directory measured so frees its bytes at most
 .RB ( upper_bound ),
 and one a walk could not read whole has no figure.
 An item named twice, or inside another item, is a usage error (exit 2):
-.B clean
-acts on all of a list or on none of it.
+an overlap fails the whole list, before anything moves.
 .PP
 When stdin and stderr are a terminal and the output is for people,
 .B clean

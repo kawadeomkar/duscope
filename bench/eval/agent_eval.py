@@ -8,7 +8,7 @@
 Each run gets a directory of its own: a scratch HOME (with the duscope skill
 written by `duscope agent --skill` in the cells that have it), the tree the
 tasks ask about, built fresh, and a `duscope` on PATH that logs each call and
-refuses `clean --yes`. Claude Code runs headless in it (`claude -p` with
+refuses `clean --yes` and `--allow-delete`. Claude Code runs headless in it (`claude -p` with
 stream-json output), and the run records whether the answer was right (the
 task's check against the truth worked out from the tree), the tokens, the
 turns and whether a failed tool call was followed by one that worked. The
@@ -66,26 +66,45 @@ FORMATS = ("json", "plain", "table")
 FIXTURES = ("tree", "two-scans")
 # The tree's root inside a run's directory: a home directory's name.
 TREE_NAME = "alex"
+# The tests' knob for the stub agent (fake_claude.py): comma-separated acts,
+# each `ACT` for every run or `TASK:ACT` for one task's runs.
+FAKE_ACTS_VAR = "DUSCOPE_TEST_EVAL_FAKE"
+FAKE_ACTS = ("hang", "api-error", "crash", "model", "no-skills", "bare")
+# The failure of a run that measured the infrastructure, not the agent
+# (evaltranscript.infrastructure): recorded, left out of every figure, and
+# made again by --resume. This many in a row stop the eval.
+INFRASTRUCTURE = "infrastructure"
+STOP_AFTER_OUTAGES = 3
 
-# The duscope on the agent's PATH. It runs the binary under test and appends
-# the exit status, the argument count and the arguments, NUL-separated, to
-# the log; it refuses `clean` with `--yes` or `--permanent`, so no run moves
-# anything to the Trash (which on macOS is the real account's).
+# The duscope on the agent's PATH. It runs a copy of the binary under test in
+# the run's directory, so that its text names no checkout (where
+# evaltree.py holds every answer), and appends the exit status, the argument
+# count and the arguments, NUL-separated, to the log. It refuses `clean`
+# with `--yes` (without it, `--permanent` too, clean only shows its plan)
+# and `--allow-delete`, with which `mcp` offers a client the tool that moves
+# paths to the Trash: no duscope call of a run moves anything to the Trash
+# (which on macOS is the real account's). Past the shim, a run is held only
+# by Claude Code's matching of `Bash(duscope:*)` (bench/README.md).
 SHIM = """#!/bin/sh
 # duscope as the agent runs it in the eval (bench/eval/agent_eval.py): the
-# binary under test, each call logged; clean --yes and --permanent refused.
+# binary under test, each call logged; clean --yes and --allow-delete refused.
 real={real}
 log={log}
 clean=0
-deleting=0
+yes=0
+allow=0
 for arg in "$@"; do
   case $arg in
     clean) clean=1 ;;
-    --yes|--permanent) deleting=1 ;;
+    --yes) yes=1 ;;
+    --allow-delete|--allow-delete=*) allow=1 ;;
   esac
 done
-if [ "$clean" = 1 ] && [ "$deleting" = 1 ]; then
-  echo 'duscope-eval: this evaluation refuses clean --yes and --permanent; nothing was moved' >&2
+if [ "$clean" = 1 ] && [ "$yes" = 1 ]; then
+  echo 'duscope-eval: this evaluation refuses clean --yes; nothing was moved' >&2
+  status={refused}
+elif [ "$allow" = 1 ]; then
+  echo 'duscope-eval: this evaluation refuses --allow-delete; nothing was started' >&2
   status={refused}
 else
   "$real" "$@"
@@ -98,6 +117,46 @@ exit "$status"
 
 class EvalError(RuntimeError):
     """A problem with the configuration, the tasks or the setup: exit 2."""
+
+
+class CutShort(Exception):
+    """A run the eval stopped before it ended: it is not recorded."""
+
+
+class Agents:
+    """The agents running now, so that a stop can end them. Each runs in a
+    session of its own, which the terminal's Ctrl-C does not reach, so the
+    eval ends each one's process group itself; once it is stopping, no run
+    starts an agent."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._running: Dict[int, subprocess.Popen] = {}
+        self._cut: set = set()
+        self.stopping = False
+
+    def start(self, argv: List[str], **kw: Any) -> subprocess.Popen:
+        with self._lock:
+            if self.stopping:
+                raise CutShort()
+            proc = subprocess.Popen(argv, start_new_session=True, **kw)
+            self._running[proc.pid] = proc
+            return proc
+
+    def finish(self, proc: subprocess.Popen) -> None:
+        """Forgets an agent that has ended; raises CutShort when the stop
+        ended it."""
+        with self._lock:
+            self._running.pop(proc.pid, None)
+            if proc.pid in self._cut:
+                raise CutShort()
+
+    def stop(self) -> None:
+        with self._lock:
+            self.stopping = True
+            for pid, proc in self._running.items():
+                self._cut.add(pid)
+                _kill_group(proc, signal.SIGKILL)
 
 
 # -- configuration and tasks ---------------------------------------------------
@@ -122,6 +181,8 @@ def load_config(path: str = CONFIG) -> Dict[str, Any]:
         need(bool(cells["format"]) and all(v in FORMATS for v in cells["format"]), "cells.format")
         need(isinstance(cells["runs"], int) and cells["runs"] > 0, "cells.runs")
         need(0 < float(decision["min_token_reduction"]) < 1, "decision.min_token_reduction")
+        margin = decision["completion_margin_runs"]
+        need(isinstance(margin, int) and not isinstance(margin, bool) and margin >= 0, "decision.completion_margin_runs")
         need(isinstance(decision["jq_attempt_runs_to_revisit"], int), "decision.jq_attempt_runs_to_revisit")
     except (KeyError, TypeError) as e:
         raise EvalError("%s: missing or bad setting %s" % (path, e))
@@ -189,14 +250,16 @@ def render_prompt(meta: Dict[str, Any], task: Dict[str, Any], root: str, scale: 
 
 
 class Layout:
-    """A run's directory: home/ (HOME), bin/ (the shim), project/ (the
-    agent's working directory), tmp/, disk/alex (the tree), truth/ (the
-    harness's own index directory) and out/ (the logs)."""
+    """A run's directory: home/ (HOME), bin/ (the shim), under-test/ (the
+    copy of the binary the shim runs), project/ (the agent's working
+    directory), tmp/, disk/alex (the tree), truth/ (the harness's own index
+    directory) and out/ (the logs)."""
 
     def __init__(self, work: str) -> None:
         self.work = os.path.realpath(work)
         self.home = os.path.join(self.work, "home")
         self.bin = os.path.join(self.work, "bin")
+        self.binary = os.path.join(self.work, "under-test", "duscope")
         self.project = os.path.join(self.work, "project")
         self.tmp = os.path.join(self.work, "tmp")
         self.disk = os.path.join(self.work, "disk")
@@ -204,18 +267,25 @@ class Layout:
         self.truth = os.path.join(self.work, "truth")
         self.out = os.path.join(self.work, "out")
         self.shim_log = os.path.join(self.out, "duscope-calls.log")
-        for d in (self.home, self.bin, self.project, self.tmp, self.disk, self.truth, self.out):
+        for d in (self.home, self.bin, os.path.dirname(self.binary), self.project, self.tmp, self.disk, self.truth, self.out):
             os.makedirs(d, exist_ok=True)
         for sub in (".config", ".cache", ".local/share", ".local/state"):
             os.makedirs(os.path.join(self.home, sub), exist_ok=True)
 
 
 def write_shim(layout: Layout, binary: str) -> str:
+    """The shim in bin/, running `binary` placed in the run's directory: a
+    hard link where one can be made (a new file would be scanned by macOS
+    again on its first start), else a copy."""
+    try:
+        os.link(binary, layout.binary)
+    except OSError:
+        shutil.copy2(binary, layout.binary)
     path = os.path.join(layout.bin, "duscope")
     with open(path, "w", encoding="utf-8") as f:
         f.write(
             SHIM.format(
-                real=shlex.quote(binary), log=shlex.quote(layout.shim_log), refused=evaltranscript.REFUSED_STATUS
+                real=shlex.quote(layout.binary), log=shlex.quote(layout.shim_log), refused=evaltranscript.REFUSED_STATUS
             )
         )
     os.chmod(path, 0o755)
@@ -364,6 +434,8 @@ class Settings:
         self.work_dir: Optional[str] = kw["work_dir"]
         self.keep_work: bool = kw["keep_work"]
         self.transcripts: Optional[str] = kw["transcripts"]
+        self.fake_acts: List[Tuple[Optional[str], str]] = kw.get("fake_acts") or []
+        self.agents = Agents()
 
 
 def run_one(s: Settings, task: Dict[str, Any], cell: Dict[str, Any], repeat: int) -> Dict[str, Any]:
@@ -378,6 +450,8 @@ def run_one(s: Settings, task: Dict[str, Any], cell: Dict[str, Any], repeat: int
 
 
 def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], repeat: int) -> Dict[str, Any]:
+    if s.agents.stopping:
+        raise CutShort()
     layout = Layout(work)
     now = time.time()
     evaltree.build(layout.root, now, s.scale)
@@ -421,8 +495,9 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
         )
         fake_file = os.path.join(layout.out, "fake-answer.json")
         with open(fake_file, "w", encoding="utf-8") as f:
-            json.dump({"mode": s.fake, "root": root, "answer": answer}, f)
-        env = dict(env, DUSCOPE_EVAL_FAKE_ANSWER=fake_file)
+            acts = [act for only, act in s.fake_acts if only in (None, task["id"])]
+            json.dump({"mode": s.fake, "root": root, "answer": answer, "acts": acts}, f)
+        env = dict(env, DUSCOPE_TEST_EVAL_FAKE_ANSWER=fake_file)
 
     argv = claude_argv(s.claude, s.config, prompt)
     transcript = os.path.join(layout.out, "transcript.jsonl")
@@ -430,9 +505,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     started = time.time()
     timed_out = False
     with open(transcript, "wb") as out, open(stderr_path, "wb") as err:
-        proc = subprocess.Popen(
-            argv, cwd=layout.project, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True
-        )
+        proc = s.agents.start(argv, cwd=layout.project, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
         try:
             proc.wait(timeout=s.config["claude_code"]["timeout_s"])
         except subprocess.TimeoutExpired:
@@ -444,6 +517,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
                 _kill_group(proc, signal.SIGKILL)
                 proc.wait()
         _kill_group(proc, signal.SIGKILL)  # anything the agent left running
+    s.agents.finish(proc)
     wall = time.time() - started
 
     with open(transcript, "r", encoding="utf-8", errors="replace") as f:
@@ -457,15 +531,20 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
 
     max_tokens = s.config["claude_code"]["max_tokens"]
     total = stream["tokens"]["total"]
+    outage = None if timed_out else evaltranscript.infrastructure(stream, proc.returncode, s.config["model"]["id"], cell["skill"])
+    # What the agent did to the tree outranks an outage, which --resume
+    # would otherwise make again and so hide.
     failure = None
     if timed_out:
         failure = "timeout"
-    elif stream["reply"] is None:
-        failure = "no reply"
     elif changes:
         failure = "tree changed"
     elif duscope["deletion_refused"]:
         failure = "deletion refused"
+    elif outage:
+        failure = INFRASTRUCTURE
+    elif stream["reply"] is None:
+        failure = "no reply"
     elif total is not None and total > max_tokens:
         failure = "over the token limit"
     elif not verdict["passed"]:
@@ -487,6 +566,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
         "repeat": repeat,
         "completed": failure is None,
         "failure": failure,
+        "infrastructure": evalchecks.portable(outage, root) if outage else None,
         "check": verdict,
         "expected": evalchecks.portable(truth.expected, root),
         "exit_status": proc.returncode,
@@ -504,6 +584,19 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     if fixture:
         record["fixture"] = {"old_scan": fixture["old_scan"], "new_scan": fixture["new_scan"]}
     return record
+
+
+def fake_acts(text: str) -> List[Tuple[Optional[str], str]]:
+    """DUSCOPE_TEST_EVAL_FAKE read: (task or None for every task, act)."""
+    acts: List[Tuple[Optional[str], str]] = []
+    for item in (x.strip() for x in text.split(",")):
+        if not item:
+            continue
+        only, _, act = item.rpartition(":")
+        if act.split("=", 1)[0] not in FAKE_ACTS:
+            raise EvalError("%s: unknown act %r" % (FAKE_ACTS_VAR, act))
+        acts.append((only or None, act))
+    return acts
 
 
 def shown_path(path: str) -> str:
@@ -529,9 +622,17 @@ def _kill_group(proc: subprocess.Popen, sig: int) -> None:
 # -- the summary and the decisions ----------------------------------------------
 
 
-def stats(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
-    tokens = [r["tokens"]["total"] for r in runs if r["tokens"]["total"] is not None]
-    costs = [r["cost_usd"] for r in runs if isinstance(r.get("cost_usd"), (int, float))]
+def outage(record: Dict[str, Any]) -> bool:
+    return record["failure"] == INFRASTRUCTURE
+
+
+def stats(every: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """A set of runs' figures. The runs that failed for the infrastructure
+    are counted apart and left out of every figure but the cost."""
+    runs = [r for r in every if not outage(r)]
+    # Tokens at equal completion: the runs that completed their task alone.
+    tokens = [r["tokens"]["total"] for r in runs if r["completed"] and r["tokens"]["total"] is not None]
+    costs = [r["cost_usd"] for r in every if isinstance(r.get("cost_usd"), (int, float))]
     turns = [r["turns"] for r in runs if isinstance(r.get("turns"), int)]
     tiers: Dict[str, int] = {}
     for r in runs:
@@ -541,6 +642,7 @@ def stats(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     done = sum(1 for r in runs if r["completed"])
     return {
         "runs": n,
+        "infrastructure": len(every) - n,
         "completed": done,
         "completion": round(done / n, 4) if n else None,
         "tokens_mean": round(statistics.mean(tokens), 1) if tokens else None,
@@ -556,8 +658,16 @@ def stats(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
         "tiers": dict(sorted(tiers.items())),
         "jq_flag_runs": sum(1 for r in runs if jq_flag(r)),
         "jq_pipe_runs": sum(1 for r in runs if r["jq_pipe"]),
+        "default_format_runs": sum(1 for r in runs if took_default(r)),
         "failures": _count(r["failure"] for r in runs if r["failure"]),
     }
+
+
+def took_default(record: Dict[str, Any]) -> bool:
+    """Whether a run called duscope and passed no format in any call, so
+    that every answer came in the cell's format."""
+    formats = record["duscope"].get("formats") or {}
+    return bool(formats) and set(formats) == {"default"}
 
 
 def jq_flag(record: Dict[str, Any]) -> bool:
@@ -573,40 +683,47 @@ def _count(values) -> Dict[str, int]:
     return dict(sorted(out.items()))
 
 
-def criterion(treated: Dict[str, Any], baseline: Dict[str, Any], min_reduction: float) -> Dict[str, Any]:
-    """The row's criterion for `treated` against `baseline`: better when its
-    completion is higher, or equal with at least `min_reduction` fewer tokens
-    (the mean per run). Undecided when either has no runs or neither
+def criterion(treated: Dict[str, Any], baseline: Dict[str, Any], min_reduction: float, margin: int) -> Dict[str, Any]:
+    """The row's criterion for `treated` against `baseline`: better when it
+    completed at least `margin` runs more, not better when as many fewer.
+    Within the margin the arms count as equal, and it is better with at
+    least `min_reduction` fewer tokens (the mean of a completed run). Arms
+    of unequal size (a run left for --resume) compare as rates, the margin
+    taken at their mean size. Undecided when either has no runs or neither
     completed anything."""
     if not treated["runs"] or not baseline["runs"]:
         return {"verdict": "undecided", "reason": "no runs to compare"}
     if not treated["completed"] and not baseline["completed"]:
         return {"verdict": "undecided", "reason": "no run completed its task"}
-    ours = treated["completed"] * baseline["runs"]
-    theirs = baseline["completed"] * treated["runs"]
-    if ours > theirs:
-        return {"verdict": "better", "reason": "higher completion"}
-    if ours < theirs:
-        return {"verdict": "not better", "reason": "lower completion"}
+    n, m = treated["runs"], baseline["runs"]
+    ahead = (treated["completed"] / n - baseline["completed"] / m) * (n + m) / 2
+    apart = round(abs(ahead), 1)
+    runs = "%g run%s" % (apart, "" if apart == 1 else "s")
+    if apart > 0 and apart >= margin:
+        if ahead > 0:
+            return {"verdict": "better", "reason": "higher completion, %s ahead with a margin of %d" % (runs, margin)}
+        return {"verdict": "not better", "reason": "lower completion, %s behind with a margin of %d" % (runs, margin)}
+    within = "completion %s apart, within the margin of %d" % (runs, margin)
     a, b = treated["tokens_mean"], baseline["tokens_mean"]
     if a is None or b is None or b == 0:
-        return {"verdict": "undecided", "reason": "equal completion and no token counts"}
+        return {"verdict": "undecided", "reason": within + "; no token counts"}
     reduction = 1 - a / b
     if reduction >= min_reduction - 1e-12:
-        return {"verdict": "better", "reason": "equal completion, %.1f%% fewer tokens" % (reduction * 100)}
+        return {"verdict": "better", "reason": "%s; %.1f%% fewer tokens" % (within, reduction * 100)}
     if reduction >= 0:
-        why = "equal completion, only %.1f%% fewer tokens" % (reduction * 100)
+        why = "%s; only %.1f%% fewer tokens" % (within, reduction * 100)
     else:
-        why = "equal completion, %.1f%% more tokens" % (-reduction * 100)
+        why = "%s; %.1f%% more tokens" % (within, -reduction * 100)
     return {"verdict": "not better", "reason": why}
 
 
 def decide(runs: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]:
     d = config["decision"]
     reduction = float(d["min_token_reduction"])
+    margin = int(d["completion_margin_runs"])
     with_skill = stats([r for r in runs if r["skill"]])
     without = stats([r for r in runs if not r["skill"]])
-    skill = criterion(with_skill, without, reduction)
+    skill = criterion(with_skill, without, reduction, margin)
     skill_decision = {
         "better": "recommended",
         "not better": "optional: the skill stays optional and its description is rewritten",
@@ -615,7 +732,7 @@ def decide(runs: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]
 
     json_runs = stats([r for r in runs if r["format"] == "json"])
     plain_runs = stats([r for r in runs if r["format"] == "plain"])
-    fmt = criterion(json_runs, plain_runs, reduction)
+    fmt = criterion(json_runs, plain_runs, reduction, margin)
     if not json_runs["runs"] or not plain_runs["runs"]:
         fmt_decision = "not measured: the cells lack json or plain"
     elif fmt["verdict"] == "better":
@@ -625,6 +742,7 @@ def decide(runs: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]
     else:
         fmt_decision = "undecided (%s)" % fmt["reason"]
 
+    runs = [r for r in runs if not outage(r)]
     flagged = sum(1 for r in runs if jq_flag(r))
     piped = sum(1 for r in runs if r["jq_pipe"])
     threshold = d["jq_attempt_runs_to_revisit"]
@@ -633,10 +751,17 @@ def decide(runs: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]
     else:
         jq_decision = "confirmed: %d of %d runs passed --jq" % (flagged, len(runs))
     return {
+        "model": config["model"]["id"],
+        "margin_runs": margin,
         "skill": {"with": with_skill, "without": without, "criterion": skill, "decision": skill_decision},
         "format": {"json": json_runs, "plain": plain_runs, "criterion": fmt, "decision": fmt_decision},
         "jq": {"runs": len(runs), "flag_runs": flagged, "pipe_runs": piped, "threshold": threshold, "decision": jq_decision},
     }
+
+
+# When both arms complete at least this share of their runs (58 of 60),
+# completion cannot separate them, and the skill line says so.
+CEILING = (58, 60)
 
 
 def checklist_lines(decisions: Dict[str, Any]) -> List[str]:
@@ -650,15 +775,28 @@ def checklist_lines(decisions: Dict[str, Any]) -> List[str]:
     def tokens(s: Dict[str, Any]) -> str:
         return "{:,.0f}".format(s["tokens_mean"]) if s["tokens_mean"] is not None else "n/a"
 
+    def no_format(s: Dict[str, Any]) -> str:
+        return "%d of %d runs passed no format" % (s.get("default_format_runs", 0), s["runs"])
+
+    def at_ceiling(s: Dict[str, Any]) -> bool:
+        return bool(s["runs"]) and s["completed"] * CEILING[1] >= CEILING[0] * s["runs"]
+
     sk, fm, jq = decisions["skill"], decisions["format"], decisions["jq"]
+    model = "model `%s`" % decisions.get("model")
+    skill_line = (
+        "Decision gate **skill recommendation** (P3-AGT-03, %s): completion with/without %s / %s, higher with a "
+        "margin of %d runs ; tokens %s / %s (mean per completed run) ; decision: %s (%s)"
+        % (model, completion(sk["with"]), completion(sk["without"]), decisions.get("margin_runs"),
+           tokens(sk["with"]), tokens(sk["without"]), sk["decision"], sk["criterion"]["reason"])
+    )
+    if at_ceiling(sk["with"]) and at_ceiling(sk["without"]):
+        skill_line += "; both arms completed %d of %d or more: the eval measured tokens alone" % CEILING
     return [
-        "Decision gate **skill recommendation** (P3-AGT-03): completion with/without %s / %s ; "
-        "tokens %s / %s (mean per run) ; decision: %s (%s)"
-        % (completion(sk["with"]), completion(sk["without"]), tokens(sk["with"]), tokens(sk["without"]),
-           sk["decision"], sk["criterion"]["reason"]),
-        "Decision gate **non-TTY default `plain`** (D27): confirmed/revised: %s; json %s, %s tokens; "
-        "plain %s, %s tokens" % (fm["decision"], completion(fm["json"]), tokens(fm["json"]),
-                                 completion(fm["plain"]), tokens(fm["plain"])),
+        skill_line,
+        "Decision gate **non-TTY default `plain`** (D27; P3-AGT-03, %s): confirmed/revised: %s; json %s, %s tokens, "
+        "%s; plain %s, %s tokens, %s" % (model, fm["decision"], completion(fm["json"]), tokens(fm["json"]),
+                                         no_format(fm["json"]), completion(fm["plain"]), tokens(fm["plain"]),
+                                         no_format(fm["plain"])),
         "`--jq` absent (D36): %s; %d runs piped duscope to jq" % (jq["decision"], jq["pipe_runs"]),
     ]
 
@@ -669,7 +807,7 @@ def summarize(runs: List[Dict[str, Any]], cells: List[Dict[str, Any]], tasks: Li
     for t in tasks:
         row = {}
         for c in cells:
-            mine = [r for r in runs if r["task"] == t["id"] and r["cell"] == c["id"]]
+            mine = [r for r in runs if r["task"] == t["id"] and r["cell"] == c["id"] and not outage(r)]
             row[c["id"]] = "%d/%d" % (sum(1 for r in mine if r["completed"]), len(mine))
         by_task[t["id"]] = row
     decisions = decide(runs, config)
@@ -682,12 +820,18 @@ def format_summary(result: Dict[str, Any]) -> str:
     lines = ["%s, %s, model %s, %d runs%s" % (
         result["date"], result["mode"], result["model"], len(result["runs"]),
         "" if result["complete"] else " (incomplete)")]
+    d = result["config"]["decision"]
+    lines.append(
+        "criterion: higher completion by %s runs, or within that margin %.0f%% fewer tokens (the mean of a "
+        "completed run)" % (d.get("completion_margin_runs", "-"), 100 * float(d["min_token_reduction"]))
+    )
     lines.append("")
-    head = "%-18s %10s %12s %9s %7s %10s %9s" % ("cell", "completed", "tokens", "cost", "turns", "recovered", "skill")
+    head = "%-18s %10s %12s %9s %7s %10s %9s %10s %7s" % (
+        "cell", "completed", "tokens", "cost", "turns", "recovered", "skill", "no format", "infra")
     lines.append(head)
     for cid in cells:
         c = s["cells"][cid]
-        lines.append("%-18s %10s %12s %9s %7s %10s %9s" % (
+        lines.append("%-18s %10s %12s %9s %7s %10s %9s %10s %7s" % (
             cid,
             "%d/%d" % (c["completed"], c["runs"]),
             "{:,.0f}".format(c["tokens_mean"]) if c["tokens_mean"] is not None else "-",
@@ -695,6 +839,8 @@ def format_summary(result: Dict[str, Any]) -> str:
             c["turns_mean"] if c["turns_mean"] is not None else "-",
             "%d/%d" % (c["recovered_runs"], c["runs_with_failed_calls"]),
             c["skill_invoked_runs"],
+            c.get("default_format_runs", "-"),
+            c.get("infrastructure", 0),
         ))
     lines.append("")
     lines.append("%-16s " % "task" + " ".join("%-14s" % cid for cid in cells))
@@ -888,8 +1034,10 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
     date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     suffix = "" if mode == "claude" else "-" + mode
     out = args.out or os.path.join(args.results_dir, "%s%s.json" % (date, suffix))
+    # A second start on the same day would overwrite the first's runs.
+    if os.path.exists(out) and not (args.resume and os.path.realpath(args.resume) == os.path.realpath(out)):
+        raise EvalError("%s exists: --resume %s continues it, --out names another file" % (out, out))
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    transcripts = None if args.no_transcripts else (args.transcripts or os.path.join(HERE, ".runs", date + suffix))
 
     header = {
         "schema_version": SCHEMA_VERSION,
@@ -937,62 +1085,95 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
                 raise EvalError("%s was run with another %s: start a new file" % (args.resume, key))
         if old["mode"] != mode or old["claude_code"]["version"] != claude_version:
             raise EvalError("%s was run with another agent: start a new file" % args.resume)
+        # One file, one binary: the runs it keeps and those it adds must
+        # measure the same duscope.
+        if old["harness"].get("commit") != header["harness"]["commit"]:
+            raise EvalError(
+                "%s was run at another commit (%s; this checkout is at %s): start a new file"
+                % (args.resume, old["harness"].get("commit"), header["harness"]["commit"])
+            )
+        if old["duscope"].get("version") != header["duscope"]["version"]:
+            raise EvalError(
+                "%s was run with another duscope (%s; this one is %s): start a new file"
+                % (args.resume, old["duscope"].get("version"), header["duscope"]["version"])
+            )
         for r in old["runs"]:
-            done[(r["task"], r["cell"], r["repeat"])] = r
+            if not outage(r):
+                done[(r["task"], r["cell"], r["repeat"])] = r
         header["started_at"] = old["started_at"]
         header["date"] = old["date"]
 
-    extra_dirs = tool_dirs(["claude", "node", "jq"], base_env) if mode == "claude" else tool_dirs(["jq"], base_env)
-    if mode == "claude":
-        extra_dirs = [os.path.dirname(claude[0])] + [d for d in extra_dirs if d != os.path.dirname(claude[0])]
-    settings = Settings(
-        config=config,
-        meta=meta,
-        binary=binary,
-        claude=claude,
-        fake=args.fake,
-        scale=args.scale,
-        base_env=base_env,
-        extra_dirs=extra_dirs,
-        work_dir=args.work_dir,
-        keep_work=args.keep_work,
-        transcripts=transcripts,
-    )
-    # Interleaved: every cell runs a task before the next task, and every task
-    # once before any runs a second time, so a slow hour or a changed rate
-    # limit falls on every cell alike.
-    order = [(t, c, r) for r in range(runs) for t in tasks for c in cells if (t["id"], c["id"], r) not in done]
-    records = list(done.values())
-    lock = threading.Lock()
-
-    task_index = {t["id"]: i for i, t in enumerate(tasks)}
-    cell_index = {c["id"]: i for i, c in enumerate(cells)}
-    wanted = {(t["id"], c["id"], r) for r in range(runs) for t in tasks for c in cells}
-
-    def save(final: bool) -> None:
-        ordered = sorted(
-            records,
-            key=lambda x: (x["repeat"], task_index.get(x["task"], len(task_index)), cell_index.get(x["cell"], len(cell_index))),
+    transcripts = None if args.no_transcripts else (args.transcripts or os.path.join(HERE, ".runs", header["date"] + suffix))
+    if transcripts and not args.resume and os.path.isdir(transcripts) and os.listdir(transcripts):
+        raise EvalError(
+            "%s holds the transcripts of another run: --transcripts names another directory, "
+            "--no-transcripts keeps none" % transcripts
         )
-        have = {(x["task"], x["cell"], x["repeat"]) for x in ordered}
-        result = dict(header, runs=ordered, complete=final and wanted <= have)
-        if final:
-            result["finished_at"] = utc_now()
-        result["summary"] = summarize(ordered, cells, tasks, config)
-        write_json(out, result)
 
-    total = len(order) + len(done)
-    failures: List[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        futures = {pool.submit(run_one, settings, t, c, r): (t, c, r) for t, c, r in order}
-        for future in concurrent.futures.as_completed(futures):
+    # One binary for the whole eval, whatever is built meanwhile: a copy, which
+    # each run's directory links to and the harness's own calls run.
+    frozen_dir = tempfile.mkdtemp(prefix="duscope-under-test-", dir=args.work_dir)
+    try:
+        frozen = os.path.join(frozen_dir, "duscope")
+        shutil.copy2(binary, frozen)
+        extra_dirs = tool_dirs(["claude", "node", "jq"], base_env) if mode == "claude" else tool_dirs(["jq"], base_env)
+        if mode == "claude":
+            extra_dirs = [os.path.dirname(claude[0])] + [d for d in extra_dirs if d != os.path.dirname(claude[0])]
+        settings = Settings(
+            config=config,
+            meta=meta,
+            binary=frozen,
+            claude=claude,
+            fake=args.fake,
+            scale=args.scale,
+            base_env=base_env,
+            extra_dirs=extra_dirs,
+            work_dir=args.work_dir,
+            keep_work=args.keep_work,
+            transcripts=transcripts,
+            fake_acts=fake_acts(base_env.get(FAKE_ACTS_VAR, "")) if args.fake else [],
+        )
+        # Interleaved: every cell runs a task before the next task, and every task
+        # once before any runs a second time, so a slow hour or a changed rate
+        # limit falls on every cell alike.
+        order = [(t, c, r) for r in range(runs) for t in tasks for c in cells if (t["id"], c["id"], r) not in done]
+        records = list(done.values())
+        lock = threading.Lock()
+
+        task_index = {t["id"]: i for i, t in enumerate(tasks)}
+        cell_index = {c["id"]: i for i, c in enumerate(cells)}
+        wanted = {(t["id"], c["id"], r) for r in range(runs) for t in tasks for c in cells}
+
+        def save(final: bool) -> bool:
+            ordered = sorted(
+                records,
+                key=lambda x: (x["repeat"], task_index.get(x["task"], len(task_index)), cell_index.get(x["cell"], len(cell_index))),
+            )
+            have = {(x["task"], x["cell"], x["repeat"]) for x in ordered if not outage(x)}
+            result = dict(header, runs=ordered, complete=final and wanted <= have)
+            if final:
+                result["finished_at"] = utc_now()
+            result["summary"] = summarize(ordered, cells, tasks, config)
+            write_json(out, result)
+            return result["complete"]
+
+        total = len(order) + len(done)
+        failures: List[str] = []
+
+        def take(future: concurrent.futures.Future) -> Optional[Dict[str, Any]]:
             t, c, r = futures[future]
             try:
                 record = future.result()
+            except CutShort:
+                cut.append(future)
+                return None
             except (EvalError, OSError, subprocess.SubprocessError, evalchecks.TruthError) as e:
+                if settings.agents.stopping:
+                    cut.append(future)
+                    return None
                 failures.append("%s/%s/%d: %s" % (t["id"], c["id"], r, e))
                 print("eval: %s %s run %d could not run: %s" % (t["id"], c["id"], r + 1, e), file=sys.stderr)
-                continue
+                return None
             with lock:
                 records.append(record)
                 save(False)
@@ -1000,14 +1181,71 @@ def cmd_run(args, base_env: Dict[str, str]) -> int:
                     "eval: [%d/%d] %s %s run %d: %s%s"
                     % (len(records), total, t["id"], c["id"], r + 1,
                        "completed" if record["completed"] else "not completed",
-                       "" if record["completed"] else " (%s)" % record["failure"]),
+                       "" if record["completed"] else " (%s)" % (record["infrastructure"] or record["failure"])),
                     file=sys.stderr,
                 )
-    save(True)
-    with open(out, encoding="utf-8") as f:
-        print(format_summary(json.load(f)), file=sys.stderr)
-    print(out)
-    return 1 if failures else 0
+            return record
+
+        # On Ctrl-C, after STOP_AFTER_OUTAGES outages in a row (or on any error
+        # here) the queue is cancelled and the running agents are ended; a run
+        # cut short is not recorded, so --resume runs it.
+        cut: List[concurrent.futures.Future] = []
+        taken = set()
+        interrupted = False
+        drained = False
+        stopped: Optional[str] = None
+        streak = 0
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs))
+        futures = {pool.submit(run_one, settings, t, c, r): (t, c, r) for t, c, r in order}
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                taken.add(future)
+                record = take(future)
+                if record is None:
+                    continue
+                streak = streak + 1 if outage(record) else 0
+                if streak >= STOP_AFTER_OUTAGES:
+                    stopped = record["infrastructure"]
+                    break
+            else:
+                drained = True
+        except KeyboardInterrupt:
+            interrupted = True
+        finally:
+            if not drained:
+                settings.agents.stop()
+                pool.shutdown(wait=False, cancel_futures=True)
+            pool.shutdown(wait=True)
+        # A run that ended while the eval stopped is kept.
+        for future in futures:
+            if future not in taken and not future.cancelled():
+                take(future)
+
+        complete = save(not interrupted and not stopped)
+        with open(out, encoding="utf-8") as f:
+            print(format_summary(json.load(f)), file=sys.stderr)
+        print(out)
+        left = "%d runs cut short and not recorded, %d not started" % (len(cut), sum(1 for f in futures if f.cancelled()))
+        if interrupted:
+            print("eval: interrupted: %s; the same command with --resume %s runs them" % (left, out), file=sys.stderr)
+            return 130
+        outages = sum(1 for x in records if outage(x))
+        if stopped:
+            print(
+                "eval: stopped after %d infrastructure failures in a row (the last: %s); %s. Once that is "
+                "fixed, the same command with --resume %s runs them and the failures again"
+                % (STOP_AFTER_OUTAGES, stopped, left, out),
+                file=sys.stderr,
+            )
+        elif outages:
+            print(
+                "eval: %d runs failed for the infrastructure and are not counted; the same command with "
+                "--resume %s runs them again" % (outages, out),
+                file=sys.stderr,
+            )
+        return 0 if complete else 1
+    finally:
+        shutil.rmtree(frozen_dir, ignore_errors=True)
 
 
 def main(argv: Optional[List[str]] = None, environ: Optional[Dict[str, str]] = None) -> int:
@@ -1024,6 +1262,9 @@ def main(argv: Optional[List[str]] = None, environ: Optional[Dict[str, str]] = N
     except (EvalError, minitoml.TomlError) as e:
         print("eval: %s" % e, file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("eval: interrupted", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

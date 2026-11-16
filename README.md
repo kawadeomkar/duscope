@@ -6,14 +6,17 @@
 > from it in milliseconds, compares two scans (`diff`) and takes read-only SQL
 > (`query --sql`); it prints one JSON envelope, exports to ncdu, GrandPerspective
 > and QDirStat, imports ncdu's, gdu's and GrandPerspective's files, and renders
-> the treemap in the terminal, as SVG or as PNG. The MCP server and the interactive treemap arrive in later
-> releases, as the list below marks.
+> the treemap in the terminal, as SVG or as PNG. v0.2.0 also carries the
+> interactive viewer (`duscope view`), `clean`, `duscope agent` and the MCP
+> server, though the server offers no tools until v0.3; they are held to their
+> own gates in v0.3 (the MCP server and `agent`) and v0.4 (the viewer and
+> `clean`).
 
 duscope is a disk-usage analyzer for macOS and Linux. It scans a directory tree
 once, in parallel, and:
 
-- draws the tree as a coloured treemap in the terminal (static now; interactive
-  later), or renders it as SVG or PNG;
+- draws the tree as a coloured treemap in the terminal, as a static map or in
+  an interactive viewer, or renders it as SVG or PNG;
 - answers the questions that free space: the largest directories and files,
   large files untouched for months, bytes by file type, regenerable caches, and
   what deleting a path would free;
@@ -21,8 +24,7 @@ once, in parallel, and:
   from it in milliseconds, compares two scans and takes read-only SQL;
 - prints one versioned JSON envelope, sized to fit the output limits of scripts
   and AI agents;
-- will serve the same read-only operations to agents as a stdio MCP server
-  (v0.3).
+- serves the same read-only operations to agents as a stdio MCP server.
 
 Its sizes are what deleting would free: hard links count once on every
 filesystem, and it accounts for APFS clones and firmlinks on macOS and for
@@ -265,9 +267,9 @@ gives the terminal back as it found it when it ends.
 
 The map fills the screen; from 110 columns a column at its right holds the
 selection's facts, its siblings and the legend of the colours. The selection
-starts at the largest file. The line at the bottom shows six keys for what is
-in focus, and `?` lists them all, as this table does (`⏎` is Enter, `⌫`
-Backspace and `⇥` Tab):
+starts on the file reached by taking the largest entry at every level. The line
+at the bottom shows six keys for what is in focus, and `?` lists them all, as
+this table does (`⏎` is Enter, `⌫` Backspace and `⇥` Tab):
 
 | Keys | What they do |
 | --- | --- |
@@ -305,8 +307,9 @@ viewer and `clean` in full.
 
 ## With an AI agent
 
-From v0.3, `duscope mcp` serves scans to MCP clients over stdio, and they reach
-nothing outside the directories given to `--roots`. Each client takes one line:
+`duscope mcp` serves scans to MCP clients over stdio, and they reach nothing
+outside the directories given to `--roots` (v0.2.0's server offers no tools;
+they come with v0.3). Each client takes one line:
 
 ```sh
 claude mcp add --transport stdio duscope -- duscope mcp --roots ~

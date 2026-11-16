@@ -205,7 +205,9 @@ opt-level = "z"
 [profile.release.package.quick-xml]
 opt-level = "z"
 
-# cargo-dist always builds with a profile named `dist`. It is the release profile
-# unchanged, so the archives hold the binary `just repro` builds for their target.
+# cargo-dist always builds with a profile named `dist`, the release profile unchanged.
+# `just repro` builds another profile, for no explicit target and without the
+# dependency list `cargo auditable` embeds, so it cannot rebuild an archive's binary;
+# `just repro-dist <target>` builds it as dist does.
 [profile.dist]
 inherits = "release"

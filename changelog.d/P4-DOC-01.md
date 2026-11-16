@@ -14,3 +14,6 @@
   the README now says that it is a dry run unless given `--yes`, moves to the Trash unless
   given `--permanent`, and refuses a symbolic link, a mount point and the scanned tree's
   root.
+- `README.md` said that the interactive viewer and the MCP server arrive in later releases.
+  v0.2.0 carries the viewer, `clean`, `duscope agent` and the MCP server, whose tools come
+  with v0.3; the README now says so.
