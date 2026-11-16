@@ -291,7 +291,8 @@ fn p3_mcp_02_instructions_are_cut_to_4096_characters() {
     assert_eq!(MAX_INSTRUCTIONS_CHARS, 4096);
     let utf16 = |text: &str| text.encode_utf16().count();
     // Characters as a JavaScript client counts them: UTF-16 code units, so a
-    // character outside the BMP counts two, and none is split.
+    // character outside the BMP counts two, and none is split. A text with no
+    // line break within the limit is cut at a character.
     for (text, kept) in [
         ("é".repeat(5000), 4096),
         ("😀".repeat(3000), 2048),
@@ -310,6 +311,37 @@ fn p3_mcp_02_instructions_are_cut_to_4096_characters() {
         ServerConfig::new("a few words").instructions(),
         "a few words"
     );
+}
+
+#[test]
+fn p3_mcp_02_instructions_end_at_a_line_boundary() {
+    let utf16 = |text: &str| text.encode_utf16().count();
+    // A table whose rows straddle the limit, as the briefing's do: the
+    // instructions keep the lines that fit whole and stop there.
+    let row = "| Large files not modified in months | `duscope top ~ --files --json` |\n";
+    let table = format!(
+        "| Question | Command |\n| --- | --- |\n{}",
+        row.repeat(MAX_INSTRUCTIONS_CHARS / row.len() + 2)
+    );
+    // A line that ends exactly at the limit is kept, and so is a character
+    // outside the BMP before it, counted as two.
+    let exact = format!("{}{}\nnext\n", "😀", "a".repeat(MAX_INSTRUCTIONS_CHARS - 3));
+    for text in [table, exact] {
+        let kept = ServerConfig::new(&text).instructions().to_owned();
+        assert!(text.starts_with(&kept));
+        assert!(kept.ends_with('\n'), "{:?}", kept.lines().last());
+        assert!(utf16(&kept) <= MAX_INSTRUCTIONS_CHARS);
+        let next = text[kept.len()..].split_inclusive('\n').next().unwrap();
+        assert!(
+            utf16(&kept) + utf16(next) > MAX_INSTRUCTIONS_CHARS,
+            "{next:?} fits too"
+        );
+    }
+    // A text within the limit is kept whole, with or without a last line
+    // break.
+    for text in ["one line", "two\nlines\n"] {
+        assert_eq!(ServerConfig::new(text).instructions(), text);
+    }
 }
 
 #[test]
