@@ -5,6 +5,12 @@
   snapshots; reflinks, full rescans, automount points, subvolumes, names that are not UTF-8,
   `relatime`, the Trash), each with the document that covers it. Its install section says what
   each channel installs and what building from crates.io or the source needs.
+- The manual page has a section on `query --sql`, SQL QUERIES: which saved scan it reads, what a
+  statement may do and what is refused (`sql_denied`), duscope's functions and parameters, the
+  row, time (`sql_timeout`) and memory limits, and the output. CAVEATS explains the Full Disk
+  Access probe and `full_disk_access_missing` on macOS; ENVIRONMENT adds `HOME`, `XDG_DATA_HOME`,
+  `TMUX`, `STY` and `TERM_PROGRAM`, with what duscope reads each for; FILES adds the `out/`
+  folder of spilled envelopes and a user `caches.toml`.
 
 ### Fixed
 
