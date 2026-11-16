@@ -557,9 +557,12 @@ and the limits. Each run has a directory of its own in the system's temporary di
 
 Past the shim, what holds a run is Claude Code's matching of `Bash(duscope:*)` and nothing else:
 there is no sandbox, the network is not cut off, and Read (with Grep and Glob) is not limited to
-the tree, so it reaches any file the account can read. Whether that matching refuses
-`duscope x; rm -rf y`, a redirection or a here-document is not known until a run shows it. A run
-that changes the tree fails as `tree changed`, and its transcript keeps the commands.
+the tree, so it reaches any file the account can read. The runs of 2026-11-16 show that it refuses
+a command with a part outside `allowed_tools`, and one that sets or reads a shell variable: of 152
+refusals, 57 were a `cd` before `duscope`, 51 a variable ("A variable in this command can't be
+checked before it runs"), and the rest `sed`, `head`, `cat`, `grep`, `python3` or `ls` beside it.
+Each was recorded as a permission denial, and every run went on to complete. A run that changes the
+tree fails as `tree changed`, and its transcript keeps the commands.
 
 A run is completed when its answer is right, it stayed within 600 s and 2,000,000 tokens, it left
 the tree as it was built, and no deletion was refused. The tree is the same when the same entries
@@ -596,12 +599,12 @@ again.
 (`CLAUDE_CODE_OAUTH_TOKEN`) the runs count against the plan's usage limits, and are billed only past
 them where the plan buys usage on demand; with an API key they are billed per token. Headless Claude
 Code reads its system prompt and tools from the prompt cache on every turn, so most of a run's
-tokens are cache reads. Measured on 2026-11-16 (the first two tasks, every cell): 50,000–90,000
-tokens and 3–5 turns a run, which Claude Code prices at $0.05–0.11 at Sonnet 5.5's API rates ($2 a
-million input tokens, $10 output, $0.20 cache reads), so roughly $7–15 for the eval at those rates;
-the later tasks take more turns. `total_cost_usd` in each record is that price, not a bill, and
-`summary` sums it per cell. A run took under a minute; `--jobs N` runs N at once, within the
-account's rate limits. Ctrl-C stops the eval: the runs not started are cancelled and the running agents ended
+tokens are cache reads. Measured on 2026-11-16 (`results/2026-11-16.json`): about 100,000–160,000
+tokens and 6–9 turns a run on average by cell, which Claude Code prices at $0.07 a run at Sonnet
+5.5's API rates ($2 a million input tokens, $10 output, $0.20 cache reads), $8.71 for the 120 runs.
+`total_cost_usd` in each record is that price, not a bill, and `summary` sums it per cell. A run
+took 14 seconds on average, and the eval 15 minutes at `--jobs 2`; `--jobs N` runs N at once,
+within the account's rate limits. Ctrl-C stops the eval: the runs not started are cancelled and the running agents ended
 (each runs in a session of its own, which the terminal's Ctrl-C does not reach), and the eval
 exits with status 130. A run cut short is not recorded. `--resume FILE` continues an interrupted
 run: the runs in FILE are kept and not made again, but for those that failed for the
@@ -615,7 +618,9 @@ run and marked `complete` at the end. A second start refuses a result file that 
 run on the same UTC day needs `--resume` that file or another `--out`; it also refuses a
 transcripts directory that holds another run's. The file holds the host, the commit, the hashes of
 both files, the Claude Code and duscope versions, the configuration, each task's prompt (`{root}`
-for the tree), and one record per run with its verdict and the reasons, the expected and the given
+for the tree, as everywhere in the file, and `{work}` for the run's own directory: its scratch
+`HOME` and the folder the tree is in, so the file names no path of the account that ran it), and
+one record per run with its verdict and the reasons, the expected and the given
 answer, the models the stream names, tokens (`total`: the pinned model's input, cache creation,
 cache reads and output, from `modelUsage`, else the result's `usage`, else the sum of the
 messages'; `all_models` with any other model Claude Code called), the cost, turns, tool calls,
