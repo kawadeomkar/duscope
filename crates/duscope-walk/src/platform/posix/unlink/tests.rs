@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use duscope_testkit::TestEnv;
@@ -326,6 +326,54 @@ fn p5_core_03_a_file_swapped_for_a_symlink_mid_removal_unlinks_the_link() {
     assert!(fs::symlink_metadata(&item).is_err());
     outside_intact(&root);
     assert_eq!(fs::read(root.join("a.away")).unwrap(), [1u8; 9000]);
+}
+
+/// Gives each directory its mode back when dropped, so that the test's
+/// temporary directory can be removed however the test ends.
+struct Modes(Vec<(PathBuf, u32)>);
+
+impl Drop for Modes {
+    fn drop(&mut self) {
+        for (dir, mode) in &self.0 {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(*mode));
+        }
+    }
+}
+
+#[test]
+fn p5_sec_01_a_directory_that_can_be_searched_but_not_read_is_passed_through() {
+    // Root is held to no directory's mode: there the test shows nothing.
+    if crate::platform::posix::system::effective_uid() == 0 {
+        eprintln!("skipped: root reads a directory whatever its mode");
+        return;
+    }
+    let env = TestEnv::new();
+    let root = tree(&env);
+    // On the way, a directory that may only be searched (0111), as an index
+    // directory below another user's 0711 home has; in it, the entries' own
+    // directory, which may be searched and written but not read (0311). A
+    // lookup by path passes both, and so must the descriptors, on macOS as
+    // on Linux: a deletion of a file and one of a directory with what is
+    // under it.
+    let locked = root.join("locked");
+    let parent = locked.join("parent");
+    fs::create_dir_all(parent.join("dir/sub")).unwrap();
+    fs::write(parent.join("b.bin"), b"deleted").unwrap();
+    fs::write(parent.join("dir/sub/c.bin"), vec![3u8; 9000]).unwrap();
+    let (b, dir) = (ident(&parent.join("b.bin")), ident(&parent.join("dir")));
+    let _modes = Modes(vec![(locked.clone(), 0o755), (parent.clone(), 0o755)]);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o311)).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o111)).unwrap();
+    assert!(fs::read_dir(&locked).is_err() && fs::read_dir(&parent).is_err());
+    let checked = CheckedDir::open(&parent).unwrap();
+    assert_eq!(checked.path(), parent);
+    let mut freed = 0;
+    unlink_checked(&checked, OsStr::new("b.bin"), b, &mut freed).unwrap();
+    remove_dir_checked(&checked, OsStr::new("dir"), dir, &mut freed).unwrap();
+    assert!(freed > 0);
+    for name in ["b.bin", "dir"] {
+        assert!(fs::symlink_metadata(parent.join(name)).is_err(), "{name}");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -876,11 +924,11 @@ mod rename {
     use std::fs;
     use std::os::fd::AsFd;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use duscope_testkit::TestEnv;
 
-    use super::{ident, outside_intact, swap_for_link, tree};
+    use super::{Modes, ident, outside_intact, swap_for_link, tree};
     use crate::RemoveError;
     use crate::platform::posix::system::effective_uid;
     use crate::platform::posix::unlink::{
@@ -913,18 +961,6 @@ mod rename {
             let root = tree(&env);
             let _refused = refused.then(hook::without_noreplace);
             test(&root);
-        }
-    }
-
-    /// Gives each directory its mode back when dropped, so that the test's
-    /// temporary directory can be removed however the test ends.
-    struct Modes(Vec<(PathBuf, u32)>);
-
-    impl Drop for Modes {
-        fn drop(&mut self) {
-            for (dir, mode) in &self.0 {
-                let _ = fs::set_permissions(dir, fs::Permissions::from_mode(*mode));
-            }
         }
     }
 

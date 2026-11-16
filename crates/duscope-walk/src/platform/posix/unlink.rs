@@ -5,10 +5,11 @@
 //! - **The way there.** [`CheckedDir::open`] opens `/`, then each component
 //!   of the path relative to the one above with `O_NOFOLLOW | O_DIRECTORY`:
 //!   a component replaced by a symbolic link fails the open rather than
-//!   leading elsewhere. On Linux each is opened as a path only (`O_PATH`),
-//!   which needs search permission alone, as a lookup by path does, so a
-//!   directory that may be searched but not listed (mode 0711) is passed
-//!   through; only a directory to be emptied is opened to read.
+//!   leading elsewhere. Each is opened as a path only on Linux (`O_PATH`)
+//!   and for search only on macOS (`O_SEARCH`), which needs search
+//!   permission alone, as a lookup by path does, so a directory that may be
+//!   searched but not listed (mode 0711) is passed through; only a
+//!   directory to be emptied is opened to read.
 //! - **The entry.** [`unlink_checked`] and [`remove_dir_checked`] read the
 //!   entry's device and inode through the parent's descriptor, without
 //!   following a link, and remove nothing unless they are the expected ones.
@@ -62,9 +63,10 @@ pub struct CheckedDir {
 impl CheckedDir {
     /// Opens the directory `path`, absolute and without `..`: `/`, then
     /// each component relative to the one above with `O_NOFOLLOW |
-    /// O_DIRECTORY`, on Linux as a path only (`O_PATH`), so that a directory
-    /// on the way needs only search permission. Mounts on the way are
-    /// crossed: it is the removal below that never crosses one.
+    /// O_DIRECTORY`, as a path only on Linux (`O_PATH`) and for search only
+    /// on macOS (`O_SEARCH`), so that a directory on the way needs only
+    /// search permission. Mounts on the way are crossed: it is the removal
+    /// below that never crosses one.
     ///
     /// # Errors
     ///
@@ -702,10 +704,16 @@ fn checked(
 const ON_THE_WAY: c_int = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 /// How [`CheckedDir::open`] opens each directory on the way to an entry:
-/// to read, never through a symbolic link, so on macOS a directory on the
-/// way needs read permission.
+/// never through a symbolic link, and on macOS for search only (`O_SEARCH`,
+/// from macOS 13). Such a descriptor asks for search permission on the
+/// directory itself and the one above, and none to read it, as a lookup by
+/// path does, so a directory that may be searched but not listed (mode
+/// 0711) is passed through. It cannot be listed (`EBADF`), and serves only
+/// as the directory of `*at` calls (`openat`, `fstatat`, `unlinkat`) and
+/// `fstat` of itself; a directory to be emptied is opened to read
+/// ([`open_child`]).
 #[cfg(not(target_os = "linux"))]
-const ON_THE_WAY: c_int = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+const ON_THE_WAY: c_int = libc::O_SEARCH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 /// Opens the directory `name`, at `path`, in the directory open on `dir`,
 /// to read it, never through a symbolic link.
