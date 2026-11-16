@@ -305,6 +305,28 @@ class Answers(unittest.TestCase):
         self.assertFalse(evalchecks.size_matches("lots", 1, 0.5))
         self.assertFalse(evalchecks.size_matches(15 * mib * 1.06, 15 * mib, 0.05))
 
+    def test_p3_agt_03_final_answer_labels_the_answer_line_too(self):
+        for label in ("Final ANSWER:", "final answer:", "FINAL ANSWER:", "**Final Answer:**", "**Final** ANSWER:"):
+            text = "Done.\n%s {\"bytes\": 7}\n" % label
+            self.assertEqual(evalchecks.extract_answer(text), ({"bytes": 7}, None), label)
+        # Another word before it makes a line of prose.
+        self.assertEqual(evalchecks.extract_answer("My answer: {\"bytes\": 7}")[1], "no ANSWER line")
+
+    def test_p3_agt_03_a_prose_line_after_the_answer_line_is_passed_over(self):
+        for after in ("That is all.", "Answer: the Downloads folder, as above.", "Final answer: nothing was changed."):
+            text = "Done.\nANSWER: {\"bytes\": 7}\n%s\n" % after
+            self.assertEqual(evalchecks.extract_answer(text), ({"bytes": 7}, None), after)
+        # A last ANSWER line whose object is not JSON is refused, not passed over.
+        self.assertIn("not JSON", evalchecks.extract_answer("ANSWER: {\"bytes\": 7}\nANSWER: {bytes: 8}")[1])
+
+    def test_p3_agt_03_a_size_may_carry_its_bytes_in_parentheses(self):
+        truth = 66_246_656
+        for value in ("63 MiB (66,246,656 bytes)", "63.2 MiB (66246656)", "63 MiB (66,246,656 B)"):
+            self.assertTrue(evalchecks.size_matches(value, truth, 0.05), value)
+        # The count in parentheses is the size, and what comes before it must be one too.
+        for value in ("63 MiB (99,000,000 bytes)", "lots (66,246,656 bytes)", "63 MiB (66,246,656 bytes"):
+            self.assertFalse(evalchecks.size_matches(value, truth, 0.05), value)
+
 
 class Checks(unittest.TestCase):
     """Each check accepts the truth's own answer and refuses a wrong one."""
@@ -352,6 +374,16 @@ class Checks(unittest.TestCase):
                 self.assertEqual(reasons, [], path)
         finally:
             os.remove(link)
+
+    def test_p3_agt_03_a_path_from_tilde_is_in_the_tree_the_prompt_calls_a_home(self):
+        truth = evalchecks.Truth({"path": os.path.join(self.root, "Downloads"), "bytes": 100})
+        for path in ("~/Downloads", "~/Downloads/", "`~/Downloads`"):
+            reasons = evalchecks.check_path_bytes({"path": path, "bytes": 100}, truth, 0.0, self.ctx)
+            self.assertEqual(reasons, [], path)
+        for path in ("~/Documents", "~"):
+            reasons = evalchecks.check_path_bytes({"path": path, "bytes": 100}, truth, 0.0, self.ctx)
+            self.assertTrue(reasons, path)
+        self.assertEqual(evalchecks.norm_path("~", self.root), self.root)
 
     def test_p3_agt_03_a_cleanup_plan_must_be_eligible_reach_the_target_and_add_up(self):
         t = next(t for t in self.tasks if t["id"] == "cleanup-plan")
