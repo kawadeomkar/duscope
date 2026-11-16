@@ -21,7 +21,7 @@ anything in this table is a new row in the [change log](#change-log).
 
 | | `bench-macos` | `bench-linux` |
 | --- | --- | --- |
-| Machine | the author's MacBook Pro (Mac17,8), [below](#bench-macos-the-authors-macbook-pro) | VM `bench-linux` (VMID 101) on the author's Proxmox VE 9.2 host, [below](#bench-linux-a-vm-on-proxmox) |
+| Machine | the author's MacBook Pro (Mac17,8), [below](#bench-macos-the-authors-macbook-pro) | VM `bench-linux` (VMID 102) on the author's Proxmox VE 9.2 host, [below](#bench-linux-a-vm-on-proxmox) |
 | CPU and cores | Apple M5 Pro, 18 cores | 10 vCPUs of an Intel Core i9-10900K (10 cores, 20 threads), one per core, CPU type `host`, shared with the host's other VMs |
 | Memory | 48 GiB, shared with the author's own work | 8 GiB, fixed (no ballooning) |
 | OS and kernel | macOS 26.7.2 (25G330), Darwin 25.6.0 | Ubuntu 24.04.5 LTS, Linux 6.8.0-147-generic |
@@ -83,22 +83,21 @@ The Linux runner is a VM on the author's Proxmox host, not a machine of its own,
 so other VMs share its CPU and disk; ratios within a run hold up better than
 absolute times between nights. It has 10 vCPUs, one per core of the host, so
 P1-BENCH-01's thread sweep can choose a default above 4 (with 4 it could choose
-nothing else); `qm set 101 --cores 10` on the host, then a reboot of the VM,
-set it. It was created with
-[claude-on-proxmox](https://github.com/kawadeomkar/claude-on-proxmox)'s
+nothing else). It was created with
+[agent-warehouse](https://github.com/kawadeomkar/agent-warehouse)'s
 provision stage alone, with a tag of its own, so that project's configuration
 (Claude Code, cloned repositories, sign-ins) never reaches it and its everyday
 commands do not see it:
 
 ```sh
-# in the claude-on-proxmox checkout
-ANSIBLE_ARGS='-e claude_vm_tag=duscope-bench -e vm_cores=10 -e vm_memory_mb=8192 -e vm_disk_size=64G' \
-  just deploy --only provision bench-linux
+# in the agent-warehouse checkout
+ANSIBLE_ARGS='-e claude_vm_tag=duscope-bench' \
+  just deploy --only provision --cores 10 --memory 8G --disk 64G bench-linux
 # on the Proxmox host: the disk is NVMe-backed, so the guest is told it is an SSD
-qm set 101 --scsi0 local-lvm:vm-101-disk-0,discard=on,size=64G,ssd=1 && qm reboot 101
+qm set 102 --scsi0 local-lvm:vm-102-disk-0,discard=on,size=64G,ssd=1 && qm reboot 102
 ```
 
-The same `ANSIBLE_ARGS='-e claude_vm_tag=duscope-bench'` before `just list` or
+The same `ANSIBLE_ARGS='-e claude_vm_tag=duscope-bench'` before `just status` or
 `just destroy bench-linux` reaches it. The rest of its setup is this page's: the
 cloud-init user `dev` (the author's SSH key, passwordless sudo) administers it,
 and the runner runs as `runner`. Besides the tools below it has
@@ -468,6 +467,7 @@ platform and architecture.
 | 2026-10-25 | `bench-linux` | Registered: a VM on the author's Proxmox host, runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1 |
 | 2026-10-25 | `bench-macos` | Registered: the author's MacBook Pro (M5 Pro, 18 cores, 48 GiB, macOS 26.7.2), runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1; a launchd daemon in the system domain; a daily wake at 03:10 |
 | 2026-10-25 | `bench-linux` | 10 vCPUs, one per core of the host (was 4), for the thread sweep |
+| 2026-11-15 | `bench-linux` | Re-created as VM 102, after the VM of 2026-10-25 (VMID 101) was destroyed on 2026-11-09: Ubuntu 24.04.5, kernel 6.8.0-149, 10 vCPUs, 8 GiB, 64 GB ext4 on the SSD-flagged NVMe disk; runner 2.338.2, hyperfine 2.0.0, rustc 1.100.0. The same host and CPU model, so `bench/compare.py` keeps comparing it with the old VM's results; its first night builds the trees again. rustc segfaulted once while it was set up, as on the old VM: the host's memory is still untested |
 | 2026-10-25 | `bench-macos` | the trees on an APFS disk image, which the cold command remounts around each purge |
 | 2026-10-28 | `bench-macos` | the warm runs' trees back on the Data volume, in `BENCH_HOME/trees`; the image holds the cold runs' trees, measured with dua and `du` only |
 | 2026-10-28 | `bench-macos` | [paused](#paused): left out of scheduled runs until a dedicated Mac takes the label; a dispatch with `macos` ticked runs it |
