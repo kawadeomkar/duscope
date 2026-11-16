@@ -1,0 +1,7 @@
+# duscope's apt repository: https://github.com/kawadeomkar/duscope/blob/main/docs/apt.md
+Types: deb
+URIs: https://kawadeomkar.github.io/duscope/apt
+Suites: stable
+Components: main
+Architectures: amd64 arm64
+Signed-By: /etc/apt/keyrings/duscope.gpg

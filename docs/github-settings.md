@@ -67,7 +67,12 @@ under [Auditing](#auditing) read it again.
   [nightly-fuzz.yml](../.github/workflows/nightly-fuzz.yml), which run on their
   schedules and a dispatch alone: among them `coverage`, the nightly
   `cargo llvm-cov` report on `ubuntu-24.04` and `macos-26` (P5-TEST-01), which
-  is reported and never enforced. This PUT replaces the whole
+  is reported and never enforced.
+  [apt.yml](../.github/workflows/apt.yml) (P5-PKG-01) runs `repo-test` on the
+  pull requests that change the apt repository's files alone, so it is not
+  required either: a required check that most pull requests never run would
+  hold them forever. Its other jobs run after a release and on a dispatch,
+  never on a pull request. This PUT replaces the whole
   protection of `main`, so it restates the settings above unchanged. `app_id`
   15368 is GitHub Actions, so only a workflow run can report these checks.
 
@@ -236,6 +241,10 @@ under [Auditing](#auditing) read it again.
 - [x] GitHub Pages served from the `gh-pages` branch, for the apt repository:
   P0-REPO-03. Served at https://kawadeomkar.github.io/duscope/ with HTTPS
   enforced; the branch holds a placeholder page until apt.yml publishes `/apt`.
+  apt.yml's `publish` job (P5-PKG-01) needs no further setting: it pushes `apt/`
+  with its run's `GITHUB_TOKEN` (`contents: write`) and, since a push made with
+  that token starts no Pages build, requests one (`pages: write`); both in that
+  job alone.
 - [x] Protection for `v*` tags (P0-CI-02): a tag ruleset under which only a
   repository administrator, the author, may create, move or delete a `v*` tag.
   Tags are never moved or deleted (a pulled release burns its number), and the

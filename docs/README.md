@@ -5,6 +5,9 @@ ones at the top of the repository.
 
 ## In this directory
 
+- [apt.md](apt.md): the signed apt repository: installing duscope from it, its
+  `stable` and `testing` suites, the signing key's fingerprint and rotation, what
+  to do when the key changes, and how apt.yml builds and publishes it.
 - [github-settings.md](github-settings.md): the repository settings duscope
   depends on (branch protection and the required checks, merge methods,
   Actions, security, labels), as a checklist with the command that applies each.

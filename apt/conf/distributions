@@ -1,0 +1,22 @@
+# The two suites of the apt repository (P5-PKG-01), which scripts/apt-repo.sh
+# rebuilds from the GitHub Releases at every run of apt.yml: stable holds the
+# newest release, testing the newest release or pre-release (docs/apt.md).
+# Each holds one version of duscope for amd64 and arm64. scripts/apt-repo.sh
+# signs each Release file itself, with the subkey apt.yml imports, so no
+# SignWith here.
+
+Origin: duscope
+Label: duscope
+Suite: stable
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+Description: duscope, the disk-usage analyzer: the newest release
+
+Origin: duscope
+Label: duscope
+Suite: testing
+Codename: testing
+Architectures: amd64 arm64
+Components: main
+Description: duscope, the disk-usage analyzer: the newest release or pre-release
