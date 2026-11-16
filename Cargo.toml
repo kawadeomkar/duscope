@@ -47,7 +47,7 @@ crossterm = "=0.29.0"
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 # Default features off: the `log` feature only logs how patterns compile.
 gix-ignore = { version = "=0.24.1", default-features = false }
-jiff = { version = "=0.2.42", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+jiff = { version = "=0.2.43", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 globset = { version = "=0.4.21", default-features = false }
 # The MAC of `explain`'s handles (P2-CORE-01), over the SHA-256 of sha2.
 hmac = "=0.13.0"
@@ -102,7 +102,7 @@ unicode-width = { version = "=0.2.3", default-features = false }
 assert_cmd = "2.2.2"
 cargo_metadata = "=0.23.1"
 # Default features off: they fetch remote `$ref`s over HTTP (reqwest, rustls).
-jsonschema = { version = "=0.61.1", default-features = false }
+jsonschema = { version = "=0.61.2", default-features = false }
 # Default features off but `std`: no forked or timed-out test cases.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # The MCP conformance oracle (D36): rmcp's client, which deny.toml keeps out of
@@ -110,7 +110,7 @@ proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # acceptance names so it cannot move under the tests. Default features off, so
 # its server half, macros and schemars stay out; `transport-async-rw` speaks
 # over the pipes the tests hand it.
-rmcp = { version = "=3.9.0", default-features = false, features = ["client", "transport-async-rw"] }
+rmcp = { version = "=3.10.0", default-features = false, features = ["client", "transport-async-rw"] }
 schemars = { version = "1.2.3", default-features = false, features = ["derive"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
