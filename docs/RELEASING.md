@@ -132,14 +132,16 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    the end; its `live-install` jobs are the check in a clean container:
 
    ```sh
-   gh run watch "$(gh run list --workflow apt.yml --event workflow_run --limit 1 \
-     --json databaseId --jq '.[0].databaseId')"
+   gh run watch "$(gh run list --workflow apt.yml --event workflow_run --limit 20 \
+     --json databaseId,conclusion --jq 'map(select(.conclusion != "skipped"))[0].databaseId')"
    ```
 
-   A release whose run needed a re-run starts it again when the re-run
-   succeeds. To publish for a tag by hand, after a fix or a pulled release:
-   `gh workflow run apt.yml -f tag=vX.Y.Z`. Until the key ceremony (P5-SEC-02),
-   every run fails at its first step, which says so; the release itself is
+   Every run of release.yml starts one of apt.yml, and each lists `main` as its branch, so the
+   newest is not always the tag's: those a pull request's run starts are skipped, and the
+   newest one not skipped is the tag's. A release whose run needed a re-run starts it again
+   when the re-run succeeds. To publish for a tag by hand, after a fix or a pulled release:
+   `gh workflow run apt.yml -f tag=vX.Y.Z`. Until the key ceremony (P5-SEC-02), a release's
+   run and a dispatched one fail at their first step, which says so; the release itself is
    unaffected.
 
 7. **After the release.** On a clean machine, `cargo install duscope --locked` and
@@ -147,8 +149,10 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    and update the Tracker's phase row and current-state line, and the proposal's decision log
    when a gate decision was taken.
 
-8. **Yearly.** At the first release after each anniversary of a secret's creation, rotate the
-   secrets in the table below and record the new dates there.
+8. **Yearly.** Before each secret in the table below expires, rotate it and record the new
+   dates there: a token that lives 12 months a month before its anniversary, so that no
+   release meets it expired, and the apt signing subkey about ten months after it is made,
+   before `apt.yml`'s 60 days ([apt.md](apt.md#rotating-the-signing-subkey)).
 
 ### Patch releases
 
