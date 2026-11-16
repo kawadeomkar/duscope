@@ -10,6 +10,18 @@ change adds a fragment, `changelog.d/<ID>.md`, in the format given in
 `scripts/changelog.py` assembles the fragments into the version's dated section
 and deletes them.
 
+## [0.2.1] - 2026-11-18
+
+### Fixed
+
+- `rescan`, and every command that reads `--exclude-from`, `--ignore-from` or the configuration's `[caches] extra` table, no longer waits for ever on a FIFO, or fills memory from a device, named as one of those files: each is read only when it is a regular file of at most 1 MiB, links followed, and is otherwise refused as a usage error that names the file and why (`not a regular file`, `is a directory`, or the cap).
+- `scans --prune` removes from the index directory's `out` only the files a spilled envelope is written to (`<scan>-<verb>-<time>.json`), where it removed every file there older than a week, and refuses an `out` that is a symbolic link (`refused_path`) before it removes anything.
+
+### Security
+
+- rustix 1.1.6, for RUSTSEC-2026-0486: rustix 1.1.5's extended-attribute functions were unsound on a zero-length buffer. duscope calls none of them, so nothing changes in what it does; the binary no longer carries the release the advisory names.
+- GHSA-64hc-5m63-wrmm (CVE pending): `export -o` and `agent --skill` no longer write through a symbolic link planted in their way, which could overwrite another of the user's files.
+
 ## [0.2.0] - 2026-11-05
 
 ### Added
