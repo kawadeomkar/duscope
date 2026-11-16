@@ -1,0 +1,3 @@
+# reprepro's options for scripts/apt-repo.sh, which passes the directories
+# (--basedir, --dbdir, --outdir) itself: every run builds a new repository.
+verbose

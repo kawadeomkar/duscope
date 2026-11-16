@@ -1,0 +1,319 @@
+# The signed apt repository (P5-PKG-01), https://kawadeomkar.github.io/duscope/apt:
+# reprepro's repository of the .debs release.yml attaches to the GitHub Releases,
+# signed with the subkey in APT_SIGNING_SUBKEY and served by GitHub Pages from
+# the gh-pages branch. docs/apt.md describes it, and records the key's
+# fingerprint; scripts/apt-repo.sh does each step, here and on any Linux machine.
+#
+#   select         the public key, apt/duscope.gpg, exists and is the one
+#                  docs/apt.md records (before the key ceremony, P5-SEC-02, every
+#                  run fails here); the release the run is for; each suite's
+#   build          the suites' .debs, each checked against release.yml's
+#                  attestation; the subkey imported, and refused when it expires
+#                  within 60 days; the repository built, signed and verified
+#   local-install  docs/apt.md's install commands, against that repository
+#                  served on the runner, in Debian 12 and Ubuntu 22.04 on amd64
+#                  and arm64, before anything is published
+#   publish        the repository replaces apt/ on gh-pages, and Pages builds it
+#   live-install   once Pages serves it, the same commands against the live URL
+#   repo-test      a pull request that changes these files: the key checks
+#                  against throwaway keys (a subkey with 30 days left fails the
+#                  expiry check), then the newest release's .debs built into a
+#                  repository signed with a throwaway subkey, and installed from
+#                  it in both containers on both architectures
+#
+# The trigger. release.yml publishes the GitHub Release with its run's
+# GITHUB_TOKEN, and GitHub starts no workflow for an event that token causes
+# (workflow_dispatch and repository_dispatch aside), so `release: published`
+# would never start this one. workflow_run does: it follows the completion of
+# release.yml's run, which the author's tag push started. Only a successful run
+# for a tag counts: a release that failed partway publishes nothing to apt until
+# its re-run succeeds, which starts this again, or a dispatch names its tag.
+# Pull requests start release.yml too; those runs, and failed ones, skip every
+# job here.
+#
+# The suites. Every run rebuilds the repository from the GitHub Releases, so it
+# holds the newest of them and nothing else: stable the newest release, testing
+# the newest release or pre-release, each among the releases that still have
+# both .debs. A pulled release, whose assets are deleted (docs/RELEASING.md),
+# drops out at the next run.
+
+name: apt
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "the release to publish the repository for (vX.Y.Z); the suites take the newest releases"
+        required: true
+  pull_request:
+    paths:
+      - ".github/workflows/apt.yml"
+      - "apt/**"
+      - "docs/apt.md"
+      - "scripts/apt-repo.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to a pull request replaces its running test; a publishing run
+  # has a group of its own, and publish queues them (below).
+  group: apt-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  select:
+    # A dispatch, or a successful run of release.yml for a tag.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      stable: ${{ steps.suites.outputs.stable }}
+      testing: ${{ steps.suites.outputs.testing }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # First: until the key ceremony there is no key, and nothing to publish.
+      - name: The public key is the one docs/apt.md records
+        run: scripts/apt-repo.sh check-key
+      - name: The release
+        id: tag
+        env:
+          # workflow_run names a tag run's tag as its branch.
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+        run: |
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error title=apt::$TAG is not a release tag"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: The release of each suite
+        id: suites
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          scripts/apt-repo.sh releases > "$RUNNER_TEMP/releases.jsonl"
+          scripts/apt-repo.sh select "$TAG" < "$RUNNER_TEMP/releases.jsonl" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: select
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Reads the releases and their attestations; the job that holds the
+    # signing secrets writes nothing.
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install reprepro, and a keyring for the run
+        run: |
+          sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q reprepro
+          echo "GNUPGHOME=$RUNNER_TEMP/gnupg" >> "$GITHUB_ENV"
+      - name: The suites' .debs, built and attested by release.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE: ${{ needs.select.outputs.stable }}
+          TESTING: ${{ needs.select.outputs.testing }}
+        run: |
+          scripts/apt-repo.sh fetch "$STABLE" "$RUNNER_TEMP/debs/$STABLE"
+          [[ $TESTING == "$STABLE" ]] || scripts/apt-repo.sh fetch "$TESTING" "$RUNNER_TEMP/debs/$TESTING"
+      # Each secret reaches one step: the subkey its import, the passphrase the
+      # signing.
+      - name: Import the signing subkey
+        env:
+          APT_SIGNING_SUBKEY: ${{ secrets.APT_SIGNING_SUBKEY }}
+        run: scripts/apt-repo.sh import
+      - name: The subkey expires more than 60 days from now
+        run: scripts/apt-repo.sh check-expiry 60
+      - name: Build, sign and verify the repository
+        env:
+          APT_SIGNING_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+          STABLE: ${{ needs.select.outputs.stable }}
+          TESTING: ${{ needs.select.outputs.testing }}
+        run: scripts/apt-repo.sh build "$RUNNER_TEMP/site/apt" "$RUNNER_TEMP/debs/$STABLE" "$RUNNER_TEMP/debs/$TESTING"
+      - name: Forget the subkey
+        if: ${{ always() }}
+        run: |
+          gpgconf --kill all || true
+          rm -rf "$GNUPGHOME"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apt-repository
+          path: ${{ runner.temp }}/site/
+          if-no-files-found: error
+
+  local-install:
+    name: local-install (${{ matrix.image }}, ${{ matrix.arch }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "ubuntu:22.04"]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apt-repository
+          path: ${{ runner.temp }}/site/
+      - name: Install from the repository as docs/apt.md says
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: scripts/apt-repo.sh install-test "$IMAGE" "$RUNNER_TEMP/site"
+
+  publish:
+    needs: [select, build, local-install]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The push to gh-pages, and the Pages build after it: the only job whose
+    # token writes (DEV-4). A push made with the GITHUB_TOKEN starts no Pages
+    # build, so the job requests one.
+    permissions:
+      contents: write
+      pages: write
+    # One push at a time; a second run waits for the first, never cancels it.
+    concurrency:
+      group: apt-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apt-repository
+          path: ${{ runner.temp }}/site/
+      # The run's GITHUB_TOKEN stays in the checkout's git config for the push.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+      - name: Replace apt/ on gh-pages
+        env:
+          TAG: ${{ needs.select.outputs.tag }}
+          STABLE: ${{ needs.select.outputs.stable }}
+          TESTING: ${{ needs.select.outputs.testing }}
+        run: |
+          git rm -rq --ignore-unmatch apt
+          rm -rf apt
+          cp -R "$RUNNER_TEMP/site/apt" apt
+          git add apt
+          if git diff --cached --quiet; then
+            echo "::notice title=apt::gh-pages already holds this repository"
+            exit 0
+          fi
+          git -c user.name="duscope apt" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "apt: stable $STABLE, testing $TESTING" \
+            -m "Published by apt.yml for $TAG: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          git push -q origin HEAD:gh-pages
+          echo "published stable $STABLE and testing $TESTING to gh-pages" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Build the Pages site
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/$GITHUB_REPOSITORY/pages/builds" --jq .status
+
+  live-install:
+    name: live-install (${{ matrix.image }}, ${{ matrix.arch }})
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "ubuntu:22.04"]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Pages builds the branch, and its CDN keeps a file up to 10 minutes.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apt-repository
+          path: ${{ runner.temp }}/site/
+      - name: Wait for Pages to serve the new repository
+        run: scripts/apt-repo.sh wait-live "$RUNNER_TEMP/site/apt" 1200
+      - name: Install from the live repository as docs/apt.md says
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: scripts/apt-repo.sh install-test "$IMAGE"
+
+  repo-test:
+    name: repo-test (${{ matrix.arch }})
+    if: ${{ github.event_name == 'pull_request' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    # Reads the newest release and its attestations.
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A throwaway key in place of the real one, which a pull request never
+      # reaches.
+      - name: Install reprepro, and a keyring for the run
+        run: |
+          sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q reprepro
+          echo "GNUPGHOME=$RUNNER_TEMP/gnupg" >> "$GITHUB_ENV"
+          echo "APT_KEYRING=$RUNNER_TEMP/key/duscope.gpg" >> "$GITHUB_ENV"
+      - name: The key checks against throwaway keys, a subkey with 30 days left among them
+        run: scripts/apt-repo.sh self-test
+      - name: The newest release's .debs
+        id: suites
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          scripts/apt-repo.sh releases > "$RUNNER_TEMP/releases.jsonl"
+          scripts/apt-repo.sh select "$tag" < "$RUNNER_TEMP/releases.jsonl" | tee -a "$GITHUB_OUTPUT" > "$RUNNER_TEMP/suites"
+          stable=$(sed -n 's/^stable=//p' "$RUNNER_TEMP/suites")
+          testing=$(sed -n 's/^testing=//p' "$RUNNER_TEMP/suites")
+          scripts/apt-repo.sh fetch "$stable" "$RUNNER_TEMP/debs/$stable"
+          [[ $testing == "$stable" ]] || scripts/apt-repo.sh fetch "$testing" "$RUNNER_TEMP/debs/$testing"
+      - name: Build, sign and verify the repository with a throwaway key
+        env:
+          STABLE: ${{ steps.suites.outputs.stable }}
+          TESTING: ${{ steps.suites.outputs.testing }}
+        run: |
+          scripts/apt-repo.sh test-key "$RUNNER_TEMP/key" 365
+          APT_SIGNING_SUBKEY=$(cat "$RUNNER_TEMP/key/subkey.asc") scripts/apt-repo.sh import
+          scripts/apt-repo.sh check-expiry 60
+          APT_SIGNING_PASSPHRASE=$(cat "$RUNNER_TEMP/key/passphrase") \
+            scripts/apt-repo.sh build "$RUNNER_TEMP/site/apt" "$RUNNER_TEMP/debs/$STABLE" "$RUNNER_TEMP/debs/$TESTING"
+      - name: Install from the repository as docs/apt.md says
+        run: |
+          for image in debian:12 ubuntu:22.04; do
+            scripts/apt-repo.sh install-test "$image" "$RUNNER_TEMP/site"
+          done
