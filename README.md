@@ -76,9 +76,12 @@ v0.1.0. They install one static binary, which runs on any glibc:
 sudo apt install ./duscope_<version>_amd64.deb
 ```
 
-A signed apt repository (not yet live: phase 5, before 1.0) will then make it
-`sudo apt install duscope` on Debian 12 and later and Ubuntu 22.04 and later,
-once the repository is added as `docs/apt.md` will describe.
+The signed apt repository, `https://kawadeomkar.github.io/duscope/apt`, serves
+the same packages, so `sudo apt install duscope` installs duscope on Debian 12
+and later and Ubuntu 22.04 and later, and `apt upgrade` keeps it up to date.
+[docs/apt.md](docs/apt.md) has the commands that add it and its key's
+fingerprint. It is not live yet: it opens once its signing key exists (phase 5,
+before 1.0).
 
 ### crates.io
 

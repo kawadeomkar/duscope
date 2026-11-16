@@ -117,13 +117,27 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    open. A change to the formula beyond the version goes into `packaging/homebrew/duscope.rb`
    and, as its own pull request, into the tap.
 
-6. **apt.** `apt.yml` picks up the `.deb` assets, rebuilds the repository with `reprepro`,
-   signs it with the subkey (it fails when the subkey expires within 60 days) and publishes it
-   to GitHub Pages. Check it in a clean container (from phase 5, when the apt repository opens):
+6. **apt.** From phase 5, when the apt repository opens, `apt.yml` follows the
+   tag's run of release.yml once it succeeds ([apt.md](apt.md#how-the-repository-is-built)):
+   it checks the key, rebuilds the repository with `reprepro` from the GitHub
+   Releases (`stable` the newest release, `testing` the newest release or
+   pre-release), checks each `.deb` against its attestation, signs with the
+   subkey (it fails when the subkey expires within 60 days), installs duscope
+   from the result in Debian 12 and Ubuntu 22.04 containers on both
+   architectures, publishes it to GitHub Pages and installs from the live
+   repository again, with [apt.md](apt.md#installing)'s commands. Watch it to
+   the end; its `live-install` jobs are the check in a clean container:
 
    ```sh
-   docker run --rm debian:12 sh -c 'apt-get update && apt-get install -y curl gpg && …'
+   gh run watch "$(gh run list --workflow apt.yml --event workflow_run --limit 1 \
+     --json databaseId --jq '.[0].databaseId')"
    ```
+
+   A release whose run needed a re-run starts it again when the re-run
+   succeeds. To publish for a tag by hand, after a fix or a pulled release:
+   `gh workflow run apt.yml -f tag=vX.Y.Z`. Until the key ceremony (P5-SEC-02),
+   every run fails at its first step, which says so; the release itself is
+   unaffected.
 
 7. **After the release.** On a clean machine, `cargo install duscope --locked` and
    `brew install kawadeomkar/tap/duscope`. Commit the release's spec edits in `plan/` (DEV-6),
@@ -272,7 +286,7 @@ Every secret the release and benchmark pipelines read, and the one key outside G
 | `CARGO_REGISTRY_TOKEN` | none from v0.1.0; v0.0.1 published with it | `publish-update` on `duscope*` (DEV-12) | repository secret | 2026-10-25 | revoke after v0.1.0 publishes through trusted publishing | author |
 | `HOMEBREW_GITHUB_API_TOKEN` | `release.yml`, the tap's pull request: the version bump, or the first release's formula | fine-grained: contents and pull requests (write) on `kawadeomkar/homebrew-tap` only | repository secret | at the v0.1.0 release | 12 months after creation | author |
 | `BENCH_RUNNERS_TOKEN` | `nightly-bench.yml`, the probe that lists the runners (DEV-4) | fine-grained: Administration (read) on `kawadeomkar/duscope`, nothing else | repository secret | 2026-10-25 | 12 months after creation | author |
-| `APT_SIGNING_SUBKEY` and `APT_SIGNING_PASSPHRASE` | `apt.yml` (from phase 5) | the signing subkey of the apt key; the primary key stays offline (P5-SEC-02) | repository secrets | at P5-SEC-02 | 12 months after creation; `apt.yml` fails 60 days before | author |
+| `APT_SIGNING_SUBKEY` and `APT_SIGNING_PASSPHRASE` | `apt.yml`, the `build` job alone (from phase 5): the subkey its import step, the passphrase its signing step | the signing subkey of the apt key, exported alone under its own passphrase; the primary key stays offline on a hardware token (P5-SEC-02, DEV-140) | repository secrets | at P5-SEC-02 | 12 months after creation; `apt.yml` fails 60 days before; rotated as [apt.md](apt.md#rotating-the-signing-subkey) says | author |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` | the MCP smoke scripts, run by a dispatch of `ci.yml` (`mcp-smoke`); the eval runs on the author's machine with the author's own Claude Code login, not these | each vendor's key with a monthly budget cap | repository secrets | before 1.0 (the Gate 5 checklist); not set before | 12 months after creation | author |
 | Tag-signing key | `git tag -s`; `verify-tag` checks the public half in `.github/allowed_signers` | the author's SSH signing key | the author's machine | before v0.0.1 | at the author's discretion; a new key is a pull request to `allowed_signers` | author |
 
@@ -331,7 +345,9 @@ When a release must be withdrawn, in this order:
 3. Open a pull request in `kawadeomkar/homebrew-tap` that reverts the formula and its bottle
    block to the previous release.
 4. Remove the version from the apt repository and publish the previous `.deb` again (from
-   phase 5): `reprepro remove stable duscope`, then re-run `apt.yml` on the previous release.
+   phase 5). `apt.yml` rebuilds the repository from the releases that still have their
+   `.deb`s, so once step 2 has deleted the assets, run it for the previous release, which
+   `stable` then holds again: `gh workflow run apt.yml -f tag=vX.Y.W`.
 5. Add a `Removed` line for the version to `CHANGELOG.md` through a fragment.
 
 The version number is burned: the fix ships as the next patch release. Tags are never deleted.
