@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GrandPerspectiveScanDump appVersion="0.2.0" formatVersion="7">
+<ScanInfo volumePath="/" volumeSize="994610155520" freeSpace="469449547776" scanTime="2026-11-15T15:06:15Z" fileSizeMeasure="physical">
+<Folder name="srv/tree" created="2026-11-15T15:05:55Z" modified="2026-11-15T15:05:55Z">
+<File name="a &amp; b &lt;c&gt; &quot;d&quot;" size="4096"/>
+<File name="package.json" size="4096" created="2026-11-15T15:05:55Z" modified="2026-11-15T15:05:55Z"/>
+<Folder name="node_modules" created="2026-11-15T15:05:55Z" modified="2026-11-15T15:05:55Z">
+<Folder name="pkg" created="2026-11-15T15:05:55Z" modified="2026-11-15T15:05:55Z">
+<File name="index.js" size="4096" created="2026-11-15T15:05:55Z" modified="2026-11-15T15:05:55Z"/>
+</Folder>
+</Folder>
+<Folder name="src" created="2026-11-15T15:05:55Z" modified="2026-11-15T15:05:55Z">
+<File name="hardlink.rs" size="4096" flags="2" created="2026-11-15T15:05:55Z" modified="2026-11-15T15:05:55Z"/>
+<Folder name="deep" created="2026-11-15T15:05:55Z" modified="2026-11-15T15:05:55Z">
+<File name="blob.bin" size="8192" created="2026-11-15T15:05:55Z" modified="2026-11-15T15:05:55Z"/>
+</Folder>
+</Folder>
+</Folder>
+</ScanInfo>
+</GrandPerspectiveScanDump>

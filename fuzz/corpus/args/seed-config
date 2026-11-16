@@ -1,0 +1,11 @@
+[defaults]
+threads = 8
+theme = "mocha"
+limit = 20
+max_age = "7d"
+
+[excludes]
+patterns = ["node_modules", "*.tmp"]
+
+[caches]
+extra = "caches.toml"

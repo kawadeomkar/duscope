@@ -1,0 +1,13 @@
+[[rule]]
+name = "node_modules"
+markers = ["package.json"]
+regenerable_by = "npm install"
+
+[[rule]]
+name = "DerivedData"
+under = "Library/Developer/Xcode"
+regenerable_by = "xcodebuild"
+
+[[rule]]
+cachedir_tag = true
+regenerable_by = "unknown"

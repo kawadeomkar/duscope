@@ -1,0 +1,7 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"fuzz","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"echo","params":{"a":[1,2,{"b":null}],"c":"\u00e9"}}
+{"jsonrpc":"2.0","id":"three","method":"drop"}
+{"jsonrpc":"2.0","id":4,"method":"abandon"}
+{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4}}
+{"jsonrpc":"2.0","id":5,"method":"tools/list"}

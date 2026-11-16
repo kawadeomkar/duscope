@@ -1,4 +1,7 @@
 target/
-corpus/
+# What a run adds to a corpus stays out of git; the seeds each target starts
+# from (seed-*) are committed.
+corpus/*/*
+!corpus/*/seed-*
 artifacts/
 coverage/

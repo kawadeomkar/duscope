@@ -1,0 +1,1 @@
+SELECT depth, count(*), sum(allocated) FROM dirs GROUP BY depth

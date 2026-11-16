@@ -1,0 +1,1 @@
+ATTACH DATABASE '/tmp/x.db' AS x

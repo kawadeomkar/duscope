@@ -1,0 +1,411 @@
+# The external-input audit (P5-SEC-01): every call that reaches the filesystem
+# by a path or a name in the code the binary is built from, and why each is
+# safe: what reaches it, from whom, and what bounds or checks it. fs_allowlist.rs
+# says which calls count and which code is read, and fails on a call this list
+# does not hold or holds a different number of, and on an entry whose calls are
+# gone. A new call is reviewed, then written here.
+#
+# Format: `## <file>`, then for each function a line
+# `<function>: <call>[ xN][, <call>[ xN]]…` (`(item)` outside any function) and
+# the reason on the indented lines below it.
+#
+# Who names what: "a person" is the user at the command line (flags, the
+# environment, the configuration), whom the threat model does not guard against
+# (SECURITY.md, "What is not protected"); "an agent" is an MCP client, whose
+# paths go through crates/duscope-mcp/src/roots.rs and which names saved scans
+# by id only; "the tree" is the scanned tree, anyone's; "a saved scan" is an
+# index file, which may come from anyone when --trust names it.
+
+## crates/duscope-core/src/clean.rs
+
+clean_plan_until: fs::symlink_metadata
+  Each item clean or duscope_delete names (a person's path, or the path a
+  handle that verified names; an agent's only within --roots): an lstat, so the
+  entry itself and never what a link leads to, whose (dev, ino) must match the
+  handle's. Reads no contents and changes nothing.
+overlap: fs::metadata
+  The directories above each item of a plan, to find an item inside another the
+  plan moves: a stat of each, as the path resolves. Reads no contents.
+
+## crates/duscope-core/src/config.rs
+
+load: fs::read_to_string
+  The configuration file a person names (--config, DUSCOPE_CONFIG, else
+  $XDG_CONFIG_HOME/duscope/config.toml); no MCP tool names one. Read whole and
+  parsed as TOML: the user's own file, so not capped.
+
+## crates/duscope-core/src/git.rs
+
+repo_root: .exists()
+  explain: `.git` in each directory above the path explained (a person's, or an
+  agent's within --roots). A stat; what `.git` holds is read only through
+  duscope_walk::read_regular, a regular file under a cap (DEV-154).
+tracked_inside: .exists()
+  The repository's `index` in the git directory found: a stat before its read,
+  which goes through read_regular, 1 GiB at most (DEV-154).
+
+## crates/duscope-core/src/handle.rs
+
+create: DirBuilder::new, File::open, OpenOptions::new, fs::hard_link, fs::remove_file
+  The handle key, made where none is, in the index directory (a person's
+  --index-dir or DUSCOPE_INDEX_DIR, else the cache directory): the directory
+  made 0700, 40 bytes read from /dev/urandom, the key written to a staged name
+  with O_CREAT|O_EXCL and mode 0600 whatever the umask, linked into place (a key
+  already there wins) and the staged name removed. No client path reaches it.
+open: .metadata(), File::open, fs::symlink_metadata x2
+  handle.key in the index directory: an lstat first (refused unless a regular
+  file of this user's with no group or other bits), then opened and the opened
+  file's (dev, ino) compared with the lstat's, so neither a link nor a file
+  swapped in is read; 32 bytes and no more.
+
+## crates/duscope-core/src/index/reader.rs
+
+open: Connection::open_with_flags
+  Every index file read: from the index directory (query/resolve.rs
+  index_files: regular files named <id>.db), or a file --scan names that
+  resolves inside it or that --trust names (query/resolve.rs trusted); never a
+  client's path. Read-only and immutable, defensive, views and triggers off,
+  the schema untrusted, limits lowered, and the schema and version checked
+  before any row is read (SECURITY.md, Index files).
+
+## crates/duscope-core/src/index/scanid.rs
+
+random_bytes: File::open
+  /dev/urandom, a fixed path: eight bytes for a scan id.
+
+## crates/duscope-core/src/index/writer.rs
+
+build: Connection::open, File::open, OpenOptions::new
+  The temporary index file scans/<id>.db.tmp-<pid> in the index directory:
+  created empty with O_CREAT|O_EXCL and mode 0600 (no link followed, whatever
+  the umask), filled by SQLite, then synced. The scan id names it; no client
+  path reaches it.
+write_file_until: fs::remove_file
+  That temporary file, removed before a second build with the sort in memory.
+write_in: DirBuilder::new, File::open, fs::remove_file, fs::rename
+  The index directory's `scans`, made 0700 with each directory above it that
+  is missing; the temporary file renamed to <id>.db, so a snapshot appears whole
+  or not at all, and the directory synced; on a failure the temporary file is
+  removed.
+
+## crates/duscope-core/src/interchange/import/ncdu.rs
+
+read: .metadata()
+  Not a filesystem call: the import parser's own `metadata`, which reads the
+  export's metadata object from the stream.
+
+## crates/duscope-core/src/query/explain.rs
+
+explain_unindexed: fs::symlink_metadata
+  explain of a path no saved scan holds (a person's, or an agent's within
+  --roots): an lstat, the facts of the entry itself.
+fs_holds_file: .symlink_metadata()
+  A marker's name (from the vendored cache rules or a person's [caches] extra)
+  in a directory above a saved scan's root: an lstat, not followed.
+
+## crates/duscope-core/src/query/resolve.rs
+
+index_files: fs::read_dir
+  The index directory's `scans`: listed, keeping regular files alone (by the
+  entry's own type, so no link) named <id>.db.
+trusted: fs::canonicalize x3
+  The file --scan names, the files --trust names (a person's flags; no MCP tool
+  passes either) and the index directory, resolved, so the file opened is the
+  file checked and a link inside the directory to a file outside it is outside.
+warn_if_open: .metadata(), fs::metadata, fs::read_dir
+  The index directory, its `scans` and the index files in it: stat'ed for owner
+  and mode, to warn when they are not this user's alone. Nothing read or changed.
+
+## crates/duscope-core/src/query/sql.rs
+
+sandbox: Connection::open_with_flags
+  The file of an index Index::open has already opened and checked, opened again
+  for query --sql: read-only and immutable, defensive, under the sandbox's
+  authorizer, limits and deadline (SECURITY.md, SQL).
+
+## crates/duscope-core/src/rescan/incremental.rs
+
+options_unchanged: fs::metadata
+  The files the saved scan's options name (--exclude-from, --ignore-from,
+  [caches] extra), stat'ed to tell whether they changed since the scan. The
+  names come from the saved scan, which --trust may name from anyone: a stat
+  reads no contents, but follows links.
+
+## crates/duscope-core/src/resolve.rs
+
+resolve_path: fs::canonicalize
+  Every path a person or an agent names: made absolute and resolved, links
+  included; an agent's is then held to --roots (duscope-mcp roots.rs). Reads no
+  contents.
+
+## crates/duscope-mcp/src/roots.rs
+
+new: .canonicalize()
+  The server's --roots, named by the person who starts duscope mcp: resolved
+  once at start; each must be a directory.
+
+## crates/duscope-tui/src/term.rs
+
+background: OpenOptions::new
+  /dev/tty, a fixed path: the terminal, opened non-blocking to ask its
+  background colour, read for a bounded wait.
+
+## crates/duscope-walk/src/lib.rs
+
+follow: fs::canonicalize
+  Under --follow-symlinks alone (a person's flag, an agent's argument): where a
+  link in the tree leads, resolved and read as a root is. A scan never follows a
+  link without it.
+
+## crates/duscope-walk/src/platform/linux/fiemap.rs
+
+extents_with: .metadata()
+  fstat of the descriptor resolve opened as a path only (O_PATH): a link is
+  ELOOP, anything but a regular file refused before the file is opened to read.
+openat: libc::openat
+  One component of the path explain --clones maps (a person's, or an agent's
+  within --roots), opened O_PATH|O_NOFOLLOW relative to the one before.
+openat2: libc::SYS_openat2
+  The same path opened whole, O_PATH with RESOLVE_NO_SYMLINKS: no component may
+  be a link.
+reopen: .metadata(), OpenOptions::new
+  The regular file checked, opened to read through /proc/self/fd/<fd> (the file
+  checked, not its name again), O_NONBLOCK|O_NOCTTY, its (dev, ino) compared
+  again. FIEMAP's ioctl alone reads it: never its contents.
+walk: .metadata()
+  fstat of each directory on the way down: a link or a non-directory refused.
+
+## crates/duscope-walk/src/platform/linux/mounts.rs
+
+lookup: fs::read
+  /proc/self/mountinfo, a fixed path: the kernel's table of the layout.
+mnt_id_of: fs::canonicalize
+  A directory the walk reached, resolved to find its mount in the table.
+mount_point_under: fs::read
+  /proc/self/mountinfo, read again before each move to the Trash and by
+  --permanent (DEV-163).
+real: fs::canonicalize
+  The walk's root (a person's or an agent's path), resolved once per root.
+volume: fs::canonicalize
+  The root of each volume the walk enters, resolved to find its mount.
+
+## crates/duscope-walk/src/platform/linux/trash.rs
+
+nearest_dev: fs::metadata x2
+  The home Trash ($XDG_DATA_HOME, else $HOME/.local/share/Trash) or its nearest
+  existing ancestor, and `/`: a stat for the device.
+open: .metadata(), DirBuilder::new, OpenOptions::new
+  The Trash chosen for an item clean moves: the home Trash made 0700 if
+  missing; opened O_DIRECTORY, a volume's Trash O_NOFOLLOW too and refused
+  unless this user's; its `files` and `info` made 0700 and opened through its
+  descriptor.
+topdir: fs::metadata
+  The directories above an item's directory, stat'ed for their device, to find
+  the top of its volume.
+usable: DirBuilder::new, fs::symlink_metadata
+  A volume's Trash (.Trash/$uid or .Trash-$uid at its top), made 0700 if
+  missing and used only when an lstat shows a directory of this user's, not a
+  link.
+volume_trash: fs::symlink_metadata
+  The volume's shared .Trash: an lstat, used only as a sticky directory, never
+  a link (the freedesktop specification's rule).
+
+## crates/duscope-walk/src/platform/macos/fsevents.rs
+
+locate: File::open x2
+  rescan --incremental: the saved scan's root and each mount point its walk
+  entered below it (from the saved scan), opened to ask fstatfs and the path
+  without firmlinks; then that volume's mount point, from fstatfs.
+no_log: fs::symlink_metadata
+  .fseventsd/no_log at a volume's mount point: an lstat.
+
+## crates/duscope-walk/src/platform/macos/mod.rs
+
+firmlink_sources: .exists()
+  The source paths /usr/share/firmlinks lists: a stat of each.
+firmlinks: fs::read
+  /usr/share/firmlinks, a fixed path on the read-only System volume, read once.
+real_root: fs::canonicalize
+  The walk's root, resolved once per root for the firmlink decisions.
+
+## crates/duscope-walk/src/platform/macos/trash.rs
+
+trash: fs::symlink_metadata
+  An item clean moves to the Trash: an lstat just before NSFileManager's move,
+  which goes by path, its (dev, ino) compared with the plan's.
+
+## crates/duscope-walk/src/platform/macos/volume.rs
+
+full_disk_access_missing: fs::read_dir
+  ~/Library/Mail and ~/Library/Safari under $HOME, opened to see whether the
+  privacy protections refuse them (EPERM); no entry is read.
+
+## crates/duscope-walk/src/platform/mod.rs
+
+other_device: fs::metadata
+  The directory above an item clean plans (macOS): a stat for its device.
+
+## crates/duscope-walk/src/platform/posix/mod.rs
+
+cachedir_tag: .metadata(), OpenOptions::new, fs::symlink_metadata
+  CACHEDIR.TAG in a directory of the tree, under --exclude-caches: an lstat (a
+  regular file of 43 bytes or more), opened O_NOFOLLOW|O_NONBLOCK and checked
+  again through the descriptor, then 43 bytes read: the scanner's one read of
+  contents.
+open_with: libc::openat
+  Every directory the walk reads (the tree), opened O_DIRECTORY|O_NOFOLLOW
+  relative to its parent's descriptor; the staleness sweep of a scan that
+  followed links opens the pieces of a long path without O_NOFOLLOW, as that
+  scan read them.
+read_regular: .metadata(), OpenOptions::new, fs::metadata, fs::symlink_metadata
+  explain's reads of git's files (DEV-154): a stat, an lstat unless following,
+  refused unless a regular file within its cap; opened O_NONBLOCK|O_NOCTTY,
+  O_NOFOLLOW unless following; checked again through the descriptor; read to
+  the cap and no further.
+
+## crates/duscope-walk/src/platform/posix/unlink.rs
+
+create_at: libc::openat
+  The .trashinfo file of a move to a Linux Trash, in its `info` directory open
+  on a descriptor: O_CREAT|O_EXCL, so nothing at the name, a link included, is
+  opened.
+make_dir_at: libc::mkdirat
+  A Trash's `files` and `info`, made 0700 through the Trash's descriptor and
+  opened O_NOFOLLOW.
+remove_at: libc::unlinkat
+  clean --permanent: each entry removed through its directory's descriptor,
+  reached from `/` without following a link, once its (dev, ino) matches the
+  plan's (P5-CORE-03); unlinkat never follows a final link.
+renameat: libc::renameat
+  The Linux Trash's move where RENAME_NOREPLACE is refused: through
+  descriptors, after an lstat finds nothing at the new name (DEV-181).
+renameat2_noreplace: libc::SYS_renameat2
+  The Linux Trash's move: through descriptors, never over an entry already
+  there.
+
+## duscope/src/agent/mod.rs
+
+write_skill: .exists(), fs::create_dir_all, fs::remove_file, fs::rename, fs::write
+  agent --skill: the skill's files in the skill folders under --dir or the
+  working directory (a person's), each written to <name>.tmp-<pid> beside it
+  and renamed into place.
+
+## duscope/src/log.rs
+
+log: .metadata()
+  Not a filesystem call: log::Record::metadata.
+
+## duscope/src/out/mod.rs
+
+sink: File::create
+  The -o file a person names (no MCP tool takes one): created or truncated, as
+  a shell's redirection would.
+
+## duscope/src/out/spill.rs
+
+write: DirBuilder::new, OpenOptions::new, fs::set_permissions
+  The index directory's `out`, and the index directory when a spill makes it:
+  made and set 0700; each envelope written to a new file, O_CREAT|O_EXCL and
+  mode 0600, named by the scan, the verb and the time.
+
+## duscope/src/verbs/explain.rs
+
+handle: fs::symlink_metadata
+  The path a handle is issued for (a person's, or an agent's within --roots):
+  an lstat for the (dev, ino) the handle signs.
+
+## duscope/src/verbs/export.rs
+
+whole: File::create, fs::metadata, fs::remove_file, fs::rename
+  The -o file a person names: a stat (a FIFO or a device is written directly),
+  else the export goes to .<name>.<pid>.part beside it and is renamed over the
+  file once whole.
+
+## duscope/src/verbs/import.rs
+
+read: File::open
+  The file a person names to import (no MCP tool imports): another tool's
+  export, read through the streaming parsers, gzip capped at 1 GiB once
+  decompressed (SECURITY.md, Imports).
+
+## duscope/src/verbs/mcp.rs
+
+panic_on: .exists()
+  Debug builds only (test_panic, P3-MCP-08): a test's file, polled.
+
+## duscope/src/verbs/query.rs
+
+classes: fs::read_to_string
+  The classes file --classes or the configuration names (a person's): read
+  whole and parsed as TOML.
+
+## duscope/src/verbs/rescan.rs
+
+folder_alone: fs::canonicalize
+  The folder rescan is asked about (a person's path), resolved to tell one
+  reached through a link.
+same_in_a_folder: fs::read
+  The --exclude-from and --ignore-from files the saved scan's options name, read
+  to tell whether each pattern names one component.
+
+## duscope/src/verbs/scan.rs
+
+cache_rules: fs::read_to_string
+  The [caches] extra file: the configuration's (a person's), or on rescan the
+  saved scan's options'. Read whole and parsed as TOML.
+read_flag_file: fs::read
+  The --exclude-from and --ignore-from files: a person's, or on rescan the saved
+  scan's options' (rescan.rs).
+unresolved_link: fs::metadata, fs::symlink_metadata
+  The scan's root (a person's or an agent's path): an lstat and a stat, to tell
+  a link that leads nowhere or loops.
+
+## duscope/src/verbs/scans.rs
+
+check: fs::canonicalize
+  The index directory, resolved to leave it out of scans --check's sweep.
+list: fs::metadata
+  Each index file's size, for the listing.
+old_spills: fs::read_dir
+  The index directory's `out`: regular files older than a week, for --prune.
+older_than: .metadata()
+  An entry of `scans` or `out`, for its modification time.
+remove: fs::metadata, fs::remove_file
+  scans --prune (a person's; no MCP tool prunes): the index files, temporary
+  files and spills the listing chose, all in the index directory; unlink
+  removes a link, never what it leads to.
+stray_temporaries: fs::read_dir
+  The index directory's `scans`: <id>.db.tmp-<pid> files whose process is gone
+  or that are older than a day.
+
+## duscope/src/verbs/schema.rs
+
+run: .symlink_metadata()
+  The path schema describes (a person's, or an agent's within --roots): an
+  lstat, to tell that it exists.
+
+## duscope/src/verbs/source.rs
+
+drop: fs::remove_dir_all
+  The scratch directory scratch_dir made for the index of a scan not kept,
+  removed when done; remove_dir_all does not follow links inside it.
+scratch_dir: DirBuilder::new
+  duscope-<verb>-<pid>-<n> in the temporary directory: made 0700 by mkdir,
+  which fails on anything there already, a link included.
+
+## duscope/src/verbs/treemap.rs
+
+draw: fs::canonicalize
+  The working directory, resolved to tell whether it is the scan's root.
+theme: fs::read_to_string
+  The --theme file a person names (no MCP tool draws): read whole and parsed as
+  TOML.
+
+## duscope/src/verbs/view.rs
+
+named_scan: .exists()
+  The viewer's argument (a person's): a stat, to tell a path from a scan id.
+start_plan: .exists()
+  Debug builds only: DUSCOPE_TEST_PLAN_GATE, a test's file, polled.
+test_opener: OpenOptions::new
+  Debug builds only: DUSCOPE_TEST_OPENER, a test's log, appended to.

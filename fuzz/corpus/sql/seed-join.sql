@@ -1,0 +1,1 @@
+SELECT d.id, f.name FROM files f JOIN dirs d ON f.parent_id = d.id WHERE d.depth < 3
