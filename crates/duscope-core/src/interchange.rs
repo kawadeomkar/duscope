@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::os::unix::ffi::OsStringExt;
 
 use crate::CoreError;
-use crate::index::{EXCLUDED, EXCLUDED_CACHE, Index, LATER_LINK};
+use crate::index::{AUTOMOUNT, EXCLUDED, EXCLUDED_CACHE, Index, LATER_LINK};
 use crate::query::TreeView;
 
 /// What a row's kind is.
@@ -88,8 +88,9 @@ pub struct Row {
     /// A hard-linked file's device and inode.
     pub inode: Option<(u64, u64)>,
     /// Why the scan listed it without entering it, as ncdu names it:
-    /// `pattern` (an exclude), `otherfs`, `kernfs`, or `frmlink` (the
-    /// volume a macOS scan reaches through its firmlinks).
+    /// `pattern` (an exclude), `otherfs` (another filesystem, an automount
+    /// point not mounted included), `kernfs`, or `frmlink` (the volume a
+    /// macOS scan reaches through its firmlinks).
     pub excluded: Option<&'static str>,
     /// A directory's facts.
     pub dir: Option<DirFacts>,
@@ -185,9 +186,13 @@ impl Facts<'_> {
         let flags: u32 = row.get(13)?;
         let depth: u32 = row.get(16)?;
         // A firmlink (`FIRMLINK`) is entered: only the volume behind the
-        // firmlinks is left alone, as `unentered` finds.
+        // firmlinks is left alone, as `unentered` finds. An automount point
+        // the scan did not mount has no volume row; it is another
+        // filesystem left alone all the same.
         let excluded = if flags & (EXCLUDED | EXCLUDED_CACHE) != 0 {
             Some("pattern")
+        } else if flags & AUTOMOUNT != 0 {
+            Some("otherfs")
         } else {
             self.unentered.get(&id).copied()
         };

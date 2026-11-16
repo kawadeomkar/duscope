@@ -14,20 +14,23 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use duscope_testkit::TestEnv;
-use duscope_walk::{Attrs, RemoveError, TrashError, WalkOptions, walk};
+use duscope_walk::{
+    Attrs, Boundary, DirHandle, Entry, Provider, RemoveError, ScanError, TrashError, VolumeInfo,
+    WalkOptions, walk, walk_with,
+};
 
 use super::{
     CleanItem, Method, clean_execute, clean_plan, removal_error, trash_error, within_one_percent,
 };
 use crate::CoreError;
 use crate::arena::Arena;
-use crate::index::{Index, IndexWriter, ScanId, ScanMeta, index_path};
+use crate::index::{AUTOMOUNT, Index, IndexWriter, ScanId, ScanMeta, index_path};
 use crate::query::ExplainQuery;
 use crate::rollup::roll_up;
 use crate::rules::Caches;
@@ -875,6 +878,103 @@ fn p5_core_04_a_folder_the_scan_did_not_enter_with_nothing_under_it_changes_no_f
     let plan = clean_plan(&[signed(&top.join("app"))], &index, &q, Method::Trash).unwrap();
     assert_eq!(plan.plan.items[0].frees_kind, Some("exact"));
     assert!(!plan.unmeasured(0));
+}
+
+/// The platform's provider, which reads a directory named `auto` as Linux
+/// reads an automount point not yet triggered: a mount boundary in the
+/// mount around it.
+struct Automounts(Box<dyn Provider>);
+
+impl Provider for Automounts {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        let start = out.len();
+        self.0.read_dir(dir, opts, out, errs)?;
+        for entry in &mut out[start..] {
+            if entry.name.as_bytes() == b"auto" {
+                entry.boundary = Boundary::Mount;
+            }
+        }
+        Ok(())
+    }
+
+    fn untriggered_automount(&self, entry: &Entry) -> bool {
+        entry.name.as_bytes() == b"auto"
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.0.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.0.root(path, opts)
+    }
+}
+
+#[test]
+fn p5_walk_06_a_folder_holding_a_skipped_automount_point_has_not_changed() {
+    let env = TestEnv::new();
+    let top = fs::canonicalize(env.tmp_dir()).unwrap().join("proj");
+    fs::create_dir_all(top.join("app/auto/deeper")).unwrap();
+    fs::write(top.join("app/main.rs"), vec![1u8; 3000]).unwrap();
+    // What the plan's walk finds under the point, which the scan never
+    // read: the point since replaced by a plain directory, or one the walk
+    // does not know for one.
+    fs::write(top.join("app/auto/blob.bin"), vec![2u8; 40 * 1024]).unwrap();
+    fs::write(top.join("app/auto/deeper/more.bin"), vec![2u8; 20 * 1024]).unwrap();
+    // Scanned with app/auto listed and not entered, flagged automount.
+    let mut arena = Arena::new(Attrs::Basic);
+    let opts = WalkOptions::default();
+    let automounts = Automounts(duscope_walk::provider(&opts).unwrap());
+    walk_with(&automounts, &top, &opts, |e| arena.push(e).unwrap()).unwrap();
+    let rollup = roll_up(&mut arena);
+    let meta = meta(&top);
+    let dir = env.tmp_dir().join("index");
+    fs::create_dir_all(&dir).unwrap();
+    IndexWriter::write(&arena, &rollup, &meta, &dir).unwrap();
+    let index = Index::open(&index_path(&dir, &meta.scan_id)).unwrap();
+    let point = index.lookup([&b"app"[..], b"auto"]).unwrap();
+    let flags: u32 = index
+        .db()
+        .query_row("SELECT flags FROM dirs WHERE id = ?1", [point], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_ne!(flags & AUTOMOUNT, 0, "flags {flags}");
+    assert!(!index.entered(point));
+    let caches = Caches::vendored();
+    let q = query(&caches);
+    let app = top.join("app");
+    let auto = app.join("auto");
+
+    // As a folder holding an excluded directory: what the scan read has not
+    // changed, and its handle plans; what the walk found under the point
+    // is added to the scan's figures, at most.
+    let plan = clean_plan(&[signed(&app)], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 0);
+    let read = blocks(&app) + blocks(&app.join("main.rs")) + blocks(&auto);
+    let never_read = blocks(&auto.join("blob.bin"))
+        + blocks(&auto.join("deeper"))
+        + blocks(&auto.join("deeper/more.bin"));
+    let item0 = &plan.plan.items[0];
+    assert_eq!(
+        (item0.allocated_bytes, item0.frees_bytes, item0.frees_kind),
+        (
+            read + never_read,
+            Some(read + never_read),
+            Some("upper_bound")
+        )
+    );
+    assert!(plan.unmeasured(0));
+    // A change beside the point is one.
+    fs::write(app.join("lib.rs"), b"x").unwrap();
+    let plan = clean_plan(&[item(app.clone())], &index, &q, Method::Trash).unwrap();
+    assert_eq!(plan.changed_count(), 1);
 }
 
 /// `index` with `sql` run on its file: the saved scan as it would have read
