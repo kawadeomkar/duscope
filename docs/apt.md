@@ -97,7 +97,9 @@ signing subkey expires: PLACEHOLDER
 apt.yml publishes nothing unless `apt/duscope.gpg` exists, its primary key has the
 fingerprint above, and its newest signing subkey expires on the date above
 (`scripts/apt-repo.sh check-key`). Until the ceremony the file does not exist, so
-every run of apt.yml fails at its first step and says so.
+every run of apt.yml after a release, and every dispatch, fails at its first job's
+key check and says so; a pull request's `repo-test`, with a throwaway key, needs
+none.
 
 ## When the key changes
 
@@ -130,8 +132,9 @@ against the file you downloaded.
 
 For the maintainer. apt.yml refuses a subkey that expires within 60 days
 (`scripts/apt-repo.sh check-expiry`), so the subkey is rotated more than 60 days
-before its expiry, at the yearly rotation of the secrets
-([RELEASING.md](RELEASING.md#secrets), step 8) or earlier:
+before its expiry, about ten months after it was made: earlier than step 8's yearly
+rotation of the secrets ([RELEASING.md](RELEASING.md#secrets)), which comes after
+the anniversary, when a twelve-month subkey has expired:
 
 1. On the offline machine, with the token, add a signing subkey valid twelve
    months, and export its secret alone, under a new passphrase:
@@ -182,8 +185,9 @@ starts no Pages build). Once Pages serves the new files, it runs the install
 commands above against the live repository.
 
 [scripts/apt-repo.sh](../scripts/apt-repo.sh) does each of these steps, and runs
-on any Linux machine with `reprepro`, `gpg`, `jq` and Docker (`just setup`
-installs `reprepro`). A pull request that changes the repository's files runs
+on a Linux machine with `reprepro`, `gpg` and `gpgv`, `dpkg-deb`, `jq`, `curl`,
+`python3`, `gh` (to list and fetch the releases) and Docker (`just setup` installs
+`reprepro` and `jq`). A pull request that changes the repository's files runs
 apt.yml's `repo-test` job, the same steps with a throwaway key generated in the
 job: the checks of the key against throwaway keys (`self-test`, where a subkey
 with 30 days left fails the expiry check), then the newest release's `.deb`s
