@@ -53,7 +53,7 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    `just deny advisories` has just checked against the advisory database, as release.yml's
    builds do. The `dependencies` test fails when `DEPENDENCIES.md`'s tables and
    the direct dependencies of the published crates differ (a `cargo tree` count does not
-   match the table, which covers all five published crates). The CI jobs `size`, `repro` and
+   match the table, which covers all six published crates). The CI jobs `size`, `repro` and
    `build-time` (against the ceiling `BUILD_TIME_BUDGET_SECS` in `ci.yml`) on that
    commit must be green too.
 
@@ -152,7 +152,9 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
 
 ### Patch releases
 
-A patch release (`vX.Y.Z` with Z > 0) follows steps 2 to 4 and 6 to 7. In place of step 1, the
+A patch release (`vX.Y.Z` with Z > 0) follows steps 2 to 7, step 5 only when it is the newest
+release (the `homebrew` job bumps the tap's formula then, and not for a patch of an older
+minor). In place of step 1, the
 latest nightly result on `main` is at most 72 hours old; the gate is not re-judged.
 
 A security release may be tagged without a nightly result of the last 72 hours when no bench
@@ -248,14 +250,16 @@ as a patch release of the latest minor, the only one supported before 1.0. In or
 4. **The release.** Follow [Patch releases](#patch-releases) at once, without a recent nightly
    result if no bench runner reports, as it says. From `main`, the changelog section is the
    `Security` section alone. `scripts/changelog.py assemble` takes every fragment, so any
-   other fragment waiting on `main` is moved aside for the assemble and put back before the
-   release commit, for the next release:
+   other fragment waiting on `main` is moved aside for the assemble and stays out of the
+   release commit, since `verify-tag` refuses a tag whose commit still holds a fragment; once
+   the tag is pushed, a pull request on `main` puts them back for the next release:
 
    ```sh
    held=$(mktemp -d)
    git ls-files 'changelog.d/*.md' ':!changelog.d/README.md' ':!changelog.d/GHSA-*.md' |
      xargs -I{} mv {} "$held"/
    scripts/changelog.py assemble X.Y.Z
+   # the release commit, the tag; then, on a branch from main:
    for f in "$held"/*.md; do [ -e "$f" ] && mv "$f" changelog.d/; done
    ```
 
