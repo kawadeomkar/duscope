@@ -18,7 +18,8 @@ process id and the command's to `fake.pids` beside the answer file;
 `crash` exits with status 3 and no result; `model=NAME` answers as another
 model; `no-skills` lists no skill and loads none; `bare` leaves out of the
 result every field but the reply, and the cache counts out of each
-message's usage.
+message's usage; `notices` also streams events Claude Code sends besides
+messages, whose `message` is text, and a content block that is text alone.
 
 Its token counts are made up and deterministic: a fixed amount a turn plus a
 quarter of the characters the tools returned.
@@ -77,6 +78,10 @@ def main(argv: List[str]) -> int:
         "skills": ["duscope"] if has_skill else [], "claude_code_version": VERSION.split()[0],
         "permissionMode": "default",
     })
+    if "notices" in acts:
+        emit({"type": "system", "subtype": "notice", "session_id": session, "message": "Usage is close to the limit"})
+        emit({"type": "assistant", "session_id": session, "message": "a notice, not a message"})
+        emit({"type": "user", "session_id": session, "message": {"role": "user", "content": ["a block as text"]}})
     if "hang" in acts:
         child = subprocess.Popen(["/bin/sleep", "3600"], stdin=subprocess.DEVNULL)
         pids = os.path.join(os.path.dirname(path), "fake.pids")

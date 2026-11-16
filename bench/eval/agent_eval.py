@@ -69,7 +69,7 @@ TREE_NAME = "alex"
 # The tests' knob for the stub agent (fake_claude.py): comma-separated acts,
 # each `ACT` for every run or `TASK:ACT` for one task's runs.
 FAKE_ACTS_VAR = "DUSCOPE_TEST_EVAL_FAKE"
-FAKE_ACTS = ("hang", "api-error", "crash", "model", "no-skills", "bare")
+FAKE_ACTS = ("hang", "api-error", "crash", "model", "no-skills", "bare", "notices")
 # The failure of a run that measured the infrastructure, not the agent
 # (evaltranscript.infrastructure): recorded, left out of every figure, and
 # made again by --resume. This many in a row stop the eval.
@@ -520,8 +520,24 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     s.agents.finish(proc)
     wall = time.time() - started
 
+    # Kept before it is read, so a stream the reader stumbles on is still there to see.
+    saved = None
+    if s.transcripts:
+        os.makedirs(s.transcripts, exist_ok=True)
+        saved = os.path.join(s.transcripts, "%s--%s--%d.jsonl" % (task["id"], cell["id"], repeat))
+        shutil.copyfile(transcript, saved)
+
+    model = s.config["model"]["id"]
+    unreadable = None
     with open(transcript, "r", encoding="utf-8", errors="replace") as f:
-        stream = evaltranscript.summarize_stream(evaltranscript.parse_stream(f.read()), s.config["model"]["id"])
+        text = f.read()
+    try:
+        stream = evaltranscript.summarize_stream(evaltranscript.parse_stream(text), model)
+    except Exception as e:  # one run's stream must not end the eval
+        # A shape of stream this reader does not know: the run measured the
+        # reader, not the agent, so it counts apart and --resume makes it again.
+        stream = evaltranscript.summarize_stream(evaltranscript.parse_stream(""), model)
+        unreadable = "the transcript could not be read: %s: %s" % (type(e).__name__, e)
     with open(layout.shim_log, "rb") as f:
         duscope = evaltranscript.summarize_calls(evaltranscript.parse_shim_log(f.read()))
     with open(stderr_path, "rb") as f:
@@ -531,7 +547,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
 
     max_tokens = s.config["claude_code"]["max_tokens"]
     total = stream["tokens"]["total"]
-    outage = None if timed_out else evaltranscript.infrastructure(stream, proc.returncode, s.config["model"]["id"], cell["skill"])
+    outage = None if timed_out else unreadable or evaltranscript.infrastructure(stream, proc.returncode, model, cell["skill"])
     # What the agent did to the tree outranks an outage, which --resume
     # would otherwise make again and so hide.
     failure = None
@@ -549,12 +565,6 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
         failure = "over the token limit"
     elif not verdict["passed"]:
         failure = "wrong answer"
-
-    saved = None
-    if s.transcripts:
-        os.makedirs(s.transcripts, exist_ok=True)
-        saved = os.path.join(s.transcripts, "%s--%s--%d.jsonl" % (task["id"], cell["id"], repeat))
-        shutil.copyfile(transcript, saved)
 
     reply = stream.pop("reply")
     commands = stream.pop("bash_commands")
