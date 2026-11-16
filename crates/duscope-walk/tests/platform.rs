@@ -475,7 +475,8 @@ fn p1_walk_06_linux_mount_ids_hold_for_same_device_binds_and_reused_ids() {
 
 /// The superblock's options of the first mount of `fs_type` in
 /// `/proc/self/mountinfo` (the field after the source): for cgroup2, `rw`
-/// and the hierarchy's root flags.
+/// and the hierarchy's root flags; for debugfs and tracefs, `rw` and any
+/// `mode`, `uid` or `gid` the system set.
 #[cfg(target_os = "linux")]
 fn live_options(fs_type: &str) -> Option<String> {
     fs::read_to_string("/proc/self/mountinfo")
@@ -488,6 +489,17 @@ fn live_options(fs_type: &str) -> Option<String> {
             }
             after.nth(1).map(str::to_owned)
         })
+}
+
+/// `-o` and the live mount's options, for a second mount of debugfs or
+/// tracefs; nothing when none is mounted. Each has one superblock, and a
+/// mount with no options resets the `mode` it records: on Linux 6.8 the root
+/// keeps its mode and group, but the live mount no longer shows `mode=`.
+#[cfg(target_os = "linux")]
+fn keep_live_options(fs_type: &str) -> Vec<String> {
+    live_options(fs_type)
+        .map(|options| vec!["-o".to_owned(), options])
+        .unwrap_or_default()
 }
 
 /// The types of the filesystems mounted at `point`, in mount order (the one
@@ -519,7 +531,11 @@ fn p5_walk_06_linux_an_untriggered_automount_is_not_entered() {
     let root = env.tmp_dir().join("debugfs");
     let tracing = root.join("tracing");
     fs::create_dir_all(&root).unwrap();
-    if let Err(why) = attempt(&env, "mount", &[&"-t", &"debugfs", &"debugfs", &root]) {
+    let options = keep_live_options("debugfs");
+    let mut args: Vec<&dyn AsRef<std::ffi::OsStr>> = vec![&"-t", &"debugfs"];
+    args.extend(options.iter().map(|o| o as &dyn AsRef<std::ffi::OsStr>));
+    args.extend([&"debugfs" as &dyn AsRef<std::ffi::OsStr>, &root]);
+    if let Err(why) = attempt(&env, "mount", &args) {
         duscope_testkit::skip(&format!("debugfs cannot be mounted here ({why})"));
         return;
     }
@@ -561,12 +577,22 @@ fn p5_walk_06_linux_an_untriggered_automount_is_not_entered() {
         assert_eq!(seen.summary.mounts_excluded, 0, "{flags}");
         assert_eq!(seen.automounts, std::slice::from_ref(&tracing), "{flags}");
     }
-    // Asked to, the walk enters it, which mounts tracefs on it.
+    // Asked to, the walk enters it, which mounts tracefs on it as the kernel
+    // does for anything that opens it: with no options, which on Linux 6.8
+    // drops `mode=` from what the live tracefs shows. The test puts the live
+    // options back.
+    let live_tracefs = live_options("tracefs");
     let opts = WalkOptions {
         include_network: true,
         ..WalkOptions::default()
     };
     let seen = walk_root(&root, &opts);
+    if let Some(options) = live_tracefs {
+        let remount = format!("remount,{options}");
+        if let Err(why) = attempt(&env, "mount", &[&"-o", &remount, &tracing]) {
+            eprintln!("tracefs's options were not put back ({why})");
+        }
+    }
     assert_eq!(seen.skipped.get(&tracing), None);
     assert!(seen.automounts.is_empty());
     assert_eq!(mounted_at(&tracing), ["tracefs"]);
@@ -1576,15 +1602,21 @@ fn p5_test_01_linux_kernel_filesystems_are_listed_and_never_entered() {
         // (nsdelegate, memory_recursiveprot, …) from its own options, for the
         // whole system until it restarts: with no options, it would clear
         // them. The second mount takes the options the live one shows, which
-        // are those flags, so they stay as they are.
-        let options = if fs_type == "cgroup2" {
-            let Some(options) = live_options(fs_type) else {
-                duscope_testkit::skip_fs(fs_type, "no cgroup2 mounted here to take options from");
-                continue;
-            };
-            vec!["-o".to_owned(), options]
-        } else {
-            Vec::new()
+        // are those flags, so they stay as they are. debugfs and tracefs keep
+        // the live mount's options the same way.
+        let options = match fs_type {
+            "cgroup2" => {
+                let Some(options) = live_options(fs_type) else {
+                    duscope_testkit::skip_fs(
+                        fs_type,
+                        "no cgroup2 mounted here to take options from",
+                    );
+                    continue;
+                };
+                vec!["-o".to_owned(), options]
+            }
+            "debugfs" | "tracefs" => keep_live_options(fs_type),
+            _ => Vec::new(),
         };
         let mut args: Vec<&dyn AsRef<std::ffi::OsStr>> = vec![&"-t", &fs_type];
         args.extend(options.iter().map(|o| o as &dyn AsRef<std::ffi::OsStr>));
