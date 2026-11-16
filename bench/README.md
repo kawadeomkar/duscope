@@ -533,7 +533,12 @@ and the limits. Each run has a directory of its own in the system's temporary di
 
 - a scratch `HOME` and XDG directories, so the author's Claude Code settings, memory, MCP servers
   and saved scans are not read, and the run's scans go to its own index directory; in the cells
-  with the skill, `duscope agent --skill --dir $HOME` writes it there first;
+  with the skill, `duscope agent --skill --dir $HOME` writes it there first. Claude Code's user
+  settings there (`.claude/settings.json`) set `syncClaudeAiSkills` to false, so the skills a
+  Claude account syncs from claude.ai are not loaded. The skills Claude Code bundles still are,
+  and they are the same in every cell: each run's `skills_listed` names them. The runs of
+  2026-11-16 were made without the setting, and listed the same 17 skills besides duscope's in
+  every cell;
 - the tree (`evaltree.py`): a small home directory, 220 MiB in about 460 files, built fresh, every size
   and age fixed, each age counted back from the build, so that each task's answer stands clear of
   the next candidate (`bench/test_eval.py` checks the margins). Every change time is the build's,

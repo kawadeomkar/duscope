@@ -75,6 +75,12 @@ FAKE_ACTS = ("hang", "api-error", "crash", "model", "no-skills", "bare", "notice
 # made again by --resume. This many in a row stop the eval.
 INFRASTRUCTURE = "infrastructure"
 STOP_AFTER_OUTAGES = 3
+# Claude Code's user settings in each run's scratch HOME
+# (`.claude/settings.json`): the skills a Claude account syncs from claude.ai
+# are not loaded (Claude Code honours `syncClaudeAiSkills` only as false), so
+# that every cell lists the same skills, those Claude Code bundles, beside
+# duscope's in the cells that have it.
+CLAUDE_SETTINGS = {"syncClaudeAiSkills": False}
 
 # The duscope on the agent's PATH. It runs a copy of the binary under test in
 # the run's directory, so that its text names no checkout (where
@@ -293,6 +299,17 @@ def write_shim(layout: Layout, binary: str) -> str:
     return path
 
 
+def write_claude_settings(layout: Layout) -> str:
+    """Claude Code's user settings in the run's scratch HOME
+    (CLAUDE_SETTINGS); returns the file's path."""
+    path = os.path.join(layout.home, ".claude", "settings.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(CLAUDE_SETTINGS, f, indent=2)
+        f.write("\n")
+    return path
+
+
 def tool_dirs(names: List[str], base_env: Dict[str, str]) -> List[str]:
     """The directories of these commands on the caller's PATH, in order."""
     dirs: List[str] = []
@@ -453,6 +470,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     if s.agents.stopping:
         raise CutShort()
     layout = Layout(work)
+    write_claude_settings(layout)
     now = time.time()
     evaltree.build(layout.root, now, s.scale)
     root = os.path.realpath(layout.root)

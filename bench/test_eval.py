@@ -696,6 +696,15 @@ class Setup(unittest.TestCase):
         finally:
             shutil.rmtree(d)
 
+    def test_p3_agt_03_the_scratch_home_turns_off_skills_synced_from_the_account(self):
+        d = scratch()
+        self.addCleanup(shutil.rmtree, d)
+        layout = agent_eval.Layout(d)
+        path = agent_eval.write_claude_settings(layout)
+        self.assertEqual(path, os.path.join(layout.home, ".claude", "settings.json"))
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"syncClaudeAiSkills": False})
+
     def test_p3_agt_03_claude_runs_in_print_mode_with_the_pinned_model(self):
         config = agent_eval.load_config()
         argv = agent_eval.claude_argv(["claude"], config, "the prompt")
@@ -785,6 +794,15 @@ class Fake(unittest.TestCase):
         self.assertEqual(decisions["jq"]["flag_runs"], 0)
         self.assertEqual(set(result["prompts"]), {t["id"] for t in result["tasks"]})
         self.assertIn("{root}", result["prompts"]["largest-dir"])
+
+    def test_p3_agt_03_each_run_s_home_holds_the_claude_code_settings(self):
+        _, d = self.run_eval("--fake", "right", "--cells", "skill-json,no-skill-json", "--tasks", "largest-dir",
+                             "--keep-work")
+        homes = [os.path.join(d, w, "home") for w in sorted(os.listdir(d)) if w.startswith("duscope-eval-")]
+        self.assertEqual(len(homes), 2)
+        for home in homes:
+            with open(os.path.join(home, ".claude", "settings.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f), agent_eval.CLAUDE_SETTINGS)
 
     def test_p3_agt_03_notices_in_the_stream_leave_a_run_as_it_was(self):
         result, _ = self.run_eval("--fake", "right", "--cells", "skill-json", "--tasks", "largest-dir,cache-savings", fake="notices")
