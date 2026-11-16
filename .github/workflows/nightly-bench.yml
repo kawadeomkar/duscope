@@ -32,6 +32,12 @@
 # and the second consecutive skip opens the pinned issue "nightly-bench
 # offline" (or updates its description), which the next run with all its
 # runners online closes. A paused runner is not offline.
+#
+# The coverage job (P5-TEST-01) needs no bench runner: it runs the workspace's
+# tests under cargo llvm-cov on GitHub's ubuntu-24.04 and macos-26 runners,
+# whether the bench runners are online or not, and keeps the report as the
+# artifact coverage-<runner>. Coverage is reported, never enforced (plan/SPEC.md
+# "Testing strategy"), and like every job here it is no check of a pull request.
 
 name: Nightly bench
 
@@ -92,6 +98,8 @@ env:
   # not while the runner is paused; on a dispatch when `macos` is ticked.
   MACOS_NIGHTLY: "false"
   MACOS_DISPATCH: ${{ inputs.macos && 'true' || 'false' }}
+  # The coverage job's task runner, as ci.yml installs it.
+  JUST_VERSION: "1.59.0"
 
 jobs:
   probe:
@@ -689,3 +697,81 @@ jobs:
             commit -q -m "Nightly results: ${names[*]}" -m "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           git push -q origin bench-results
           echo "published ${names[*]} to bench-results"
+
+  coverage:
+    # The workspace's tests under cargo llvm-cov, at the version the justfile
+    # pins, with what ci.yml's test jobs install for them; the lcov file, the
+    # JSON summary and the HTML report kept as an artifact, the totals in the
+    # job's summary. A test that fails here fails the job, and the report is
+    # kept all the same. The artifact's name leaves it out of publish's
+    # bench-* download.
+    name: coverage (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain and its llvm-tools
+        run: |
+          rustup toolchain install --profile minimal
+          rustup component add llvm-tools-preview
+          rustc --version
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - name: Read the cargo-llvm-cov version pinned in the justfile
+        id: pins
+        run: echo "cargo_llvm_cov=$(just --evaluate cargo_llvm_cov_version)" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-llvm-cov@${{ steps.pins.outputs.cargo_llvm_cov }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install zsh, fish, mandoc, ncdu and xmllint
+        # As ci.yml's test job: in CI a test whose tool is missing fails.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zsh fish mandoc ncdu libxml2-utils
+      - name: Install bash 4 or later and fish
+        # As ci.yml's checks job: macOS ships bash 3.2, zsh and mandoc.
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install bash fish
+      - name: The workspace's tests under cargo llvm-cov
+        id: tests
+        run: cargo llvm-cov --workspace --locked --no-report --no-fail-fast
+      - name: Write the report
+        id: report
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        env:
+          OS: ${{ matrix.os }}
+        run: |
+          out=target/coverage
+          mkdir -p "$out"
+          cargo llvm-cov report --lcov --output-path "$out/lcov.info"
+          cargo llvm-cov report --json --summary-only --output-path "$out/summary.json"
+          cargo llvm-cov report --html --output-dir "$out"
+          {
+            echo "### Coverage on $OS"
+            echo
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the report
+        if: ${{ !cancelled() && steps.report.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-${{ matrix.os }}
+          path: target/coverage/
+          retention-days: 90

@@ -151,10 +151,23 @@ platform-tests:
       p5_core_10_linux_an_overlays_files_go_to_its_trash_and_its_mounts_stay
       platform::posix::unlink::tests::p5_core_10_linux_a_bound_file_is_a_mount_point_and_an_overlays_file_is_not
       p5_sec_06_a_release_build_ignores_the_test_variables
+      p5_test_01_macos_fat_and_hfs_images_are_foreign_with_their_own_case_and_links
+      p5_test_01_macos_iso_9660_and_udf_images_are_read_only
+      p5_test_01_macos_devfs_is_never_entered_and_autofs_only_listed
+      p5_test_01_linux_kernel_filesystems_are_listed_and_never_entered
+      p5_test_01_linux_ramfs_and_devtmpfs_are_entered_as_memory
+      p5_test_01_linux_fuse_is_network_and_fuse_on_a_block_device_foreign
+      p5_test_01_linux_iso_9660_and_erofs_images_are_read_only
+      p5_test_01_linux_f2fs_is_local_with_links_and_btime_as_statx_reports
+      p5_test_01_linux_hfsplus_is_foreign_with_links_and_case_unknown
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Twenty-four are built on each of Linux and macOS; a renamed test must not drop out unnoticed.
-    expected=24
+    # Each platform builds its own share of the list: twenty-seven on macOS and thirty on Linux.
+    # A renamed test must not drop out unnoticed.
+    case "$(uname -s)" in
+      Darwin) expected=27 ;;
+      *) expected=30 ;;
+    esac
     found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
     [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
     cargo_test -- --ignored --exact "${tests[@]}"

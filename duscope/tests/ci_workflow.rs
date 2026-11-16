@@ -14,6 +14,7 @@ use std::path::Path;
 
 const WORKFLOW: &str = ".github/workflows/ci.yml";
 const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
+const NIGHTLY_BENCH_WORKFLOW: &str = ".github/workflows/nightly-bench.yml";
 const SETTINGS: &str = "docs/github-settings.md";
 
 /// The per-job budget recorded in ci.yml.
@@ -1210,4 +1211,99 @@ fn p3_mcp_06_each_smoke_step_gets_its_own_key_alone() {
             "{key} is read outside its step"
         );
     }
+}
+
+/// P5-TEST-01: the coverage report, `cargo llvm-cov` over the workspace's
+/// tests at the version the justfile pins, runs nightly on GitHub's runners
+/// of both platforms, keeps its report as an artifact, and is no check: its
+/// workflow runs on the schedule and a dispatch alone, and the settings
+/// checklist says so.
+#[test]
+fn p5_test_01_coverage_runs_nightly_on_hosted_runners_and_is_no_check() {
+    let workflow = read(NIGHTLY_BENCH_WORKFLOW);
+    let triggers: Vec<&str> = workflow
+        .lines()
+        .skip_while(|line| *line != "on:")
+        .skip(1)
+        .take_while(|line| line.starts_with(' ') || line.trim().is_empty())
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|rest| !rest.starts_with([' ', '#']))
+        .map(|rest| rest.trim_end_matches(':'))
+        .collect();
+    assert_eq!(triggers, ["schedule", "workflow_dispatch"]);
+    let all = jobs(&workflow);
+    let coverage = all
+        .iter()
+        .find(|job| job.id == "coverage")
+        .expect("nightly-bench.yml has no `coverage` job");
+    let names = coverage.check_names();
+    assert_eq!(names, ["coverage (ubuntu-24.04)", "coverage (macos-26)"]);
+    for name in &names {
+        assert!(
+            !REQUIRED_CHECKS.contains(&name.as_str()),
+            "{name} is a required check"
+        );
+    }
+    // GitHub's runners, never a bench runner, and a read-only token.
+    assert_eq!(job_key(coverage, "runs-on"), Some("${{ matrix.os }}"));
+    for combination in coverage.combinations() {
+        let os = combination["os"].as_str();
+        assert!(RUNNERS[..3].contains(&os), "coverage runs on {os}");
+    }
+    assert!(
+        job_key(coverage, "timeout-minutes").is_some_and(|m| m.parse::<u32>().is_ok()),
+        "coverage has no timeout"
+    );
+    let text = coverage.lines.join("\n");
+    assert!(!text.contains(": write"), "coverage widens the token");
+    assert!(!text.contains("secrets."), "coverage reads a secret");
+
+    // The tool at the justfile's pin, read with the just ci.yml installs,
+    // and the toolchain's llvm-tools.
+    for needed in [
+        "rustup component add llvm-tools-preview",
+        "echo \"cargo_llvm_cov=$(just --evaluate cargo_llvm_cov_version)\" >> \"$GITHUB_OUTPUT\"",
+        "tool: cargo-llvm-cov@${{ steps.pins.outputs.cargo_llvm_cov }}",
+    ] {
+        assert!(text.contains(needed), "coverage lacks `{needed}`");
+    }
+    assert!(read("justfile").contains("\ncargo_llvm_cov_version := \""));
+    assert_eq!(
+        workflow_env(&workflow, "JUST_VERSION"),
+        workflow_env(&read(WORKFLOW), "JUST_VERSION")
+    );
+
+    // The workspace's tests, every one run, and the report kept whatever
+    // they did, under a name publish's bench-* download leaves alone.
+    let tests = step(coverage, "The workspace's tests under cargo llvm-cov").join("\n");
+    assert!(
+        tests.contains("cargo llvm-cov --workspace --locked --no-report --no-fail-fast"),
+        "{tests}"
+    );
+    let report = step(coverage, "Write the report").join("\n");
+    for format in [
+        "--lcov",
+        "--json --summary-only",
+        "--html",
+        "$GITHUB_STEP_SUMMARY",
+    ] {
+        assert!(report.contains(format), "the report lacks {format}");
+    }
+    assert!(report.contains("if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}"));
+    let kept = step(coverage, "Keep the report").join("\n");
+    assert!(kept.contains("uses: actions/upload-artifact@"), "{kept}");
+    assert!(kept.contains("name: coverage-${{ matrix.os }}"), "{kept}");
+
+    let settings = read(SETTINGS)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        settings.contains(
+            "[nightly-bench.yml](../.github/workflows/nightly-bench.yml) and \
+             [nightly-fuzz.yml](../.github/workflows/nightly-fuzz.yml), which run on their \
+             schedules and a dispatch alone: among them `coverage`"
+        ),
+        "{SETTINGS} does not say the coverage job is no check"
+    );
 }
