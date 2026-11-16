@@ -130,7 +130,7 @@ fn saved(files: &[(ScanId, PathBuf)]) -> Vec<Index> {
 fn list(dir: &Path, paths: &[PathBuf], output: &Output) -> Result<(), Failure> {
     // People see each id's shortest prefix among every index file, so the
     // prefix they type to --scan names this one.
-    let files = index_files(dir);
+    let files = index_files(dir).map_err(core_failure)?;
     let mut scans = saved(&files);
     if !paths.is_empty() {
         let cwd = std::env::current_dir().map_err(|e| {
@@ -218,7 +218,7 @@ fn prune(dir: &Path, now: i64, output: &Output) -> Result<(), Failure> {
         // The scans of each root, newest first: the first five stay, and
         // any younger than a week.
         let mut by_root: BTreeMap<Vec<u8>, Vec<Index>> = BTreeMap::new();
-        for index in saved(&index_files(dir)) {
+        for index in saved(&index_files(dir).map_err(core_failure)?) {
             by_root
                 .entry(index.meta().root.clone())
                 .or_default()

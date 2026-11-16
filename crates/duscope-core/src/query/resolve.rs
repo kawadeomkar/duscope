@@ -9,9 +9,9 @@
 //!
 //! An index file outside the index directory is read only when `--trust`
 //! names it (SECURITY.md): anyone may have made it. A link in `scans` is no
-//! saved scan, since what it leads to may be anywhere. The index directory
-//! and its files should be 0700 and 0600; a looser one is read, with a
-//! warning.
+//! saved scan, since what it leads to may be anywhere, and a `scans` that is
+//! a link is refused for the same reason. The index directory and its files
+//! should be 0700 and 0600; a looser one is read, with a warning.
 
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -58,11 +58,17 @@ impl ScanSelector {
 
 /// The index files under `index_dir` (`scans/<id>.db`), by id. Temporary
 /// files, other names and anything but a regular file (a link to a file
-/// elsewhere above all) are left out.
-pub fn index_files(index_dir: &Path) -> Vec<(ScanId, PathBuf)> {
+/// elsewhere above all) are left out; none where `scans` does not exist.
+///
+/// # Errors
+///
+/// [`CoreError::LinkedScans`] when `scans` is a symbolic link: nothing is
+/// read through it.
+pub fn index_files(index_dir: &Path) -> Result<Vec<(ScanId, PathBuf)>, CoreError> {
+    let scans = crate::index::scans_dir(index_dir)?;
     warn_if_open(index_dir);
-    let Ok(dir) = std::fs::read_dir(index_dir.join("scans")) else {
-        return Vec::new();
+    let Ok(dir) = std::fs::read_dir(scans) else {
+        return Ok(Vec::new());
     };
     let mut files: Vec<(ScanId, PathBuf)> = dir
         .filter_map(Result::ok)
@@ -74,7 +80,7 @@ pub fn index_files(index_dir: &Path) -> Vec<(ScanId, PathBuf)> {
         })
         .collect();
     files.sort();
-    files
+    Ok(files)
 }
 
 /// The shortest prefix of `id`, at least [`MIN_PREFIX`] digits, that no id
@@ -90,9 +96,10 @@ pub fn shortest_prefix<'a>(id: &'a str, others: &[&str]) -> &'a str {
         .unwrap_or(id)
 }
 
-/// [`shortest_prefix`] of `id` among the saved scans under `index_dir`.
+/// [`shortest_prefix`] of `id` among the saved scans under `index_dir`;
+/// at least [`MIN_PREFIX`] digits where they cannot be listed.
 pub fn short_id(index_dir: &Path, id: &str) -> String {
-    let files = index_files(index_dir);
+    let files = index_files(index_dir).unwrap_or_default();
     let ids: Vec<&str> = files.iter().map(|(id, _)| id.as_str()).collect();
     shortest_prefix(id, &ids).to_owned()
 }
@@ -172,9 +179,9 @@ pub fn resolve_scan(
         Ok(Some(resolved(index, base, q)))
     };
     match selector {
-        ScanSelector::Latest => Ok(latest(q, usable)),
+        ScanSelector::Latest => latest(q, usable),
         ScanSelector::Prefix(prefix) => {
-            let matches: Vec<(ScanId, PathBuf)> = index_files(q.index_dir)
+            let matches: Vec<(ScanId, PathBuf)> = index_files(q.index_dir)?
                 .into_iter()
                 .filter(|(id, _)| id.as_str().starts_with(prefix.as_str()))
                 .collect();
@@ -244,8 +251,10 @@ fn warn_if_open(index_dir: &Path) {
         checked.push(index_dir.to_owned());
     }
     let uid = duscope_walk::effective_uid();
-    let scans = index_dir.join("scans");
-    for dir in [index_dir, scans.as_path()] {
+    // A `scans` that is a link is refused (`index_files`): neither what it
+    // leads to nor the files there are read.
+    let scans = crate::index::scans_dir(index_dir).ok();
+    for dir in std::iter::once(index_dir).chain(scans.as_deref()) {
         let Ok(meta) = std::fs::metadata(dir) else {
             continue;
         };
@@ -264,6 +273,9 @@ fn warn_if_open(index_dir: &Path) {
             );
         }
     }
+    let Some(scans) = scans else {
+        return;
+    };
     let open = std::fs::read_dir(&scans)
         .into_iter()
         .flatten()
@@ -289,10 +301,13 @@ fn warn_if_open(index_dir: &Path) {
 
 /// The newest scan `usable` accepts whose root contains the path (or the
 /// working directory) and holds an entry at it.
-fn latest(q: &ScanQuery<'_>, usable: impl Fn(&Index) -> bool) -> Option<Resolved> {
+fn latest(
+    q: &ScanQuery<'_>,
+    usable: impl Fn(&Index) -> bool,
+) -> Result<Option<Resolved>, CoreError> {
     let path = q.path.unwrap_or(q.cwd);
     let mut found: Option<(Index, u32)> = None;
-    for (_, file) in index_files(q.index_dir) {
+    for (_, file) in index_files(q.index_dir)? {
         // A file that cannot be read is no candidate; `scans` lists it.
         let Ok(index) = Index::open(&file) else {
             continue;
@@ -310,7 +325,7 @@ fn latest(q: &ScanQuery<'_>, usable: impl Fn(&Index) -> bool) -> Option<Resolved
             found = Some((index, base));
         }
     }
-    found.map(|(index, base)| resolved(index, base, q))
+    Ok(found.map(|(index, base)| resolved(index, base, q)))
 }
 
 fn resolved(index: Index, base: u32, q: &ScanQuery<'_>) -> Resolved {

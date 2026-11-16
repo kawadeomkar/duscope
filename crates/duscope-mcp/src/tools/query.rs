@@ -107,7 +107,7 @@ pub(super) fn whole_scan(
         return Ok((scan.selector, path));
     }
     let path = path_argument(arguments, "path", None, context.roots)?;
-    let id = newest_inside(context, &path).ok_or_else(|| Refusal {
+    let id = newest_inside(context, &path)?.ok_or_else(|| Refusal {
         code: "scan_not_found",
         message: format!(
             "no saved scan of a directory under the roots holds {}",
@@ -119,9 +119,11 @@ pub(super) fn whole_scan(
 }
 
 /// The id of the newest saved scan, an import aside, whose root is a root
-/// or lies under one and holds `path`.
-fn newest_inside(context: &Context<'_>, path: &Path) -> Option<String> {
-    index_files(context.index_dir)
+/// or lies under one and holds `path`; refused where the saved scans cannot
+/// be listed ([`Refusal::unlisted`]).
+fn newest_inside(context: &Context<'_>, path: &Path) -> Result<Option<String>, Refusal> {
+    let files = index_files(context.index_dir).map_err(|e| Refusal::unlisted(&e))?;
+    Ok(files
         .into_iter()
         .filter_map(|(id, file)| {
             let index = Index::open(&file).ok()?;
@@ -132,5 +134,5 @@ fn newest_inside(context: &Context<'_>, path: &Path) -> Option<String> {
             wanted.then(|| (index.meta().started_at, id.to_string()))
         })
         .max()
-        .map(|(_, id)| id)
+        .map(|(_, id)| id))
 }

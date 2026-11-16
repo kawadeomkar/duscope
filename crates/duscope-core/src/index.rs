@@ -10,7 +10,9 @@ pub mod scanid;
 pub mod writer;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use crate::CoreError;
 
 pub use reader::{Index, IndexVolume};
 pub use scanid::{ScanId, random_bytes};
@@ -71,6 +73,34 @@ pub fn default_dir(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
         .or_else(|| set("HOME").map(|home| duscope_walk::cache_dir(&home)))?;
     Some(cache.join("duscope"))
+}
+
+/// What to do about an index directory whose `scans` is a symbolic link
+/// ([`CoreError::LinkedScans`]), for a person: the saved scans move, or the
+/// index directory is named or linked whole.
+pub const LINKED_SCANS_HINT: &str = "Put the folder the link leads to in its place, or link the \
+     whole index directory instead, or point --index-dir (DUSCOPE_INDEX_DIR) at a directory \
+     whose scans is that folder";
+
+/// The index directory `index_dir`'s `scans`, where every saved scan is
+/// read and written: refused when it is a symbolic link, a link to nothing
+/// included, since what a link leads to is outside the index directory and
+/// may be anywhere, as an index file is outside it when a link leads there
+/// (SECURITY.md, Index files). The index directory itself may be a link: it
+/// is resolved as any path is. A `scans` that does not exist yet is no
+/// refusal; the first save makes it.
+///
+/// # Errors
+///
+/// [`CoreError::LinkedScans`] when `scans` is a symbolic link.
+pub fn scans_dir(index_dir: &Path) -> Result<PathBuf, CoreError> {
+    let scans = index_dir.join("scans");
+    match std::fs::symlink_metadata(&scans) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(CoreError::LinkedScans(scans.display().to_string()))
+        }
+        _ => Ok(scans),
+    }
 }
 
 /// [`SCHEMA`] in two parts: the tables with the `index_version` row, and the

@@ -126,4 +126,9 @@ pub enum CoreError {
     /// name.
     #[error("the index {0} is outside the index directory, and --trust does not name it")]
     UntrustedIndex(String),
+    /// The index directory's `scans` is a symbolic link, a link to nothing
+    /// included: the saved scans it leads to are outside the index
+    /// directory, so none is read or written there.
+    #[error("{0} is a symbolic link, not the index directory's own folder of saved scans")]
+    LinkedScans(String),
 }

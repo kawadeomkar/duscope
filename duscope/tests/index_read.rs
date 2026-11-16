@@ -584,6 +584,165 @@ fn p5_sec_01_prune_takes_only_the_writers_temporaries_and_refuses_a_scans_that_i
     assert!(theirs.exists() && spill.exists());
 }
 
+/// What a refusal of a linked `scans` says.
+fn linked(scans: &Path) -> String {
+    format!(
+        "{} is a symbolic link, not the index directory's own folder of saved scans",
+        scans.display()
+    )
+}
+
+/// The failure envelope of `out`, a refusal of the linked `scans`: exit 1,
+/// `untrusted_index`.
+fn refused_as_linked(out: &Output, scans: &Path) {
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let error = &envelope(out)["error"];
+    assert_eq!(error["code"], "untrusted_index");
+    assert_eq!(error["message"], linked(scans));
+    assert_eq!(error["retryable"], false);
+    assert_eq!(error["fixable_by"], "user");
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("Put the folder the link leads to in its place"),
+        "{error}"
+    );
+}
+
+/// A scan of the home fixture saved, then the index directory's `scans`
+/// moved to `elsewhere` and a link to it put in its place, as a v0.2.0
+/// index directory may have it: the link, `elsewhere`, and the scan's id.
+fn saved_then_linked(env: &TestEnv) -> (PathBuf, PathBuf, String) {
+    let home = home(env);
+    let saved = ok(&run(
+        env,
+        &["scan", "--save", home.to_str().unwrap(), "--json"],
+    ));
+    let id = saved["scan"]["id"].as_str().unwrap().to_owned();
+    let scans = env.index_dir().join("scans");
+    let elsewhere = env.tmp_dir().join("elsewhere");
+    fs::create_dir_all(env.tmp_dir()).unwrap();
+    fs::rename(&scans, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &scans).unwrap();
+    (scans, elsewhere, id)
+}
+
+/// The names in `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn p5_sec_01_a_save_into_a_linked_scans_is_refused_and_writes_nothing_there() {
+    let env = TestEnv::new();
+    let home = home(&env);
+    let elsewhere = env.tmp_dir().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::create_dir_all(env.index_dir()).unwrap();
+    let scans = env.index_dir().join("scans");
+    std::os::unix::fs::symlink(&elsewhere, &scans).unwrap();
+    let out = run(&env, &["scan", "--save", home.to_str().unwrap(), "--json"]);
+    // The scan's output stands, as after any save that fails; stderr says
+    // why nothing was saved, and nothing is where the link leads.
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(envelope(&out)["ok"], true);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&linked(&scans)), "{stderr}");
+    assert!(names(&elsewhere).is_empty());
+    assert!(fs::symlink_metadata(&scans).unwrap().is_symlink());
+}
+
+#[test]
+fn p5_sec_01_scans_refuses_an_index_directory_whose_scans_is_a_link() {
+    let env = TestEnv::new();
+    let (scans, _, _) = saved_then_linked(&env);
+    refused_as_linked(&run(&env, &["scans", "--json"]), &scans);
+    refused_as_linked(
+        &run(&env, &["scans", "--check", "latest", "--json"]),
+        &scans,
+    );
+}
+
+#[test]
+fn p5_sec_01_a_verb_refuses_the_saved_scans_of_a_linked_scans() {
+    let env = TestEnv::new();
+    let home = home(&env);
+    let home = home.to_str().unwrap();
+    let (scans, elsewhere, id) = saved_then_linked(&env);
+    let before = names(&elsewhere);
+    // The newest scan that holds the path, and a scan named by its id:
+    // refused before anything is read, and nothing scanned or saved.
+    refused_as_linked(&run(&env, &["top", home, "--json"]), &scans);
+    refused_as_linked(&run(&env, &["top", "--scan", &id[..6], "--json"]), &scans);
+    assert_eq!(names(&elsewhere), before);
+    // A file named through the link is outside the index directory, as
+    // before: refused unless --trust names it.
+    let file = scans.join(format!("{id}.db"));
+    let file = file.to_str().unwrap();
+    let untrusted = run(&env, &["top", "--scan", file, "--json"]);
+    assert_eq!(untrusted.status.code(), Some(1));
+    assert_eq!(envelope(&untrusted)["error"]["code"], "untrusted_index");
+    let trusted = ok(&run(
+        &env,
+        &["top", "--scan", file, "--trust", file, "--json"],
+    ));
+    assert_eq!(trusted["scan"]["id"], id.as_str());
+}
+
+#[test]
+fn p5_sec_01_a_linked_index_directory_still_reads_and_saves() {
+    let env = TestEnv::new();
+    let home = home(&env);
+    let home = home.to_str().unwrap();
+    // The index directory itself a link: resolved first, it is the
+    // directory, and its `scans` its own.
+    let real = env.tmp_dir().join("real-index");
+    fs::create_dir_all(&real).unwrap();
+    let link = env.tmp_dir().join("index-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let with_link = |args: &[&str]| {
+        env.cmd()
+            .args(args)
+            .env("DUSCOPE_INDEX_DIR", &link)
+            .output()
+            .unwrap()
+    };
+    let saved = ok(&with_link(&["scan", "--save", home, "--json"]));
+    let id = saved["scan"]["id"].as_str().unwrap();
+    assert_eq!(names(&real.join("scans")), [format!("{id}.db")]);
+    let listed = ok(&with_link(&["scans", "--json"]));
+    assert_eq!(listed["entries"][0]["id"], id);
+    let answered = ok(&with_link(&["top", home, "--json"]));
+    assert_eq!(answered["scan"]["id"], id);
+}
+
+#[test]
+fn p5_sec_01_a_scans_linked_to_nothing_is_refused() {
+    let env = TestEnv::new();
+    let home = home(&env);
+    fs::create_dir_all(env.index_dir()).unwrap();
+    let nowhere = env.tmp_dir().join("nowhere");
+    let scans = env.index_dir().join("scans");
+    std::os::unix::fs::symlink(&nowhere, &scans).unwrap();
+    refused_as_linked(&run(&env, &["scans", "--json"]), &scans);
+    let out = run(&env, &["scan", "--save", home.to_str().unwrap(), "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&linked(&scans)), "{stderr}");
+    assert!(fs::symlink_metadata(&nowhere).is_err());
+}
+
 #[test]
 fn p2_idx_03_scans_lists_and_checks_the_saved_scans() {
     let env = TestEnv::new();

@@ -574,6 +574,48 @@ fn p3_mcp_02_the_instructions_are_the_briefing_up_to_a_whole_line() {
 }
 
 #[test]
+fn p5_sec_01_a_linked_scans_is_refused_through_the_tools() {
+    let env = TestEnv::new();
+    let base = small_tree(&env);
+    let root = base.join("root");
+    // The index directory's `scans` a link to a folder elsewhere.
+    let elsewhere = base.join("elsewhere-scans");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::create_dir_all(env.index_dir()).unwrap();
+    symlink(&elsewhere, env.index_dir().join("scans")).unwrap();
+    // A scan saved after its output, the listing, a scan read by path and
+    // one named by id: each refused as the command line refuses it, for the
+    // user to put right, and no scan id handed out that names no file.
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[
+            call(1, "duscope_scan", &json!({"root": root})),
+            call(2, "duscope_scans", &json!({})),
+            call(3, "duscope_top", &json!({"path": root})),
+            call(
+                4,
+                "duscope_query",
+                &json!({"scan_id": "0123", "sql": "SELECT 1"}),
+            ),
+        ],
+    );
+    for id in 1..=4 {
+        let result = served.result(id);
+        assert_eq!(result["isError"], true, "{result}");
+        let error = &result["structuredContent"]["error"];
+        assert_eq!(error["code"], "untrusted_index", "{result}");
+        assert_eq!(error["retryable"], false, "{result}");
+        assert_eq!(error["fixable_by"], "user", "{result}");
+        assert!(
+            result["structuredContent"].get("scan").is_none(),
+            "{result}"
+        );
+    }
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+#[test]
 fn p3_mcp_03_a_2025_11_25_client_lists_and_calls_the_tools() {
     let env = TestEnv::new();
     let (home, _) = saved_home(&env);

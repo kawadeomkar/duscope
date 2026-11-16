@@ -293,8 +293,9 @@ pub fn scan_id(scanned: &Scanned) -> Result<ScanId, Failure> {
 /// `--save`: the scan's index, written under the index directory once the
 /// output is out, then, when `announce`, its id on stderr for people (the
 /// envelope carries it already). A failure is `index_write_failed` (exit 1),
-/// [reported](Failure::reported), which `main` writes on stderr alone: the
-/// output already written stands.
+/// or `untrusted_index` for an index directory whose `scans` is a symbolic
+/// link, [reported](Failure::reported), which `main` writes on stderr alone:
+/// the output already written stands.
 pub fn save(
     scanned: &Scanned,
     walk: &WalkArgs,
@@ -316,7 +317,7 @@ pub fn save(
     // Ctrl-C, or a tool call's cancellation, stays unreported: `main` then
     // replaces a tool's envelope, whose scan id names no file (P3-MCP-09).
     write_index(scanned, walk, excludes, id, &dir).map_err(|failure| {
-        if failure.code == "index_write_failed" {
+        if save_refused(&failure) {
             failure.reported()
         } else {
             failure
@@ -329,6 +330,13 @@ pub fn save(
         ));
     }
     Ok(())
+}
+
+/// Whether `failure` is a save that failed, `index_write_failed`, or that
+/// was refused, `untrusted_index` for a linked `scans`: either comes after
+/// the output.
+fn save_refused(failure: &Failure) -> bool {
+    matches!(failure.code, "index_write_failed" | "untrusted_index")
 }
 
 /// What a failed save says: `index_write_failed`, and how to get past it
@@ -396,6 +404,8 @@ pub(super) fn write_index(
                 "interrupted",
                 "the scan was interrupted before its index was saved",
             ),
+            // Refused before anything is written: the location rule's code.
+            e @ CoreError::LinkedScans(_) => super::source::core_failure(e),
             e => save_failed(e.to_string()),
         },
     )?;

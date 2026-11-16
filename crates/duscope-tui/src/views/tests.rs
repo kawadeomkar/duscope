@@ -1794,7 +1794,7 @@ fn bench_index(env: &duscope_testkit::TestEnv, name: &str) -> Option<duscope_cor
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let files = index_files(&env.index_dir());
+    let files = index_files(&env.index_dir()).unwrap();
     Some(Index::open(&files[0].1).unwrap())
 }
 
