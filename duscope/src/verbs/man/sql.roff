@@ -1,0 +1,117 @@
+.SH "SQL QUERIES"
+.B duscope query
+.I PATH
+.B \-\-sql
+.I STATEMENT
+runs one read\-only SQL statement over the tables of a saved scan: the
+newest that holds
+.I PATH
+(the current directory by default), or the one
+.B \-\-scan
+names.
+When none holds it,
+.B query
+scans
+.I PATH
+and saves the scan first, as the list verbs do;
+.B \-\-no\-save
+keeps that scan's index in a temporary directory, removed afterwards, and
+.B \-\-no\-scan
+fails instead.
+.B duscope schema
+lists the tables and their columns, and
+.I docs/index\-format.md
+in the source distribution describes them: a row for each directory in
+.BR dirs ,
+one for each other entry in
+.BR files ,
+names as BLOBs, sizes in bytes and times in nanoseconds.
+.SS "What a statement may do"
+One statement, a
+.BR SELECT ,
+which reads the index's tables
+.RB ( scan_meta ,
+.BR scan_volumes ,
+.BR dirs ,
+.BR files ,
+.BR hardlinks ,
+.BR clones ,
+.BR shared_members ,
+.B scan_errors
+and
+.BR type_stats ),
+through subqueries and common table expressions, recursive ones included,
+and calls SQLite's core, date and time and JSON functions and duscope's
+own; an aggregate may run over a window
+.RB ( "sum(allocated) OVER ()" ).
+The saved scan is opened read\-only, and the statement is held to that:
+a write, a
+.BR PRAGMA ,
+.BR ATTACH ,
+a transaction, a second statement, a table that is not the index's (the
+schema, a view, a table\-valued function such as
+.BR json_each ),
+a window\-only function such as
+.BR row_number ,
+and any other function are refused before a row is read, with
+.B sql_denied
+(exit 1).
+A statement SQLite cannot parse is a usage error (exit 2).
+.SS "Functions and parameters"
+.TP
+.BI path( id )
+The entry's absolute path: text, or a BLOB where it is not UTF\-8.
+.TP
+.BI human_size( bytes )
+A size as the tables show it, such as
+.BR "412.3 GiB" .
+.TP
+.BI under( id ", " root_id )
+1 when
+.I id
+is
+.I root_id
+or an entry below it, else 0.
+.TP
+.BR :root_id ", " :root_last
+The entry of
+.I PATH
+and the last id below it, so that its subtree is
+.BR "id BETWEEN :root_id AND :root_last" .
+.SS Limits
+A statement without a
+.B LIMIT
+of its own returns 25 rows at most (or
+.BR \-\-max\-rows ,
+when that is lower); one with a
+.B LIMIT
+returns
+.B \-\-max\-rows
+at most, 10,000 by default and at most.
+A row past the limit sets
+.B truncated
+in the result, and the summary line says how to get more.
+.B \-\-timeout
+stops the statement after 5 seconds, or the seconds it gives, 60 at most,
+with
+.B sql_timeout
+(exit 1), which a narrower statement or a longer timeout may avoid.
+The statement may use 256 MiB of memory, its sorts included, its rows may
+hold 256 MiB, and a value may be 1,000,000 bytes long; past any of them it
+is refused with
+.BR sql_denied .
+.SS Output
+Under
+.B \-\-json
+the result holds
+.BR columns ,
+.BR rows ,
+.B row_count
+and
+.BR truncated ,
+in the statement's order, a BLOB as
+.BR {\(dq$bytes\(dq:\ \(dq <base64> \(dq} .
+.B \-\-plain
+writes a line of the column names, then a tab\-separated record for each
+row, a BLOB as its bytes and NULL as nothing.
+A table is for people.

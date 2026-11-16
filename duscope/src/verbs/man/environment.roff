@@ -80,6 +80,29 @@ The extension colours of
 .BR LC_ALL ", " LC_CTYPE ", " LANG
 Without UTF\-8 the treemap is drawn in ASCII.
 .TP
+.BR TMUX ", " STY
+Set inside tmux and screen (as is a
+.B TERM
+of
+.B tmux*
+or
+.BR screen* ),
+which by default stop the sequence that sets the clipboard: the viewer's
+.B y
+leaves the clipboard alone there.
+Inside tmux,
+.B \-\-treemap pixels
+draws the map in cells, with a warning, rather than change the pane's
+settings to reach the terminal.
+.TP
+.B TERM_PROGRAM
+.B Apple_Terminal
+(macOS's Terminal, which takes no clipboard sequence) keeps the viewer's
+.B y
+from the clipboard as well, and
+.B tmux
+counts as inside tmux.
+.TP
 .B DUSCOPE_LOG
 What is logged to stderr, in
 .BR RUST_LOG 's
@@ -96,6 +119,29 @@ As
 .B DUSCOPE_LOG
 when that is unset.
 .TP
+.B HOME
+The home folder.
+Under it are the index directory and the configuration file when
+.B XDG_CACHE_HOME
+and
+.B XDG_CONFIG_HOME
+are unset, and on Linux the home Trash when
+.B XDG_DATA_HOME
+is.
+On macOS its
+.I Library
+is where a scan tries the Full Disk Access probe (see CAVEATS).
+Its containers are what
+.B \-\-skip\-containers
+leaves out, a usage error without
+.BR HOME .
+.B explain
+reads git's user configuration under it
+.RI ( ~/.gitconfig ),
+and the viewer writes it as
+.I ~
+in its header.
+.TP
 .B XDG_CACHE_HOME
 The directory of saved scans,
 .IR duscope/scans ;
@@ -109,6 +155,15 @@ The directory of
 .IR duscope/config.toml ;
 .I ~/.config
 when unset, on macOS too.
+.TP
+.B XDG_DATA_HOME
+On Linux, where the home Trash is,
+.IR $XDG_DATA_HOME/Trash ,
+into which
+.B clean
+and the viewer move the items on the same filesystem;
+.I ~/.local/share/Trash
+when unset.
 .TP
 .B TZ
 The local zone that

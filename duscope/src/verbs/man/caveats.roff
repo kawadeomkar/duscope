@@ -15,6 +15,33 @@ measures what
 .B du \-x /
 does.
 .PP
+On macOS the privacy protections keep folders of the home such as
+.I ~/Library/Mail
+and
+.I ~/Library/Safari
+from an app without Full Disk Access.
+The grant belongs to the app that runs duscope (the terminal, or the
+client that starts
+.BR "duscope mcp" ),
+not to duscope.
+Without it those folders are left out of the totals and counted as
+unreadable, which
+.B partial_read
+reports.
+No call tells whether the grant is there, so before a scan whose walk
+reaches the home's
+.I Library
+duscope tries to open those two folders, and warns
+.B full_disk_access_missing
+when both are refused, naming the app when it can tell it.
+When either folder is missing or opens there is no warning, and the
+warning comes with the scan that probed, not with a saved scan read later.
+The grant is given in System Settings, Privacy & Security, Full Disk
+Access; what the probe cannot tell is in
+.IR docs/limits.md ,
+and what to do in
+.IR docs/troubleshooting.md .
+.PP
 On Linux 4.11 and later, an automount point the kernel has not mounted
 yet (an NFS submount, debugfs's
 .IR tracing )
