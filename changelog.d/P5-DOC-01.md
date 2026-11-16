@@ -26,4 +26,6 @@
   duscope cannot read.
 - `docs/index-format.md` said that no reader names a secondary index: `top --files`, `stale` and
   `by-type` read `files_allocated`, and fail `index_corrupt` on a file without it. It also gave the
-  index directory for macOS alone, and the `sparse` flag for Linux, which never sets it.
+  index directory for macOS alone, the `sparse` flag for Linux, which never sets it, and
+  `firmlinked` among a volume's reasons, which no volume row carries, without `excluded_cache`,
+  which a mount point holding a `CACHEDIR.TAG` under `--exclude-caches` does.
