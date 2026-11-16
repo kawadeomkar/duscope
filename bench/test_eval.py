@@ -395,6 +395,33 @@ class Portable(unittest.TestCase):
         # Without the run's directory, only the root is written for it.
         self.assertIn(os.path.realpath(work), evalchecks.portable(commands, root)[0])
 
+    def test_p3_agt_03_claude_s_stderr_names_no_home_tree_or_run_directory(self):
+        home = tempfile.mkdtemp(prefix="duscope-eval-home-")
+        self.addCleanup(shutil.rmtree, home)
+        # A run's directory under the account's home, as --work-dir can put it.
+        work = os.path.join(home, "runs", "duscope-eval-x")
+        root = os.path.join(work, "disk", "alex")
+        os.makedirs(root)
+        stderr = "\n".join([
+            "error: spawn %s/.cache/duscope-eval/bin/claude" % os.path.realpath(home),
+            "settings: %s/home/.claude/settings.json" % work,
+            "read %s/Downloads" % os.path.realpath(root),
+            "config in %s" % os.path.normpath(home),
+        ]).encode()
+        # The last 2,000 bytes are kept.
+        self.assertEqual(
+            agent_eval.stderr_tail(b"x" * 3000 + stderr, root, work, home),
+            "x" * (2000 - len(stderr)) + "\n".join([
+                "error: spawn ~/.cache/duscope-eval/bin/claude",
+                "settings: {work}/home/.claude/settings.json",
+                "read {root}/Downloads",
+                "config in ~",
+            ]),
+        )
+        self.assertIsNone(agent_eval.stderr_tail(b" \n", root, work, home))
+        # A home of / names nothing to take out.
+        self.assertEqual(agent_eval.stderr_tail(b"/usr/bin/env", root, work, "/"), "/usr/bin/env")
+
 
 class Transcript(unittest.TestCase):
     def tool(self, n, name, inp):

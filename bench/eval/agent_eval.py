@@ -559,7 +559,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     with open(layout.shim_log, "rb") as f:
         duscope = evaltranscript.summarize_calls(evaltranscript.parse_shim_log(f.read()))
     with open(stderr_path, "rb") as f:
-        stderr_tail = f.read()[-2000:].decode("utf-8", "replace")
+        claude_stderr = f.read()
     changes = evaltree.diff_manifests(before, evaltree.manifest(root))
     verdict = evalchecks.check(task["check"], stream["reply"], truth, float(task["tolerance"]), ctx)
 
@@ -607,11 +607,28 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     record["bash_commands"] = [evalchecks.portable(c, root, work) for c in commands]
     record["duscope"] = duscope
     record["tree_changes"] = changes
-    record["claude_stderr_tail"] = evalchecks.portable(stderr_tail, root, work) if stderr_tail.strip() else None
+    caller_home = s.base_env.get("HOME") or os.path.expanduser("~")
+    record["claude_stderr_tail"] = stderr_tail(claude_stderr, root, work, caller_home)
     record["transcript"] = shown_path(saved) if saved else None
     if fixture:
         record["fixture"] = {"old_scan": fixture["old_scan"], "new_scan": fixture["new_scan"]}
     return record
+
+
+def stderr_tail(raw: bytes, root: str, work: str, home: str) -> Optional[str]:
+    """The last 2,000 bytes of Claude Code's stderr as a result file keeps
+    them: the tree written `{root}` and the run's directory `{work}`
+    (evalchecks.portable), then the home directory of the account that ran
+    the eval `~`, so that a committed file names no account even where
+    Claude Code names a path of its own; None when they are blank."""
+    tail = raw[-2000:].decode("utf-8", "replace")
+    if not tail.strip():
+        return None
+    tail = evalchecks.portable(tail, root, work)
+    homes = {os.path.realpath(home), os.path.normpath(home)} - {"/"} if os.path.isabs(home) else set()
+    for prefix in sorted(homes, key=len, reverse=True):
+        tail = tail.replace(prefix, "~")
+    return tail
 
 
 def fake_acts(text: str) -> List[Tuple[Optional[str], str]]:
