@@ -1,12 +1,13 @@
 //! `--max-chars`: a JSON envelope longer than the limit (24,000 characters
 //! by default, what an agent's tool reads inline) goes to a file under the
 //! index directory's `out/`, 0600, and stdout gets a stub naming the file
-//! with the envelope's first five rows. `scans --prune` removes such files
-//! after a week.
+//! with the envelope's first five rows. An `out` that is a symbolic link is
+//! refused, and `out` is given 0700 only when it is this user's own
+//! directory. `scans --prune` removes such files after a week.
 
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use duscope_core::envelope::{SCHEMA_VERSION, Spill, SpilledEnvelope, Tool, Warning};
@@ -37,12 +38,26 @@ pub fn write(dir: &Path, scan: Option<&str>, verb: &str, json: &[u8]) -> Result<
     // The directory holds what scans print: the owner's only, and so is each
     // directory made on the way to it (the index directory itself, when a
     // spill is the first thing written there).
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(failed)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(failed)?;
+    let made = DirBuilder::new().recursive(true).mode(0o700).create(dir);
+    // A link in its place, even one to nothing, leads elsewhere: refused,
+    // as `scans --prune` refuses it, before anything is written or changed.
+    let found = match fs::symlink_metadata(dir) {
+        Ok(found) => found,
+        Err(e) => return Err(failed(made.err().unwrap_or(e))),
+    };
+    if found.file_type().is_symlink() {
+        return Err(Failure::new(
+            Exit::Runtime,
+            "io_error",
+            format!(
+                "{} is a symbolic link, not the index directory's own folder of spills",
+                dir.display()
+            ),
+        )
+        .hint("Remove the link, or rerun the command with -o FILE or a larger --max-chars"));
+    }
+    made.map_err(failed)?;
+    owners_alone(dir, &found).map_err(failed)?;
     let stamp = compact(&duscope_core::query::timegrammar::iso8601(clock::now()));
     let verb = verb.replace(' ', "-");
     let scan = scan.unwrap_or("fresh");
@@ -69,6 +84,26 @@ pub fn write(dir: &Path, scan: Option<&str>, verb: &str, json: &[u8]) -> Result<
             Err(e) => return Err(failed(e)),
         }
     }
+}
+
+/// Gives `dir`, read as `found` without following a link, mode 0700
+/// whatever the umask when it is a directory of this user's; one of
+/// another user's is left as it is. The mode is set through a descriptor of
+/// the directory opened, whose device and inode must be `found`'s, so a
+/// link put in its place since is never followed to change what it leads
+/// to.
+fn owners_alone(dir: &Path, found: &fs::Metadata) -> std::io::Result<()> {
+    if !found.is_dir() || found.uid() != duscope_walk::effective_uid() {
+        return Ok(());
+    }
+    let opened = File::open(dir)?;
+    let now = opened.metadata()?;
+    if (now.dev(), now.ino()) != (found.dev(), found.ino()) {
+        return Err(std::io::Error::other(
+            "it was replaced while its mode was being set",
+        ));
+    }
+    opened.set_permissions(fs::Permissions::from_mode(0o700))
 }
 
 /// Whether `name` is one [`write()`] gives a file, so that `scans --prune`
