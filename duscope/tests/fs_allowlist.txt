@@ -328,8 +328,9 @@ open_with: libc::openat
   relative to its parent's descriptor; the staleness sweep of a scan that
   followed links opens the pieces of a long path without O_NOFOLLOW, as that
   scan read them. unlink.rs CheckedDir::open's way from `/`, O_NOFOLLOW each
-  component, to the directory clean removes from and to the index directory's
-  `scans` and `out` scans --prune removes from.
+  component, to the directory clean removes from, to the index directory's
+  `scans` and `out` scans --prune removes from, and to the `out` a spill is
+  written into.
 read_regular: .metadata(), OpenOptions::new, fs::metadata, fs::symlink_metadata
   explain's reads of git's files (DEV-154), and the files a scan's options name
   (--exclude-from, --ignore-from, [caches] extra: a person's, or on rescan the
@@ -366,10 +367,13 @@ stat_following: libc::fstatat
 
 ## crates/duscope-walk/src/platform/posix/unlink.rs
 
-create_at: libc::openat
-  The .trashinfo file of a move to a Linux Trash, in its `info` directory open
-  on a descriptor: O_CREAT|O_EXCL, so nothing at the name, a link included, is
-  opened.
+create_in: libc::openat
+  A new file in a directory open on a descriptor, O_CREAT|O_EXCL, so nothing at
+  the name, a link included, is opened: the .trashinfo file of a move to a
+  Linux Trash, in its `info` directory (create_at); and through
+  duscope_walk::create_checked, mode 0600, each spill (duscope/src/out/spill.rs
+  write_in) in the index directory's `out`, opened from `/` without following a
+  link (CheckedDir::open), its name checked to be one name in it.
 make_dir_at: libc::mkdirat
   A Trash's `files` and `info`, made 0700 through the Trash's descriptor and
   opened O_NOFOLLOW.
@@ -423,11 +427,15 @@ owners_alone: .metadata(), File::open
   opened, its (dev, ino) compared with the lstat's, and given 0700 through the
   descriptor (fchmod), so a link swapped in is never followed to change what
   it leads to. Nothing read.
-write: DirBuilder::new, OpenOptions::new, fs::symlink_metadata
+open_out: DirBuilder::new, fs::canonicalize, fs::symlink_metadata
   The index directory's `out`, and the index directory when a spill makes it:
   made 0700; an lstat refuses an `out` that is a symbolic link, before
-  anything is written or changed. Each envelope written to a new file,
-  O_CREAT|O_EXCL and mode 0600, named by the scan, the verb and the time.
+  anything is written or changed; then the index directory resolved, and
+  `out` opened from `/` a component at a time without following a link
+  (duscope-walk's CheckedDir::open). Each envelope is written to a new file
+  made through that descriptor (duscope_walk::create_checked: O_CREAT|O_EXCL,
+  mode 0600), named by the scan, the verb and the time, so an `out` swapped for
+  a link later never gets one.
 
 ## duscope/src/verbs/explain.rs
 

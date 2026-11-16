@@ -14,7 +14,7 @@ use duscope_testkit::TestEnv;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 
-use super::{CheckedDir, hook, remove_dir_checked, unlink_checked};
+use super::{CheckedDir, create_checked, hook, remove_dir_checked, unlink_checked};
 use crate::RemoveError;
 
 /// `path`'s device and inode, as a plan records them.
@@ -354,7 +354,7 @@ fn p5_sec_01_a_directory_that_can_be_searched_but_not_read_is_passed_through() {
     // directory, which may be searched and written but not read (0311). A
     // lookup by path passes both, and so must the descriptors, on macOS as
     // on Linux: a deletion of a file and one of a directory with what is
-    // under it.
+    // under it, and a file made, as a spill makes one in `out`.
     let locked = root.join("locked");
     let parent = locked.join("parent");
     fs::create_dir_all(parent.join("dir/sub")).unwrap();
@@ -374,6 +374,50 @@ fn p5_sec_01_a_directory_that_can_be_searched_but_not_read_is_passed_through() {
     for name in ["b.bin", "dir"] {
         assert!(fs::symlink_metadata(parent.join(name)).is_err(), "{name}");
     }
+    let mut made = create_checked(&checked, OsStr::new("made.json")).unwrap();
+    std::io::Write::write_all(&mut made, b"{}").unwrap();
+    assert_eq!(fs::read(parent.join("made.json")).unwrap(), b"{}");
+}
+
+#[test]
+fn p5_sec_01_a_file_is_created_through_the_directory_opened_never_a_link_swapped_in() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let item = root.join("item");
+    let outside = root.join("outside");
+    let parent = CheckedDir::open(&item).unwrap();
+    // Once opened, the directory moves aside and a link to the outside
+    // directory takes its place: the file is made in the directory opened,
+    // where it now is, and nothing where the link leads.
+    swap_for_link(&item, &root.join("item.away"), &outside);
+    let mut file = create_checked(&parent, OsStr::new("new.json")).unwrap();
+    std::io::Write::write_all(&mut file, b"{}").unwrap();
+    assert_eq!(fs::read(root.join("item.away/new.json")).unwrap(), b"{}");
+    assert!(fs::symlink_metadata(outside.join("new.json")).is_err());
+    // Mode 0600, the owner's alone.
+    let mode = fs::metadata(root.join("item.away/new.json"))
+        .unwrap()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    // Nothing at the name is opened: neither a file nor a link, to a file
+    // or to nothing, whose target stays as it was.
+    symlink(
+        outside.join("made-through-link"),
+        root.join("item.away/dangling"),
+    )
+    .unwrap();
+    for name in ["new.json", "a.bin", "to-file", "dangling"] {
+        let err = create_checked(&parent, OsStr::new(name)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{name}");
+    }
+    assert!(fs::symlink_metadata(outside.join("made-through-link")).is_err());
+    outside_intact(&root);
+    // One name in the directory, and nothing past it.
+    for name in ["", ".", "..", "sub/x.json", "../outside/x.json"] {
+        let err = create_checked(&parent, OsStr::new(name)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{name:?}");
+    }
+    assert!(fs::symlink_metadata(outside.join("x.json")).is_err());
 }
 
 #[cfg(target_os = "linux")]

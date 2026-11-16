@@ -486,6 +486,10 @@ fn renameat(from: BorrowedFd<'_>, old: &CStr, to: BorrowedFd<'_>, new: &CStr) ->
 #[cfg(target_os = "linux")]
 const CREATE_MODE: libc::c_uint = 0o666;
 
+/// The mode a file [`create_checked`] makes is given before the umask: read
+/// and write for the owner alone.
+const PRIVATE_MODE: libc::c_uint = 0o600;
+
 /// The directory `name` in the directory open on `dir`, made with mode 0700
 /// when missing, opened never through a symbolic link.
 #[cfg(target_os = "linux")]
@@ -503,15 +507,42 @@ pub(crate) fn make_dir_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedF
 /// (`O_CREAT | O_EXCL`), so the name is this caller's alone.
 #[cfg(target_os = "linux")]
 pub(crate) fn create_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<std::fs::File> {
+    create_in(dir, name, CREATE_MODE)
+}
+
+/// Creates the file `name`, mode 0600 before the umask, in `parent`, to
+/// write it: through `parent`'s descriptor, and only where nothing is at
+/// the name, not even a symbolic link (`O_CREAT | O_EXCL`), so the file is
+/// new and this caller's alone.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::AlreadyExists`] when something is at the name;
+/// [`io::ErrorKind::InvalidInput`] when `name` is not one name in the
+/// directory; otherwise the open's error.
+pub fn create_checked(parent: &CheckedDir, name: &OsStr) -> io::Result<std::fs::File> {
+    if !one_name(name.as_bytes()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not one name in the directory",
+        ));
+    }
+    create_in(parent.fd.as_fd(), name, PRIVATE_MODE)
+}
+
+/// Creates the file `name`, `mode` before the umask, in the directory open
+/// on `dir`, to write it, only where nothing is at the name.
+fn create_in(dir: BorrowedFd<'_>, name: &OsStr, mode: libc::c_uint) -> io::Result<std::fs::File> {
     super::with_c_name(name.as_bytes(), |c_name| {
         // SAFETY: `dir` is open for the borrow and `c_name` is
-        // NUL-terminated; with O_CREAT the mode is the third argument.
+        // NUL-terminated; with O_CREAT the mode is the third argument, an
+        // unsigned int as the variadic call promotes a mode_t.
         super::parked(|| unsafe {
             libc::openat(
                 dir.as_raw_fd(),
                 c_name.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
-                CREATE_MODE,
+                mode,
             )
         })
     })

@@ -22,7 +22,7 @@ pub(crate) use posix::DirFd;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use posix::unlink::CheckedDir;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use posix::unlink::{remove_dir_checked, unlink_checked};
+pub(crate) use posix::unlink::{create_checked, remove_dir_checked, unlink_checked};
 
 /// A directory's open descriptor: none is opened on this platform.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -554,6 +554,15 @@ pub(crate) fn unlink_checked(
     _expect: (u64, u64),
     _freed: &mut u64,
 ) -> Result<(), crate::RemoveError> {
+    match parent.never {}
+}
+
+/// Creates a file: there is no directory to create it in here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn create_checked(
+    parent: &CheckedDir,
+    _name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
     match parent.never {}
 }
 
