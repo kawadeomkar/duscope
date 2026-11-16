@@ -10,6 +10,11 @@
 //! Linux, so there the blocks are held to `golden/readme_tour@linux.snap`
 //! (regenerated as every golden is), and the README's own rows to the paths
 //! or classes Linux prints.
+//!
+//! P4-DOC-01: the key table of "The interactive viewer" is the viewer's key
+//! map, row for row in the order `?` lists it
+//! (`duscope_tui::key_rows`), so a key added, dropped or rebound in the
+//! viewer fails here until the README says so.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -29,17 +34,26 @@ struct Block {
     shown: Vec<String>,
 }
 
-/// The tour's blocks, in order.
-fn tour() -> Vec<Block> {
-    let readme =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../README.md")).unwrap();
-    let section = readme
-        .split("\n## A tour\n")
+/// The README.
+fn readme() -> String {
+    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../README.md")).unwrap()
+}
+
+/// The README's section under `## {heading}`, up to the next.
+fn section<'r>(readme: &'r str, heading: &str) -> &'r str {
+    readme
+        .split(&format!("\n## {heading}\n"))
         .nth(1)
-        .unwrap()
+        .unwrap_or_else(|| panic!("README.md has no section {heading:?}"))
         .split("\n## ")
         .next()
-        .unwrap();
+        .unwrap()
+}
+
+/// The tour's blocks, in order.
+fn tour() -> Vec<Block> {
+    let readme = readme();
+    let section = section(&readme, "A tour");
     let mut blocks = Vec::new();
     for block in section.split("```console\n").skip(1) {
         let body = block.split("\n```").next().unwrap();
@@ -80,6 +94,25 @@ fn words(text: &str) -> Vec<String> {
     }
     words.extend(word);
     words
+}
+
+/// The keys of each row of the table in `section`, as the first cell
+/// writes them: its code spans, joined by a space (`` `g` `Home` `` is
+/// `g Home`). The table's first two lines are its head.
+fn key_column(section: &str) -> Vec<String> {
+    section
+        .lines()
+        .filter(|line| line.starts_with('|'))
+        .skip(2)
+        .map(|row| {
+            let cell = row.split('|').nth(1).unwrap_or_default();
+            cell.split('`')
+                .skip(1)
+                .step_by(2)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
 }
 
 /// What the block's command prints on this machine, as the README shows it:
@@ -224,4 +257,22 @@ fn p1_doc_01_the_readme_tour_shows_this_platforms_output() {
         text, expected,
         "golden {name} differs; rerun with DUSCOPE_TEST_UPDATE_GOLDEN=1 to regenerate"
     );
+}
+
+#[test]
+fn p4_doc_01_the_readme_key_table_is_the_viewers_key_map() {
+    let readme = readme();
+    let documented = key_column(section(&readme, "The interactive viewer"));
+    let viewer: Vec<&str> = duscope_tui::key_rows().iter().map(|r| r.label).collect();
+    assert_eq!(
+        documented, viewer,
+        "README.md's key table against the keys `?` lists, row by row"
+    );
+}
+
+#[test]
+fn p4_doc_01_the_key_column_is_read_from_the_code_spans() {
+    let table = "Some text.\n\n| Keys | What they do |\n| --- | --- |\n\
+                 | `g` `Home` | First `sibling` |\n| `?` | List the keys |\n\nMore text.\n";
+    assert_eq!(key_column(table), ["g Home", "?"]);
 }

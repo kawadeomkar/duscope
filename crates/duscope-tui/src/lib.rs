@@ -13,9 +13,10 @@
 //! system's components, and the panes' contents come from `panes`. The
 //! cursor (`cursor`) moves over the map on the selected path (`path`),
 //! whose visible root the zoom (`zoom`) sets. The key map (`keys`) routes
-//! every key and is what `?` lists; `views` holds the list, largest and
-//! types tables and the help, `mask` the map's filter, `mark` the marks and
-//! the pane that moves them to the Trash, and `mouse` what a click lands on.
+//! every key and is what `?` lists, and [`key_rows`] gives its rows to the
+//! documentation's tests; `views` holds the list, largest and types tables
+//! and the help, `mask` the map's filter, `mark` the marks and the pane
+//! that moves them to the Trash, and `mouse` what a click lands on.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
@@ -39,6 +40,7 @@ pub use app::{
     run_session, snapshot,
 };
 pub use crossterm::event::Event;
+pub use keys::{KeyRow, key_rows};
 pub use mark::{PlanJob, Planned, Planner};
 pub use panes::{ScanFacts, Sources};
 pub use term::{Background, MIN_SIZE, Tui, event_ready, next_event, open_detached, restore, size};

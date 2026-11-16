@@ -256,6 +256,53 @@ GrandPerspective's `.gpscan`, QDirStat's cache or CSV), and `duscope import`
 saves a tree that ncdu, gdu or GrandPerspective wrote. `duscope man` prints the manual page, and `duscope completions bash`
 (or zsh, fish, elvish, powershell) the completion script.
 
+## The interactive viewer
+
+`duscope view ~` opens the treemap in an interactive viewer, on the newest
+saved scan that holds the path (or on a new scan, which it saves), and
+`duscope scan ~ -i` scans first. It needs a terminal of at least 80×24, and
+gives the terminal back as it found it when it ends.
+
+The map fills the screen; from 110 columns a column at its right holds the
+selection's facts, its siblings and the legend of the colours. The selection
+starts at the largest file. The line at the bottom shows six keys for what is
+in focus, and `?` lists them all, as this table does (`⏎` is Enter, `⌫`
+Backspace and `⇥` Tab):
+
+| Keys | What they do |
+| --- | --- |
+| `←↓↑→` `hjkl` | Move to the neighbouring tile, or along a list or the pane in focus |
+| `⏎` | Go down the path; in the largest files, show the file on the map; in the types and the legend, keep that row's tiles on the map |
+| `⌫` | Go up the path |
+| `Esc` | Close the facts, the help, the prompt or the mark pane; else clear the filter; else go up the path |
+| `z` | Zoom the map to the folder under the cursor |
+| `Z` | Zoom out one step |
+| `0` | Zoom all the way out |
+| `g` `Home` | The first sibling, or the first row |
+| `G` `End` | The last sibling, or the last row |
+| `PgUp` `PgDn` | A page of siblings or rows |
+| `1` `2` `3` `4` | The views: the treemap, the folder as a list, the largest files, the file types |
+| `s` | The next sort of the siblings and the list: size, name, modified, count |
+| `t` | Labels on the tiles of at least 8×2 cells, on or off |
+| `c` | The next colour mode: by type, folder, level, age or `LS_COLORS` |
+| `p` | The next theme pack |
+| `/` | Filter the map, the list and the largest files by a glob, such as `*.zip` |
+| `⇥` | Focus the next pane: the map, the siblings, the legend |
+| `Shift-⇥` | Focus the previous pane |
+| `i` | The selection's full facts, with what deleting it would free |
+| `y` | Copy the selection's path to the clipboard |
+| `o` | Show the selection in the file manager |
+| `d` | Mark the selection for the Trash, or unmark it |
+| `D` | The mark pane: the plan for the marked paths, as `duscope clean` makes it |
+| `r` | Scan the viewer's root again and reload |
+| `?` | List the keys |
+| `q` `Ctrl-C` | Quit |
+
+In the mark pane, `yes` typed in full, then `⏎`, moves the marked paths to the
+Trash; any other answer moves nothing. The viewer never deletes, and a plan that
+refuses a path moves nothing. The manual page (`duscope man`) describes the
+viewer and `clean` in full.
+
 ## With an AI agent
 
 From v0.3, `duscope mcp` serves scans to MCP clients over stdio, and they reach
@@ -276,7 +323,7 @@ adds `duscope_delete`, which can only move entries to the Trash.
 - It never follows a symbolic link, unless given `--follow-symlinks`.
 - It never reads a file's contents, only names and metadata (and, for `--exclude-caches`, the 43-byte signature of a `CACHEDIR.TAG`). It does read the system's own description of the disk's layout: `/usr/share/firmlinks` on macOS, `/proc/self/mountinfo` on Linux.
 - It never writes inside the tree it scans.
-- It never deletes without being told: no release yet has a command that deletes, and the `clean` of a later release is a dry run unless given `--yes`, and moves files to the Trash by default.
+- It never deletes without being told: `clean` is a dry run unless given `--yes` (or `yes` typed at its question), moves files to the Trash unless given `--permanent`, and refuses a symbolic link, a mount point and the scanned tree's root.
 - It never reads an index file from outside its index directory unless `--trust` names it: an index file may come from anyone ([SECURITY.md](SECURITY.md)).
 - It never opens a network connection: no telemetry, no update checks.
 

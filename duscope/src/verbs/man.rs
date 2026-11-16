@@ -1,8 +1,9 @@
 //! `man`: the manual page, in roff. `clap_mangen` writes the name,
 //! synopsis, description and options from the clap tree, so a new flag
-//! cannot miss the page; the sections `clap` knows nothing of (ENVIRONMENT,
-//! EXIT STATUS, FILES, EXAMPLES, CAVEATS) are written by hand beside this
-//! file.
+//! cannot miss the page; the sections `clap` knows nothing of (INTERACTIVE
+//! VIEWER, CLEANING UP, ENVIRONMENT, EXIT STATUS, FILES, EXAMPLES, CAVEATS)
+//! are written by hand beside this file. The tests hold the viewer's key
+//! list to its key map and the refusals `CLEANING UP` lists to `clean`'s.
 //! Hidden (test-only) flags are left out.
 //!
 //! Each flag is described once: the scan and output flags `duscope` itself
@@ -21,10 +22,12 @@ use crate::cli::{Cli, visible_verbs};
 use crate::out::emit_bytes;
 
 /// The page's date, changed with its hand-written prose.
-const DATE: &str = "2026-11-08";
+const DATE: &str = "2026-11-15";
 
 /// The hand-written sections, in order.
-const SECTIONS: [&str; 5] = [
+const SECTIONS: [&str; 7] = [
+    include_str!("man/viewer.roff"),
+    include_str!("man/clean.roff"),
     include_str!("man/environment.roff"),
     include_str!("man/exit-status.roff"),
     include_str!("man/files.roff"),
@@ -209,9 +212,99 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use clap::{Command, CommandFactory};
+    use duscope_core::envelope::values;
 
     use super::page;
     use crate::cli::Cli;
+
+    /// The lines of `page`'s section `.SH name`, and within it, given
+    /// `sub`, those of its subsection `.SS sub`: up to the next heading of
+    /// the same level or above.
+    fn part<'p>(page: &'p str, name: &str, sub: Option<&str>) -> Vec<&'p str> {
+        let quoted = |s: &str| {
+            if s.contains(' ') {
+                format!("\"{s}\"")
+            } else {
+                s.to_owned()
+            }
+        };
+        let within = |lines: Vec<&'p str>, heading: String, level: &[&str]| -> Vec<&'p str> {
+            lines
+                .into_iter()
+                .skip_while(|l| *l != heading)
+                .skip(1)
+                .take_while(|l| !level.iter().any(|m| l.starts_with(m)))
+                .collect()
+        };
+        let lines = within(
+            page.lines().collect(),
+            format!(".SH {}", quoted(name)),
+            &[".SH "],
+        );
+        match sub {
+            Some(sub) => within(lines, format!(".SS {}", quoted(sub)), &[".SH ", ".SS "]),
+            None => lines,
+        }
+    }
+
+    /// The words of each `.TP` entry's tag in `lines` (the line after the
+    /// `.TP`), its macro, roff's quotes and escapes and the commas between
+    /// keys gone: `.BR q ", " Ctrl\-C` is `q`, `Ctrl-C`.
+    fn tags(lines: &[&str]) -> Vec<Vec<String>> {
+        lines
+            .windows(2)
+            .filter(|pair| pair[0] == ".TP")
+            .map(|pair| {
+                let tag = pair[1];
+                let text = tag
+                    .strip_prefix(".BR ")
+                    .or_else(|| tag.strip_prefix(".B "))
+                    .unwrap_or(tag);
+                text.replace("\\-", "-")
+                    .replace(['"', ','], " ")
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn p4_doc_01_the_viewers_keys_in_the_page_are_its_key_map() {
+        let text = page().unwrap();
+        let listed = tags(&part(&text, "INTERACTIVE VIEWER", Some("Keys")));
+        let viewer: Vec<Vec<String>> = duscope_tui::key_rows()
+            .into_iter()
+            .map(|row| row.names)
+            .collect();
+        assert_eq!(
+            listed, viewer,
+            "INTERACTIVE VIEWER's key list against the keys `?` lists, row by row"
+        );
+    }
+
+    #[test]
+    fn p4_doc_01_the_refusals_in_the_page_are_clean_s() {
+        let text = page().unwrap();
+        let mut listed: Vec<String> = tags(&part(&text, "CLEANING UP", Some("Refusals")))
+            .into_iter()
+            .flatten()
+            .collect();
+        listed.sort();
+        let mut refusals = values::REFUSALS.map(str::to_owned).to_vec();
+        refusals.sort();
+        assert_eq!(listed, refusals, "CLEANING UP's refusals against clean's");
+    }
+
+    #[test]
+    fn p4_doc_01_the_page_s_parts_and_tags_are_read_as_roff_writes_them() {
+        let roff = ".SH NAME\nx\n.SH \"A B\"\ntext\n.SS Keys\n.TP\n.BR q \", \" Ctrl\\-C\n\
+                    Quit.\n.TP\n.B /\nFilter.\n.SS Other\n.TP\n.B z\n.SH C\n";
+        let keys = part(roff, "A B", Some("Keys"));
+        assert_eq!(tags(&keys), [vec!["q", "Ctrl-C"], vec!["/"]]);
+        assert_eq!(part(roff, "A B", None).len(), 11);
+        assert!(part(roff, "A B", Some("Missing")).is_empty());
+    }
 
     /// Every argument of `command` and its verbs, with whether it is hidden.
     fn args(command: &Command, out: &mut Vec<(String, bool)>) {
@@ -270,6 +363,8 @@ mod tests {
                 "OUTPUT OPTIONS",
                 "FILTER OPTIONS",
                 "VERBS",
+                "INTERACTIVE VIEWER",
+                "CLEANING UP",
                 "ENVIRONMENT",
                 "EXIT STATUS",
                 "FILES",

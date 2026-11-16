@@ -1,0 +1,170 @@
+.SH "CLEANING UP"
+.B duscope clean
+moves files and directories to the Trash, or with
+.B \-\-permanent
+deletes them.
+It makes a plan first, and acts on it only with
+.B \-\-yes
+or a
+.B yes
+typed at its question: without either, nothing moves.
+.SS "The plan"
+A plan is made against one saved scan: the newest that holds the first
+item, or the one
+.B \-\-scan
+names.
+The scan's root bounds what may go, and its sizes are the plan's.
+With no saved scan,
+.B clean
+fails with
+.B scan_not_found
+(exit 3), and
+.B duscope scan \-\-save
+makes one.
+For each item the plan gives its size on disk, what deleting it would free
+now, the command that regenerates it, and what is done with it: a move to
+the Trash, a deletion, or a refusal with its reason.
+What an item frees is its bytes less those that a hard link or an APFS
+clone outside the plan keeps: a file whose other links lie elsewhere frees
+nothing, and two links both in the plan free their bytes once.
+.PP
+An item that has changed since the saved scan (its size, times or links,
+or for a directory what it holds) is measured from the tree as it is now,
+with the
+.B changed_since_scan
+warning; a directory measured so frees its bytes at most
+.RB ( upper_bound ),
+and one a walk could not read whole has no figure.
+An item named twice, or inside another item, is a usage error (exit 2):
+.B clean
+acts on all of a list or on none of it.
+.PP
+When stdin and stderr are a terminal and the output is for people,
+.B clean
+shows the plan and asks once, unless
+.B \-\-no\-input
+is given; only
+.BR yes ,
+typed in full, acts.
+Otherwise, and after any other answer, it prints the plan and exits 1 with
+.BR confirmation_required .
+.B \-\-expect\-bytes
+.I N
+acts only when the plan frees within 1% of
+.I N
+bytes, and never when an item has no figure; otherwise nothing is touched
+.RB ( expectation_mismatch ,
+exit 1).
+.SS Refusals
+A refused item stops the whole run before anything moves, with
+.B refused_path
+(exit 1), unless
+.B \-\-skip\-refused
+is given, which acts on the other items.
+The plan gives each refused item one of these reasons:
+.TP
+.B symlink
+The item is a symbolic link.
+.TP
+.B firmlink
+The item is a macOS firmlink, which leads from the system volume into the
+Data volume.
+.TP
+.B mount_point
+The item is a mount point; for the Trash, also a directory with a mount
+point anywhere under it, or one whose mounts the system cannot tell, since
+a move would take the mounted volume into the Trash with it.
+On Linux a btrfs subvolume is a mount point to
+.BR clean ,
+and so is a file of an overlayfs mount where the system cannot tell
+whether it is the root of a mount.
+.TP
+.B root
+The item is the saved scan's root, or
+.IR / .
+.TP
+.B outside_root
+The item is not under the saved scan's root.
+.TP
+.B read_only_volume
+The item's volume is mounted read\-only.
+.TP
+.B expectation_mismatch
+Only under
+.BR "duscope mcp" :
+.B duscope_delete
+refuses an item that does not free, within 1%, what the client said it
+would.
+.SS "The Trash and \-\-permanent"
+By default each item is moved to the Trash, by renaming it, never by
+copying it: on macOS into the Trash of the item's volume, through
+NSFileManager; on Linux into the XDG Trash, the home Trash
+.RI ( $XDG_DATA_HOME/Trash ,
+else
+.IR ~/.local/share/Trash )
+for an item on its filesystem and otherwise the volume's own
+.RI ( .Trash/$uid
+or
+.IR .Trash\-$uid ),
+with a
+.I .trashinfo
+file that says where the item was.
+An item whose volume has no Trash duscope can use is left where it is
+.RB ( trash_unavailable ):
+.B clean
+never falls back to deleting.
+Moving to the Trash frees nothing until the Trash is emptied: the result
+counts the bytes moved in
+.B trashed_bytes
+and leaves
+.B freed_bytes
+at 0.
+.PP
+.B \-\-permanent
+deletes the items instead, and nothing brings them back.
+Every directory on the way to an item is opened without following a
+symbolic link, and a directory is emptied from the bottom up, never across
+a mount point nor into a btrfs subvolume: there the item fails
+.RB ( refused_path ),
+what was deleted before stays deleted, and the hint names
+.B umount
+or
+.BR "btrfs subvolume delete" .
+.B freed_bytes
+counts the bytes of each file whose last link went.
+.PP
+Just before each item goes,
+.B clean
+checks that its path still holds what the plan saw (its device and
+inode): an item that has gone or been replaced fails alone
+.RB ( path_changed ),
+and the others still go.
+A saved scan is never changed, so afterwards the saved scans still count
+what went
+.RB ( index_untouched ),
+until
+.B duscope rescan
+measures the tree again.
+.SS Handles
+.B \-\-from
+.I HANDLE
+names an item by a handle from
+.BR "explain \-\-json" :
+the path as
+.B explain
+examined it, signed with
+.I handle.key
+(see FILES) and good for fifteen minutes.
+Before anything moves,
+.B clean
+fails with
+.B handle_invalid
+for a handle this duscope did not sign,
+.B handle_expired
+for one past its fifteen minutes, and
+.B path_changed
+for one whose path no longer holds what
+.B explain
+examined, or holds it changed since the saved scan.
+Handles of different saved scans are a usage error: a plan is made against
+one.
