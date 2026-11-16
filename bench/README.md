@@ -43,6 +43,7 @@ for release binaries, and rustup with the stable toolchain for the competitors b
 | `redraw` | measure the viewer's redraw at 120x40 on T2 ([The redraw budget](#the-redraw-budget)) |
 | `acceptance` | the 1.0 acceptance run on this machine: the harness, the index measurements and the rescans, in one file ([The 1.0 acceptance run](#the-10-acceptance-run)) |
 | `judge [FILE...]` | each goal-1 and goal-2 target against the 1.0 files, and their summary ([Judging it](#judging-it)) |
+| `crosscheck CURRENT BASELINE...` | a hosted runner's ratios against bench-linux's latest nightly ([The Linux cross-check](#the-linux-cross-check)) |
 
 Options of `run` (most also apply to `build`, `install` and `verify`):
 
@@ -585,6 +586,36 @@ the machines, a table per goal with each target's source, and the rescans. The c
 `results/1.0/README.md`, for the top-level README to link to; it is generated, never edited, and
 `bench/test_acceptance.py` fails when it differs from what the committed files give.
 
+### The Linux cross-check
+
+Every Linux figure of Gates 1 → 2 and 2 → 3 is bench-linux's, a VM on a Proxmox host whose memory
+is suspect (DEV-157). [linux-crosscheck.yml](../.github/workflows/linux-crosscheck.yml) measures the
+same thing on another machine, a GitHub-hosted `ubuntu-24.04` runner: the x86_64 musl build,
+`bench/run.sh run` with every pinned competitor, warm and cold, on T1 and T2 (`trees`; `all` adds
+T3 when the runner's disk and the job's 360 minutes allow), as bench-linux's nightly runs it. A
+dispatch runs it and nothing else, so its job is never a required check; it reads no secret and
+its token reads the repository alone:
+
+```sh
+gh workflow run linux-crosscheck.yml --repo kawadeomkar/duscope --ref main
+gh run download <run id> --repo kawadeomkar/duscope --name linux-crosscheck --dir crosscheck
+```
+
+The artifact holds the result file, `runner.txt` (the CPU model, cores, memory, kernel and the
+disk) and `comparison.txt`, which is also in the job's summary. A hosted runner is another machine,
+so its times are not compared (DEV-20); its ratios are. `bench/run.sh crosscheck CURRENT
+BASELINE...` holds each of CURRENT's ratios (duscope's time over a competitor's in the same rounds)
+to bench-linux's for the same tree, mode and competitor, in the latest Linux nightly result among
+BASELINE (result files or directories: the job checks out the `bench-results` branch; `--last N`
+takes the median of the newest N from that machine). A ratio lies within the noise when it differs
+from bench-linux's by at most 15% either way (`--tolerance`): what `bench-regression` allows a
+ratio on one machine (DEV-59), and where the ratio decides when absolute times moved (DEV-76). DEV-59
+also saw a ratio differ by about as much between two CPU models of the same shared runners, so a
+ratio outside the noise is a finding to read with both machines in view, not a verdict: each line
+also says whether the hosted runner's ratio meets the goal-1 target of that pair. The command
+exits 0 when every ratio lies within the noise, 1 when one does not (in the job, a warning), and 2
+when nothing can be compared (the job fails); a run at a `scale` below 1 compares nothing.
+
 ## The allocator
 
 P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
@@ -784,7 +815,8 @@ the result file.
 | `test_indexbench.py` | its unit tests, run with `test_bench.py`; `duscope/tests/index_bench.rs` runs it whole |
 | `acceptance.py` | the 1.0 acceptance run (`acceptance`), the goal-1 and goal-2 targets, the judgement and the summary (`judge`) |
 | `rescanbench.py` | the acceptance run's incremental rescans against full ones |
-| `test_acceptance.py` | their unit tests, run with `test_bench.py`; `duscope/tests/acceptance_bench.rs` runs `acceptance` whole |
+| `crosscheck.py` | the Linux cross-check: a hosted runner's ratios against bench-linux's nightly ones (`crosscheck`) |
+| `test_acceptance.py`, `test_crosscheck.py` | their unit tests, run with `test_bench.py`; `duscope/tests/acceptance_bench.rs` runs `acceptance` whole and the cross-check's workflow step |
 | `results/1.0/` | the acceptance run's files, one per platform, and their generated summary, `README.md` |
 | `compare.py` | the regression check: a result file against the results before it on the same machine and tree |
 | `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |

@@ -8,6 +8,7 @@
     show FILE          print a result file as a table
     acceptance         the 1.0 acceptance run on this machine (bench/acceptance.py)
     judge [FILE...]    the goal-1 and goal-2 targets against the 1.0 files
+    crosscheck ...     a hosted runner's ratios against bench-linux's (DEV-157)
 
 `run` is the default. bench/README.md documents every option and the result
 file. Standard library only; Python 3.9 or later.
@@ -32,6 +33,7 @@ if sys.version_info < (3, 9):  # pragma: no cover - the message is the point
     sys.exit("bench: Python 3.9 or later is needed")
 
 import acceptance
+import crosscheck
 import measure
 import indexbench
 import redraw
@@ -197,6 +199,10 @@ def parser() -> argparse.ArgumentParser:
     judged.add_argument("files", nargs="*", metavar="FILE", help="acceptance files (default linux.json and macos.json in --dir)")
     judged.add_argument("--dir", default=acceptance.OUT_DIR, help="where the acceptance files are (default bench/results/1.0)")
     judged.add_argument("--summary", metavar="FILE", help="also write the Markdown summary of the files to FILE")
+
+    # crosscheck takes its own command line (bench/crosscheck.py); main hands
+    # it over before this parser reads it, and this entry lists it in --help.
+    sub.add_parser("crosscheck", add_help=False, help="a hosted runner's ratios against bench-linux's latest nightly (DEV-157)")
     return top
 
 
@@ -596,6 +602,8 @@ COMMANDS = {
 def main(argv: List[str]) -> int:
     if not argv or argv[0].startswith("-") and argv[0] not in ("-h", "--help"):
         argv = ["run", *argv]
+    if argv[0] == "crosscheck":
+        return crosscheck.main(argv[1:])
     args = parser().parse_args(argv)
     try:
         return COMMANDS[args.subcommand](args)
