@@ -1,8 +1,10 @@
 # Index format
 
 Each saved scan is one SQLite file, `scans/<scan_id>.db` under the index
-directory (`$XDG_CACHE_HOME/duscope`, else `~/Library/Caches/duscope` on macOS,
-or `--index-dir`/`DUSCOPE_INDEX_DIR`), mode 0600. duscope writes the file once,
+directory, mode 0600. The index directory is the one `--index-dir`,
+`DUSCOPE_INDEX_DIR` or the configuration file's `index_dir` names, else
+`$XDG_CACHE_HOME/duscope` (an absolute `XDG_CACHE_HOME`), else
+`~/Library/Caches/duscope` on macOS and `~/.cache/duscope` on Linux. duscope writes the file once,
 after the scan, and never changes it: a rescan writes a new file. This page
 describes `index_version` 2.0, whose DDL is
 [schemas/index/v2.sql](../schemas/index/v2.sql).
@@ -280,17 +282,17 @@ that reveals.
 ## Flags
 
 `dirs.flags` and `files.flags` hold these bits. A bit a platform cannot set
-stays 0; bits 9 to 11, 13 and 14 are set on directories only, and bit 12 on files only.
+stays 0; bits 7 to 11, 13 and 14 are set on directories only, and bit 12 on files only.
 
 | Bit | Value | Name | Set on | Meaning |
 | --- | --- | --- | --- | --- |
-| 0 | 1 | sparse | macOS, Linux | the file has holes |
+| 0 | 1 | sparse | macOS | the file has holes |
 | 1 | 2 | compressed | macOS, Linux | the filesystem compresses the file |
 | 2 | 4 | dataless | macOS | the content lives in the cloud and is not on disk |
 | 3 | 8 | purgeable | macOS | the system may delete the file to free space |
 | 4 | 16 | may_share | macOS | the file may share blocks with another, though no clone id says with which |
 | 5 | 32 | shares_all | macOS | every block of the file is shared with a clone |
-| 6 | 64 | mount_root | Linux | the directory is the root of a mount |
+| 6 | 64 | mount_root | Linux | the entry is the root of a mount: a directory, or a file mounted on its own (a bind mount) |
 | 7 | 128 | subvolume | Linux | the directory is a btrfs subvolume or a ZFS dataset |
 | 8 | 256 | firmlink | macOS | the directory is a firmlink into the Data volume |
 | 9 | 512 | upper_bound | macOS | the directory's totals are an upper bound: a file under it may share blocks with another that no clone id names |
@@ -346,10 +348,25 @@ stays 0; bits 9 to 11, 13 and 14 are set on directories only, and bit 12 on file
 
 ## Compatibility
 
-A reader opens every minor version of its major and ignores columns it does not
-know; a minor version only adds nullable columns, tables or keys. A change to
-what an existing column means is a new major version, which an older reader
-refuses (exit 5) with a hint to rescan.
+A reader opens every minor version of its major and ignores the columns,
+tables, `scan_meta` keys and flag bits it does not know: it reads `flags`
+through masks of the bits it knows. A minor version only adds nullable columns,
+tables or keys. A change to what an existing column means is a new major
+version. A reader refuses a file of any other major, older or newer, and an
+`index_version` that is not `major.minor`, before it reads the other tables:
+`index_version_mismatch`, exit 5, with a hint to scan again.
+
+Of the indexes, a reader names `files_allocated` (`INDEXED BY`, for `top
+--files`, `stale` and `by-type`'s examples), so on a file without it those verbs
+fail `index_corrupt`. It names no other index: a file without one answers
+alike, more slowly.
+
+Within 2.0, flag bits 13 and 14 and the index `dirs_automount` came without a
+new minor version, since a reader that does not know them reads the file as
+before ([Changelog](#changelog)). Whether a new flag bit or index takes a minor
+version, and which indexes the format promises, are for the 1.0 release's
+versioning freeze to settle; this page describes the files duscope writes and
+reads until then.
 
 ## What duscope opens
 
@@ -393,9 +410,9 @@ A program that writes index files for duscope to read keeps within these.
 
 The first version, written from the first release that saves indexes.
 
-Secondary indexes are not part of the format's contract: a reader relies on
-the tables, and no reader names an index. Files written before duscope dropped
-them also hold `dirs_cum_allocated` (`dirs (cum_allocated DESC)`) and
+Of the secondary indexes, a reader relies on `files_allocated` alone
+([Compatibility](#compatibility)). Files written before duscope dropped two
+others also hold `dirs_cum_allocated` (`dirs (cum_allocated DESC)`) and
 `files_mtime` (`files (mtime)`), which no query read. They are still 2.0 and
 answer every query the same; only a hand-written query may run slower without
 them. Files written before duscope added `dirs_automount` and flag bit 14 lack
