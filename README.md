@@ -58,7 +58,10 @@ gh attestation verify duscope-aarch64-apple-darwin.tar.xz --repo kawadeomkar/dus
 
 ### Homebrew
 
-On macOS and Linux, with bottles, from the tap `kawadeomkar/homebrew-tap`:
+On macOS and Linux from v0.1.0, from the tap `kawadeomkar/homebrew-tap`, with
+the man page and the shell completions. Homebrew pours a bottle where the tap
+has one for the machine (Apple-silicon macOS, x86_64 Linux) and otherwise
+builds duscope from source, with its own Rust:
 
 ```sh
 brew install kawadeomkar/tap/duscope
@@ -70,7 +73,8 @@ homebrew-core and `brew install duscope` works without the tap.
 ### Debian and Ubuntu
 
 `.deb` packages for amd64 and arm64, attached to each GitHub release from
-v0.1.0. They install one static binary, which runs on any glibc:
+v0.1.0. They install one statically linked binary (musl), which needs no
+particular glibc, with the man page and the bash, zsh and fish completions:
 
 ```sh
 sudo apt install ./duscope_<version>_amd64.deb
@@ -81,7 +85,7 @@ the same packages, so `sudo apt install duscope` installs duscope on Debian 12
 and later and Ubuntu 22.04 and later, and `apt upgrade` keeps it up to date.
 [docs/apt.md](docs/apt.md) has the commands that add it and its key's
 fingerprint. It is not live yet: it opens once its signing key exists (phase 5,
-before 1.0).
+before 1.0), with the first release after that.
 
 ### crates.io
 
@@ -89,9 +93,12 @@ before 1.0).
 cargo install duscope --locked
 ```
 
-Cargo builds it with its default release settings: duscope's release profile
-(link-time optimisation, symbols stripped) applies only to builds inside this
-repository, so the binary is larger than the prebuilt ones.
+It needs Rust 1.89 or later and a C compiler, which builds the SQLite duscope
+bundles. Cargo builds it with its default release settings: duscope's release
+profile (link-time optimisation, symbols stripped) applies only to builds
+inside this repository, so the binary is larger than the prebuilt ones. Cargo
+installs no man page or completions: `duscope man` and `duscope completions`
+print them.
 
 The `pixels` feature adds `--treemap pixels`: the map drawn in pixels on a
 terminal that shows images through Kitty graphics, Sixel or iTerm2's inline
@@ -110,7 +117,7 @@ runs no other program.
 ### From source
 
 It needs [rustup](https://rustup.rs), which installs the toolchain pinned in
-`rust-toolchain.toml`:
+`rust-toolchain.toml`, and a C compiler:
 
 ```sh
 git clone https://github.com/kawadeomkar/duscope
@@ -128,7 +135,8 @@ The first command scans the tree and saves the scan in the index directory
 names it. The commands after it answer from that saved scan, as every
 command does when a saved scan holds its path: an answer then takes
 milliseconds, however large the tree. `--no-save` scans without saving, `--scan`
-names another saved scan, and `scan` (or `duscope` alone) always scans afresh.
+names another saved scan, and `scan` (or `duscope` alone) scans afresh, unless
+`--reuse AGE` lets it print a saved scan younger than that.
 
 The output below is from the fixture tree duscope's tests build (`just
 fixtures`), a made-up home directory, on macOS (APFS); a terminal shows it in
@@ -337,11 +345,67 @@ adds `duscope_delete`, which can only move entries to the Trash.
 ## What it never does
 
 - It never follows a symbolic link, unless given `--follow-symlinks`.
-- It never reads a file's contents, only names and metadata (and, for `--exclude-caches`, the 43-byte signature of a `CACHEDIR.TAG`). It does read the system's own description of the disk's layout: `/usr/share/firmlinks` on macOS, `/proc/self/mountinfo` on Linux.
+- It never reads a file's contents, only names and metadata, with three exceptions: the 43-byte signature of a `CACHEDIR.TAG` (for `caches` and `--exclude-caches`); for `explain`, the files git reads to tell whether it tracks or ignores a path (the ignore files, the configuration and the repository's index); and the system's own description of the disk's layout, `/usr/share/firmlinks` on macOS and `/proc/self/mountinfo` on Linux.
 - It never writes inside the tree it scans.
 - It never deletes without being told: `clean` is a dry run unless given `--yes` (or `yes` typed at its question), moves files to the Trash unless given `--permanent`, and refuses a symbolic link, a mount point and the scanned tree's root.
 - It never reads an index file from outside its index directory unless `--trust` names it: an index file may come from anyone ([SECURITY.md](SECURITY.md)).
 - It never opens a network connection: no telemetry, no update checks.
+
+## macOS and Linux
+
+The commands, the flags and the JSON are the same on both. What duscope can
+see is not, where the systems differ.
+
+On macOS:
+
+- **Full Disk Access.** The protected folders of `~/Library` are read only when
+  the app that runs duscope (the terminal, or the client that starts `duscope
+  mcp`) has Full Disk Access; otherwise they count as unreadable, with the
+  warning `full_disk_access_missing`
+  ([troubleshooting](docs/troubleshooting.md#full_disk_access_missing),
+  [limits](docs/limits.md#full-disk-access-is-a-heuristic-macos)).
+- **APFS clones** count once, unless `--no-clones`; a clone written to since
+  makes the totals above it an upper bound
+  ([limits](docs/limits.md#apfs-clones-written-to-since-they-were-cloned)).
+- **The volume group.** A scan of `/` reads the Data volume once, through the
+  firmlinks, and `-x` tells the group's volumes apart by their own devices
+  (CAVEATS in `duscope man`;
+  [limits](docs/limits.md#scanvolumes-and-a-firmlink-below-the-path-macos)).
+- **`~/Library/Containers`** can take minutes to read; `--skip-containers`
+  leaves it and `Group Containers` out
+  ([limits](docs/limits.md#librarycontainers-can-be-slow-macos)).
+- **`rescan`** reads again only what the volume's FSEvents history reports
+  changed, and the whole tree when it cannot trust the history
+  ([limits](docs/limits.md#fsevents-history-is-advisory-macos-rescans)).
+- **Cloud placeholders** (iCloud Drive, Dropbox, OneDrive) take no space on the
+  disk ([`dataless_present`](docs/troubleshooting.md#dataless_present)), and
+  **Time Machine's local snapshots** hold what a deletion frees until they go
+  ([limits](docs/limits.md#snapshots)).
+- **The Trash** is the Finder's, on the item's volume (CLEANING UP in `duscope
+  man`).
+
+On Linux:
+
+- **Reflinks** (`cp --reflink`, btrfs and XFS) count in full, as `du` counts
+  them, and `duscope explain --clones` measures what they share
+  ([limits](docs/limits.md#reflinks-on-linux)).
+- **`rescan`** reads the whole tree, since Linux keeps no change history
+  ([limits](docs/limits.md#a-linux-rescan-reads-the-whole-tree)).
+- **Automount points** the kernel has not mounted are listed and not entered
+  ([limits](docs/limits.md#automount-points-linux), CAVEATS in `duscope man`).
+- **Subvolumes.** No flag keeps a scan inside one btrfs subvolume, and `clean`
+  takes a subvolume for a mount point
+  ([limits](docs/limits.md#no---one-subvolume-linux),
+  [limits](docs/limits.md#a-btrfs-subvolume-is-a-mount-point-to-clean-linux)).
+- **Names that are not UTF-8** keep their bytes in `path_raw` and `name_raw`
+  ([limits](docs/limits.md#paths-that-are-not-utf-8-linux)).
+- **Access times.** Linux mounts with `relatime` by default, under which
+  `stale --atime` can take a file read lately for one left untouched
+  ([`atime_unreliable`](docs/troubleshooting.md#atime_unreliable)).
+- **The Trash** is the freedesktop one, `~/.local/share/Trash` or the volume's
+  own; on overlayfs, NFS, 9p and FUSE it has limits of its own
+  ([limits](docs/limits.md#overlayfs-what-the-trash-cannot-take-linux),
+  [limits](docs/limits.md#the-trash-on-nfs-9p-and-fuse-linux)).
 
 ## Documentation
 
