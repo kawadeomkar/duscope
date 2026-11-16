@@ -117,7 +117,14 @@ fn p1_rel_01_step_3_runs_checks_that_exist() {
         .nth(1)
         .and_then(|rest| rest.split("4. **").next())
         .unwrap();
-    assert!(step.contains("cargo auditable build --release --locked -p duscope"));
+    // release.yml builds each target's archive with cargo-dist's `dist`
+    // profile, as `just repro-dist <target>` does; a `--release` build is
+    // another binary.
+    assert!(step.contains("just repro-dist "));
+    assert!(!step.contains("--release"), "{step}");
+    let justfile = read("justfile");
+    assert!(justfile.lines().any(|l| l.starts_with("repro-dist ")));
+    assert!(justfile.contains("cargo auditable build --profile dist "));
     assert!(step.contains("cargo test -p duscope --test dependencies"));
     assert!(root().join("duscope/tests/dependencies.rs").exists());
     assert!(
