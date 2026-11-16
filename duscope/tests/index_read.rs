@@ -503,6 +503,88 @@ fn p5_sec_01_prune_removes_only_spills_and_refuses_an_out_that_is_a_link() {
 }
 
 #[test]
+fn p5_sec_01_prune_takes_only_the_writers_temporaries_and_refuses_a_scans_that_is_a_link() {
+    let env = TestEnv::new();
+    let scans = env.index_dir().join("scans");
+    fs::create_dir_all(&scans).unwrap();
+    fs::create_dir_all(env.tmp_dir()).unwrap();
+    // A writer that is gone: each file below has a stray's pid.
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    let stray = scans.join(format!("0123456789ab.db.tmp-{pid}"));
+    fs::write(&stray, b"half an index").unwrap();
+    // Names the index writer never gives a temporary file: no scan id
+    // before `.db.tmp-`, or a pid it never writes.
+    let others = [
+        format!("notes.db.tmp-{pid}"),
+        format!("FEDCBA987654.db.tmp-{pid}"),
+        format!("x0123456789ab.db.tmp-{pid}"),
+        format!("0123456789ab.db.tmp-+{pid}"),
+        format!("0123456789ab.db.tmp-0{pid}"),
+        format!("0123456789ab.db.tmp-{pid}.bak"),
+    ];
+    for name in &others {
+        fs::write(scans.join(name), b"not a temporary file").unwrap();
+    }
+    // The writer's name on what is not a regular file: a directory, and a
+    // link to a file elsewhere.
+    let folder = scans.join(format!("aaaaaaaaaaaa.db.tmp-{pid}"));
+    fs::create_dir(&folder).unwrap();
+    fs::write(folder.join("inside"), b"kept").unwrap();
+    let target = env.tmp_dir().join("target");
+    fs::write(&target, b"kept").unwrap();
+    let link = scans.join(format!("bbbbbbbbbbbb.db.tmp-{pid}"));
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let prune = [
+        "scans",
+        "--prune",
+        "--json",
+        "--test-now",
+        "2030-03-01T00:00:00Z",
+    ];
+    let pruned = ok(&run(&env, &prune));
+    let removed: Vec<(&str, &str)> = pruned["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["kind"].as_str().unwrap(), e["path"].as_str().unwrap()))
+        .collect();
+    assert_eq!(removed, [("temporary", stray.to_str().unwrap())]);
+    for name in &others {
+        assert!(scans.join(name).exists(), "{name}");
+    }
+    assert!(folder.join("inside").exists());
+    assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    assert!(target.exists());
+    // `scans` a link to a folder elsewhere: refused, before anything goes,
+    // a spill in `out` past keeping included.
+    let elsewhere = env.tmp_dir().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let theirs = elsewhere.join(format!("cccccccccccc.db.tmp-{pid}"));
+    fs::write(&theirs, b"half an index").unwrap();
+    let out_dir = env.index_dir().join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+    let spill = out_dir.join("fresh-top-20300101T000000Z.json");
+    fs::write(&spill, b"{}").unwrap();
+    age(&spill, Duration::from_secs(8 * 86_400));
+    fs::rename(&scans, env.tmp_dir().join("scans.before")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &scans).unwrap();
+    let refused = run(&env, &prune);
+    assert_eq!(refused.status.code(), Some(1));
+    let error = &envelope(&refused)["error"];
+    assert_eq!(error["code"], "refused_path");
+    assert_eq!(
+        error["message"],
+        format!(
+            "{} is a symbolic link, not the index directory's own folder of saved scans",
+            scans.display()
+        )
+    );
+    assert!(theirs.exists() && spill.exists());
+}
+
+#[test]
 fn p2_idx_03_scans_lists_and_checks_the_saved_scans() {
     let env = TestEnv::new();
     let home = home(&env);

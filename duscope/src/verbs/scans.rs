@@ -7,8 +7,11 @@
 //! `--prune` keeps the five newest scans of each root and every scan under
 //! seven days old, a temporary file (`<id>.db.tmp-<pid>`) while its writer
 //! runs and for 24 hours, and a spill file for seven days. A file it cannot
-//! read as an index is left alone, and so is a file in `out` that does not
-//! have a spill's name; an `out` that is a symbolic link is refused. `--check` runs `PRAGMA quick_check`, a
+//! read as an index is left alone, and so is anything in `scans` that is
+//! not a regular file named as the index writer names its temporary files,
+//! and anything in `out` that is not a regular file with a spill's name; a
+//! `scans` or `out` that is a symbolic link is refused before anything is
+//! removed. `--check` runs `PRAGMA quick_check`, a
 //! damaged file exiting 5 (`index_corrupt`), then sweeps every directory
 //! the scan holds (`duscope_core::check`): one that changed since makes the
 //! scan `structurally_stale`, exiting 1 (`index_stale`) with the row
@@ -190,22 +193,20 @@ fn list(dir: &Path, paths: &[PathBuf], output: &Output) -> Result<(), Failure> {
     output.listing(&listed, &footer)
 }
 
-/// `--prune`. An `out` that is a symbolic link is refused before anything
-/// is removed: spills are removed from the index directory's own folder,
-/// never from one a link leads to.
+/// `--prune`. A `scans` or `out` that is a symbolic link is refused before
+/// anything is removed: files are removed from the index directory's own
+/// folders, never from one a link leads to.
 fn prune(dir: &Path, now: i64, output: &Output) -> Result<(), Failure> {
-    let out = dir.join("out");
-    if fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(Failure::new(
-            Exit::Runtime,
-            "refused_path",
-            format!(
-                "{} is a symbolic link, not the index directory's own folder of spills",
-                out.display()
-            ),
-        )
-        .hint("Remove the link, then run duscope scans --prune again"));
-    }
+    no_link(
+        &dir.join("scans"),
+        "saved scans",
+        "Put the folder the link leads to in its place, then run duscope scans --prune again",
+    )?;
+    no_link(
+        &dir.join("out"),
+        "spills",
+        "Remove the link, then run duscope scans --prune again",
+    )?;
     let mut removed = Vec::new();
     // The scans of each root, newest first: the first five stay, and any
     // younger than a week.
@@ -247,6 +248,23 @@ fn prune(dir: &Path, now: i64, output: &Output) -> Result<(), Failure> {
     output.listing(&listing("scans --prune", dir, removed), &footer)
 }
 
+/// Refuses `folder`, the index directory's folder of `what`, when it is a
+/// symbolic link, with `hint`.
+fn no_link(folder: &Path, what: &str, hint: &str) -> Result<(), Failure> {
+    if fs::symlink_metadata(folder).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(Failure::new(
+            Exit::Runtime,
+            "refused_path",
+            format!(
+                "{} is a symbolic link, not the index directory's own folder of {what}",
+                folder.display()
+            ),
+        )
+        .hint(hint));
+    }
+    Ok(())
+}
+
 /// Removes `file`, as a row of `--prune`'s listing.
 fn remove(file: &Path, kind: &'static str, id: Option<String>) -> Result<PrunedEntry, Failure> {
     let bytes = fs::metadata(file).map_or(0, |m| m.len());
@@ -266,8 +284,9 @@ fn remove(file: &Path, kind: &'static str, id: Option<String>) -> Result<PrunedE
     })
 }
 
-/// The temporary files of writes that will not finish: their process is
-/// gone, or they are older than a day.
+/// The temporary files of writes that will not finish: regular files with
+/// the name the index writer gives one, whose process is gone or that are
+/// older than a day. Nothing else in `scans` is taken.
 fn stray_temporaries(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir.join("scans")) else {
         return Vec::new();
@@ -275,21 +294,31 @@ fn stray_temporaries(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .filter(|entry| {
-            let name = entry.file_name();
-            let Some(pid) = name
-                .to_str()
-                .and_then(|n| n.rsplit_once(".db.tmp-"))
-                .and_then(|(_, pid)| pid.parse::<u32>().ok())
-            else {
+            let Some(pid) = entry.file_name().to_str().and_then(temporary_pid) else {
                 return false;
             };
-            !duscope_walk::process_alive(pid)
-                || older_than(entry, Duration::from_secs(TEMP_HOURS * 3600))
+            entry.file_type().is_ok_and(|t| t.is_file())
+                && (!duscope_walk::process_alive(pid)
+                    || older_than(entry, Duration::from_secs(TEMP_HOURS * 3600)))
         })
         .map(|entry| entry.path())
         .collect();
     files.sort();
     files
+}
+
+/// The process id in `name` when it is a name the index writer gives its
+/// temporary file (`duscope_core::index::writer`'s `write_in`):
+/// `<id>.db.tmp-<pid>`, `<id>` a scan id and `<pid>` the writer's process
+/// id in decimal digits, as `std::process::id()` prints it (no sign, no
+/// leading zero).
+fn temporary_pid(name: &str) -> Option<u32> {
+    let (id, pid) = name.split_once(".db.tmp-")?;
+    ScanId::parse(id)?;
+    if pid.starts_with('0') || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse().ok()
 }
 
 /// The spill files (`out/` under the index directory) older than a week:
