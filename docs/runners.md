@@ -170,6 +170,46 @@ gh workflow run musl-loop.yml --repo kawadeomkar/duscope --ref <branch> -f threa
 
 That matches the number of threads, not how many run at once: at most 4 do.
 
+## The Linux cross-check
+
+Every Linux figure of Gates 1 → 2 and 2 → 3 is bench-linux's, measured on the
+Proxmox host whose memory is suspect (DEV-157).
+[linux-crosscheck.yml](../.github/workflows/linux-crosscheck.yml) measures the
+scan ratios again on another machine, a GitHub-hosted `ubuntu-24.04` runner: it
+builds the x86_64 musl binary as bench-linux's nightly does, and runs
+`bench/run.sh run` with duscope paired with every pinned competitor, warm and
+cold, on T1 and T2 (`trees`; `all` adds T3 when the runner's disk and the job's
+360 minutes allow). A dispatch runs it and nothing else triggers it, so it is
+never a required check; it reads no secret, and its token reads the repository
+alone. A second dispatch waits for the first to end.
+
+```sh
+gh workflow run linux-crosscheck.yml --repo kawadeomkar/duscope --ref main
+gh run download <run id> --repo kawadeomkar/duscope --name linux-crosscheck --dir crosscheck
+cat crosscheck/runner.txt crosscheck/comparison.txt
+```
+
+The artifact `linux-crosscheck` holds the result file, `runner.txt` (the CPU
+model, cores, memory, kernel and disk) and `comparison.txt`, which the job's
+summary also shows. A hosted runner is another machine, so its times are not
+compared; its ratios are. `bench/run.sh crosscheck` holds each ratio, duscope's
+time over a competitor's in the same rounds, to bench-linux's for the same tree,
+mode and competitor in its latest nightly result on the `bench-results` branch.
+Within 15% either way, a ratio lies within the noise `bench-regression` allows a
+ratio (DEV-59, DEV-76). Outside it, the job warns and does not fail: DEV-59 saw a
+ratio move as much between two CPU models of the shared runners, so such a ratio
+is a finding to read with both machines in view. Each line also says whether the
+hosted ratio meets the goal-1 target of its pair. The job fails only when nothing
+can be compared; a run at a `scale` below 1 compares nothing.
+[bench/README.md](../bench/README.md#the-linux-cross-check) has the rest.
+
+It answers for Gate 1 → 2's scan ratios alone. The Linux figures that are not
+ratios are the machine's own: peak RSS per entry (Gate 1 → 2), the index write
+per entry (goal 2) and the query latencies (Gate 2 → 3). They still need a
+Linux machine off the Proxmox host, as Gate 5 → 1.0 asks, where
+`bench/run.sh acceptance` measures goal 2
+([bench/README.md](../bench/README.md#the-10-acceptance-run)).
+
 ## Setting up a runner
 
 Each step is done once per machine, in this order. The commands for the Mac and

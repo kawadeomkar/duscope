@@ -63,8 +63,11 @@ under [Auditing](#auditing) read it again.
   pays the vendors and waits on their uptime. Its schedule comes back with the
   keys, before 1.0.
   [musl-loop.yml](../.github/workflows/musl-loop.yml) (P5-BENCH-02, the musl
-  build's T2 loop) runs on a dispatch alone, never on a pull request, so none of
-  its jobs is a check here; nor are those of
+  build's T2 loop) and
+  [linux-crosscheck.yml](../.github/workflows/linux-crosscheck.yml)
+  (P5-BENCH-01, the harness on a hosted runner, its ratios held to
+  bench-linux's; DEV-157) run on a dispatch alone, never on a pull request, so
+  none of their jobs is a check here; nor are those of
   [nightly-bench.yml](../.github/workflows/nightly-bench.yml) and
   [nightly-fuzz.yml](../.github/workflows/nightly-fuzz.yml), which run on their
   schedules and a dispatch alone: among them `coverage`, the nightly

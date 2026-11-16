@@ -586,6 +586,46 @@ fn p5_bench_01_the_crosscheck_measures_as_bench_linux_does_and_compares_ratios()
     }
 }
 
+/// P5-BENCH-01 (DEV-157): the settings page lists the cross-check among the
+/// workflows whose jobs are no check, and the runners page says how to
+/// dispatch it, what it compares with and by which rule, and what it leaves
+/// to a machine off the Proxmox host.
+#[test]
+fn p5_bench_01_the_runner_and_settings_pages_describe_the_crosscheck() {
+    let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let settings = one_line(&read("docs/github-settings.md"));
+    assert!(
+        settings.contains(
+            "and [linux-crosscheck.yml](../.github/workflows/linux-crosscheck.yml) (P5-BENCH-01, \
+             the harness on a hosted runner, its ratios held to bench-linux's; DEV-157) run on a \
+             dispatch alone, never on a pull request, so none of their jobs is a check here"
+        ),
+        "docs/github-settings.md does not say linux-crosscheck.yml's job is no check"
+    );
+    let runners = read("docs/runners.md");
+    let section = runners
+        .split("\n## The Linux cross-check\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("docs/runners.md has no `## The Linux cross-check` section");
+    let section = one_line(section);
+    for part in [
+        "[linux-crosscheck.yml](../.github/workflows/linux-crosscheck.yml)",
+        "gh workflow run linux-crosscheck.yml --repo kawadeomkar/duscope",
+        "its latest nightly result on the `bench-results` branch",
+        "Within 15% either way",
+        "It answers for Gate 1 → 2's scan ratios alone",
+        "peak RSS per entry (Gate 1 → 2), the index write per entry (goal 2) and the query \
+         latencies (Gate 2 → 3)",
+        "a Linux machine off the Proxmox host",
+    ] {
+        assert!(
+            section.contains(part),
+            "docs/runners.md's cross-check section lacks `{part}`"
+        );
+    }
+}
+
 /// A harness result on Linux with duscope's ratio to diskus on full-scale T1.
 fn result(ratio: f64, started_at: &str) -> Value {
     json!({
