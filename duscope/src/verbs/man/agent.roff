@@ -1,0 +1,49 @@
+.SH AGENTS
+duscope serves AI agents with the verbs and flags people use and one JSON
+envelope.
+Run by an agent's client, which it tells by
+.BR CLAUDECODE ,
+.BR CODEX_THREAD_ID ,
+.B CODEX_VERSION
+or
+.BR GEMINI_CLI ,
+a verb writes JSON unless a flag or
+.B DUSCOPE_FORMAT
+asks for another format; outside a terminal and an agent's client it
+writes
+.BR plain .
+.SS "The briefing"
+.B duscope agent
+prints, as Markdown on stdout, the briefing an agent reads before it uses
+duscope: what duscope never does, which verb answers which question, the
+handle that
+.B explain
+issues and
+.B clean
+checks, the exit codes and error codes, and the tables
+.B query \-\-sql
+reads.
+The verbs, codes and schema version in it are the running binary's own.
+.SS "The skill"
+.B duscope agent \-\-skill
+writes the briefing as a skill, which an agent's client loads by itself
+when a question calls for it:
+.I SKILL.md
+and
+.I references/sql.md
+in
+.I .agents/skills/duscope/
+and
+.I .claude/skills/duscope/
+under the working directory or
+.BR \-\-dir .
+A skill already there is replaced only with
+.BR \-\-force .
+.PP
+The skill is recommended.
+In the project's evaluation, 120 runs of ten disk\-hygiene tasks through
+Claude Code, agents completed every task with it and without it, and with
+it used 29.5% fewer tokens and about two turns fewer a run; it is
+described in
+.IR bench/README.md ,
+in the source distribution.
