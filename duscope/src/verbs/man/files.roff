@@ -38,8 +38,11 @@ inside a scanned tree is never read.
 .TP
 .I $XDG_CACHE_HOME/duscope/scans/<id>.db
 A saved scan, written by
-.B scan \-\-save
-or by a list verb that found none holding its path:
+.BR "scan \-\-save" ,
+.B rescan
+or
+.BR import ,
+or by a verb that found none holding its path:
 one SQLite file, mode 0600, written once and never changed
 .RI ( ~/Library/Caches/duscope
 on macOS and

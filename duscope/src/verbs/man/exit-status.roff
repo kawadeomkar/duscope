@@ -12,7 +12,14 @@ on a scan without it; also a saved scan whose tree
 finds changed since.
 .TP
 .B 2
-A usage error: an unknown flag, a bad value, a flag of a later release.
+A usage error: an unknown flag, a bad value, a cursor or field the verb
+cannot take, two saved scans
+.B diff
+cannot compare, or what this build or platform cannot do, such as
+.B \-\-treemap pixels
+without the
+.B pixels
+feature.
 .TP
 .B 3
 The path, or a saved scan asked for, does not exist.
@@ -22,8 +29,8 @@ Permission denied on the root, or unreadable directories under
 .BR \-\-strict .
 .TP
 .B 5
-A saved index is corrupt, or was written by a version of duscope that
-cannot read it.
+A saved index is corrupt, or was written in an index version this duscope
+cannot read.
 .TP
 .B 130
 Interrupted (Ctrl\-C): while the tree is read, by a walk or from the file
