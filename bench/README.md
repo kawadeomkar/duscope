@@ -501,6 +501,99 @@ and transparent huge pages off (`.cargo/config.toml`), which keeps a scan's peak
 defaults reached 168–244. On macOS
 (arm64, APFS) it gained 1.7% (4.16 s to 4.09 s), so macOS keeps the system allocator.
 
+## The agent eval
+
+`bench/eval/` runs the ten disk-hygiene tasks of P3-AGT-03 through Claude Code, headless, and
+decides the Gate 3 → 4 lines that wait on it: whether the skill `duscope agent --skill` writes
+is recommended, whether `plain` stays the non-TTY default (D27), and whether `--jq` stays out
+(D36). The runs call the model on the author's account, so only the author starts them; the
+harness's own tests run a stub in Claude Code's place and call nothing.
+
+```sh
+cargo build --release -p duscope
+npm install --global --prefix ~/.cache/duscope-eval @anthropic-ai/claude-code@2.1.319
+export CLAUDE_CODE_OAUTH_TOKEN=...      # from `claude setup-token`; or ANTHROPIC_API_KEY
+bench/eval/run.sh plan                  # the tasks, the cells, the run count and the limits
+bench/eval/run.sh run --claude ~/.cache/duscope-eval/bin/claude --jobs 2
+bench/eval/run.sh summary bench/eval/results/2026-11-20.json
+bench/eval/run.sh run --fake right --runs 1     # the harness alone, with the stub; calls nothing
+```
+
+`bench/eval/run.sh` picks the Python as `bench/run.sh` does. Its subcommands are `run` (the
+default), `plan`, `summary FILE`, and `tree DIR`, which builds the tree in DIR and prints each
+task's answer.
+
+**What a run is.** `tasks.toml` lists the tasks in the row's order: the prompt (a preamble that
+names the tree and says to use `duscope` and change nothing, the question, and the shape of the
+`ANSWER:` line of JSON the reply must end with), the fixture, how the answer is worked out and how
+the reply is checked. `config.toml` pins the model (`claude-sonnet-5-5`, which the author
+confirms), the Claude Code release (2.1.319, the one the MCP smoke test installs; the runner
+refuses another), the tools, the cells and the limits. Each run has a directory of its own in the
+system's temporary directory (`--work-dir` elsewhere), removed after it (`--keep-work` keeps it):
+
+- a scratch `HOME` and XDG directories, so the author's Claude Code settings, memory, MCP servers
+  and saved scans are not read, and the run's scans go to its own index directory; in the cells
+  with the skill, `duscope agent --skill --dir $HOME` writes it there first;
+- the tree (`evaltree.py`): a small home directory, 220 MiB in about 460 files, built fresh, every size
+  and age fixed, each age counted back from the build, so that each task's answer stands clear of
+  the next candidate (`bench/test_eval.py` checks the margins). Every change time is the build's,
+  which `duscope stale` also requires to be old, so the questions about files unused for a year
+  ask about modification time and `stale` lists nothing on this tree. The diff task's tree also
+  has two saved scans, one before and one after a few changes;
+- `PATH` with a `duscope` that runs the binary under test (`--duscope`, default
+  `target/release/duscope`), logs each call, and refuses `clean --yes` and `--permanent`, so no
+  run moves anything to a Trash (on macOS the Trash is the account's own);
+- `claude -p PROMPT --output-format stream-json --verbose --model MODEL --max-turns 30
+  --allowedTools ... --disallowedTools ... --strict-mcp-config`, in an empty working directory.
+  Only the variables `config.toml`'s `pass_env` names reach it, and the credential:
+  `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` for a Claude subscription. With neither set
+  the runner stops before it runs anything. Print mode cannot ask, so a tool outside
+  `allowed_tools` (duscope, `jq` after a pipe, Read, Grep, Glob and Skill) is denied and recorded.
+
+A run is completed when its answer is right, it stayed within 600 s and 2,000,000 tokens, it left
+the tree as it was built, and no deletion was refused. Paths are compared after `realpath`, sizes
+within the task's tolerance (5%), and a size may be written in bytes or with a unit.
+
+The cells are with and without the skill, crossed with the output format duscope gives when the
+agent passes none (`DUSCOPE_FORMAT`): `json`, what the agent detection gives under Claude Code,
+and `plain`, the non-TTY default. An agent's own `--json` still wins, and the result counts how
+often it passed one. Three runs of each task in each cell are 120 runs, made in interleaved
+order: every cell runs a task before the next task, and every task runs once before any runs
+again.
+
+**What it costs.** 120 runs, each up to 30 turns. Headless Claude Code reads its system prompt and
+tools from the prompt cache on every turn, so most of a run's tokens are cache reads: a run of
+6–10 turns is a few hundred thousand tokens, and at Sonnet 5.5's prices ($2 a million input
+tokens, $10 output, $0.20 cache reads) on the order of $0.10–0.40, so $15–50 for the eval; a
+subscription token counts against the subscription's limits instead. These are estimates: each
+run records Claude Code's own `total_cost_usd` and tokens, and `summary` sums them per cell. At 1–3
+minutes a run, 120 runs take 2–6 hours; `--jobs N` runs N at once, within the account's rate
+limits. `--resume FILE` continues an interrupted run: the runs in FILE are kept and not made
+again, provided `config.toml`, `tasks.toml` and the Claude Code release are unchanged.
+
+**What it records.** `bench/eval/results/<date>.json` (`--out` elsewhere), rewritten after every
+run and marked `complete` at the end: the host, the commit, the hashes of both files, the Claude
+Code and duscope versions, the configuration, each task's prompt (`{root}` for the tree), and one
+record per run with its verdict and the reasons, the expected and the given answer, tokens
+(`total`: the pinned model's input, cache creation, cache reads and output, from `modelUsage`,
+else the result's `usage`, else the sum of the messages'; `all_models` with any other model Claude
+Code called), the cost, turns, tool calls, failed calls and whether a later one worked
+(`recovered`), permission denials, whether the skill was loaded, the duscope calls (verbs, the tier
+they belong to, formats asked for, `--jq`, the briefing read with `duscope agent`), and the commands
+it ran. The `summary` holds each cell's figures, each task's completion per cell, and the
+decisions. Each run's transcript stays in `bench/eval/.runs/<date>/`, which git ignores. The fake
+agent's files are `<date>-fake-right.json` and `<date>-fake-wrong.json`, also ignored.
+
+**The decisions.** The criterion is the row's: the cells with the skill against those without, both
+formats pooled, the skill being recommended with a higher completion rate, or with an equal one and
+a mean of tokens per run at least 20% lower (otherwise it stays optional and its description is
+rewritten, as PROPOSAL's Agent workflows says). The same rule, json against plain with and without
+the skill pooled, revises D27 when json wins and confirms `plain` otherwise. A run that passes
+`--jq` to duscope counts as reaching for it, and one such run revisits D36. When no run completed
+anything the decisions are `undecided`. `run.sh summary FILE` prints the table and the checklist's
+two lines, filled, with a line for `--jq`; the author pastes them into plan/SPEC.md's Gate 3 → 4
+checklist, records a changed default as a Deviation entry, and commits the result file.
+
 ## Files
 
 | File | Purpose |
@@ -515,6 +608,12 @@ defaults reached 168–244. On macOS
 | `indexbench.py` | the index measurements (`index`) |
 | `redraw.py` | the viewer's redraw budget (`redraw`) |
 | `test_redraw.py` | its unit tests, run with `test_bench.py`; `duscope/tests/pty/nav_redraw.rs` runs it whole |
+| `eval/run.sh`, `eval/agent_eval.py` | the agent eval: the command line, a run's setup, the result file and the decisions |
+| `eval/tasks.toml`, `eval/config.toml` | the ten tasks; the model, the agent, the cells and the limits |
+| `eval/evaltree.py`, `eval/evalchecks.py` | the eval's tree; each task's truth and the checks of a reply |
+| `eval/evaltranscript.py`, `eval/fake_claude.py` | a run's transcript and duscope calls read; the stub agent |
+| `eval/minitoml.py` | the TOML reader for Pythons without `tomllib` |
+| `test_eval.py` | the eval's unit and end-to-end tests (with the stub), run with `test_bench.py` |
 | `test_indexbench.py` | its unit tests, run with `test_bench.py`; `duscope/tests/index_bench.rs` runs it whole |
 | `compare.py` | the regression check: a result file against the results before it on the same machine and tree |
 | `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |

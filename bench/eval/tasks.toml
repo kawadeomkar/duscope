@@ -1,0 +1,184 @@
+# The ten disk-hygiene tasks of P3-AGT-03 (plan/SPEC.md), in the row's order.
+# bench/eval/agent_eval.py runs each in every cell of config.toml.
+#
+# Every task runs on the eval tree (bench/eval/evaltree.py), built fresh for
+# each run: a small home directory whose sizes and ages are fixed, so each
+# question has one answer that stands clear of the next candidate. The
+# fixture `two-scans` also saves a scan of the tree, changes it and saves a
+# second, in the agent's index directory. Nothing else is saved in advance:
+# the agent's first list verb scans the tree.
+#
+# Each task:
+#   id, title   the task; `row` is the row's own words for it
+#   fixture     tree | two-scans
+#   question    the question, after the preamble; {root} is the tree's path,
+#               and each `params` value can be named ({min_mib} ...)
+#   answer      the shape of the ANSWER object the reply ends with
+#   truth       how the right answer is worked out (evalchecks.TRUTHS)
+#   check       how the reply is compared with it (evalchecks.CHECKS)
+#   tolerance   how far a size may be from the truth, as a fraction
+#   params      what the truth and the question share
+#
+# Sizes are allocated bytes, what duscope reports by default and what
+# deleting frees. "Not modified for more than a year" is modification time:
+# every file of a fresh tree has a recent change time (ctime), which `duscope
+# stale` also requires to be old, so `stale` lists none of them and the agent
+# has to read modification times (`top --files`, `query --sql`).
+
+format = 1
+
+preamble = """
+The directory {root} is a copy of someone's home directory. Use the duscope \
+command, which is on PATH, to answer the question below about it. Do not \
+delete, move or change anything.
+"""
+
+answer_rule = """
+End your reply with one line that starts with ANSWER: and holds a JSON \
+object of this shape, sizes in bytes and paths absolute: {answer}
+"""
+
+[[task]]
+id = "largest-dir"
+title = "The largest directory under a root"
+row = "find the largest directory under a root"
+fixture = "tree"
+question = "Which directory directly inside {root} takes the most disk space, and how much?"
+answer = '{"path": "<directory>", "bytes": <integer>}'
+truth = "largest_child_dir"
+check = "path_bytes"
+tolerance = 0.05
+
+[[task]]
+id = "largest-files"
+title = "The three largest files"
+row = "name the three largest files"
+fixture = "tree"
+question = "Name the {n} largest files under {root}."
+answer = '{"paths": ["<file>", "<file>", "<file>"]}'
+truth = "largest_files"
+check = "path_set"
+tolerance = 0.0
+params = { n = 3 }
+
+[[task]]
+id = "cache-savings"
+title = "What the regenerable caches would free"
+row = "report how much the regenerable caches would free"
+fixture = "tree"
+question = """
+How much disk space would deleting every regenerable cache under {root} \
+free? Count the package and build caches and virtual environments that a \
+build or an install recreates, and nothing else.
+"""
+answer = '{"bytes": <integer>}'
+truth = "caches_total"
+check = "bytes"
+tolerance = 0.05
+
+[[task]]
+id = "stale-large"
+title = "Large files unused for a year"
+row = "list files unused for a year above 10 MiB"
+fixture = "tree"
+question = """
+List every file under {root} that is larger than {min_mib} MiB and has not \
+been modified for more than a year.
+"""
+answer = '{"paths": ["<file>", "..."]}'
+truth = "stale_large"
+check = "path_set"
+tolerance = 0.0
+params = { min_mib = 10, days = 365 }
+
+[[task]]
+id = "tar-gz-total"
+title = "What the tar.gz archives take"
+row = "total what the tar.gz archives take"
+fixture = "tree"
+question = "How much disk space do the {suffix} archives under {root} take in total?"
+answer = '{"bytes": <integer>}'
+truth = "suffix_total"
+check = "bytes"
+tolerance = 0.05
+params = { suffix = ".tar.gz" }
+
+[[task]]
+id = "explain-dir"
+title = "Why a directory is large"
+row = "explain why a given directory is large"
+fixture = "tree"
+question = """
+Explain why {root}/{dir} is large: which entry directly inside it takes most \
+of its space, how much, and could that entry be regenerated if it were \
+deleted?
+"""
+answer = '{"path": "<entry>", "bytes": <integer>, "regenerable": <true or false>}'
+truth = "explain_dir"
+check = "explain"
+tolerance = 0.05
+params = { dir = "Projects/rust-cli" }
+
+[[task]]
+id = "diff-growth"
+title = "Compare two scans and name the growth"
+row = "compare two scans and name the growth"
+fixture = "two-scans"
+question = """
+duscope holds two saved scans of {root}: an older one, and a newer one taken \
+after some changes. Compare them: by how many bytes did {root} grow between \
+the two (net, after anything removed), and which new file accounts for most \
+of that growth?
+"""
+answer = '{"path": "<file>", "net_growth_bytes": <integer>}'
+truth = "diff_growth"
+check = "diff"
+tolerance = 0.05
+
+[[task]]
+id = "same-name"
+title = "Same-named large files"
+row = "find same-named large files across the tree"
+fixture = "tree"
+question = """
+Some file under {root} larger than {min_mib} MiB has the same name as \
+another file larger than {min_mib} MiB elsewhere in the tree. What is that \
+name, and where are those files?
+"""
+answer = '{"name": "<file name>", "paths": ["<file>", "..."]}'
+truth = "same_name_large"
+check = "name_paths"
+tolerance = 0.0
+params = { min_mib = 10 }
+
+[[task]]
+id = "cleanup-plan"
+title = "A cleanup plan, deleting nothing"
+row = "produce a cleanup plan without deleting anything"
+fixture = "tree"
+question = """
+The owner of {root} wants to free at least {target_mib} MiB. Plan a cleanup \
+that removes only regenerable caches (what a build or an install recreates) \
+and files that have not been modified for more than a year. Do not delete or \
+move anything: list the paths you would remove and what they would free in \
+total.
+"""
+answer = '{"paths": ["<path>", "..."], "total_bytes": <integer>}'
+truth = "cleanup"
+check = "cleanup"
+tolerance = 0.05
+params = { target_mib = 80, days = 365 }
+
+[[task]]
+id = "sql-own-files"
+title = "A question for query --sql"
+row = "answer a question that needs query --sql"
+fixture = "tree"
+question = """
+Which directory under {root} holds the most files directly inside it, not \
+counting the files in its subdirectories, and how many files is that?
+"""
+answer = '{"path": "<directory>", "files": <integer>}'
+truth = "most_own_files"
+check = "path_count"
+tolerance = 0.0

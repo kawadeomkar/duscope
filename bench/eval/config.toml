@@ -1,0 +1,56 @@
+# How the ten-task eval runs (P3-AGT-03, plan/SPEC.md): the model, the agent,
+# the cells and the decision rule. bench/eval/agent_eval.py reads it; its
+# SHA-256 goes into every result file, and `run --resume` refuses a result
+# file written under another one. bench/README.md, "The agent eval".
+
+[model]
+# The model every run uses (`claude --model`), pinned so that runs on
+# different days compare. The author confirms it before the first real run.
+id = "claude-sonnet-5-5"
+
+[claude_code]
+# The Claude Code release the runner accepts (`claude --version`), the one
+# the MCP smoke test pins (crates/duscope-mcp/tests/smoke/claude-code.sh).
+version = "2.1.319"
+# Per run: the turns `claude -p --max-turns` allows, the wall-clock seconds
+# before the run is stopped, and the tokens (input, cache creation, cache
+# reads and output, summed over the run) above which it does not count as
+# completed. A run over a limit counts as not completed.
+max_turns = 30
+timeout_s = 600
+max_tokens = 2000000
+# The tools a run may use without asking (print mode cannot ask, so any
+# other is denied and recorded as a permission denial): duscope, jq after a
+# pipe, and Claude Code's read-only tools, with which an agent can read a
+# file that duscope spilled.
+allowed_tools = ["Bash(duscope:*)", "Bash(jq:*)", "Read", "Grep", "Glob", "Skill"]
+# The tools a run never has: nothing writes, fetches or hands off the task.
+disallowed_tools = ["Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent"]
+# The caller's variables a run sees. Nothing else passes from the caller's
+# environment but the credential (ANTHROPIC_API_KEY or
+# CLAUDE_CODE_OAUTH_TOKEN) in a real run.
+pass_env = [
+    "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
+    "NODE_EXTRA_CA_CERTS",
+]
+
+[cells]
+# Each cell is one value of each: with or without the skill that
+# `duscope agent --skill` writes into the scratch HOME, and the output format
+# duscope gives when the agent passes none (DUSCOPE_FORMAT): json, what the
+# agent detection gives under Claude Code, against plain, the non-TTY
+# default (D27), sizes in bytes. An agent's own --json or --plain still wins.
+skill = [false, true]
+format = ["json", "plain"]
+# Runs of each task in each cell.
+runs = 3
+
+[decision]
+# The row's criterion: the skill is recommended with a higher completion, or
+# at equal completion with at least this fraction fewer tokens (the mean per
+# run). The same rule, json against plain, revises the non-TTY default.
+min_token_reduction = 0.20
+# --jq's absence (D36) is revisited when at least this many runs passed
+# --jq to duscope.
+jq_attempt_runs_to_revisit = 1
