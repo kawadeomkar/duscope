@@ -1,10 +1,13 @@
 # duscope releases (plan/SPEC.md "Versioning, branching and releases", P0-CI-02).
 #
-# A signed `v*` tag on a commit of main runs this workflow:
+# A signed `v*` tag on a commit of main, or a patch release's on its hotfix
+# branch, runs this workflow:
 #
 #   verify-tag   the tag is signed by a key in .github/allowed_signers (as main has it
-#                now), points at a commit on main, names the workspace version, and its
-#                commit carries the version's dated CHANGELOG.md section
+#                now), points at a commit on main or, for a patch release (vX.Y.Z,
+#                Z > 0), on hotfix/<the tag>, names the workspace version, and its
+#                commit carries the version's dated CHANGELOG.md section; it says
+#                whether the tag is the newest release
 #   plan         `dist host --steps=create`: what to build (pull requests: `dist plan`)
 #   build-local-artifacts
 #                one archive per target under the `just repro` environment, built
@@ -15,12 +18,14 @@
 #   deb          the .deb of each musl target with cargo-deb, from the binary of
 #                that target's archive, lintian-clean and attested (P1-PKG-01)
 #   deb-install  each .deb installed and run in Debian 12 and Ubuntu 22.04
-#   host         the GitHub Release, its notes from CHANGELOG.md, with the .debs
+#   host         the GitHub Release, its notes from CHANGELOG.md, with the .debs,
+#                marked latest when it is the newest release
 #   publish-crates
 #                the six crates on crates.io, in dependency order, through
 #                trusted publishing (no standing token; docs/RELEASING.md)
-#   homebrew     the version-bump pull request in kawadeomkar/homebrew-tap
-#                (P1-PKG-02); the tap's own workflows build and publish bottles
+#   homebrew     the version-bump pull request in kawadeomkar/homebrew-tap for the
+#                newest release (P1-PKG-02); the tap's own workflows build and
+#                publish bottles
 #   announce     nothing more yet (dist's last phase)
 #
 # Every job needs verify-tag, directly or through plan, and the jobs that use
@@ -78,6 +83,8 @@ jobs:
   verify-tag:
     runs-on: "ubuntu-24.04"
     timeout-minutes: 10
+    outputs:
+      latest: ${{ steps.verify.outputs.latest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,18 +94,21 @@ jobs:
         if: ${{ github.event_name != 'push' }}
         run: echo "Not a tag push; release.yml only plans."
       - name: Verify the tag
+        id: verify
         if: ${{ github.event_name == 'push' }}
         env:
           TAG: ${{ github.ref_name }}
         shell: bash
         run: |
           fail() { echo "::error title=verify-tag::$*"; exit 1; }
-          [[ $TAG =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]] || fail "$TAG is not a vMAJOR.MINOR.PATCH tag"
-          version=${BASH_REMATCH[1]}
+          [[ $TAG =~ ^v(([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?)$ ]] || fail "$TAG is not a vMAJOR.MINOR.PATCH tag"
+          version=${BASH_REMATCH[1]} patch=${BASH_REMATCH[4]} pre=${BASH_REMATCH[5]}
 
           # Fetch the tag object itself (a checkout may record an annotated tag as a
-          # lightweight one) and main as it is now.
-          git fetch --no-tags --force origin "+refs/tags/$TAG:refs/tags/$TAG" "+refs/heads/main:refs/remotes/origin/main"
+          # lightweight one), the other release tags, and main and the hotfix
+          # branches as they are now (there may be none).
+          git fetch --no-tags --force origin "+refs/tags/$TAG:refs/tags/$TAG" "+refs/tags/v*:refs/tags/v*" \
+            "+refs/heads/main:refs/remotes/origin/main" "+refs/heads/hotfix/*:refs/remotes/origin/hotfix/*"
           [[ $(git cat-file -t "refs/tags/$TAG") == tag ]] || fail "$TAG is a lightweight tag; release tags are made with git tag -s"
 
           # The signers main lists now, so a key removed from main signs no later release.
@@ -106,8 +116,23 @@ jobs:
           git -c gpg.ssh.allowedSignersFile="$RUNNER_TEMP/allowed_signers" verify-tag "refs/tags/$TAG" ||
             fail "$TAG is not signed by a key in .github/allowed_signers on main"
 
+          # The commit is on main, or a patch release's is on hotfix/<the tag>: the
+          # branch from the minor's latest release that carries a patch when main
+          # cannot be released as it stands (docs/RELEASING.md, Patch releases).
           commit=$(git rev-parse "refs/tags/$TAG^{commit}")
-          git merge-base --is-ancestor "$commit" refs/remotes/origin/main || fail "$TAG points at $commit, which is not on main"
+          hotfix=hotfix/$TAG
+          if [[ -z $pre ]] && (( 10#$patch > 0 )); then allowed="main or $hotfix"; else allowed=main; fi
+          if git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            branch=main
+          elif git rev-parse -q --verify "refs/remotes/origin/$hotfix" > /dev/null &&
+            git merge-base --is-ancestor "$commit" "refs/remotes/origin/$hotfix"; then
+            [[ $allowed != main ]] ||
+              fail "$TAG is on $hotfix, but a hotfix branch releases a patch alone (vX.Y.Z with Z > 0, no pre-release)"
+            branch=$hotfix
+          else
+            elsewhere=$(git for-each-ref --contains "$commit" --format='%(refname:lstrip=3)' refs/remotes/origin/hotfix/ | paste -sd ' ' -)
+            fail "$TAG points at $commit, which is not on $allowed${elsewhere:+ (it is on $elsewhere)}"
+          fi
           [[ $(git rev-parse HEAD) == "$commit" ]] || fail "the checkout is $(git rev-parse HEAD), not the tagged commit $commit"
 
           # Every crate the release ships carries the tag's version, and Cargo.lock agrees.
@@ -122,7 +147,13 @@ jobs:
             fail "CHANGELOG.md has no dated section for $version; run scripts/changelog.py assemble $version before tagging"
           fragments=$(find changelog.d -type f -name '*.md' ! -name README.md | sort)
           [[ -z $fragments ]] || fail "changelog.d still holds fragments ($(echo $fragments)); assemble them before tagging"
-          echo "$TAG: signed by an allowed signer, on main, version $version, changelog assembled"
+
+          # Only the newest release becomes GitHub's latest and the tap's formula: not
+          # a pre-release, nor a patch of an older minor after a newer one's release.
+          newest=$(git tag -l 'v*' | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+          if [[ $version == "$newest" ]]; then latest=true; else latest=false; fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "$TAG: signed by an allowed signer, on $branch, version $version, changelog assembled, latest: $latest"
 
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
@@ -136,6 +167,8 @@ jobs:
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
       tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
       publishing: ${{ !github.event.pull_request }}
+      # Whether the tag is the newest release, from verify-tag, for host and homebrew.
+      latest: ${{ needs.verify-tag.outputs.latest }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -565,11 +598,14 @@ jobs:
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
+          # GitHub makes every new release its latest unless told otherwise, and
+          # the shell installer's link follows the latest.
+          LATEST: ${{ needs.plan.outputs.latest }}
         run: |
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --latest="$LATEST" --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   # Publish the crates to crates.io after the GitHub Release, each crate after the
   # crates it depends on. A rerun skips the versions already published.
@@ -626,14 +662,15 @@ jobs:
   # whose tests.yml builds the bottles and publish.yml merges them (the tap has no
   # autobump.yml, so the two never race). The first release finds no formula to
   # bump and opens packaging/homebrew/duscope.rb as the pull request instead, so it
-  # gets its bottles the same way. Not for a pre-release. A re-run of the release
-  # finds the formula at the tag, or its pull request open, and stops there
-  # without opening another.
+  # gets its bottles the same way. Only for the newest release (verify-tag's
+  # latest): not for a pre-release, nor for a patch of an older minor, since the
+  # formula is the newest version. A re-run of the release finds the formula at
+  # the tag, or its pull request open, and stops there without opening another.
   homebrew:
     needs:
       - plan
       - host
-    if: ${{ needs.plan.outputs.publishing == 'true' && !fromJson(needs.host.outputs.val).announcement_is_prerelease }}
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.plan.outputs.latest == 'true' && !fromJson(needs.host.outputs.val).announcement_is_prerelease }}
     runs-on: macos-26
     timeout-minutes: 15
     env:
