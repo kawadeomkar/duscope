@@ -411,10 +411,16 @@ sink: File::create
 
 ## duscope/src/out/spill.rs
 
-write: DirBuilder::new, OpenOptions::new, fs::set_permissions
+owners_alone: .metadata(), File::open
+  The index directory's `out`, once an lstat shows a directory of this user's:
+  opened, its (dev, ino) compared with the lstat's, and given 0700 through the
+  descriptor (fchmod), so a link swapped in is never followed to change what
+  it leads to. Nothing read.
+write: DirBuilder::new, OpenOptions::new, fs::symlink_metadata
   The index directory's `out`, and the index directory when a spill makes it:
-  made and set 0700; each envelope written to a new file, O_CREAT|O_EXCL and
-  mode 0600, named by the scan, the verb and the time.
+  made 0700; an lstat refuses an `out` that is a symbolic link, before
+  anything is written or changed. Each envelope written to a new file,
+  O_CREAT|O_EXCL and mode 0600, named by the scan, the verb and the time.
 
 ## duscope/src/verbs/explain.rs
 

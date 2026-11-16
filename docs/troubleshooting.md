@@ -349,8 +349,12 @@ read, a move to the Trash failed for a reason other than a volume without one
 (on macOS, no permission or a locked file), the envelope could not be written to
 its spill file, or the scan was too large to hold
 ([limits.md](limits.md#at-most-4-gib-of-names)). The message names what failed.
+A spill refuses an index directory whose `out` is a symbolic link, even one to
+nothing, before it writes or changes anything: it writes to the index
+directory's own folder alone.
 
-What to do: fix what the message names, then run the command again.
+What to do: fix what the message names, then run the command again. For a
+linked `out`, remove the link; duscope makes `out` again.
 
 ### `interrupted`
 

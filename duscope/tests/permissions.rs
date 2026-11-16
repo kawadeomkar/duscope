@@ -257,3 +257,60 @@ fn p5_sec_01_a_spill_and_its_directories_are_the_owners_alone_whatever_the_umask
         assert_eq!(mode(dir), "0700", "{}", dir.display());
     }
 }
+
+#[test]
+fn p5_sec_01_a_spill_refuses_an_out_that_is_a_link_and_changes_no_mode() {
+    let env = TestEnv::new();
+    let root = tree(&env);
+    let index_dir = env.tmp_dir().join("linked");
+    fs::create_dir_all(&index_dir).unwrap();
+    let spill = |index_dir: &Path| {
+        under_umask_000(
+            &env,
+            &duscope_bin(),
+            &[
+                "scan",
+                root.to_str().unwrap(),
+                "--index-dir",
+                index_dir.to_str().unwrap(),
+                "--json",
+                "--max-chars",
+                "1",
+            ],
+        )
+    };
+    // `out` a link to a folder of someone else's choosing: refused, and the
+    // folder keeps its mode and gets no file.
+    let elsewhere = env.tmp_dir().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = index_dir.join("out");
+    std::os::unix::fs::symlink(&elsewhere, &out).unwrap();
+    let refused = spill(&index_dir);
+    assert_eq!(refused.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "io_error", "{error}");
+    assert_eq!(
+        error["error"]["message"],
+        format!(
+            "{} is a symbolic link, not the index directory's own folder of spills",
+            out.display()
+        )
+    );
+    assert_eq!(mode(&elsewhere), "0755");
+    assert!(names(&elsewhere).is_empty(), "{:?}", names(&elsewhere));
+    // A link to nothing is refused as a link, not as a file in the way.
+    fs::remove_file(&out).unwrap();
+    std::os::unix::fs::symlink(env.tmp_dir().join("nowhere"), &out).unwrap();
+    let dangling: Value = serde_json::from_slice(&spill(&index_dir).stdout).unwrap();
+    assert_eq!(dangling["error"]["message"], error["error"]["message"]);
+    assert!(!env.tmp_dir().join("nowhere").exists());
+    // The user's own `out`, made looser by hand: given 0700 again.
+    fs::remove_file(&out).unwrap();
+    fs::create_dir(&out).unwrap();
+    fs::set_permissions(&out, fs::Permissions::from_mode(0o755)).unwrap();
+    let stub = ok(&spill(&index_dir));
+    let file = PathBuf::from(stub["spilled"]["path"].as_str().unwrap());
+    assert_eq!(file.parent(), Some(out.as_path()));
+    assert_eq!(mode(&out), "0700");
+}
