@@ -38,7 +38,8 @@ The design is fixed by two documents; read the parts a task cites before writing
 - `just golden`     regenerate golden files after an intended output change (review the diff)
 - `just bench`      hyperfine harness on the three seeded trees (results in bench/results)
 - `just size`       release build, strip, print the binary size against the budget
-- `just repro`      the one reproducible release-build recipe CI and cargo-dist use
+- `just repro`      the reproducible host build, made twice and compared by CI's `repro` job
+- `just repro-dist <target>`   the build release.yml makes for one target (dist profile)
 - `just deb`        build the .deb packages locally
 - `cargo +nightly fuzz run <target>`   fuzzing needs the nightly toolchain
 
