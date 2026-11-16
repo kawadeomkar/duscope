@@ -15,7 +15,7 @@
     },
     "older_than": {
       "type": "string",
-      "description": "Files neither modified nor changed (ctime) for at least this long: a number with h, d, w or y. Default: 180d"
+      "description": "Files neither modified nor changed (ctime) for at least this long: a number with h, d, w or y. Default: 180d. For the modification time alone: duscope_top with files and older_than"
     },
     "min_size": {
       "type": "string",

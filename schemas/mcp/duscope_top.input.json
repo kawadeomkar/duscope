@@ -26,6 +26,10 @@
       "type": "string",
       "description": "Leave out rows smaller than this: 100M, 1.5G, 10KB, or a number of bytes"
     },
+    "older_than": {
+      "type": "string",
+      "description": "Only rows not modified for at least this long, by the modification time alone (a directory's is the newest under it, max_mtime): a number with h, d, w or y"
+    },
     "glob": {
       "type": "array",
       "items": {

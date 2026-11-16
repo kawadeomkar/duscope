@@ -7,8 +7,8 @@ use super::{Annotations, Context, Invocation, READ_ONLY, Tool, read_only, rows_t
 use crate::roots::Refusal;
 
 /// `top --no-scan [--scan ID] [--files] [--depth N] [--min-size SIZE]
-/// [--glob G]… [--exclude G]… [--size KIND] [--fields F] [--limit N]
-/// [--cursor C] PATH`.
+/// [--older-than AGE] [--glob G]… [--exclude G]… [--size KIND] [--fields F]
+/// [--limit N] [--cursor C] PATH`.
 pub struct Top;
 
 impl Tool for Top {
@@ -18,7 +18,7 @@ impl Tool for Top {
 
     fn description(&self) -> &'static str {
         "The largest directories, or files, under a path in a saved scan, largest first; \
-         narrowed by depth, size and glob, and paged with cursor."
+         narrowed by depth, size, modification time and glob, and paged with cursor."
     }
 
     fn input_schema(&self) -> &'static str {
@@ -42,6 +42,7 @@ impl Tool for Top {
             line.switch("files", "--files")
                 .value("depth", "--depth")
                 .value("min_size", "--min-size")
+                .value("older_than", "--older-than")
                 .each("glob", "--glob")
                 .each("exclude", "--exclude")
                 .list();
