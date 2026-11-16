@@ -57,8 +57,9 @@ under [Auditing](#auditing) read it again.
   retires it. release.yml builds the x86_64 macOS archive again for a tag, so a
   broken Intel build still stops a release. `mcp-smoke`, which has Claude Code,
   Codex CLI and Gemini CLI call `duscope mcp` with the vendors' keys, runs on
-  the schedule and a dispatch alone, and on no pull request: it is not
-  required, since each run pays the vendors and waits on their uptime.
+  a dispatch alone, and on no pull request: it is not required, since each run
+  pays the vendors and waits on their uptime. Its schedule comes back with the
+  keys, before 1.0.
   [musl-loop.yml](../.github/workflows/musl-loop.yml) (P5-BENCH-02, the musl
   build's T2 loop) runs on a dispatch alone, never on a pull request, so none of
   its jobs is a check here; nor are those of

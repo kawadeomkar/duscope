@@ -91,7 +91,7 @@ const REQUIRED_CHECKS: &[&str] = &[
 /// best-effort Intel macOS runner, on pushes to main, the schedule and a
 /// dispatch; quick runs only on a pull request into another branch than main,
 /// which no branch protection covers (DEV-73); mcp-smoke runs the three MCP
-/// clients on the schedule and a dispatch alone (P3-MCP-06).
+/// clients on a dispatch alone (P3-MCP-06).
 const OPTIONAL_JOBS: &[&str] = &["intel-mac", "quick", "mcp-smoke"];
 
 /// The jobs of release.yml that run only for a tag: pull requests report them
@@ -1041,9 +1041,9 @@ fn p4_tui_07_the_pixels_job_runs_on_both_platforms() {
     }
 }
 
-/// When `mcp-smoke` runs: the schedule and a dispatch, never a pull request.
-const SMOKE_ONLY_ON: &str =
-    "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
+/// When `mcp-smoke` runs: a dispatch, never the schedule or a pull request,
+/// until the vendor keys are set before 1.0.
+const SMOKE_ONLY_ON: &str = "github.event_name == 'workflow_dispatch'";
 
 /// The steps of `job`: each one's lines, from its `- ` on.
 fn steps(job: &Job) -> Vec<Vec<&str>> {
@@ -1123,9 +1123,11 @@ fn p3_mcp_06_mcp_conformance_runs_rmcps_client_against_the_binary_on_both_platfo
 }
 
 /// P3-MCP-06: the client smoke tests run where they cost nothing to a pull
-/// request: on the schedule and a dispatch, never required.
+/// request: on a dispatch, never required. The schedule waits for the vendor
+/// keys, set before 1.0, so that a scheduled run does not fail every day
+/// without them.
 #[test]
-fn p3_mcp_06_mcp_smoke_runs_on_the_schedule_and_a_dispatch_alone() {
+fn p3_mcp_06_mcp_smoke_runs_on_a_dispatch_alone() {
     let workflow = read(WORKFLOW);
     let jobs = jobs(&workflow);
     let job = jobs
@@ -1140,12 +1142,10 @@ fn p3_mcp_06_mcp_smoke_runs_on_the_schedule_and_a_dispatch_alone() {
             .all(|check| !check.starts_with("mcp-smoke")),
         "mcp-smoke gates no merge"
     );
-    for trigger in ["\n  schedule:\n", "\n  workflow_dispatch:\n"] {
-        assert!(
-            workflow.contains(trigger),
-            "ci.yml has no {trigger:?} trigger"
-        );
-    }
+    assert!(
+        workflow.contains("\n  workflow_dispatch:\n"),
+        "ci.yml has no workflow_dispatch trigger"
+    );
     // The logs are kept whatever failed, for the author to commit.
     let upload = steps(job)
         .into_iter()
