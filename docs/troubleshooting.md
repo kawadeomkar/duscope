@@ -88,7 +88,7 @@ each with its `reason`:
 
 | `reason` | The volume | To enter it |
 | --- | --- | --- |
-| `network` | NFS, SMB, FUSE, 9p, AFP or autofs | `--include-network` |
+| `network` | NFS, SMB, 9p, AFP, autofs, Ceph, virtiofs, WebDAV and the other network filesystems, and FUSE but on a disk (`fuseblk`, as ntfs-3g) | `--include-network` |
 | `one_file_system` | any mount other than the root's, under `-x` | leave out `-x` |
 | `kernel` | proc, sysfs, cgroup and the other kernel pseudo-filesystems, and macOS's devfs | never entered |
 | `bind_cycle` | a bind mount of a directory already on the path, which would loop | never entered |

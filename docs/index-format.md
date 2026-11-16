@@ -119,7 +119,7 @@ disks.
 | `fs_type` | TEXT | no | filesystem type as the kernel names it, lower-cased (`apfs`, `ext4`, `nfs4`, …) |
 | `read_only` | INTEGER | no | 1 when mounted read-only |
 | `entered` | INTEGER | no | 1 when the scan walked into the volume |
-| `reason` | TEXT | yes | why the scan did not enter it: `firmlinked`, `kernel`, `network`, `one_file_system` or `bind_cycle`; NULL when it did |
+| `reason` | TEXT | yes | why the scan did not enter it: `kernel`, `network`, `one_file_system`, `bind_cycle`, or `excluded_cache` for a mount point holding a `CACHEDIR.TAG` under `--exclude-caches`; NULL when it did |
 | `case_sensitive` | INTEGER | yes | 1 when names that differ only by case are different names; NULL where it cannot be told without entering the volume |
 | `normalization` | TEXT | no | `insensitive` when the NFC and NFD forms of a name are the same name (APFS, HFS+), else `none` |
 | `fsevents_uuid` | TEXT | yes | macOS: the UUID of the volume's FSEvents database, upper-case and hyphenated, for incremental rescans; NULL on Linux, for a volume the scan did not enter, and where macOS keeps no history of the volume (logging turned off with `.fseventsd/no_log`, a disk image attached with `-nobrowse`) |
