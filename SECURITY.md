@@ -189,6 +189,9 @@ virtual tables and crafted pages.
   else.
   - Both paths are resolved first. A link inside the directory to a file outside it counts as
     outside, and `--trust` may name the file by any path to it.
+  - The rule holds for the `scans` folder too: an index directory whose `scans` is a symbolic
+    link, even one to nothing, is refused with `untrusted_index` before any saved scan is
+    listed, read or written there, while the index directory itself may be a link.
 - **Every open, trusted or not.** The rules are in `crates/duscope-core/src/index/reader.rs`.
   - **Mode:** read-only and immutable (`mode=ro&immutable=1`), with `SQLITE_DBCONFIG_DEFENSIVE`
     set and the schema untrusted.

@@ -1003,6 +1003,13 @@ pub fn core_failure(error: CoreError) -> Failure {
             );
             Failure::new(Exit::Runtime, "untrusted_index", error.to_string()).hint(hint)
         }
+        // The saved scans a linked `scans` leads to are outside the index
+        // directory, as a file --trust does not name is: the same code, and
+        // the user, not an agent, moves the folder.
+        CoreError::LinkedScans(_) => {
+            Failure::new(Exit::Runtime, "untrusted_index", error.to_string())
+                .hint(duscope_core::index::LINKED_SCANS_HINT)
+        }
         other => Failure::new(Exit::Runtime, "io_error", other.to_string()),
     }
 }

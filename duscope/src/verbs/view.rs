@@ -209,9 +209,11 @@ fn named_scan(
             .map(Path::to_owned)
             .or_else(|| duscope_core::index::default_dir(|name| std::env::var_os(name)))
             .is_some_and(|dir| {
-                query::index_files(&dir)
-                    .iter()
-                    .any(|(id, _)| id.as_str().starts_with(prefix))
+                // Saved scans that cannot be listed (a linked `scans`): the
+                // argument is taken as a scan, whose read then says why.
+                query::index_files(&dir).map_or(true, |files| {
+                    files.iter().any(|(id, _)| id.as_str().starts_with(prefix))
+                })
             })
     };
     if index.scan.is_none()

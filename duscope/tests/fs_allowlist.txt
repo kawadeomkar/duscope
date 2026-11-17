@@ -60,6 +60,16 @@ open: .metadata(), File::open, fs::symlink_metadata x2
   file's (dev, ino) compared with the lstat's, so neither a link nor a file
   swapped in is read; 32 bytes and no more.
 
+## crates/duscope-core/src/index.rs
+
+scans_dir: fs::symlink_metadata
+  The index directory's `scans` (under a person's --index-dir or
+  DUSCOPE_INDEX_DIR, else the cache directory), before any saved scan is
+  listed, read or written there (query/resolve.rs index_files and
+  warn_if_open, index/writer.rs write_in): an lstat, refusing a `scans` that is
+  a symbolic link, a link to nothing included, so no saved scan is read from or
+  written to where a link leads. Nothing read or changed.
+
 ## crates/duscope-core/src/index/reader.rs
 
 open: Connection::open_with_flags
@@ -89,8 +99,8 @@ kill_before_rename: Command::new
 write_file_until: fs::remove_file
   That temporary file, removed before a second build with the sort in memory.
 write_in: DirBuilder::new, File::open, fs::remove_file, fs::rename
-  The index directory's `scans`, made 0700 with each directory above it that
-  is missing; the temporary file renamed to <id>.db, so a snapshot appears whole
+  The index directory's `scans`, once index.rs scans_dir has refused one that
+  is a symbolic link, made 0700 with each directory above it that is missing; the temporary file renamed to <id>.db, so a snapshot appears whole
   or not at all, and the directory synced; on a failure the temporary file is
   removed.
 
@@ -112,15 +122,17 @@ fs_holds_file: .symlink_metadata()
 ## crates/duscope-core/src/query/resolve.rs
 
 index_files: fs::read_dir
-  The index directory's `scans`: listed, keeping regular files alone (by the
-  entry's own type, so no link) named <id>.db.
+  The index directory's `scans`, once index.rs scans_dir has refused one that
+  is a symbolic link: listed, keeping regular files alone (by the entry's own
+  type, so no link) named <id>.db.
 trusted: fs::canonicalize x3
   The file --scan names, the files --trust names (a person's flags; no MCP tool
   passes either) and the index directory, resolved, so the file opened is the
   file checked and a link inside the directory to a file outside it is outside.
 warn_if_open: .metadata(), fs::metadata, fs::read_dir
-  The index directory, its `scans` and the index files in it: stat'ed for owner
-  and mode, to warn when they are not this user's alone. Nothing read or changed.
+  The index directory, its `scans` unless index.rs scans_dir refuses it, and
+  the index files in it: stat'ed for owner and mode, to warn when they are not
+  this user's alone. Nothing read or changed.
 
 ## crates/duscope-core/src/query/sql.rs
 

@@ -112,7 +112,7 @@ fn p2_test_01_a_reader_never_sees_half_a_write() {
         let mut opened = 0;
         loop {
             let finished = writer.is_finished();
-            for (id, file) in index_files(&dir) {
+            for (id, file) in index_files(&dir).unwrap() {
                 let index =
                     Index::open(&file).unwrap_or_else(|e| panic!("{id} opened half written: {e}"));
                 assert_eq!(index.meta().scan_id, id);
@@ -127,7 +127,7 @@ fn p2_test_01_a_reader_never_sees_half_a_write() {
         opened
     });
     assert!(opened >= 40);
-    assert_eq!(index_files(&dir).len(), 40);
+    assert_eq!(index_files(&dir).unwrap().len(), 40);
     // Nothing but the 40 is left: no temporary file, no journal.
     assert_eq!(listing(&dir.join("scans")).len(), 40);
 }

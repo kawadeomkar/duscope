@@ -760,7 +760,7 @@ fn p4_tui_09_one_pass_finds_every_folders_dominant_classes() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let index = Index::open(&index_files(&env.index_dir())[0].1).unwrap();
+    let index = Index::open(&index_files(&env.index_dir()).unwrap()[0].1).unwrap();
     for (what, view) in [("walked", &walked as &dyn TreeView), ("saved", &index)] {
         for size in [SizeKind::Allocated, SizeKind::Apparent] {
             let mut next = 0;

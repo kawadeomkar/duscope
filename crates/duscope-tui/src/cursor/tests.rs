@@ -1272,7 +1272,7 @@ pub(crate) fn t2(env: &duscope_testkit::TestEnv) -> Option<duscope_core::index::
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let files = index_files(&env.index_dir());
+    let files = index_files(&env.index_dir()).unwrap();
     Some(Index::open(&files[0].1).unwrap())
 }
 

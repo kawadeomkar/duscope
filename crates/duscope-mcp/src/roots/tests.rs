@@ -221,6 +221,24 @@ fn p3_mcp_03_a_scan_id_no_saved_scan_has_is_not_found() {
 }
 
 #[test]
+fn p5_sec_01_the_saved_scans_of_a_linked_scans_are_refused_as_the_verbs_refuse_them() {
+    let tree = Tree::new();
+    let index_dir = tree.path("index");
+    fs::create_dir_all(&index_dir).unwrap();
+    symlink(tree.path("elsewhere"), index_dir.join("scans")).unwrap();
+    let refusal = tree.roots().saved_scan(&index_dir, "0123").unwrap_err();
+    assert_eq!(refusal.code, "untrusted_index", "{refusal}");
+    assert_eq!(
+        refusal.message,
+        format!(
+            "{} is a symbolic link, not the index directory's own folder of saved scans",
+            index_dir.join("scans").display()
+        )
+    );
+    assert_eq!(refusal.hint, duscope_core::index::LINKED_SCANS_HINT);
+}
+
+#[test]
 fn p5_mcp_01_an_item_whose_folder_became_a_link_out_of_the_roots_is_refused() {
     let tree = Tree::new();
     let roots = tree.roots();

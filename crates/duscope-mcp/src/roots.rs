@@ -22,7 +22,7 @@ use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use duscope_core::index::Index;
+use duscope_core::index::{Index, LINKED_SCANS_HINT};
 use duscope_core::query::resolve::MIN_PREFIX;
 use duscope_core::query::{TreeView, index_files};
 
@@ -38,7 +38,8 @@ pub const MAX_PATH_BYTES: usize = 4096;
 pub struct Refusal {
     /// `refused_path`, `scan_not_found` for a saved scan the roots hide, or
     /// the verb's own code for a call refused for another reason
-    /// (`usage`, `handle_invalid`, `handle_expired`).
+    /// (`usage`, `handle_invalid`, `handle_expired`, `untrusted_index` for
+    /// an index directory whose `scans` is a symbolic link).
     pub code: &'static str,
     /// One sentence.
     pub message: String,
@@ -47,6 +48,17 @@ pub struct Refusal {
 }
 
 impl Refusal {
+    /// The refusal of a call whose saved scans cannot be listed, `error`:
+    /// the index directory's `scans` is a symbolic link (`untrusted_index`,
+    /// as the verbs give it), which the user, not the client, puts right.
+    pub(crate) fn unlisted(error: &duscope_core::CoreError) -> Refusal {
+        Refusal {
+            code: "untrusted_index",
+            message: error.to_string(),
+            hint: LINKED_SCANS_HINT.to_owned(),
+        }
+    }
+
     fn path(message: String) -> Refusal {
         Refusal {
             code: "refused_path",
@@ -301,6 +313,7 @@ impl Roots {
             hint: "Call duscope_scans for the saved scans' ids, or duscope_scan to scan".to_owned(),
         };
         let mut found: Vec<SavedScan> = index_files(index_dir)
+            .map_err(|e| Refusal::unlisted(&e))?
             .into_iter()
             .filter(|(id, _)| id.to_string().starts_with(prefix))
             .filter_map(|(id, file)| {

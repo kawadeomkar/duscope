@@ -449,8 +449,18 @@ Exit 1. `--scan` names an index file outside the index directory. An index file
 is data from whoever wrote it, so duscope reads one from elsewhere only when
 `--trust` names it ([SECURITY.md](../SECURITY.md)).
 
+The same rule refuses an index directory whose `scans` is a symbolic link, even
+one to nothing, before any saved scan is listed, read or saved there: the saved
+scans it leads to are outside the index directory. A save refused so comes
+after the output, as a failed save does
+([`index_write_failed`](#index_write_failed)): the output stands, and the scan
+id in it names no file. The index directory itself may be a link.
+
 What to do: if you trust the file, run the command again with
-`--trust FILE`, as the hint spells it.
+`--trust FILE`, as the hint spells it. For a linked `scans`, move the folder it
+leads to into its place; or point `--index-dir` (or `DUSCOPE_INDEX_DIR`) at a
+directory that holds that folder as its `scans`; or link the whole index
+directory to such a directory instead.
 
 ### `index_stale`
 
@@ -573,8 +583,9 @@ mounted on its own cannot be unmounted: for one under an item, the hint names
 `btrfs subvolume delete`, which deletes it
 ([limits.md](limits.md#a-btrfs-subvolume-is-a-mount-point-to-clean-linux)).
 For `scans --prune`, remove a linked `out`; duscope makes `out` again when it
-next spills. For a linked `scans`, put the folder it leads to in its place:
-removing the link instead leaves the saved scans in that folder unread.
+next spills. For a linked `scans`, put the folder it leads to in its place, or
+take another way [`untrusted_index`](#untrusted_index) gives: removing the link
+instead leaves the saved scans in that folder unread.
 
 ### `expectation_mismatch`
 

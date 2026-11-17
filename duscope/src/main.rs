@@ -166,14 +166,15 @@ fn execute(mut cli: Cli, matches: &ArgMatches, capture: Option<&Capture>) -> u8 
             failure.exit.code()
         }
         // A verb run for an MCP tool call wrote its envelope to the capture,
-        // which nothing has read yet: a failed save, or one the call's
-        // cancellation or deadline stopped, replaces it with the error, so
-        // that the client is not handed a scan id no saved scan has
-        // (P3-MCP-09). A stop before anything was written finds the capture
-        // empty.
+        // which nothing has read yet: a failed save, a save refused after
+        // the output (a linked `scans`), or one the call's cancellation or
+        // deadline stopped, replaces it with the error, so that the client
+        // is not handed a scan id no saved scan has (P3-MCP-09). A stop
+        // before anything was written finds the capture empty.
         Err(failure)
             if capture.is_some()
                 && (failure.code == "index_write_failed"
+                    || (failure.code == "untrusted_index" && failure.reported)
                     || (failure.exit == Exit::Interrupted && !failure.reported)) =>
         {
             if let Some(capture) = capture {

@@ -66,7 +66,10 @@ names one; an index file outside the directory is read only when
 names it. The directory and its
 .I scans
 are mode 0700; duscope warns when they or an index file are open to
-other users. Its tables are described in
+other users. A
+.I scans
+that is a symbolic link is refused, as an index file outside the
+directory is; the directory itself may be one. Its tables are described in
 .I docs/index-format.md
 in the source distribution.
 .TP

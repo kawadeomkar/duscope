@@ -191,7 +191,9 @@ fn write_in(
     if stopped() {
         return Err(CoreError::IndexWriteStopped);
     }
-    let scans = dir.join("scans");
+    // Refused before anything is made or written: a `scans` that is a link
+    // leads outside the index directory.
+    let scans = super::scans_dir(dir)?;
     let path = index_path(dir, &meta.scan_id);
     let fail = |e: &dyn Display| {
         if stopped() {
