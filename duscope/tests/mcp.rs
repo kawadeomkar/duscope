@@ -25,6 +25,9 @@
 //! P3-MCP-09: a failed save through `duscope_scan`, and the index directory
 //! and the configuration file the server reads.
 //!
+//! P3-MCP-02: the `instructions` the server gives, the agent briefing up to
+//! its last whole line within 4,096 characters.
+//!
 //! P3-MCP-08: a verb that panics (`DUSCOPE_TEST_MCP_TOOLS=panic` adds the
 //! fixture tool `test_panic`), under `DUSCOPE_TEST_PANIC=abort`, which ends
 //! the process after the panic hook as the release build's abort does;
@@ -535,6 +538,39 @@ fn p3_mcp_03_stdout_holds_protocol_messages_alone() {
     assert_eq!(served.response(5)["error"]["code"], -32602);
     // The debug log went to stderr.
     assert!(served.stderr.contains("tools/call"), "{}", served.stderr);
+}
+
+#[test]
+fn p3_mcp_02_the_instructions_are_the_briefing_up_to_a_whole_line() {
+    let env = TestEnv::new();
+    let root = env.work_dir().canonicalize().unwrap();
+    let served = serve(
+        &env,
+        &roots(&[&root]),
+        &[request(1, "server/discover", &json!({}))],
+    );
+    let instructions = served.result(1)["instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let agent = env.cmd().arg("agent").output().unwrap();
+    assert!(agent.status.success(), "{agent:?}");
+    let briefing = String::from_utf8(agent.stdout).unwrap();
+    // Characters as a JavaScript client counts them: UTF-16 code units.
+    let units = |text: &str| text.encode_utf16().count();
+    assert!(briefing.starts_with(&instructions));
+    assert!(units(&instructions) <= 4096, "{}", units(&instructions));
+    assert!(
+        instructions.ends_with('\n'),
+        "the instructions end inside a line: {:?}",
+        instructions.lines().last()
+    );
+    // The briefing's next line would not fit whole.
+    let next = briefing[instructions.len()..]
+        .split_inclusive('\n')
+        .next()
+        .expect("the briefing is longer than the instructions");
+    assert!(units(&instructions) + units(next) > 4096, "{next:?} fits");
 }
 
 #[test]

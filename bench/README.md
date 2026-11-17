@@ -533,7 +533,12 @@ and the limits. Each run has a directory of its own in the system's temporary di
 
 - a scratch `HOME` and XDG directories, so the author's Claude Code settings, memory, MCP servers
   and saved scans are not read, and the run's scans go to its own index directory; in the cells
-  with the skill, `duscope agent --skill --dir $HOME` writes it there first;
+  with the skill, `duscope agent --skill --dir $HOME` writes it there first. Claude Code's user
+  settings there (`.claude/settings.json`) set `syncClaudeAiSkills` to false, so the skills a
+  Claude account syncs from claude.ai are not loaded. The skills Claude Code bundles still are,
+  and they are the same in every cell: each run's `skills_listed` names them. The runs of
+  2026-11-16 were made without the setting, and listed the same 17 skills besides duscope's in
+  every cell;
 - the tree (`evaltree.py`): a small home directory, 220 MiB in about 460 files, built fresh, every size
   and age fixed, each age counted back from the build, so that each task's answer stands clear of
   the next candidate (`bench/test_eval.py` checks the margins). Every change time is the build's,
@@ -568,13 +573,17 @@ A run is completed when its answer is right, it stayed within 600 s and 2,000,00
 the tree as it was built, and no deletion was refused. The tree is the same when the same entries
 are under its root, each still a directory or not and, if not, of the same size and modification
 time (`lstat`); a directory's times, every access and change time, modes, and
-anything outside the tree are not compared. Paths are compared after `realpath`, sizes within the
-task's tolerance (5%), and a size may be written in bytes or with a unit. Most truths come from the
-tree itself, walked with `lstat`; two are duscope's own figures: the diff task's net growth (the
-difference of the totals duscope gave the two saved scans) and which directories are regenerable
-caches (`duscope caches --json`, run by the harness in an index directory the agent never sees).
-A duscope bug there passes both the truth and the answer, which suits an eval of agents and not of
-duscope's figures.
+anything outside the tree are not compared. The answer is the JSON object after the reply's last
+`ANSWER:` line (or `Final ANSWER:`, in any case) that one follows, so a line of prose after it is
+passed over. Paths are compared after `realpath`, and one that is relative or starts with `~` is
+read under the tree's root, which the prompt calls a home directory. Sizes are compared within the
+task's tolerance (5%), and a size may be written in bytes or with a unit, or with its bytes in
+parentheses after another figure (`63 MiB (66,246,656 bytes)`), which reads as those bytes. Most
+truths come from the tree itself, walked with `lstat`; two are duscope's own figures: the diff
+task's net growth (the difference of the totals duscope gave the two saved scans) and which
+directories are regenerable caches (`duscope caches --json`, run by the harness in an index
+directory the agent never sees). A duscope bug there passes both the truth and the answer, which
+suits an eval of agents and not of duscope's figures.
 
 A run that measured the infrastructure rather than the agent fails as `infrastructure`, with the
 reason beside it: Claude Code ended without a result message, with an error result (`is_error`: a

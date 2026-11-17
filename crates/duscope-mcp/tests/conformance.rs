@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use duscope_mcp::discover::ServerConfig;
 use duscope_testkit::TestEnv;
 use rmcp::model::{
     CacheScope, CallToolRequest, CallToolRequestParams, CallToolResult, ClientCapabilities,
@@ -671,20 +672,14 @@ fn wide_tree(env: &TestEnv, dirs: usize) -> PathBuf {
     root
 }
 
-/// The `instructions` the binary gives: the agent briefing, cut to 4,096
-/// characters as a JavaScript string counts them.
+/// The `instructions` the binary gives: the agent briefing, cut as
+/// `ServerConfig` cuts it (its last whole line within 4,096 characters as a
+/// JavaScript string counts them).
 fn instructions(env: &TestEnv) -> String {
     let out = env.cmd().arg("agent").output().unwrap();
     assert!(out.status.success(), "{out:?}");
     let briefing = String::from_utf8(out.stdout).unwrap();
-    let mut units = 0;
-    briefing
-        .chars()
-        .take_while(|c| {
-            units += c.len_utf16();
-            units <= 4_096
-        })
-        .collect()
+    ServerConfig::new(&briefing).instructions().to_owned()
 }
 
 /// Checks what rmcp recorded of the server in either revision.

@@ -42,13 +42,16 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    just size                  # stripped binary against size_budget in the justfile
    just repro                 # twice, on two checkouts: the same SHA-256
    just deny advisories       # and `just deny` for licences, bans and sources
-   cargo auditable build --release --locked -p duscope   # the build release.yml makes
-   cargo test -p duscope --test dependencies             # DEPENDENCIES.md against cargo metadata
+   just repro-dist aarch64-apple-darwin        # the build release.yml makes for that target
+   cargo test -p duscope --test dependencies   # DEPENDENCIES.md against cargo metadata
    ```
 
-   `cargo auditable` is clean when its build succeeds: it embeds the Cargo.lock dependency
-   list that `just deny advisories` has just checked against the advisory database, as
-   release.yml's builds do. The `dependencies` test fails when `DEPENDENCIES.md`'s tables and
+   release.yml builds each target's archive with the `dist` profile, as `just repro-dist <target>`
+   does for any target in [dist-workspace.toml](../dist-workspace.toml): on an Apple-silicon Mac,
+   `aarch64-apple-darwin`; a musl target needs what step 4 installs. Its `cargo auditable` is
+   clean when its build succeeds: it embeds the Cargo.lock dependency list that
+   `just deny advisories` has just checked against the advisory database, as release.yml's
+   builds do. The `dependencies` test fails when `DEPENDENCIES.md`'s tables and
    the direct dependencies of the published crates differ (a `cargo tree` count does not
    match the table, which covers all five published crates). The CI jobs `size`, `repro` and
    `build-time` (against the ceiling `BUILD_TIME_BUDGET_SECS` in `ci.yml`) on that

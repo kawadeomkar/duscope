@@ -75,6 +75,12 @@ FAKE_ACTS = ("hang", "api-error", "crash", "model", "no-skills", "bare", "notice
 # made again by --resume. This many in a row stop the eval.
 INFRASTRUCTURE = "infrastructure"
 STOP_AFTER_OUTAGES = 3
+# Claude Code's user settings in each run's scratch HOME
+# (`.claude/settings.json`): the skills a Claude account syncs from claude.ai
+# are not loaded (Claude Code honours `syncClaudeAiSkills` only as false), so
+# that every cell lists the same skills, those Claude Code bundles, beside
+# duscope's in the cells that have it.
+CLAUDE_SETTINGS = {"syncClaudeAiSkills": False}
 
 # The duscope on the agent's PATH. It runs a copy of the binary under test in
 # the run's directory, so that its text names no checkout (where
@@ -293,6 +299,17 @@ def write_shim(layout: Layout, binary: str) -> str:
     return path
 
 
+def write_claude_settings(layout: Layout) -> str:
+    """Claude Code's user settings in the run's scratch HOME
+    (CLAUDE_SETTINGS); returns the file's path."""
+    path = os.path.join(layout.home, ".claude", "settings.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(CLAUDE_SETTINGS, f, indent=2)
+        f.write("\n")
+    return path
+
+
 def tool_dirs(names: List[str], base_env: Dict[str, str]) -> List[str]:
     """The directories of these commands on the caller's PATH, in order."""
     dirs: List[str] = []
@@ -453,6 +470,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     if s.agents.stopping:
         raise CutShort()
     layout = Layout(work)
+    write_claude_settings(layout)
     now = time.time()
     evaltree.build(layout.root, now, s.scale)
     root = os.path.realpath(layout.root)
@@ -541,7 +559,7 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     with open(layout.shim_log, "rb") as f:
         duscope = evaltranscript.summarize_calls(evaltranscript.parse_shim_log(f.read()))
     with open(stderr_path, "rb") as f:
-        stderr_tail = f.read()[-2000:].decode("utf-8", "replace")
+        claude_stderr = f.read()
     changes = evaltree.diff_manifests(before, evaltree.manifest(root))
     verdict = evalchecks.check(task["check"], stream["reply"], truth, float(task["tolerance"]), ctx)
 
@@ -589,11 +607,28 @@ def _run_in(work: str, s: Settings, task: Dict[str, Any], cell: Dict[str, Any], 
     record["bash_commands"] = [evalchecks.portable(c, root, work) for c in commands]
     record["duscope"] = duscope
     record["tree_changes"] = changes
-    record["claude_stderr_tail"] = evalchecks.portable(stderr_tail, root, work) if stderr_tail.strip() else None
+    caller_home = s.base_env.get("HOME") or os.path.expanduser("~")
+    record["claude_stderr_tail"] = stderr_tail(claude_stderr, root, work, caller_home)
     record["transcript"] = shown_path(saved) if saved else None
     if fixture:
         record["fixture"] = {"old_scan": fixture["old_scan"], "new_scan": fixture["new_scan"]}
     return record
+
+
+def stderr_tail(raw: bytes, root: str, work: str, home: str) -> Optional[str]:
+    """The last 2,000 bytes of Claude Code's stderr as a result file keeps
+    them: the tree written `{root}` and the run's directory `{work}`
+    (evalchecks.portable), then the home directory of the account that ran
+    the eval `~`, so that a committed file names no account even where
+    Claude Code names a path of its own; None when they are blank."""
+    tail = raw[-2000:].decode("utf-8", "replace")
+    if not tail.strip():
+        return None
+    tail = evalchecks.portable(tail, root, work)
+    homes = {os.path.realpath(home), os.path.normpath(home)} - {"/"} if os.path.isabs(home) else set()
+    for prefix in sorted(homes, key=len, reverse=True):
+        tail = tail.replace(prefix, "~")
+    return tail
 
 
 def fake_acts(text: str) -> List[Tuple[Optional[str], str]]:

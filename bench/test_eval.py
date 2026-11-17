@@ -305,6 +305,28 @@ class Answers(unittest.TestCase):
         self.assertFalse(evalchecks.size_matches("lots", 1, 0.5))
         self.assertFalse(evalchecks.size_matches(15 * mib * 1.06, 15 * mib, 0.05))
 
+    def test_p3_agt_03_final_answer_labels_the_answer_line_too(self):
+        for label in ("Final ANSWER:", "final answer:", "FINAL ANSWER:", "**Final Answer:**", "**Final** ANSWER:"):
+            text = "Done.\n%s {\"bytes\": 7}\n" % label
+            self.assertEqual(evalchecks.extract_answer(text), ({"bytes": 7}, None), label)
+        # Another word before it makes a line of prose.
+        self.assertEqual(evalchecks.extract_answer("My answer: {\"bytes\": 7}")[1], "no ANSWER line")
+
+    def test_p3_agt_03_a_prose_line_after_the_answer_line_is_passed_over(self):
+        for after in ("That is all.", "Answer: the Downloads folder, as above.", "Final answer: nothing was changed."):
+            text = "Done.\nANSWER: {\"bytes\": 7}\n%s\n" % after
+            self.assertEqual(evalchecks.extract_answer(text), ({"bytes": 7}, None), after)
+        # A last ANSWER line whose object is not JSON is refused, not passed over.
+        self.assertIn("not JSON", evalchecks.extract_answer("ANSWER: {\"bytes\": 7}\nANSWER: {bytes: 8}")[1])
+
+    def test_p3_agt_03_a_size_may_carry_its_bytes_in_parentheses(self):
+        truth = 66_246_656
+        for value in ("63 MiB (66,246,656 bytes)", "63.2 MiB (66246656)", "63 MiB (66,246,656 B)"):
+            self.assertTrue(evalchecks.size_matches(value, truth, 0.05), value)
+        # The count in parentheses is the size, and what comes before it must be one too.
+        for value in ("63 MiB (99,000,000 bytes)", "lots (66,246,656 bytes)", "63 MiB (66,246,656 bytes"):
+            self.assertFalse(evalchecks.size_matches(value, truth, 0.05), value)
+
 
 class Checks(unittest.TestCase):
     """Each check accepts the truth's own answer and refuses a wrong one."""
@@ -353,6 +375,16 @@ class Checks(unittest.TestCase):
         finally:
             os.remove(link)
 
+    def test_p3_agt_03_a_path_from_tilde_is_in_the_tree_the_prompt_calls_a_home(self):
+        truth = evalchecks.Truth({"path": os.path.join(self.root, "Downloads"), "bytes": 100})
+        for path in ("~/Downloads", "~/Downloads/", "`~/Downloads`"):
+            reasons = evalchecks.check_path_bytes({"path": path, "bytes": 100}, truth, 0.0, self.ctx)
+            self.assertEqual(reasons, [], path)
+        for path in ("~/Documents", "~"):
+            reasons = evalchecks.check_path_bytes({"path": path, "bytes": 100}, truth, 0.0, self.ctx)
+            self.assertTrue(reasons, path)
+        self.assertEqual(evalchecks.norm_path("~", self.root), self.root)
+
     def test_p3_agt_03_a_cleanup_plan_must_be_eligible_reach_the_target_and_add_up(self):
         t = next(t for t in self.tasks if t["id"] == "cleanup-plan")
         truth = evalchecks.TRUTHS["cleanup"](self.ctx, t["params"])
@@ -394,6 +426,33 @@ class Portable(unittest.TestCase):
         )
         # Without the run's directory, only the root is written for it.
         self.assertIn(os.path.realpath(work), evalchecks.portable(commands, root)[0])
+
+    def test_p3_agt_03_claude_s_stderr_names_no_home_tree_or_run_directory(self):
+        home = tempfile.mkdtemp(prefix="duscope-eval-home-")
+        self.addCleanup(shutil.rmtree, home)
+        # A run's directory under the account's home, as --work-dir can put it.
+        work = os.path.join(home, "runs", "duscope-eval-x")
+        root = os.path.join(work, "disk", "alex")
+        os.makedirs(root)
+        stderr = "\n".join([
+            "error: spawn %s/.cache/duscope-eval/bin/claude" % os.path.realpath(home),
+            "settings: %s/home/.claude/settings.json" % work,
+            "read %s/Downloads" % os.path.realpath(root),
+            "config in %s" % os.path.normpath(home),
+        ]).encode()
+        # The last 2,000 bytes are kept.
+        self.assertEqual(
+            agent_eval.stderr_tail(b"x" * 3000 + stderr, root, work, home),
+            "x" * (2000 - len(stderr)) + "\n".join([
+                "error: spawn ~/.cache/duscope-eval/bin/claude",
+                "settings: {work}/home/.claude/settings.json",
+                "read {root}/Downloads",
+                "config in ~",
+            ]),
+        )
+        self.assertIsNone(agent_eval.stderr_tail(b" \n", root, work, home))
+        # A home of / names nothing to take out.
+        self.assertEqual(agent_eval.stderr_tail(b"/usr/bin/env", root, work, "/"), "/usr/bin/env")
 
 
 class Transcript(unittest.TestCase):
@@ -696,6 +755,15 @@ class Setup(unittest.TestCase):
         finally:
             shutil.rmtree(d)
 
+    def test_p3_agt_03_the_scratch_home_turns_off_skills_synced_from_the_account(self):
+        d = scratch()
+        self.addCleanup(shutil.rmtree, d)
+        layout = agent_eval.Layout(d)
+        path = agent_eval.write_claude_settings(layout)
+        self.assertEqual(path, os.path.join(layout.home, ".claude", "settings.json"))
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"syncClaudeAiSkills": False})
+
     def test_p3_agt_03_claude_runs_in_print_mode_with_the_pinned_model(self):
         config = agent_eval.load_config()
         argv = agent_eval.claude_argv(["claude"], config, "the prompt")
@@ -785,6 +853,15 @@ class Fake(unittest.TestCase):
         self.assertEqual(decisions["jq"]["flag_runs"], 0)
         self.assertEqual(set(result["prompts"]), {t["id"] for t in result["tasks"]})
         self.assertIn("{root}", result["prompts"]["largest-dir"])
+
+    def test_p3_agt_03_each_run_s_home_holds_the_claude_code_settings(self):
+        _, d = self.run_eval("--fake", "right", "--cells", "skill-json,no-skill-json", "--tasks", "largest-dir",
+                             "--keep-work")
+        homes = [os.path.join(d, w, "home") for w in sorted(os.listdir(d)) if w.startswith("duscope-eval-")]
+        self.assertEqual(len(homes), 2)
+        for home in homes:
+            with open(os.path.join(home, ".claude", "settings.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f), agent_eval.CLAUDE_SETTINGS)
 
     def test_p3_agt_03_notices_in_the_stream_leave_a_run_as_it_was(self):
         result, _ = self.run_eval("--fake", "right", "--cells", "skill-json", "--tasks", "largest-dir,cache-savings", fake="notices")

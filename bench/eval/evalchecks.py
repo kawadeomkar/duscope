@@ -10,10 +10,16 @@ totals) come from `duscope --json`, run by the harness with an index
 directory of its own, so the agent's saved scans are not touched.
 
 The agent ends its reply with `ANSWER: {json}`; `extract_answer` reads the
-last such line. Paths compare after `realpath` (so `/tmp` and `/private/tmp`
-agree), sizes within the task's `tolerance` (a fraction of the truth), and
-sizes may be written as numbers or with a unit (`12.5 MiB`, `13 MB`); where a
-unit could mean powers of 1,000 or 1,024 (`MB`, `M`), either reading counts.
+last such line (`Final ANSWER:` too, in any case) that a JSON object follows,
+so a line of prose after it, one that starts `Answer:` included, is passed
+over. Paths compare after `realpath` (so `/tmp` and `/private/tmp` agree); a
+relative path is under the tree's root, and so is one that starts with `~`,
+since the prompt calls the tree a copy of someone's home directory. Sizes
+compare within the task's `tolerance` (a fraction of the truth), and may be
+written as numbers or with a unit (`12.5 MiB`, `13 MB`); where a unit could
+mean powers of 1,000 or 1,024 (`MB`, `M`), either reading counts. A size
+followed by its byte count in parentheses (`63 MiB (66,246,656 bytes)`) reads
+as that count.
 """
 
 from __future__ import annotations
@@ -220,20 +226,26 @@ NEEDS_DUSCOPE = {"caches_total", "explain_dir", "cleanup"}
 
 # -- reading an answer -------------------------------------------------------
 
-_ANSWER = re.compile(r"(?im)^[\s>*_`#-]*answer[*_`\s]*:")
+_ANSWER = re.compile(r"(?im)^[\s>*_`#-]*(?:final[\s*_`]+)?answer[*_`\s]*:")
 
 
 def extract_answer(text: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """The JSON object after the last `ANSWER:` line of `text`, or None and
-    what was wrong."""
+    """The JSON object after the last `ANSWER:` (or `Final ANSWER:`) line of
+    `text` that one follows, or None and what was wrong. A line after the
+    answer that starts with the label but holds no object (`Answer: the
+    Downloads folder.`) is prose, and passed over; the last object that is
+    not JSON is refused, not passed over."""
     if not text:
         return None, "no final reply"
     matches = list(_ANSWER.finditer(text))
     if not matches:
         return None, "no ANSWER line"
-    rest = text[matches[-1].end() :]
-    start = rest.find("{")
-    if start < 0:
+    for match in reversed(matches):
+        rest = text[match.end() :]
+        start = rest.find("{")
+        if start >= 0:
+            break
+    else:
         return None, "no JSON object after ANSWER:"
     try:
         value, _ = json.JSONDecoder().raw_decode(rest[start:])
@@ -263,17 +275,27 @@ _UNITS = {
     "tib": (1024**4,),
 }
 _SIZE = re.compile(r"^\s*([0-9][0-9,_]*(?:\.[0-9]+)?)\s*([A-Za-z]*)\s*$")
+# A size followed by its byte count in parentheses: `63 MiB (66,246,656 bytes)`.
+_WITH_BYTES = re.compile(r"^(.*?)\(([^()]*)\)\s*$")
+_BYTE_UNITS = ("", "b", "byte", "bytes")
 
 
 def size_readings(value: Any) -> List[float]:
     """The byte counts `value` can mean: one for a number or an exact unit,
-    two where the unit could be decimal or binary, none when unreadable."""
+    two where the unit could be decimal or binary, none when unreadable. A
+    size followed by its byte count in parentheses means that count alone."""
     if isinstance(value, bool):
         return []
     if isinstance(value, (int, float)):
         return [float(value)]
     if not isinstance(value, str):
         return []
+    pair = _WITH_BYTES.match(value)
+    if pair:
+        count = _SIZE.match(pair.group(2))
+        if not size_readings(pair.group(1)) or not count or count.group(2).lower() not in _BYTE_UNITS:
+            return []
+        return size_readings(pair.group(2))
     m = _SIZE.match(value)
     if not m:
         return []
@@ -289,10 +311,15 @@ def size_matches(value: Any, truth: int, tolerance: float) -> bool:
 
 
 def norm_path(value: Any, root: str) -> Optional[str]:
-    """`value` as an absolute real path (relative paths are under the root)."""
+    """`value` as an absolute real path. A relative path is under the root,
+    and so is one that starts with `~`: the prompt calls the tree a copy of
+    someone's home directory, so `~/Downloads` is the tree's Downloads (the
+    run's own HOME lies beside the tree, and holds no answer)."""
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip().strip("`'\"").rstrip("/") or "/"
+    if text == "~" or text.startswith("~/"):
+        text = root + text[1:]
     if not os.path.isabs(text):
         text = os.path.join(root, text)
     return os.path.realpath(os.path.normpath(text))

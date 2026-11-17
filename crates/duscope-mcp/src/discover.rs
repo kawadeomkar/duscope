@@ -38,7 +38,7 @@ pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 
 /// The longest `instructions`, in characters as a JavaScript string counts
 /// them (UTF-16 code units): as much as Claude Code's tool search loads at
-/// startup.
+/// startup. The text is cut at a line within it ([`ServerConfig::new`]).
 pub const MAX_INSTRUCTIONS_CHARS: usize = 4096;
 
 /// How long a client may keep a discovery result, in milliseconds: an hour.
@@ -64,9 +64,9 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// duscope at this crate's version, with `instructions` cut to
-    /// [`MAX_INSTRUCTIONS_CHARS`] and no capabilities yet (the tool registry
-    /// adds its own).
+    /// duscope at this crate's version, with `instructions` cut after the
+    /// last whole line within [`MAX_INSTRUCTIONS_CHARS`] and no capabilities
+    /// yet (the tool registry adds its own).
     pub fn new(instructions: &str) -> ServerConfig {
         ServerConfig {
             name: "duscope".to_owned(),
@@ -107,16 +107,29 @@ impl ServerConfig {
     }
 }
 
-/// `text` up to [`MAX_INSTRUCTIONS_CHARS`] UTF-16 code units, never splitting
-/// a character.
+/// `text` whole when it fits in [`MAX_INSTRUCTIONS_CHARS`] UTF-16 code
+/// units; else up to the end of its last line that fits, line break
+/// included.
+///
+/// The cut falls at a line boundary because the text is the agent briefing,
+/// Markdown whose tables and lists a model reads a line at a time: cut at the
+/// 4,096th character, it ended half way through a table row (the `stale`
+/// row of "Which command answers which question"), handing a client half a
+/// command. A text with no line break within the limit is cut after its last
+/// character that fits, never splitting one.
 fn cut(text: &str) -> String {
     let mut units = 0;
-    text.chars()
-        .take_while(|c| {
-            units += c.len_utf16();
-            units <= MAX_INSTRUCTIONS_CHARS
-        })
-        .collect()
+    let mut line_end = None;
+    for (at, c) in text.char_indices() {
+        units += c.len_utf16();
+        if units > MAX_INSTRUCTIONS_CHARS {
+            return text[..line_end.unwrap_or(at)].to_owned();
+        }
+        if c == '\n' {
+            line_end = Some(at + c.len_utf8());
+        }
+    }
+    text.to_owned()
 }
 
 /// The version a request names in its `_meta`: `None` when it names none,
