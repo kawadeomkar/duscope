@@ -1,0 +1,2 @@
+### Changed
+- Saved scans are written as `index_version` 2.1, which adds index flag bits 13 (`skipped_containers`) and 14 (`automount`) and the `dirs_automount` index. Every reader of 2.x, v0.2.0's included, opens the files of both minors and answers alike; a new flag bit now takes a new minor version, and a new or dropped secondary index none ([docs/index-format.md](docs/index-format.md#compatibility)).

@@ -23,7 +23,7 @@ pub use writer::{
 
 /// The index version this build writes and reads: major.minor, apart from the
 /// envelope's `schema_version`. A reader opens every minor of its major.
-pub const INDEX_VERSION: &str = "2.0";
+pub const INDEX_VERSION: &str = "2.1";
 
 /// The keys of `scan_meta`, every one present in an index; the DDL writes
 /// `index_version` and the writer the others.
