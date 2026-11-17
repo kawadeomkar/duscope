@@ -179,7 +179,8 @@ No nightly benchmark result of the last 72 hours stands behind this release: no 
 #### From a hotfix branch
 
 A patch is tagged on `main` when `main` can be released as it stands. When it cannot, because
-it holds work since the minor's tag that a patch must not carry, the patch ships from
+it holds work since the minor's tag that a patch must not carry (a fragment waits in
+`changelog.d` other than the patch's own), the patch ships from
 `hotfix/vX.Y.Z`, a branch from the tag of the minor's latest release (`vX.Y.0`, or its
 latest patch). `verify-tag` accepts a tag whose commit is on `main` or on the hotfix branch of
 the tag's own name, and only a patch's: a `vX.Y.0` or a pre-release on a hotfix branch, and a
@@ -252,27 +253,17 @@ as a patch release of the latest minor, the only one supported before 1.0. In or
    in the private fork, so run `just check-full` on both platforms before merging. Then merge
    the fix from the advisory page into `main`.
 4. **The release.** Follow [Patch releases](#patch-releases) at once, without a recent nightly
-   result if no bench runner reports, as it says. From `main`, the changelog section is the
-   `Security` section alone. `scripts/changelog.py assemble` takes every fragment, so any
-   other fragment waiting on `main` is moved aside for the assemble and stays out of the
-   release commit, since `verify-tag` refuses a tag whose commit still holds a fragment; once
-   the tag is pushed, a pull request on `main` puts them back for the next release:
-
-   ```sh
-   held=$(mktemp -d)
-   git ls-files 'changelog.d/*.md' ':!changelog.d/README.md' ':!changelog.d/GHSA-*.md' |
-     xargs -I{} mv {} "$held"/
-   scripts/changelog.py assemble X.Y.Z
-   # the release commit, the tag; then, on a branch from main:
-   for f in "$held"/*.md; do [ -e "$f" ] && mv "$f" changelog.d/; done
-   ```
-
-   A tag on `main` carries whatever else `main` holds. When that includes work a patch must
-   not carry, the release ships from `hotfix/vX.Y.Z` instead
-   ([From a hotfix branch](#from-a-hotfix-branch)): the fix, once merged into `main`, is
-   cherry-picked onto the branch with its fragment, beside any `Fixed` backports, and the
-   section holds their lines alone. No fragment is moved aside there, and the pull request
-   back on `main` removes the fix's fragment with the others the release shipped.
+   result if no bench runner reports, as it says. The release ships from `main` only when the
+   fix's fragment is the only one waiting there: `main` then holds no user-visible change since
+   the latest release but the fix, and `scripts/changelog.py assemble` makes the `Security`
+   section alone. When any other fragment waits, `main` holds work a patch must not carry and
+   its notes would not list, since a tag on `main` ships whatever `main` holds, so the release
+   ships from `hotfix/vX.Y.Z` ([From a hotfix branch](#from-a-hotfix-branch)): the fix, once
+   merged into `main`, is cherry-picked onto the branch with its fragment, beside any `Fixed`
+   backports, and the section holds their lines alone; the pull request back on `main`
+   removes the fix's fragment with the others the release shipped. No fragment is moved aside
+   for an assemble, on `main` or on the branch: the notes of a release list what its binary
+   carries.
 5. **Disclosure.** Publish the advisory once the release's assets and crates are live, and no
    later than 90 days after the report. Publishing it adds it, with the CVE, to the GitHub
    Advisory Database, from which Dependabot alerts the crates' dependents.
