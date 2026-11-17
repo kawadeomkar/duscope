@@ -41,6 +41,9 @@ for release binaries, and rustup with the stable toolchain for the competitors b
 | `sweep` | measure duscope at each thread count and apply the defaults rule ([The thread sweep](#the-thread-sweep)) |
 | `index` | measure a saved scan's write, queries and size, and the D34 comparison ([Index measurements](#index-measurements)) |
 | `redraw` | measure the viewer's redraw at 120x40 on T2 ([The redraw budget](#the-redraw-budget)) |
+| `acceptance` | the 1.0 acceptance run on this machine: the harness, the index measurements and the rescans, in one file ([The 1.0 acceptance run](#the-10-acceptance-run)) |
+| `judge [FILE...]` | each goal-1 and goal-2 target against the 1.0 files, and their summary ([Judging it](#judging-it)) |
+| `crosscheck CURRENT BASELINE...` | a hosted runner's ratios against bench-linux's latest nightly ([The Linux cross-check](#the-linux-cross-check)) |
 
 Options of `run` (most also apply to `build`, `install` and `verify`):
 
@@ -487,6 +490,132 @@ macOS-local, and it is not the nightly result. It was measured before the frames
 reclassified from its own samples: its `zoom` and `resize` rows could not be, keep their old
 figures, marked `unclassified`, and are in neither line's value (its `reclassified` field says why).
 
+## The 1.0 acceptance run
+
+P5-BENCH-01 publishes the numbers 1.0 is judged on in `results/1.0/`, one file per platform, from
+a quiet machine of each: a dedicated Mac with the `bench-macos` layout (DEV-52), and a Linux
+machine off the Proxmox host whose memory is suspect (DEV-157). `bench/run.sh acceptance` is the
+whole run on one of them:
+
+```sh
+# macOS, as bench-macos keeps its trees: warm on the internal disk, cold on the disk image
+cargo build --release --locked -p duscope
+home=~/duscope-bench
+cold="$PWD/bench/drop-caches.sh --remount $home/trees.sparsebundle $home/trees-volume"
+caffeinate -is bench/run.sh acceptance --platform macos --duscope target/release/duscope \
+  --trees-dir "$home/trees" --cold-trees-dir "$home/trees-volume/trees" --tools-dir "$home/tools" \
+  --cold-cmd "$cold"
+
+# Linux: the musl build the archives and .debs ship, as bench-linux's nightly builds it
+cargo build --release --locked -p duscope --target x86_64-unknown-linux-musl
+bench/run.sh acceptance --platform linux --duscope target/x86_64-unknown-linux-musl/release/duscope
+
+bench/run.sh judge --summary bench/results/1.0/README.md
+```
+
+It runs three parts, in this order, and writes `results/1.0/<platform>.json` (`--out-dir`,
+`--out`; a run on scaled trees writes `<platform>-x<scale>.json`, which is not the acceptance run):
+
+- **`run`**: the harness with duscope as the subject, on T1–T3, warm and cold, paired with every
+  pinned competitor (`--competitors`, `--cold-competitors`, `--runs`, `--warmup`, and the trees,
+  tools and cold options mean what they mean in `run`), as `bench/run.sh run` writes it. Goal 1 is
+  judged on it. The defaults are the full matrix: on bench-macos all eight tools cold on the disk
+  image take more than the nightly job's 300 minutes (DEV-51); `--cold-competitors dua,du`
+  measures what the macOS cold target reads, as the nightly does.
+- **`index`**: the index measurements on T2 (`--index-runs`, 20 by default), as `bench/run.sh
+  index` writes them, with dua and fdu for D34 when `--competitors` names them. Goal 2 is judged
+  on its warm write. Left out when `--trees` leaves out T2.
+- **`rescan`**: the incremental rescan against a full one, warm, on each tree. A round creates one
+  4 KiB file, `.duscope-bench-rescan`, in each of up to `--changed-dirs` directories (100, and at
+  most 1% of the tree's), spread over the tree in its build order; waits `--settle` seconds (2) for
+  fseventsd to record the change; then times `rescan --incremental` and `rescan --full` of the
+  same tree from the same saved scan, the incremental one first on even rounds and second on odd
+  ones, `--runs` rounds after one unrecorded incremental rescan. The next round starts from the
+  full rescan's scan. Both write a whole new index, so both times include the write, which `-v`
+  splits out (`write_p50_s`). After each round the files are removed and the directories' times
+  put back, so the tree still matches its stamp, which the part checks at the end. The harness
+  times each rescan around the process rather than through hyperfine, since each answer names the
+  scan the next round reads. The rows are `results` rows, `rescan --full` paired with `rescan
+  --incremental`, so its `subject_ratio_p50` is the incremental rescan's time over the full one's;
+  each tree also records the directories each incremental rescan read again, and a round that read
+  fewer than its change touched is a failure (the history had not recorded the change: raise
+  `--settle`). What the platform refuses is recorded with the binary's own message, and the tree is
+  not measured:
+  - Linux keeps no change history, so `rescan --incremental` is refused on every tree and every
+    rescan reads the whole tree (plan/PROPOSAL.md, "Incremental rescans"): the Linux file says so
+    for each tree, and measures no incremental rescan.
+  - T3 has no directory below its root, so any change touches every directory it has, over the 15%
+    an incremental rescan reads at most (`too_many_changes`): no platform reads it incrementally.
+  - The cold runs' disk image on bench-macos is attached with `-nobrowse`, and fseventsd keeps no
+    history for it, so the part reads the warm trees alone (`--trees-dir`).
+
+The file holds the usual header (`host`, `harness.commit`, the duscope `version`), `run`, `index`
+and `rescan` (each null when the part could not run), and `failures`, what could not be measured.
+The command ends by judging its own platform's targets on stderr, and exits 1 when something
+could not be measured, never because a target was missed.
+
+### Judging it
+
+`bench/run.sh judge` reads `results/1.0/linux.json` and `results/1.0/macos.json` (or the files it
+is given) and prints each target with its number, `met` or `MISSED`, or `not measured` and why. It
+exits 0 when every target is met, 1 when one is missed or not measured, and 2 when a file is not
+an acceptance file. The targets are plan/PROPOSAL.md's goals 1 and 2, as its 1.0 acceptance targets
+state them:
+
+| Goal | Target | Read from | Source |
+| --- | --- | --- | --- |
+| 1 | Linux warm p50 ≤ 1.2× diskus, on T1–T3 | `run`: diskus's `subject_ratio_p50` | goal 1; target (1); Gate 1 → 2 |
+| 1 | Linux warm p50 ≤ 1.15× the faster of pdu and fdu | the larger of the two ratios | goal 1; target (1); Gate 1 → 2 |
+| 1 | Linux cold p50 ≤ 1.15× diskus | diskus's cold ratio | goal 1; target (1); Gate 1 → 2 |
+| 1 | macOS warm p50 ≤ 1.0× diskus, ≤ 1.2× dua, ≤ 1.3× dumac | each one's warm ratio | goal 1; target (2); deferred from Gate 1 → 2 (DEV-52) |
+| 1 | macOS cold p50 ≤ 1.2× dua | dua's cold ratio | goal 1; target (2); deferred from Gate 1 → 2 (DEV-52) |
+| 2 | Linux warm index write ≤ 2.75 µs per entry, on T2 | `index`: `write_us_per_entry_warm_p50` | goal 2; target (3); DEV-107; Gate 2 → 3 |
+
+The ratio is the harness's paired one (`subject_ratio_p50`, [Reading results](#reading-results)):
+the median over the pair's rounds of duscope's time over the competitor's. A competitor that was
+not measured leaves its line `not measured` with the tool's reason; for the faster of pdu and fdu
+the one measured is judged, and the line says the other was not. The judge also says when a file
+was not measured as the targets name it: a scaled run, Linux trees off ext4, macOS trees off APFS
+or a Mac off Apple silicon. Goal 2's other half, that the write starts only after the treemap or
+JSON is out, is no number: `p2_idx_02_the_write_starts_after_the_output` holds it on every
+platform. The write's share of a cold scan is printed and holds no target (DEV-108). A missed
+target is a Deviation entry's to explain, not the judge's.
+
+`--summary FILE` also writes the Markdown summary of the files, every figure taken from them:
+the machines, a table per goal with each target's source, and the rescans. The committed one is
+`results/1.0/README.md`, for the top-level README to link to; it is generated, never edited, and
+`bench/test_acceptance.py` fails when it differs from what the committed files give.
+
+### The Linux cross-check
+
+Every Linux figure of Gates 1 → 2 and 2 → 3 is bench-linux's, a VM on a Proxmox host whose memory
+is suspect (DEV-157). [linux-crosscheck.yml](../.github/workflows/linux-crosscheck.yml) measures the
+same thing on another machine, a GitHub-hosted `ubuntu-24.04` runner: the x86_64 musl build,
+`bench/run.sh run` with every pinned competitor, warm and cold, on T1 and T2 (`trees`; `all` adds
+T3 when the runner's disk and the job's 360 minutes allow), as bench-linux's nightly runs it. A
+dispatch runs it and nothing else, so its job is never a required check; it reads no secret and
+its token reads the repository alone:
+
+```sh
+gh workflow run linux-crosscheck.yml --repo kawadeomkar/duscope --ref main
+gh run download <run id> --repo kawadeomkar/duscope --name linux-crosscheck --dir crosscheck
+```
+
+The artifact holds the result file, `runner.txt` (the CPU model, cores, memory, kernel and the
+disk) and `comparison.txt`, which is also in the job's summary. A hosted runner is another machine,
+so its times are not compared (DEV-20); its ratios are. `bench/run.sh crosscheck CURRENT
+BASELINE...` holds each of CURRENT's ratios (duscope's time over a competitor's in the same rounds)
+to bench-linux's for the same tree, mode and competitor, in the latest Linux nightly result among
+BASELINE (result files or directories: the job checks out the `bench-results` branch; `--last N`
+takes the median of the newest N from that machine). A ratio lies within the noise when it differs
+from bench-linux's by at most 15% either way (`--tolerance`): what `bench-regression` allows a
+ratio on one machine (DEV-59), and where the ratio decides when absolute times moved (DEV-76). DEV-59
+also saw a ratio differ by about as much between two CPU models of the same shared runners, so a
+ratio outside the noise is a finding to read with both machines in view, not a verdict: each line
+also says whether the hosted runner's ratio meets the goal-1 target of that pair. The command
+exits 0 when every ratio lies within the noise, 1 when one does not (in the job, a warning), and 2
+when nothing can be compared (the job fails); a run at a `scale` below 1 compares nothing.
+
 ## The allocator
 
 P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
@@ -684,6 +813,11 @@ the result file.
 | `eval/minitoml.py` | the TOML reader for Pythons without `tomllib` |
 | `test_eval.py` | the eval's unit and end-to-end tests (with the stub), run with `test_bench.py` |
 | `test_indexbench.py` | its unit tests, run with `test_bench.py`; `duscope/tests/index_bench.rs` runs it whole |
+| `acceptance.py` | the 1.0 acceptance run (`acceptance`), the goal-1 and goal-2 targets, the judgement and the summary (`judge`) |
+| `rescanbench.py` | the acceptance run's incremental rescans against full ones |
+| `crosscheck.py` | the Linux cross-check: a hosted runner's ratios against bench-linux's nightly ones (`crosscheck`) |
+| `test_acceptance.py`, `test_crosscheck.py` | their unit tests, run with `test_bench.py`; `duscope/tests/acceptance_bench.rs` runs `acceptance` whole and the cross-check's workflow step |
+| `results/1.0/` | the acceptance run's files, one per platform, and their generated summary, `README.md` |
 | `compare.py` | the regression check: a result file against the results before it on the same machine and tree |
 | `test_compare.py` | unit tests of `compare.py`, run by `duscope/tests/nightly_bench.rs` |
 | `testdata/` | a real hyperfine 2.0.0 export and the hyperfine stand-in the tests use |

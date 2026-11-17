@@ -1,0 +1,139 @@
+# The off-Proxmox cross-check of the Linux gate figures (DEV-157, P5-BENCH-01).
+#
+# Every Linux figure of Gates 1 -> 2 and 2 -> 3 is bench-linux's, a VM on a
+# Proxmox host whose memory is suspect. This runs the harness on GitHub's hosted
+# ubuntu-24.04 runner, as bench-linux's nightly runs it: the x86_64 musl build,
+# duscope paired with every pinned competitor, warm and cold. A hosted runner is
+# another machine, so its times are not compared; its ratios are, each one
+# duscope's time over a competitor's in the same rounds, against bench-linux's
+# for the same tree, mode and competitor in its latest nightly result on the
+# `bench-results` branch (`bench/run.sh crosscheck`, bench/README.md).
+#
+# A dispatch runs it, and nothing else: no push, pull request or schedule, so
+# its job is never a required check. It reads no secret, and its token reads
+# the repository and nothing more. The result file, the runner's CPU model and
+# the comparison are kept as the artifact linux-crosscheck. A ratio outside the
+# noise is a warning, not a failure: the job fails when the harness could not
+# measure a tool or nothing could be compared.
+
+name: Linux cross-check
+
+on:
+  workflow_dispatch:
+    inputs:
+      trees:
+        description: "bench/run.sh --trees: T1,T2; all adds T3, when the runner's disk and 360 minutes allow"
+        default: "T1,T2"
+      mode:
+        description: "bench/run.sh --mode: warm, cold or both"
+        default: "both"
+      scale:
+        description: "bench/run.sh --scale: 1 to compare; below 1 for a smoke run, which is not compared"
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  # One cross-check at a time: a second dispatch waits for the first to end.
+  group: linux-crosscheck
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # As ci.yml installs it, and the justfile pins it.
+  HYPERFINE_VERSION: "2.0.0"
+
+jobs:
+  crosscheck:
+    name: linux-crosscheck
+    runs-on: ubuntu-24.04
+    # The full matrix, warm and cold, on T1 and T2: the most a job on a hosted
+    # runner may run.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain, the musl target and musl-tools
+        run: |
+          rustup toolchain install --profile minimal && rustc --version
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q musl-tools
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: hyperfine@${{ env.HYPERFINE_VERSION }}
+      # The binary bench-linux's nightly measures: the musl build the Linux
+      # archives and .debs ship, built as its "Build duscope" step builds it.
+      - name: Build duscope
+        run: |
+          cargo build --release --locked -p duscope --target x86_64-unknown-linux-musl
+          sha256sum target/x86_64-unknown-linux-musl/release/duscope | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/crosscheck"
+          { sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1; nproc; free -h | sed -n 2p; uname -r; df -h "$RUNNER_TEMP" | sed -n 2p; } \
+            | tee "$RUNNER_TEMP/crosscheck/runner.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+      # bench-linux's nightly command line, with the trees and tools on the
+      # runner's disk. Exit status 1 means a tool could not be measured: the
+      # result file is still written and says which.
+      - name: Run the harness
+        id: harness
+        env:
+          TREES: ${{ inputs.trees }}
+          MODE: ${{ inputs.mode }}
+          SCALE: ${{ inputs.scale }}
+        run: |
+          file="$RUNNER_TEMP/crosscheck/linux-crosscheck.json"
+          status=0
+          bench/run.sh run --subject duscope --tool-path "duscope=$PWD/target/x86_64-unknown-linux-musl/release/duscope" \
+            --trees "$TREES" --competitors all \
+            --mode "$MODE" --scale "$SCALE" --trees-dir "$RUNNER_TEMP/trees" --tools-dir "$RUNNER_TEMP/tools" \
+            --out "$file" || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [[ -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
+      - name: Check out bench-linux's nightly results
+        if: ${{ !cancelled() && steps.harness.outputs.file != '' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: bench-results
+          path: bench-results
+          persist-credentials: false
+      # Each ratio against bench-linux's latest nightly one; the lines go to the
+      # job's summary and the artifact, a ratio outside the noise also to a
+      # warning. Only nothing to compare fails the step.
+      - name: Compare with bench-linux's latest nightly
+        if: ${{ !cancelled() && steps.harness.outputs.file != '' }}
+        env:
+          FILE: ${{ steps.harness.outputs.file }}
+          SCALE: ${{ inputs.scale }}
+        run: |
+          if [[ $SCALE != 1 ]]; then
+            echo "::notice title=linux-crosscheck::a run at scale $SCALE is a smoke run: bench-linux measures the full trees, so nothing is compared"
+            exit 0
+          fi
+          out="$RUNNER_TEMP/crosscheck/comparison.txt"
+          status=0
+          bench/run.sh crosscheck "$FILE" bench-results > "$out" || status=$?
+          cat "$out"
+          { echo '```'; grep -v '^::' "$out" || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          (( status != 2 ))
+      # Kept on a failure and a timeout too.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: linux-crosscheck
+          path: ${{ runner.temp }}/crosscheck/
+          if-no-files-found: ignore
+          retention-days: 90
+      - name: Fail when the harness did
+        if: ${{ !cancelled() && steps.harness.outputs.status != '0' }}
+        env:
+          STATUS: ${{ steps.harness.outputs.status }}
+        run: |
+          echo "::error title=linux-crosscheck::bench/run.sh exited ${STATUS:-early}; the job log and the result file say why"
+          exit 1

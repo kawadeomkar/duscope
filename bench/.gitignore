@@ -9,5 +9,9 @@
 # to commit (thread-sweep-*.json, results/1.0/) have other names.
 /results/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.json
 /results/*.tmp
+# The 1.0 acceptance run's scaled smoke runs (<platform>-x<scale>.json) are not
+# the acceptance run.
+/results/1.0/*-x*.json
+/results/1.0/*.tmp
 
 __pycache__/

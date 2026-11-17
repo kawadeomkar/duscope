@@ -6,6 +6,9 @@
     verify [options]   walk built trees and compare them with their stamps
     tools              list the pinned tools and how each installs per platform
     show FILE          print a result file as a table
+    acceptance         the 1.0 acceptance run on this machine (bench/acceptance.py)
+    judge [FILE...]    the goal-1 and goal-2 targets against the 1.0 files
+    crosscheck ...     a hosted runner's ratios against bench-linux's (DEV-157)
 
 `run` is the default. bench/README.md documents every option and the result
 file. Standard library only; Python 3.9 or later.
@@ -29,9 +32,12 @@ from typing import Dict, List, Optional
 if sys.version_info < (3, 9):  # pragma: no cover - the message is the point
     sys.exit("bench: Python 3.9 or later is needed")
 
+import acceptance
+import crosscheck
 import measure
 import indexbench
 import redraw
+import rescanbench
 import sweep
 import tools
 import trees
@@ -169,6 +175,34 @@ def parser() -> argparse.ArgumentParser:
     drawn.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
     drawn.add_argument("--out", help="the result file (default <results-dir>/<date>-<platform>-redraw.json)")
     drawn.add_argument("--note", help="free text kept in the result file, such as where a provisional number was measured")
+
+    accepted = sub.add_parser("acceptance", help="the 1.0 acceptance run on this machine (P5-BENCH-01)")
+    accepted.add_argument("--duscope", required=True, metavar="PATH", help="the duscope executable to measure")
+    accepted.add_argument("--platform", choices=acceptance.PLATFORMS, help="refuse to run unless this machine is this platform")
+    _tree_options(accepted, "all")
+    _jobs_option(accepted)
+    _tool_options(accepted, "all")
+    accepted.add_argument("--cold-competitors", help="the pinned tools paired with duscope in cold runs (default --competitors)")
+    accepted.add_argument("--mode", choices=("warm", "cold", "both"), default="both", help="warm caches, cold caches, or both (default both)")
+    accepted.add_argument("--cold-cmd", default=shlex.quote(os.path.join(BENCH, "drop-caches.sh")), help="the command that drops the caches before each cold run (default bench/drop-caches.sh)")
+    accepted.add_argument("--cold-trees-dir", help="where the trees the cold runs measure live (default --trees-dir)")
+    accepted.add_argument("--runs", type=int, default=10, help="measured runs of each pair, and rounds of the rescans (default 10)")
+    accepted.add_argument("--warmup", type=int, default=2, help="warm-up runs of each warm pair and measurement (default 2)")
+    accepted.add_argument("--index-runs", type=int, default=20, help="measured runs of each index measurement (default 20)")
+    accepted.add_argument("--settle", type=float, default=rescanbench.SETTLE_S, help=f"seconds a rescan round waits for the change history after its change (default {rescanbench.SETTLE_S:g})")
+    accepted.add_argument("--changed-dirs", type=int, default=rescanbench.CHANGED_DIRS, help=f"directories a rescan round's change touches, at most 1%% of a tree's (default {rescanbench.CHANGED_DIRS})")
+    accepted.add_argument("--out-dir", default=acceptance.OUT_DIR, help="where the result file goes (default bench/results/1.0)")
+    accepted.add_argument("--out", help="the result file (default <out-dir>/<platform>.json)")
+    accepted.add_argument("--hyperfine", default="hyperfine", help="the hyperfine command (default hyperfine on PATH)")
+
+    judged = sub.add_parser("judge", help="the goal-1 and goal-2 targets against the 1.0 result files (P5-BENCH-01)")
+    judged.add_argument("files", nargs="*", metavar="FILE", help="acceptance files (default linux.json and macos.json in --dir)")
+    judged.add_argument("--dir", default=acceptance.OUT_DIR, help="where the acceptance files are (default bench/results/1.0)")
+    judged.add_argument("--summary", metavar="FILE", help="also write the Markdown summary of the files to FILE")
+
+    # crosscheck takes its own command line (bench/crosscheck.py); main hands
+    # it over before this parser reads it, and this entry lists it in --help.
+    sub.add_parser("crosscheck", add_help=False, help="a hosted runner's ratios against bench-linux's latest nightly (DEV-157)")
     return top
 
 
@@ -554,6 +588,8 @@ COMMANDS = {
     "sweep": lambda args: sweep.cmd_sweep(args, sys.modules[__name__]),
     "index": lambda args: indexbench.cmd_index(args, sys.modules[__name__]),
     "redraw": lambda args: redraw.cmd_redraw(args, sys.modules[__name__]),
+    "acceptance": lambda args: acceptance.cmd_acceptance(args, sys.modules[__name__]),
+    "judge": lambda args: acceptance.cmd_judge(args, sys.modules[__name__]),
     "run": cmd_run,
     "build": cmd_build,
     "install": cmd_install,
@@ -566,6 +602,8 @@ COMMANDS = {
 def main(argv: List[str]) -> int:
     if not argv or argv[0].startswith("-") and argv[0] not in ("-h", "--help"):
         argv = ["run", *argv]
+    if argv[0] == "crosscheck":
+        return crosscheck.main(argv[1:])
     args = parser().parse_args(argv)
     try:
         return COMMANDS[args.subcommand](args)
