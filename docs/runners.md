@@ -312,7 +312,11 @@ echo "$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" > .path
 The runner reads `.env` and `.path` into every job: `.env` holds `NAME=value`
 lines, and `BENCH_HOME` tells the workflow where the trees live; `.path` holds
 the value of `PATH` itself, with no `PATH=` in front, and puts hyperfine and
-cargo on it.
+cargo on it. `config.sh` rewrites `.path` each time it runs, from the `PATH` it
+runs with (sudo's `secure_path` under `sudo -u runner`), so write `.path` after
+the last `config.sh`, and check that `cat .path` starts with the runner's
+`~/.cargo/bin` before the service starts. A runner without it stays online and
+fails each bench job at its first step with `rustup: command not found`.
 Then install it as a service that starts at boot:
 
 ```sh
