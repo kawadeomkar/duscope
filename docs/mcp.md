@@ -5,8 +5,8 @@ server on stdin and stdout: an AI client can scan a directory and ask what is in
 it. It answers from the same saved scans, in the same JSON envelope, as the
 command line, and, like the rest of the binary, opens no network socket.
 
-Install the binary first ([README](../README.md#install)). The tools below
-arrive with v0.3; v0.2.0's `duscope mcp` lists none.
+Install the binary first ([README](../README.md#install)), v0.3.0 or later:
+v0.2.0's `duscope mcp` lists no tools.
 
 ## The `--roots` rule
 
