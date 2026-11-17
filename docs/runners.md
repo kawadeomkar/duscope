@@ -10,7 +10,9 @@ runner is set up, and what keeps a public repository's code off them.
 Every night at 03:17 Pacific the workflow runs `bench/run.sh` (the three trees,
 the pinned competitors, warm and cold caches) on bench-linux, and on bench-macos
 when it is not [paused](#paused), as it is now, and pushes the result files to
-the `bench-results` branch as `<date>-<platform>.json`.
+the `bench-results` branch as `<date>-<platform>.json`, with the index and
+redraw measurements beside them as `<date>-<platform>-index.json` and
+`<date>-<platform>-redraw.json`.
 [bench/README.md](../bench/README.md) documents the harness and the result file;
 `bench/compare.py` reads the files as baselines.
 
@@ -301,7 +303,9 @@ The macOS daemon is GitHub's own plist template with `UserName` and
 ```
 
 Check that GitHub sees it online, then start a smoke run (T1 at 1% scale, warm
-caches, `du` alone) and read its result on the `bench-results` branch:
+caches, duscope alone; add `-f macos=true` for bench-macos, which a dispatch
+leaves out while it is [paused](#paused)) and read its result on the
+`bench-results` branch:
 
 ```sh
 gh api repos/kawadeomkar/duscope/actions/runners --jq '.runners[] | {name, status, labels: [.labels[].name]}'
@@ -348,8 +352,9 @@ EOF
 
 Both machines need outbound HTTPS only: to github.com (the runner, the
 checkout, artifact uploads) and, for the competitors, to GitHub release
-downloads, crates.io and static.crates.io, and to static.rust-lang.org for the
-pinned toolchain. They accept no inbound connection
+downloads, crates.io and static.crates.io, and dev.yorhel.nl for ncdu's Linux
+build, and to static.rust-lang.org for the pinned toolchain. They accept no
+inbound connection
 the runner needs; it polls GitHub. A wired connection is preferred, since a
 dropped connection fails the job mid-run.
 
@@ -457,8 +462,9 @@ sudo launchctl bootout system /Library/LaunchDaemons/actions.runner.kawadeomkar-
 
 Then register again as above, with the same name and label. New hardware is a
 new row in the change log, and its results are not compared with the old
-machine's by eye; `bench/compare.py` compares only results of the same
-platform and architecture.
+machine's by eye; `bench/compare.py` compares only results from the same
+machine (the same platform, architecture, CPU model and logical CPU count) on
+the same tree.
 
 ## Change log
 

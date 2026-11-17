@@ -53,7 +53,7 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    `just deny advisories` has just checked against the advisory database, as release.yml's
    builds do. The `dependencies` test fails when `DEPENDENCIES.md`'s tables and
    the direct dependencies of the published crates differ (a `cargo tree` count does not
-   match the table, which covers all five published crates). The CI jobs `size`, `repro` and
+   match the table, which covers all six published crates). The CI jobs `size`, `repro` and
    `build-time` (against the ceiling `BUILD_TIME_BUDGET_SECS` in `ci.yml`) on that
    commit must be green too.
 
@@ -132,14 +132,16 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    the end; its `live-install` jobs are the check in a clean container:
 
    ```sh
-   gh run watch "$(gh run list --workflow apt.yml --event workflow_run --limit 1 \
-     --json databaseId --jq '.[0].databaseId')"
+   gh run watch "$(gh run list --workflow apt.yml --event workflow_run --limit 20 \
+     --json databaseId,conclusion --jq 'map(select(.conclusion != "skipped"))[0].databaseId')"
    ```
 
-   A release whose run needed a re-run starts it again when the re-run
-   succeeds. To publish for a tag by hand, after a fix or a pulled release:
-   `gh workflow run apt.yml -f tag=vX.Y.Z`. Until the key ceremony (P5-SEC-02),
-   every run fails at its first step, which says so; the release itself is
+   Every run of release.yml starts one of apt.yml, and each lists `main` as its branch, so the
+   newest is not always the tag's: those a pull request's run starts are skipped, and the
+   newest one not skipped is the tag's. A release whose run needed a re-run starts it again
+   when the re-run succeeds. To publish for a tag by hand, after a fix or a pulled release:
+   `gh workflow run apt.yml -f tag=vX.Y.Z`. Until the key ceremony (P5-SEC-02), a release's
+   run and a dispatched one fail at their first step, which says so; the release itself is
    unaffected.
 
 7. **After the release.** On a clean machine, `cargo install duscope --locked` and
@@ -147,12 +149,16 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    and update the Tracker's phase row and current-state line, and the proposal's decision log
    when a gate decision was taken.
 
-8. **Yearly.** At the first release after each anniversary of a secret's creation, rotate the
-   secrets in the table below and record the new dates there.
+8. **Yearly.** Before each secret in the table below expires, rotate it and record the new
+   dates there: a token that lives 12 months a month before its anniversary, so that no
+   release meets it expired, and the apt signing subkey about ten months after it is made,
+   before `apt.yml`'s 60 days ([apt.md](apt.md#rotating-the-signing-subkey)).
 
 ### Patch releases
 
-A patch release (`vX.Y.Z` with Z > 0) follows steps 2 to 4 and 6 to 7. In place of step 1, the
+A patch release (`vX.Y.Z` with Z > 0) follows steps 2 to 7, step 5 only when it is the newest
+release (the `homebrew` job bumps the tap's formula then, and not for a patch of an older
+minor). In place of step 1, the
 latest nightly result on `main` is at most 72 hours old; the gate is not re-judged.
 
 A security release may be tagged without a nightly result of the last 72 hours when no bench
@@ -248,14 +254,16 @@ as a patch release of the latest minor, the only one supported before 1.0. In or
 4. **The release.** Follow [Patch releases](#patch-releases) at once, without a recent nightly
    result if no bench runner reports, as it says. From `main`, the changelog section is the
    `Security` section alone. `scripts/changelog.py assemble` takes every fragment, so any
-   other fragment waiting on `main` is moved aside for the assemble and put back before the
-   release commit, for the next release:
+   other fragment waiting on `main` is moved aside for the assemble and stays out of the
+   release commit, since `verify-tag` refuses a tag whose commit still holds a fragment; once
+   the tag is pushed, a pull request on `main` puts them back for the next release:
 
    ```sh
    held=$(mktemp -d)
    git ls-files 'changelog.d/*.md' ':!changelog.d/README.md' ':!changelog.d/GHSA-*.md' |
      xargs -I{} mv {} "$held"/
    scripts/changelog.py assemble X.Y.Z
+   # the release commit, the tag; then, on a branch from main:
    for f in "$held"/*.md; do [ -e "$f" ] && mv "$f" changelog.d/; done
    ```
 

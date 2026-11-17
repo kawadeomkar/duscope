@@ -82,7 +82,7 @@ So `caches` and `scan --exclude-caches` can disagree on a nested cache. Take `mo
 | --- | --- |
 | `[roles]` | the thirteen roles: `base`, `mantle`, `crust`, `surface1`, `surface2`, `overlay1`, `subtext`, `text`, `accent`, `title`, `link`, `red` (warnings), `green` (success) |
 | `[classes]` | one colour for each of the seven classes |
-| `cycle` | ten colours, for `--color-by folder` |
+| `cycle` | ten colours, for `--color-by folder` and `--color-by level` |
 | `age` | five colours, newest to oldest, for `--color-by age` |
 
 The colours drawn as borders or fills (`link`, `overlay1`, `surface1`, `surface2`, `accent`) must differ from the seven class colours. This example is Catppuccin Mocha, the default:

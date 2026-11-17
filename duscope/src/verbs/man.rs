@@ -1,10 +1,12 @@
 //! `man`: the manual page, in roff. `clap_mangen` writes the name,
 //! synopsis, description and options from the clap tree, so a new flag
 //! cannot miss the page; the sections `clap` knows nothing of (INTERACTIVE
-//! VIEWER, CLEANING UP, ENVIRONMENT, EXIT STATUS, FILES, EXAMPLES, CAVEATS)
-//! are written by hand beside this file. The tests hold the viewer's key
-//! list to its key map and the refusals `CLEANING UP` lists to `clean`'s.
-//! Hidden (test-only) flags are left out.
+//! VIEWER, CLEANING UP, SQL QUERIES, MCP SERVER, AGENTS, ENVIRONMENT, EXIT
+//! STATUS, FILES, EXAMPLES, CAVEATS) are written by hand beside this file.
+//! The tests hold the viewer's key list to its key map, the refusals
+//! `CLEANING UP` lists to `clean`'s, the tools of MCP SERVER to the
+//! server's, and the tables, functions and limits of SQL QUERIES to the
+//! sandbox's. Hidden (test-only) flags are left out.
 //!
 //! Each flag is described once: the scan and output flags `duscope` itself
 //! takes under SCAN OPTIONS and OUTPUT OPTIONS, the filters the list verbs
@@ -25,9 +27,10 @@ use crate::out::emit_bytes;
 const DATE: &str = "2026-11-16";
 
 /// The hand-written sections, in order.
-const SECTIONS: [&str; 9] = [
+const SECTIONS: [&str; 10] = [
     include_str!("man/viewer.roff"),
     include_str!("man/clean.roff"),
+    include_str!("man/sql.roff"),
     include_str!("man/mcp.roff"),
     include_str!("man/agent.roff"),
     include_str!("man/environment.roff"),
@@ -330,6 +333,58 @@ mod tests {
     }
 
     #[test]
+    fn p5_doc_01_the_sql_section_is_the_sandbox_s_tables_functions_and_limits() {
+        use duscope_core::query::sql;
+        let text = page().unwrap();
+        let words = |lines: Vec<&str>| -> Vec<String> {
+            lines
+                .join(" ")
+                .replace(['(', ')', ',', '"'], " ")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect()
+        };
+        let allowed = words(part(&text, "SQL QUERIES", Some("What a statement may do")));
+        for table in sql::TABLES {
+            assert!(
+                allowed.iter().any(|w| w == table),
+                "SQL QUERIES names the table {table}"
+            );
+        }
+        // Each `.BI name( arg )` tag is one of duscope's functions, which
+        // the sandbox allows.
+        let mut functions: Vec<String> =
+            part(&text, "SQL QUERIES", Some("Functions and parameters"))
+                .iter()
+                .filter_map(|l| l.strip_prefix(".BI "))
+                .filter_map(|l| l.split_once('(').map(|(name, _)| name.to_owned()))
+                .collect();
+        functions.sort();
+        assert_eq!(functions, ["human_size", "path", "under"]);
+        assert!(
+            functions
+                .iter()
+                .all(|f| sql::FUNCTIONS.contains(&f.as_str()))
+        );
+        let limits = part(&text, "SQL QUERIES", Some("Limits")).join(" ");
+        for figure in [
+            format!("{} rows at most", sql::DEFAULT_LIMIT),
+            format!(
+                "{},{:03} by default and at most",
+                sql::MAX_ROWS / 1000,
+                sql::MAX_ROWS % 1000
+            ),
+            format!("after {} seconds", sql::DEFAULT_TIMEOUT.as_secs()),
+            format!("{} at most", sql::MAX_TIMEOUT.as_secs()),
+        ] {
+            assert!(
+                limits.contains(&figure),
+                "SQL QUERIES' limits say {figure:?}"
+            );
+        }
+    }
+
+    #[test]
     fn p4_doc_01_the_page_s_parts_and_tags_are_read_as_roff_writes_them() {
         let roff = ".SH NAME\nx\n.SH \"A B\"\ntext\n.SS Keys\n.TP\n.BR q \", \" Ctrl\\-C\n\
                     Quit.\n.TP\n.B /\nFilter.\n.SS Other\n.TP\n.B z\n.SH C\n";
@@ -398,6 +453,7 @@ mod tests {
                 "VERBS",
                 "INTERACTIVE VIEWER",
                 "CLEANING UP",
+                "SQL QUERIES",
                 "MCP SERVER",
                 "AGENTS",
                 "ENVIRONMENT",

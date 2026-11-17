@@ -38,8 +38,11 @@ inside a scanned tree is never read.
 .TP
 .I $XDG_CACHE_HOME/duscope/scans/<id>.db
 A saved scan, written by
-.B scan \-\-save
-or by a list verb that found none holding its path:
+.BR "scan \-\-save" ,
+.B rescan
+or
+.BR import ,
+or by a verb that found none holding its path:
 one SQLite file, mode 0600, written once and never changed
 .RI ( ~/Library/Caches/duscope
 on macOS and
@@ -74,6 +77,17 @@ handles: 32 random bytes, mode 0600, made on first use. A key that is a
 symbolic link, another user's, or readable by others signs nothing;
 deleting it invalidates every handle given out.
 .TP
+.I $XDG_CACHE_HOME/duscope/out/
+JSON envelopes longer than
+.B \-\-max\-chars
+(24,000 characters by default): each goes to a file of its own here, named
+after the scan, the verb and the time, mode 0600, and stdout gets a short
+envelope naming the file, with the first five rows.
+The folder is in the index directory, wherever that is, and is the
+owner's only;
+.B scans \-\-prune
+removes the files after a week.
+.TP
 .I theme.toml
 A theme for
 .B \-\-theme
@@ -91,6 +105,27 @@ merged over the built\-in one:
 maps an extension to a class,
 .B [dir]
 a directory name or glob.
+.TP
+.I caches.toml
+A table of cache rules, which the configuration file's
+.B [caches] extra
+names, merged over the built\-in one and tried before it by
+.BR caches ,
+.BR "scan \-\-exclude\-caches" ,
+.B explain
+and
+.BR clean :
+each
+.B [[rule]]
+names a directory, by name or glob, and the marker files
+.RB ( markers )
+or the parent path
+.RB ( under )
+that confirm it is a cache, or takes any directory that holds a valid
+.I CACHEDIR.TAG
+.RB ( "cachedir_tag = true" ),
+with the command that rebuilds it
+.RB ( regenerable_by ).
 .TP
 .I ignore files
 Gitignore\-syntax files for

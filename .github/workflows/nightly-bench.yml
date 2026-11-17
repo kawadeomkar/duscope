@@ -5,8 +5,9 @@
 # label `bench-macos` and a Linux x86_64 box with `bench-linux`, described in
 # docs/runners.md. The subject is duscope, built from the checkout; `du` is one
 # of the competitors. The result files go to the `bench-results` branch as
-# <date>-<platform>.json, never to main, and bench/compare.py reads baselines from
-# there. Each bench job then checks the binary's du parity on a system tree
+# <date>-<platform>.json, with the index and redraw measurements beside them as
+# <date>-<platform>-index.json and <date>-<platform>-redraw.json, never to main,
+# and bench/compare.py reads baselines from there. Each bench job then checks the binary's du parity on a system tree
 # (/Applications, /usr), its peak RSS on the trees (P1-TEST-01) and that of
 # `top` and `stale` with --all on T2 (P2-QRY-13), the viewer's reads to open a
 # saved scan of T2 (P4-TUI-09), and holds the fixture tree to P0-TEST-01's

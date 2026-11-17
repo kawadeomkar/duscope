@@ -17,8 +17,10 @@ under [Auditing](#auditing) read it again.
 - [x] Linear history is required.
 - [x] Force pushes and deletion of `main` are blocked.
 - [x] Required status checks, with "Require branches to be up to date before
-  merging" (`strict`). Every check a pull request runs is required but one, so
-  nothing merges until they all pass. The checks are the jobs of
+  merging" (`strict`). Every check a pull request into `main` runs is required
+  but apt.yml's `repo-test`, which runs only on the pull requests that change
+  the apt repository's files (below), so nothing merges until they all pass.
+  The checks are the jobs of
   [ci.yml](../.github/workflows/ci.yml):
   - `fmt`
   - `clippy` and `test`, with its locale leg, on `ubuntu-24.04` and
@@ -91,8 +93,9 @@ under [Auditing](#auditing) read it again.
   `full-ci`. GitHub's stacked pull requests run as if into `main`: the pull
   requests of a stack it recognises take `main`'s protection and run these
   checks too. Any other pull request into another branch, the middle of a
-  longer stack, runs `fmt`, `deny`, `changelog` and `quick` (clippy and the
-  tests on `ubuntu-24.04`) alone (DEV-73): no protection applies to it, and
+  longer stack, runs `fmt`, `deny`, `changelog`, `quick` (clippy and the
+  tests on `ubuntu-24.04`) and release.yml's `verify-tag` alone (DEV-73): no
+  protection applies to it, and
   before it merges `strict` makes it take `main`, which runs the full set on
   its new head. The top of a stack carries `full-ci`, so the whole stack's
   code runs the full set once per push.
