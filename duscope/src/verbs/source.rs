@@ -594,7 +594,7 @@ impl Source {
         } = self
         {
             scan::save(scanned, walk, &[], id, Some(dir), output, false)
-                .map_err(|failure| failure.hint(SAVE_HINT))?;
+                .map_err(|failure| scan::save_hint(failure, SAVE_HINT))?;
         }
         Ok(())
     }
@@ -631,7 +631,8 @@ impl Drop for Scratch {
 }
 
 /// The hint of a scan run for a verb that cannot be saved in the index
-/// directory.
+/// directory, for a save that failed ([`scan::save_hint`]): a refused one
+/// keeps its own.
 const SAVE_HINT: &str = "Rerun with --no-save, or with --index-dir naming a writable directory";
 
 /// The hint of a scan run for a verb that cannot be written to a scratch
@@ -675,7 +676,7 @@ impl Source {
                 // Not scan::save, whose failure comes after the output.
                 // On a failure below, `scratch` goes, and its directory.
                 scan::write_index(&scanned, walk, excludes, &id, &dir)
-                    .map_err(|failure| failure.hint(hint))?;
+                    .map_err(|failure| scan::save_hint(failure, hint))?;
                 let index = Index::open(&index_path(&dir, &id)).map_err(core_failure)?;
                 Ok(Indexed {
                     index: Box::new(index),

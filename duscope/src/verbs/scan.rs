@@ -1352,6 +1352,7 @@ pub(super) mod tests {
     use std::time::Duration;
 
     use clap::Parser;
+    use duscope_core::CoreError;
     use duscope_core::arena::Arena;
     use duscope_core::index::{Index, ScanId, index_path};
     use duscope_core::query::SizeKind;
@@ -1361,13 +1362,14 @@ pub(super) mod tests {
     use duscope_testkit::TestEnv;
 
     use super::{
-        DirErrors, OPTION_FILE_CAP, Scanned, cache_rules, excluded, read_flag_file, scan_block,
-        warnings, write_index,
+        DirErrors, OPTION_FILE_CAP, Scanned, cache_rules, excluded, read_flag_file, save_hint,
+        scan_block, warnings, write_index,
     };
     use crate::cli::{Cli, Verb};
     use crate::out::{Format, Output, Units};
     use crate::verbs::query::top_envelope;
     use crate::verbs::source::{Source, saved_block};
+    use crate::verbs::{Exit, Failure};
 
     /// A scan of a small in-memory tree; without its volume when `volume`
     /// is false.
@@ -1399,6 +1401,23 @@ pub(super) mod tests {
             full_disk_access_missing: false,
             stop: std::sync::Arc::default(),
         }
+    }
+
+    /// A verb's own hint goes to a save that failed; a refused save (a
+    /// linked `scans`) keeps the hint that says how to put it right, and a
+    /// stopped one (Ctrl-C, a tool call's deadline) gets none.
+    #[test]
+    fn p5_cli_03_a_refused_or_stopped_save_keeps_its_own_hint() {
+        let hint = "Rerun with --no-save";
+        let failed = Failure::new(Exit::Runtime, "index_write_failed", "disk full")
+            .hint("Run duscope scan --save again");
+        assert_eq!(save_hint(failed, hint).hint.as_deref(), Some(hint));
+        let refused = crate::verbs::source::core_failure(CoreError::LinkedScans("/x/scans".into()));
+        let own = refused.hint.clone();
+        assert!(own.is_some());
+        assert_eq!(save_hint(refused, hint).hint, own);
+        let stopped = Failure::new(Exit::Interrupted, "interrupted", "interrupted");
+        assert_eq!(save_hint(stopped, hint).hint, None);
     }
 
     #[test]
