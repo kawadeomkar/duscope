@@ -40,6 +40,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
 
+use duscope_core::query::timegrammar;
 use duscope_testkit::{TestEnv, golden};
 use serde_json::{Value, json};
 
@@ -690,13 +691,14 @@ fn scan_group_cases(env: &TestEnv, home: &Path, id: &str) -> Vec<Case> {
         (
             "duscope_top",
             json!({"scan_id": id, "path": "Library", "files": true, "depth": 3,
-                "min_size": "1K", "glob": ["*"], "exclude": ["*.log", "*.tmp"],
-                "size": "apparent", "fields": ["path", "apparent_bytes"], "limit": 3}),
+                "min_size": "1K", "older_than": "30d", "glob": ["*"],
+                "exclude": ["*.log", "*.tmp"], "size": "apparent",
+                "fields": ["path", "apparent_bytes"], "limit": 3}),
             line(
                 &format!(
-                    "top --no-scan --scan {id} --files --depth=3 --min-size=1K --glob=* \
-                     --exclude=*.log --exclude=*.tmp --size=apparent \
-                     --fields=path,apparent_bytes --limit=3"
+                    "top --no-scan --scan {id} --files --depth=3 --min-size=1K \
+                     --older-than=30d --glob=* --exclude=*.log --exclude=*.tmp \
+                     --size=apparent --fields=path,apparent_bytes --limit=3"
                 ),
                 &library,
             ),
@@ -999,6 +1001,94 @@ fn p3_mcp_04_a_value_starting_with_a_dash_is_never_read_as_a_flag() {
         age["message"].as_str().unwrap().contains("--older-than"),
         "{age}"
     );
+}
+
+/// `duscope_top` with `older_than` lists only the rows whose modification
+/// time is before the cutoff, each one `top --older-than` lists from the same
+/// saved scan; a value the verb refuses is its usage error, byte for byte.
+#[test]
+fn p3_mcp_04_top_older_than_lists_only_rows_older_than_the_cutoff() {
+    let env = TestEnv::new();
+    let (home, id) = saved_home(&env);
+    // Two fields, so that 50 rows stay under the server's --max-chars.
+    let rows = json!({"files": true, "fields": ["path", "max_mtime"], "limit": 50});
+    let mut aged = rows.clone();
+    aged["older_than"] = json!("1y");
+    let served = serve(
+        &env,
+        &roots(&[&home]),
+        &[
+            call(1, "duscope_top", &aged),
+            call(2, "duscope_top", &rows),
+            call(3, "duscope_top", &json!({"older_than": "6m"})),
+            call(4, "duscope_top", &json!({"older_than": "soon"})),
+        ],
+    );
+    let result = served.result(1);
+    assert_eq!(result["isError"], false, "{result}");
+    let old = &result["structuredContent"];
+    assert_eq!(old["scan"]["id"], id.as_str());
+    assert_eq!(
+        structured_content(served.line(1)),
+        cli_json(
+            &env,
+            &line(
+                "top --no-scan --files --older-than=1y --fields=path,max_mtime --limit=50",
+                &home
+            )
+        )
+    );
+    // A file row's max_mtime is its own modification time.
+    let now = timegrammar::parse_date(env.test_now()).unwrap().ns;
+    let cutoff = now - timegrammar::parse_age("1y").unwrap();
+    let mtime = |entry: &Value| {
+        timegrammar::parse_date(entry["max_mtime"].as_str().unwrap())
+            .unwrap()
+            .ns
+    };
+    let paths = |entries: Vec<&Value>| -> Vec<String> {
+        entries
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let listed: Vec<&Value> = old["entries"].as_array().unwrap().iter().collect();
+    assert!(!listed.is_empty(), "{old}");
+    assert!(listed.iter().all(|entry| mtime(entry) < cutoff), "{old}");
+    // Without it the newer files are listed too; the older ones among them
+    // are the largest the call listed, in the same order.
+    let all = &served.result(2)["structuredContent"];
+    let (older, newer): (Vec<&Value>, Vec<&Value>) = all["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .partition(|entry| mtime(entry) < cutoff);
+    assert!(!newer.is_empty(), "{all}");
+    assert!(
+        old["total_count"].as_u64().unwrap() < all["total_count"].as_u64().unwrap(),
+        "{old} {all}"
+    );
+    let older = paths(older);
+    assert!(!older.is_empty(), "{all}");
+    assert_eq!(paths(listed)[..older.len()], older[..]);
+    // m is refused as ambiguous, and a word is no age: the verb's usage
+    // error, as the command line gives it.
+    for (call_id, value) in [(3, "6m"), (4, "soon")] {
+        let result = served.result(call_id);
+        assert_eq!(result["isError"], true, "{value}: {result}");
+        assert_eq!(
+            result["structuredContent"]["error"]["code"], "usage",
+            "{value}: {result}"
+        );
+        assert_eq!(
+            structured_content(served.line(call_id)),
+            cli_json(
+                &env,
+                &line(&format!("top --no-scan --older-than={value}"), &home)
+            ),
+            "{value}"
+        );
+    }
 }
 
 #[test]

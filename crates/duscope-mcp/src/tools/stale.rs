@@ -20,7 +20,7 @@ impl Tool for Stale {
         "Large files under a path in a saved scan neither modified nor changed (ctime) for a long \
          time (by default 10 MB and 180 days), largest first; paged with cursor. A file restored, \
          or copied with its times kept, has a new change time and is not listed: for the \
-         modification time alone, use duscope_query on files.mtime (nanoseconds)."
+         modification time alone, use duscope_top with files and older_than."
     }
 
     fn input_schema(&self) -> &'static str {

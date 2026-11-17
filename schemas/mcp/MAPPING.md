@@ -124,6 +124,7 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--files` | `files` | |
 | `--depth` | `depth` | |
 | `--min-size` | `min_size` | |
+| `--older-than` | `older_than` | |
 | `--glob` | `glob` | |
 | `--exclude` | `exclude` | |
 | `--size` | `size` | |
@@ -133,11 +134,10 @@ configuration's); a scan taken with others is read by its `scan_id`.
 | `--no-cut-through` | — | looking through a directory that holds 80% of its parent is what a question about space wants |
 | `--min-depth` | — | the rows start at the path, which the call chooses |
 | `--max-size` | — | the tool lists the largest |
-| `--older-than` | — | `duscope_stale` answers by age |
-| `--newer-than` | — | `duscope_stale` answers by age |
-| `--since` | — | `duscope_stale` answers by age |
-| `--until` | — | `duscope_stale` answers by age |
-| `--time` | — | `duscope_stale` answers by age |
+| `--newer-than` | — | only `older_than` asks by age: what is old |
+| `--since` | — | only `older_than` asks by age: what is old |
+| `--until` | — | `older_than` |
+| `--time` | — | `older_than` reads the modification time, the default |
 | `--type` | — | `files` chooses files or directories |
 | `--sort` | — | the tool lists the largest first |
 | `--reverse` | — | the tool lists the largest first |
