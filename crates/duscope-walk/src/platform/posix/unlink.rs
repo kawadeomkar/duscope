@@ -5,10 +5,11 @@
 //! - **The way there.** [`CheckedDir::open`] opens `/`, then each component
 //!   of the path relative to the one above with `O_NOFOLLOW | O_DIRECTORY`:
 //!   a component replaced by a symbolic link fails the open rather than
-//!   leading elsewhere. On Linux each is opened as a path only (`O_PATH`),
-//!   which needs search permission alone, as a lookup by path does, so a
-//!   directory that may be searched but not listed (mode 0711) is passed
-//!   through; only a directory to be emptied is opened to read.
+//!   leading elsewhere. Each is opened as a path only on Linux (`O_PATH`)
+//!   and for search only on macOS (`O_SEARCH`), which needs search
+//!   permission alone, as a lookup by path does, so a directory that may be
+//!   searched but not listed (mode 0711) is passed through; only a
+//!   directory to be emptied is opened to read.
 //! - **The entry.** [`unlink_checked`] and [`remove_dir_checked`] read the
 //!   entry's device and inode through the parent's descriptor, without
 //!   following a link, and remove nothing unless they are the expected ones.
@@ -62,9 +63,10 @@ pub struct CheckedDir {
 impl CheckedDir {
     /// Opens the directory `path`, absolute and without `..`: `/`, then
     /// each component relative to the one above with `O_NOFOLLOW |
-    /// O_DIRECTORY`, on Linux as a path only (`O_PATH`), so that a directory
-    /// on the way needs only search permission. Mounts on the way are
-    /// crossed: it is the removal below that never crosses one.
+    /// O_DIRECTORY`, as a path only on Linux (`O_PATH`) and for search only
+    /// on macOS (`O_SEARCH`), so that a directory on the way needs only
+    /// search permission. Mounts on the way are crossed: it is the removal
+    /// below that never crosses one.
     ///
     /// # Errors
     ///
@@ -484,6 +486,10 @@ fn renameat(from: BorrowedFd<'_>, old: &CStr, to: BorrowedFd<'_>, new: &CStr) ->
 #[cfg(target_os = "linux")]
 const CREATE_MODE: libc::c_uint = 0o666;
 
+/// The mode a file [`create_checked`] makes is given before the umask: read
+/// and write for the owner alone.
+const PRIVATE_MODE: libc::c_uint = 0o600;
+
 /// The directory `name` in the directory open on `dir`, made with mode 0700
 /// when missing, opened never through a symbolic link.
 #[cfg(target_os = "linux")]
@@ -501,15 +507,42 @@ pub(crate) fn make_dir_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedF
 /// (`O_CREAT | O_EXCL`), so the name is this caller's alone.
 #[cfg(target_os = "linux")]
 pub(crate) fn create_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<std::fs::File> {
+    create_in(dir, name, CREATE_MODE)
+}
+
+/// Creates the file `name`, mode 0600 before the umask, in `parent`, to
+/// write it: through `parent`'s descriptor, and only where nothing is at
+/// the name, not even a symbolic link (`O_CREAT | O_EXCL`), so the file is
+/// new and this caller's alone.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::AlreadyExists`] when something is at the name;
+/// [`io::ErrorKind::InvalidInput`] when `name` is not one name in the
+/// directory; otherwise the open's error.
+pub fn create_checked(parent: &CheckedDir, name: &OsStr) -> io::Result<std::fs::File> {
+    if !one_name(name.as_bytes()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not one name in the directory",
+        ));
+    }
+    create_in(parent.fd.as_fd(), name, PRIVATE_MODE)
+}
+
+/// Creates the file `name`, `mode` before the umask, in the directory open
+/// on `dir`, to write it, only where nothing is at the name.
+fn create_in(dir: BorrowedFd<'_>, name: &OsStr, mode: libc::c_uint) -> io::Result<std::fs::File> {
     super::with_c_name(name.as_bytes(), |c_name| {
         // SAFETY: `dir` is open for the borrow and `c_name` is
-        // NUL-terminated; with O_CREAT the mode is the third argument.
+        // NUL-terminated; with O_CREAT the mode is the third argument, an
+        // unsigned int as the variadic call promotes a mode_t.
         super::parked(|| unsafe {
             libc::openat(
                 dir.as_raw_fd(),
                 c_name.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
-                CREATE_MODE,
+                mode,
             )
         })
     })
@@ -702,10 +735,16 @@ fn checked(
 const ON_THE_WAY: c_int = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 /// How [`CheckedDir::open`] opens each directory on the way to an entry:
-/// to read, never through a symbolic link, so on macOS a directory on the
-/// way needs read permission.
+/// never through a symbolic link, and on macOS for search only (`O_SEARCH`,
+/// from macOS 13). Such a descriptor asks for search permission on the
+/// directory itself and the one above, and none to read it, as a lookup by
+/// path does, so a directory that may be searched but not listed (mode
+/// 0711) is passed through. It cannot be listed (`EBADF`), and serves only
+/// as the directory of `*at` calls (`openat`, `fstatat`, `unlinkat`) and
+/// `fstat` of itself; a directory to be emptied is opened to read
+/// ([`open_child`]).
 #[cfg(not(target_os = "linux"))]
-const ON_THE_WAY: c_int = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+const ON_THE_WAY: c_int = libc::O_SEARCH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 /// Opens the directory `name`, at `path`, in the directory open on `dir`,
 /// to read it, never through a symbolic link.

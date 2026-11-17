@@ -844,6 +844,22 @@ pub fn unlink_checked(
     platform::unlink_checked(parent, name, expect, freed)
 }
 
+/// Creates the file `name` in `parent` to write it, mode 0600 before the
+/// umask: through `parent`'s descriptor, so a directory swapped for a
+/// symbolic link since `parent` was opened is never reached, and only where
+/// nothing is at the name, not even a symbolic link (`O_CREAT | O_EXCL`), so
+/// the file is new and this caller's alone. A spilled envelope is written so,
+/// into the index directory's `out`.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::AlreadyExists`] when something is at the name;
+/// [`io::ErrorKind::InvalidInput`] when `name` is not one name in the
+/// directory; otherwise the open's error.
+pub fn create_checked(parent: &CheckedDir, name: &OsStr) -> io::Result<std::fs::File> {
+    platform::create_checked(parent, name)
+}
+
 /// Deletes the directory `name` and everything under it from `parent`, as
 /// `clean --permanent` does: only when its device and inode are `expect`;
 /// then depth first through each directory's descriptor, each opened with

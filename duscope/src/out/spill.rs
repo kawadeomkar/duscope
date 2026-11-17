@@ -3,16 +3,20 @@
 //! index directory's `out/`, 0600, and stdout gets a stub naming the file
 //! with the envelope's first five rows. An `out` that is a symbolic link is
 //! refused, and `out` is given 0700 only when it is this user's own
-//! directory. `scans --prune` removes such files after a week.
+//! directory. Each file is made through `out` opened once, from `/` without
+//! following a link, so an `out` swapped for a link meanwhile never gets
+//! one. `scans --prune` removes such files after a week.
 
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::ffi::OsStr;
+use std::fs::{self, DirBuilder, File};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use duscope_core::envelope::{SCHEMA_VERSION, Spill, SpilledEnvelope, Tool, Warning};
 use duscope_core::index::ScanId;
 use duscope_core::query::clock;
+use duscope_walk::{CheckedDir, RemoveError};
 use serde::Serialize;
 
 use crate::verbs::{Exit, Failure};
@@ -27,14 +31,29 @@ const PREVIEW: usize = 5;
 /// the scan (`scan`, or `fresh` for one not saved), the verb and now, and
 /// returns it.
 pub fn write(dir: &Path, scan: Option<&str>, verb: &str, json: &[u8]) -> Result<PathBuf, Failure> {
-    let failed = |e: std::io::Error| {
+    let out = open_out(dir)?;
+    write_in(&out, dir, scan, verb, json)
+}
+
+/// The failure to write a spill into `dir`, for `e`.
+fn failed(dir: &Path) -> impl Fn(std::io::Error) -> Failure + '_ {
+    move |e| {
         Failure::new(
             Exit::Runtime,
             "io_error",
             format!("cannot write the envelope to {}: {e}", dir.display()),
         )
         .hint("Rerun the command with -o FILE, or a larger --max-chars")
-    };
+    }
+}
+
+/// The index directory's `out` at `dir`, made where it is missing and
+/// opened once, from `/` a component at a time without following a link
+/// (`duscope_walk::CheckedDir`), once the index directory above it is
+/// resolved: every spill is made through that descriptor, so an `out`
+/// swapped for a link after this check is never reached.
+fn open_out(dir: &Path) -> Result<CheckedDir, Failure> {
+    let failed = failed(dir);
     // The directory holds what scans print: the owner's only, and so is each
     // directory made on the way to it (the index directory itself, when a
     // spill is the first thing written there).
@@ -56,8 +75,41 @@ pub fn write(dir: &Path, scan: Option<&str>, verb: &str, json: &[u8]) -> Result<
         )
         .hint("Remove the link, or rerun the command with -o FILE or a larger --max-chars"));
     }
-    made.map_err(failed)?;
-    owners_alone(dir, &found).map_err(failed)?;
+    made.map_err(&failed)?;
+    owners_alone(dir, &found).map_err(&failed)?;
+    let (above, name) = match (dir.parent(), dir.file_name()) {
+        (Some(above), Some(name)) if !above.as_os_str().is_empty() => (above, name),
+        (_, Some(name)) => (Path::new("."), name),
+        (_, None) => {
+            return Err(failed(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "it names no folder",
+            )));
+        }
+    };
+    let above = fs::canonicalize(above).map_err(&failed)?;
+    CheckedDir::open(&above.join(name)).map_err(|e| {
+        failed(match e {
+            RemoveError::Changed { .. } => {
+                std::io::Error::other("it was replaced while it was opened")
+            }
+            RemoveError::Io { source, .. } => source,
+            other => std::io::Error::other(other.to_string()),
+        })
+    })
+}
+
+/// Writes `json` to a new file in `out`, the folder [`open_out`] opened at
+/// `dir`, through its descriptor and only where nothing is at the name;
+/// returns the file's path under `dir`.
+fn write_in(
+    out: &CheckedDir,
+    dir: &Path,
+    scan: Option<&str>,
+    verb: &str,
+    json: &[u8],
+) -> Result<PathBuf, Failure> {
+    let failed = failed(dir);
     let stamp = compact(&duscope_core::query::timegrammar::iso8601(clock::now()));
     let verb = verb.replace(' ', "-");
     let scan = scan.unwrap_or("fresh");
@@ -68,17 +120,11 @@ pub fn write(dir: &Path, scan: Option<&str>, verb: &str, json: &[u8]) -> Result<
         } else {
             format!("{scan}-{verb}-{stamp}-{n}.json")
         };
-        let path = dir.join(name);
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
+        match duscope_walk::create_checked(out, OsStr::new(&name)) {
             Ok(mut file) => {
-                file.write_all(json).map_err(failed)?;
-                file.write_all(b"\n").map_err(failed)?;
-                return Ok(path);
+                file.write_all(json).map_err(&failed)?;
+                file.write_all(b"\n").map_err(&failed)?;
+                return Ok(dir.join(name));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => n += 1,
             Err(e) => return Err(failed(e)),
@@ -190,9 +236,41 @@ pub fn stub<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, symlink};
+
     use duscope_testkit::TestEnv;
 
-    use super::{is_spill_name, write};
+    use super::{is_spill_name, open_out, write, write_in};
+
+    #[test]
+    fn p5_sec_01_a_spill_is_made_in_the_out_it_opened_never_a_link_swapped_in() {
+        let env = TestEnv::new();
+        let dir = env.index_dir().join("out");
+        let opened = open_out(&dir).unwrap();
+        // `out` moved aside once opened, and in its place a link to a
+        // folder elsewhere.
+        let elsewhere = env.tmp_dir().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let aside = env.index_dir().join("out.aside");
+        fs::rename(&dir, &aside).unwrap();
+        symlink(&elsewhere, &dir).unwrap();
+        let path = write_in(&opened, &dir, Some("0123456789ab"), "top", b"{}").unwrap();
+        // The file is in the folder opened, where it now is, 0600; nothing
+        // is where the link leads.
+        let name = path.file_name().unwrap();
+        assert_eq!(path, dir.join(name));
+        assert_eq!(fs::read(aside.join(name)).unwrap(), b"{}\n");
+        assert_eq!(
+            fs::metadata(aside.join(name)).unwrap().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+        // With the link in place already, the spill is refused.
+        let failure = write(&dir, None, "top", b"{}").err().unwrap();
+        assert_eq!(failure.code, "io_error");
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
 
     #[test]
     fn p5_sec_01_a_spill_name_is_one_write_gives() {
