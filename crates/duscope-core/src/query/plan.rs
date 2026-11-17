@@ -9,7 +9,8 @@
 //!   largest, kept to the id range and filtered as it goes, until the limit
 //!   is reached. Its cost is how far it walks: little when the matches are
 //!   common, the whole index when none match. Apparent size has no index,
-//!   so a walk by apparent size is the range.
+//!   so a walk by apparent size is the range, and so is a walk of a file
+//!   without the size index.
 //! - **Dirs:** the subtree's directories at the depths the cut keeps, each
 //!   one's own files read by their id range (`files` has no depth column).
 //!
@@ -23,6 +24,13 @@
 //! index; otherwise the matches are counted over the range (or the
 //! directories, for a depth), and the walk is taken when they are common
 //! enough that it stops early (`walks`).
+//!
+//! The format promises no secondary index, and `INDEXED BY` fails on a file
+//! without the one it names, so the size index is read only where the file
+//! has one (`Index::size_index`). Without it, no statement names an
+//! index: the walk is the range (`Index::takes`), the band is not counted
+//! along it, the matches are counted where they lie, and the ties are found
+//! without it. The answers are the same, only slower.
 //!
 //! Every plan returns the rows the arena's queries return: ranked by size,
 //! ties by path (the tied rows found in path order by
@@ -44,7 +52,8 @@ pub enum Plan {
     /// The subtree's id range, filtered and sorted by size.
     Range,
     /// The size index, walked from the largest, filtered to the id range
-    /// and the cut; the range when ranking by apparent size.
+    /// and the cut; the range when ranking by apparent size, or on a file
+    /// without the size index.
     Walk,
     /// The subtree's directories at the depths kept, each one's own files
     /// read by their id range, filtered and sorted by size.
@@ -363,7 +372,8 @@ impl<'c> Terms<'c> {
         }
     }
 
-    /// How `plan` reads the subtree.
+    /// How `plan` reads the subtree. The walk names the size index: the
+    /// index asks for it only when the file has one ([`Index::takes`]).
     fn read(&self, plan: Plan) -> Read {
         let mut binds = Binds::after(2);
         let mut reads = Vec::new();
@@ -422,7 +432,8 @@ impl<'c> Terms<'c> {
 impl Index {
     /// The largest non-directories under `dir` (ties by path), at most
     /// `limit`, that `cut` keeps (every file, by allocated size, when
-    /// `None`), read with `plan`, or the plan the count chooses when `None`.
+    /// `None`), read with `plan` as the file can take it (`Index::takes`),
+    /// or the plan the count chooses when `None`.
     pub fn largest_files(
         &self,
         dir: u32,
@@ -444,7 +455,13 @@ impl Index {
         };
         let (first, last) = (dir, root.last_id);
         // A subtree that is one file has no directories to read.
-        let plan = plan.map(|p| if root.is_dir() { p } else { Plan::Range });
+        let plan = plan.map(|p| {
+            if root.is_dir() {
+                self.takes(p)
+            } else {
+                Plan::Range
+            }
+        });
         let (plan, total_count) = match plan {
             Some(plan) if terms.keeps_all() => (plan, root.file_count),
             Some(plan) => {
@@ -515,6 +532,16 @@ impl Index {
         Ok(Ranked { ids, total_count })
     }
 
+    /// `plan` as this file can take it: the walk reads the size index, so
+    /// on a file without one ([`Index::size_index`]) it is the range, which
+    /// keeps the same files, by the same ranking.
+    fn takes(&self, plan: Plan) -> Plan {
+        match plan {
+            Plan::Walk if !self.size_index() => Plan::Range,
+            plan => plan,
+        }
+    }
+
     /// The plan for `terms` under `root`, and how many files they keep.
     /// Without a condition, the subtree's size chooses and its file count
     /// is the count. With one, the files kept are counted first: in a
@@ -522,7 +549,8 @@ impl Index {
     /// counted and read along it ([`Index::by_band`]); otherwise they are
     /// counted where they lie, in the subtree's range or its directories
     /// at the depths kept, which also gives the rows that reading them
-    /// there costs, and the walk is taken when it costs less ([`walks`]).
+    /// there costs, and the walk is taken when it costs less ([`walks`])
+    /// and the file has the size index to walk.
     fn choose(
         &self,
         terms: &Terms<'_>,
@@ -535,7 +563,7 @@ impl Index {
             let (_, matched) = self.count(&terms.read(Plan::Range), first, last)?;
             return Ok((Plan::Range, matched));
         }
-        let by_size = Plan::choose(files, total);
+        let by_size = self.takes(Plan::choose(files, total));
         if terms.keeps_all() {
             return Ok((terms.plan_for(by_size), files));
         }
@@ -553,7 +581,8 @@ impl Index {
             Plan::Range
         };
         let (read, matched) = self.count(&terms.read(other), first, last)?;
-        let walk = cut.size == SizeKind::Allocated
+        let walk = self.size_index()
+            && cut.size == SizeKind::Allocated
             && walks(matched, read, files, total, limit, terms.residual());
         Ok((if walk { Plan::Walk } else { other }, matched))
     }
@@ -565,8 +594,12 @@ impl Index {
     /// entries than the range reads rows, each for half the cost), or when
     /// the band is narrow, holding less than a sixteenth of the subtree,
     /// which a count of the index alone, stopped there, finds. `None` for a
-    /// wide band.
+    /// wide band, and on a file without the size index, where the files
+    /// are counted where they lie.
     fn by_band(&self, terms: &Terms<'_>, root: &Node, total: u64) -> rusqlite::Result<Option<u64>> {
+        if !self.size_index() {
+            return Ok(None);
+        }
         let (first, last, files) = (root.id, root.last_id, root.file_count);
         if !terms.residual() && 2 * files >= total {
             return Ok(Some(self.count(&terms.read(Plan::Walk), first, last)?.1));
@@ -649,12 +682,13 @@ struct TieReads<'db> {
 
 impl Index {
     /// The statements that find the files tied at a size that `terms`
-    /// keep.
+    /// keep: the probe seeks the size along the size index where the file
+    /// has one, and reads the range otherwise.
     fn tie_reads(&self, terms: &Terms<'_>) -> rusqlite::Result<TieReads<'_>> {
         let column = terms.cut.column();
         let indexed = match terms.cut.size {
-            SizeKind::Allocated => "INDEXED BY files_allocated",
-            SizeKind::Apparent => "NOT INDEXED",
+            SizeKind::Allocated if self.size_index() => "INDEXED BY files_allocated",
+            SizeKind::Allocated | SizeKind::Apparent => "NOT INDEXED",
         };
         let mut binds = Binds::after(3);
         let mut conds = vec![format!("f.{column} = ?1")];
@@ -686,8 +720,8 @@ impl Index {
     /// they are read in pages. A directory whose own files lie at a depth
     /// the cut leaves out is passed through, one below every depth it keeps
     /// is not entered, and a subtree holding no such file, found by a seek
-    /// on the size index (a read of its range, by apparent size), is passed
-    /// over.
+    /// on the size index (a read of its range, by apparent size or on a
+    /// file without the size index), is passed over.
     fn first_in_path_order(
         &self,
         dir: u32,

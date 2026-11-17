@@ -357,15 +357,15 @@ fn largest_first(kept: Kept) -> Vec<(u64, u32)> {
 /// outermost directories a directory rule matches, read from `dirs` in
 /// pre-order as [`classify`] reads them, their files' tallies, by
 /// extension and execute bit, moved to the rule's class; and each class's
-/// largest files from one pass down `files_allocated`, whose order
-/// (allocated bytes down, ids up among equals) is the walk's. For a
-/// subtree, whose ids are one range: the rules' directories from that
-/// range of `dirs`, and everything else from one pass over that range of
-/// `files` ([`subtree_tallies`]). A scan's `attrs` says whether its rows
-/// hold modes: a basic scan's are NULL. `None` where the walk is needed: a
-/// filter, `--sort mtime` (the newest file is not in the tables), apparent
-/// sizes, or, for the whole scan, a class whose examples would include a
-/// file that counts no bytes.
+/// largest files from one pass down `files_allocated` (over `files` in that
+/// order, on a file without it), whose order (allocated bytes down, ids up
+/// among equals) is the walk's. For a subtree, whose ids are one range: the
+/// rules' directories from that range of `dirs`, and everything else from
+/// one pass over that range of `files` ([`subtree_tallies`]). A scan's
+/// `attrs` says whether its rows hold modes: a basic scan's are NULL.
+/// `None` where the walk is needed: a filter, `--sort mtime` (the newest
+/// file is not in the tables), apparent sizes, or, for the whole scan, a
+/// class whose examples would include a file that counts no bytes.
 fn from_index(view: &(impl TreeView + ?Sized), q: &ByTypeQuery<'_>) -> Option<Vec<Tally>> {
     let (saved, base) = view.as_index()?;
     if !q.filters.is_empty() || q.sort == SortKey::Mtime || q.size != SizeKind::Allocated {
@@ -526,11 +526,13 @@ fn rule_class(ranges: &[(u32, u32, Class)], id: u32) -> Option<Class> {
 /// Each class's `examples` largest files, ranked as the walk ranks them:
 /// bytes counted, down, then ids, up. The files charged with their bytes
 /// come from one pass down `files_allocated` that stops once every class
-/// is full; the files that count no bytes though they count (an uncharged
-/// clone member, a file of `shared_members`) rank after them, by id among
-/// the empty files the pass found. `class_at` gives a file's class from
-/// its id, extension and execute bit. `false` when the pass did not find
-/// what the tallies count (the walk decides).
+/// is full (on a file without that index, `Index::size_index`, a pass over
+/// `files` sorted in the same order: the same files, only more slowly);
+/// the files that count no bytes though they count (an uncharged clone
+/// member, a file of `shared_members`) rank after them, by id among the
+/// empty files the pass found. `class_at` gives a file's class from its
+/// id, extension and execute bit. `false` when the pass did not find what
+/// the tallies count (the walk decides).
 fn largest_by_class(
     saved: &crate::index::Index,
     examples: usize,
@@ -565,8 +567,13 @@ fn largest_by_class(
         .collect();
     let wanted = targets.iter().filter(|&&n| n > 0).count();
     let mut full = 0;
+    let indexed = if saved.size_index() {
+        "INDEXED BY files_allocated"
+    } else {
+        "NOT INDEXED"
+    };
     let mut stmt = db.prepare(&format!(
-        "SELECT id, allocated, ext, mode FROM files INDEXED BY files_allocated \
+        "SELECT id, allocated, ext, mode FROM files {indexed} \
          WHERE charged AND flags & {LATER_LINK} = 0 ORDER BY allocated DESC, id"
     ))?;
     let mut rows = stmt.query([])?;

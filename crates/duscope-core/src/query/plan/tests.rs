@@ -798,7 +798,8 @@ proptest! {
     /// Each plan, and the plan the count chooses, answers a random query
     /// of a random tree as the arena does: at its root and in a subtree,
     /// with ties by path (a quarter of the trees have equal sizes), hard
-    /// links and clones charged once, on both pages.
+    /// links and clones charged once, on both pages; on the file duscope
+    /// writes, and on a copy of it without the size index.
     #[test]
     fn p2_qry_10_every_plan_answers_as_the_arena(
         picks in prop::collection::vec(pick(), 1..64),
@@ -809,11 +810,15 @@ proptest! {
         let (arena, rollup) = generated(&picks, equal);
         let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
         let index = write(&arena, &rollup, Path::new("/r"), &env.tmp_dir());
+        let bare = changed(&index, "bare", "DROP INDEX files_allocated;");
+        prop_assert!(index.size_index() && !bare.size_index());
         let dirs = dirs_of(&view);
         for ask in &asks {
-            answers_as_the_arena(&view, &index, 0, ask)?;
             let d = dirs[usize::from(ask.under) % dirs.len()];
-            answers_as_the_arena(&view, &index, d, ask)?;
+            for saved in [&index, &bare] {
+                answers_as_the_arena(&view, saved, 0, ask)?;
+                answers_as_the_arena(&view, saved, d, ask)?;
+            }
         }
     }
 }
@@ -880,13 +885,10 @@ fn p2_qry_10_ties_of_equal_files_are_found_in_path_order_at_every_depth() {
     }
 }
 
-/// The plan the count chooses, for each kind of cut, on a tree of 1,200
-/// files a twentieth of which are large: the files each keeps are counted
-/// as the arena counts them, and read where they cost least.
-#[test]
-fn p2_qry_10_the_count_chooses_each_plan() {
-    let env = TestEnv::new();
-    let picks: Vec<Pick> = (0..1200u32)
+/// A tree of 1,200 files a twentieth of which are large, a third of them
+/// in the root and the rest in five directories.
+fn a_twentieth_large() -> Vec<Pick> {
+    (0..1200u32)
         .map(|i| {
             let i8 = u8::try_from(i % 251).unwrap();
             Pick {
@@ -901,8 +903,16 @@ fn p2_qry_10_the_count_chooses_each_plan() {
                 share: 0,
             }
         })
-        .collect();
-    let (arena, rollup) = generated(&picks, false);
+        .collect()
+}
+
+/// The plan the count chooses, for each kind of cut, on a tree of 1,200
+/// files a twentieth of which are large: the files each keeps are counted
+/// as the arena counts them, and read where they cost least.
+#[test]
+fn p2_qry_10_the_count_chooses_each_plan() {
+    let env = TestEnv::new();
+    let (arena, rollup) = generated(&a_twentieth_large(), false);
     let view = ArenaView::new(&arena, &rollup, PathBuf::from("/r"));
     let index = write(&arena, &rollup, Path::new("/r"), &env.tmp_dir());
     let root = index.node(0);
@@ -1177,6 +1187,170 @@ fn p2_qry_10_each_plan_reads_as_designed() {
         probe.contains("COVERING INDEX files_allocated"),
         "the band is counted on the index alone: {probe}"
     );
+}
+
+/// Copies of a saved scan whose size index the plans cannot name, as a
+/// program writing within the format may leave it: without one, with a
+/// partial one, and with one on another column.
+const WITHOUT_SIZE_INDEX: [(&str, &str); 3] = [
+    ("dropped", "DROP INDEX files_allocated;"),
+    (
+        "partial",
+        "DROP INDEX files_allocated; \
+         CREATE INDEX files_allocated ON files (allocated DESC) WHERE allocated >= 4096;",
+    ),
+    (
+        "on-apparent",
+        "DROP INDEX files_allocated; CREATE INDEX files_allocated ON files (apparent DESC);",
+    ),
+];
+
+/// A copy of the file `index` reads, beside it as `name`, changed by `sql`
+/// through a connection that may write anything, and opened as a saved
+/// scan.
+fn changed(index: &Index, name: &str, sql: &str) -> Index {
+    let copy = index.file().with_file_name(format!("{name}.db"));
+    fs::copy(index.file(), &copy).unwrap();
+    let db = rusqlite::Connection::open(&copy).unwrap();
+    db.execute_batch(sql).unwrap();
+    drop(db);
+    Index::open(&copy).unwrap()
+}
+
+/// A cut of each kind: none, a narrow band judged on the way, a band the
+/// index alone judges, a rare kind, a common kind, the root's own files,
+/// apparent sizes, and `stale`'s.
+fn a_cut_of_each_kind() -> [Cut; 8] {
+    [
+        Cut::default(),
+        Cut {
+            min_size: 1 << 20,
+            kinds: vec!["file"],
+            ..Cut::default()
+        },
+        Cut {
+            min_size: 1,
+            ..Cut::default()
+        },
+        Cut {
+            kinds: vec!["symlink"],
+            ..Cut::default()
+        },
+        Cut {
+            kinds: vec!["file"],
+            ..Cut::default()
+        },
+        Cut {
+            max_depth: Some(1),
+            ..Cut::default()
+        },
+        Cut {
+            size: SizeKind::Apparent,
+            kinds: vec!["file"],
+            ..Cut::default()
+        },
+        Cut {
+            min_size: 4096,
+            unchanged_before: Some(NOW - DAY),
+            ..Cut::default()
+        },
+    ]
+}
+
+/// Asserts that the subtree at `d` reads alike on `bare` and on `index`
+/// with `cut`, for 1, 25 and 100 rows: each plan forced and the one the
+/// count chooses, `ranked_files`, and `top --files` and `stale` with the
+/// filters that make the cut.
+fn reads_alike(bare: &Index, index: &Index, d: u32, cut: &Cut, name: &str) {
+    let filters = Filters {
+        kinds: cut.kinds.clone(),
+        min_size: (cut.min_size > 0).then_some(cut.min_size),
+        ..Filters::default()
+    };
+    let (on_bare, on_index) = (Subtree::new(bare, d), Subtree::new(index, d));
+    for limit in [1, 25, 100] {
+        let what = format!("{name} at {d}, {limit} rows: {cut:?}");
+        for plan in PLANS {
+            let read = |saved: &Index| saved.largest_files(d, limit, Some(cut.clone()), plan);
+            assert_eq!(
+                read(bare).unwrap(),
+                read(index).unwrap(),
+                "{plan:?}, {what}"
+            );
+        }
+        let ranked =
+            |view: &Subtree<'_, Index>| query::ranked_files(view, 0, limit, Some(cut.clone()));
+        assert_eq!(ranked(&on_bare), ranked(&on_index), "{what}");
+        let top = TopQuery {
+            files: true,
+            filters: filters.clone(),
+            depth: cut.max_depth,
+            size: cut.size,
+            limit: Some(limit),
+            ..TopQuery::default()
+        };
+        assert_eq!(
+            query::top(&on_bare, &top),
+            query::top(&on_index, &top),
+            "top, {what}"
+        );
+        let stale = StaleQuery {
+            now: NOW,
+            older_than: DAY,
+            min_size: cut.min_size,
+            filters: filters.clone(),
+            size: cut.size,
+            limit: Some(limit),
+            ..StaleQuery::default()
+        };
+        assert_eq!(
+            query::stale(&on_bare, &stale).unwrap(),
+            query::stale(&on_index, &stale).unwrap(),
+            "stale, {what}"
+        );
+    }
+}
+
+/// On a file whose size index the plans cannot name, each plan, the plan
+/// the count chooses, and `top --files` and `stale` answer as on the file
+/// duscope wrote, at the root and in a subtree, for each kind of cut: the
+/// same ids, in the same order (the ties of equal files included), and the
+/// same count. The count chooses as before, except that where it chose the
+/// walk it takes the plan it counted the matches with.
+#[test]
+fn p2_qry_10_every_plan_answers_alike_without_the_size_index() {
+    let env = TestEnv::new();
+    let (arena, rollup) = generated(&a_twentieth_large(), false);
+    let index = write(&arena, &rollup, Path::new("/r"), &env.tmp_dir());
+    let a = index.lookup([&b"a"[..]]).unwrap();
+    let mut walked = Vec::new();
+    for (name, sql) in WITHOUT_SIZE_INDEX {
+        let bare = changed(&index, name, sql);
+        for d in [0, a] {
+            let root = index.node(d);
+            for cut in &a_cut_of_each_kind() {
+                let terms = super::Terms::new(cut, &root).unwrap();
+                let (plan, count) = index.choose(&terms, &root, 25).unwrap();
+                let (bare_plan, bare_count) = bare.choose(&terms, &root, 25).unwrap();
+                assert_eq!(bare_count, count, "{name} at {d}: {cut:?}");
+                let counted = match plan {
+                    Plan::Walk if terms.parents.is_some() => Plan::Dirs,
+                    Plan::Walk => Plan::Range,
+                    plan => plan,
+                };
+                assert_eq!(bare_plan, counted, "{name} at {d}: {cut:?}");
+                if plan == Plan::Walk {
+                    walked.push(d);
+                }
+                reads_alike(&bare, &index, d, cut, name);
+            }
+        }
+        assert!(bare.failure().is_none(), "{name}: {:?}", bare.failure());
+        assert!(!bare.size_index(), "{name}");
+    }
+    // The file duscope wrote is walked, at the root and in the subtree.
+    assert!(walked.contains(&0) && walked.contains(&a), "{walked:?}");
+    assert!(index.failure().is_none(), "{:?}", index.failure());
 }
 
 /// The filtered shapes `p2_qry_10_timings` times.
