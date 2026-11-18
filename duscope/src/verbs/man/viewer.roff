@@ -4,9 +4,12 @@ opens the treemap in a viewer that takes the whole terminal.
 It reads the newest saved scan that holds the path (the current directory
 by default), or the saved scan
 .B \-\-scan
-names; an argument that is no path but
+names.
+An argument that is no path but the first four or more digits of a saved
+scan's id names that scan;
 .B latest
-or the first digits of a saved scan's id names that scan.
+as the argument means what no argument does, the newest saved scan that
+holds the current directory.
 When no saved scan holds the path, it scans the path and saves the scan,
 as the list verbs do:
 .B \-\-no\-save
@@ -44,9 +47,10 @@ when the output is one for programs
 .RB ( \-\-json ,
 .BR \-\-plain ,
 a format that
-.B \-\-format
-or
+.BR \-\-format ,
 .B DUSCOPE_FORMAT
+or the configuration file's
+.B format
 names other than
 .B table
 or
@@ -242,6 +246,14 @@ Open the mark pane.
 Scan the viewer's root again (not the zoomed folder alone) with the saved
 scan's options, beside the viewer, and reload when the new scan is saved,
 keeping the view, the filter, the marks and the path to the selection.
+On a map that no saved scan holds
+.RB ( "scan \-i"
+without
+.BR \-\-save ,
+or a scan that
+.B \-\-no\-save
+kept unsaved), walk the command's path again with its own options instead,
+reload on that walk, and save nothing.
 .TP
 .B ?
 List the keys;
@@ -286,11 +298,22 @@ What moved stays on the map as a freed tile until
 .B r
 reloads the map from a new scan or the viewer closes, and until then
 neither it nor a folder that holds it can be marked again.
-When the viewer closes, stderr says what it moved, with the
+When the viewer closes by
+.B q
+or
+.BR Ctrl\-C ,
+stderr says what it moved, with the
 .B index_untouched
 warning: the saved scans count what moved until
 .B duscope rescan
 measures the tree again.
+Under
+.B \-q
+that line is not written, nor when an error,
+.B SIGTERM
+or
+.B SIGHUP
+ends the viewer.
 A map that no saved scan holds
 .RB ( "scan \-i"
 without
