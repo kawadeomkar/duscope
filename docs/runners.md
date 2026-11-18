@@ -25,7 +25,7 @@ anything in this table is a new row in the [change log](#change-log).
 | --- | --- | --- |
 | Machine | the author's MacBook Pro (Mac17,8), [below](#bench-macos-the-authors-macbook-pro) | VM `bench-linux` (VMID 102) on the author's Proxmox VE 9.2 host, [below](#bench-linux-a-vm-on-proxmox) |
 | CPU and cores | Apple M5 Pro, 18 cores | 10 vCPUs of an Intel Core i9-10900K (10 cores, 20 threads), one per core, CPU type `host`, shared with the host's other VMs |
-| Memory | 48 GiB, shared with the author's own work | 8 GiB, fixed (no ballooning) |
+| Memory | 48 GiB, shared with the author's own work | 8 GiB, fixed (no ballooning), of the host's 64 GB of DDR4 at 2133 MT/s, XMP off ([change log](#change-log)) |
 | OS and kernel | macOS 26.7.2 (25G330), Darwin 25.6.0 | Ubuntu 24.04.5 LTS, Linux 6.8.0-147-generic |
 | Disk holding `BENCH_HOME` | the internal SSD | a 64 GB virtio-scsi disk (`ssd=1`, `discard=on`, no host cache) on LVM-thin storage on the host's Sabrent NVMe SSD |
 | Filesystem of `BENCH_HOME` | APFS, the Data volume, holding the warm runs' trees; the cold runs' trees on an APFS sparse-bundle disk image inside it ([below](#bench-macos-the-authors-macbook-pro)) | ext4, the root filesystem (`relatime,discard`) |
@@ -126,8 +126,8 @@ archives and `.deb`s ship. On bench-linux, the only machine it had run on, 3 of
 1,653 warm T2 scans aborted in the roll-up, a slice index out of range, two of
 them on a single flipped bit (bit 7); none of 2,100 scans of the glibc build did
 there. The project's Linux development VM shares bench-linux's Proxmox host,
-whose memory is suspect, so a run on either cannot tell a bad build from a bad
-host. [musl-loop.yml](../.github/workflows/musl-loop.yml) runs the same build on
+whose memory was then suspect, so a run on either could not tell a bad build
+from a bad host. [musl-loop.yml](../.github/workflows/musl-loop.yml) runs the same build on
 GitHub's hosted `ubuntu-24.04` runners instead. A dispatch runs it and nothing
 else triggers it, so it is never a required check and runs no other job:
 
@@ -170,10 +170,16 @@ gh workflow run musl-loop.yml --repo kawadeomkar/duscope --ref <branch> -f threa
 
 That matches the number of threads, not how many run at once: at most 4 do.
 
+It was the host. The loop's first run (43390167053, 2026-11-13) failed none of
+its 8,000 scans, and memtest86+ then found the host's memory failing at XMP's
+DDR4-3200, on bit 7, and clean at 2133 MT/s, where it has run since 2026-11-18
+([change log](#change-log)). After that change none of 8,000 warm T2 scans
+of the musl build, built on bench-linux, failed there.
+
 ## The Linux cross-check
 
-Every Linux figure of Gates 1 → 2 and 2 → 3 is bench-linux's, measured on the
-Proxmox host whose memory is suspect (DEV-157).
+Every Linux figure of Gates 1 → 2 and 2 → 3 is bench-linux's, measured on one
+Proxmox host, whose memory was unstable until 2026-11-18 (DEV-157).
 [linux-crosscheck.yml](../.github/workflows/linux-crosscheck.yml) measures the
 scan ratios again on another machine, a GitHub-hosted `ubuntu-24.04` runner: it
 builds the x86_64 musl binary as bench-linux's nightly does, and runs
@@ -513,7 +519,8 @@ the same tree.
 | 2026-10-25 | `bench-linux` | Registered: a VM on the author's Proxmox host, runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1 |
 | 2026-10-25 | `bench-macos` | Registered: the author's MacBook Pro (M5 Pro, 18 cores, 48 GiB, macOS 26.7.2), runner 2.338.1, hyperfine 2.0.0, rustc 1.99.1; a launchd daemon in the system domain; a daily wake at 03:10 |
 | 2026-10-25 | `bench-linux` | 10 vCPUs, one per core of the host (was 4), for the thread sweep |
-| 2026-11-15 | `bench-linux` | Re-created as VM 102, after the VM of 2026-10-25 (VMID 101) was destroyed on 2026-11-09: Ubuntu 24.04.5, kernel 6.8.0-149, 10 vCPUs, 8 GiB, 64 GB ext4 on the SSD-flagged NVMe disk; runner 2.338.2, hyperfine 2.0.0, rustc 1.100.0. The same host and CPU model, so `bench/compare.py` keeps comparing it with the old VM's results; its first night builds the trees again. rustc segfaulted once while it was set up, as on the old VM: the host's memory is still untested |
+| 2026-11-15 | `bench-linux` | Re-created as VM 102, after the VM of 2026-10-25 (VMID 101) was destroyed on 2026-11-09: Ubuntu 24.04.5, kernel 6.8.0-149, 10 vCPUs, 8 GiB, 64 GB ext4 on the SSD-flagged NVMe disk; runner 2.338.2, hyperfine 2.0.0, rustc 1.100.0. The same host and CPU model, so `bench/compare.py` keeps comparing it with the old VM's results; its first night builds the trees again. rustc segfaulted once while it was set up, as on the old VM: the host's memory was not yet tested (2026-11-18) |
+| 2026-11-18 | `bench-linux` | The host's memory at DDR4-2133, XMP off (was XMP's DDR4-3200, above the CPU's rated 2933, on four sticks of two kits). memtest86+ 7.20 found 51 errors at 3200 within five minutes, each one bit 7 of a 64-bit word's lowest byte read as 0, and none in three passes at 2133. The VM's disk checked clean from the host (`e2fsck -fn`, `dpkg --verify`); its Rust toolchains, cargo caches, hyperfine and `BENCH_HOME`'s `target` and `tools` were installed again, and the trees, which matched their stamps, kept. The same host and CPU model, so `bench/compare.py` keeps comparing with earlier results: absolute times from this date are on slower memory, and a slowdown the competitors share is a warning, not a regression |
 | 2026-10-25 | `bench-macos` | the trees on an APFS disk image, which the cold command remounts around each purge |
 | 2026-10-28 | `bench-macos` | the warm runs' trees back on the Data volume, in `BENCH_HOME/trees`; the image holds the cold runs' trees, measured with dua and `du` only |
 | 2026-10-28 | `bench-macos` | [paused](#paused): left out of scheduled runs until a dedicated Mac takes the label; a dispatch with `macos` ticked runs it |
