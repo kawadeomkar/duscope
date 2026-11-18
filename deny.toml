@@ -28,7 +28,14 @@ all-features = true
 # an exception is an `ignore` entry with a reason.
 unsound = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    # chrono is unmaintained, and no release of it or of a fork replaces it. It
+    # reaches the graph only through rmcp, the MCP conformance oracle, a
+    # dev-dependency of duscope-mcp that needs it unconditionally; no build of
+    # duscope holds it (`cargo tree -i chrono -e normal,build` is empty). Remove
+    # this entry when rmcp drops chrono or the oracle leaves rmcp.
+    { id = "RUSTSEC-2026-0543", reason = "chrono reaches only the tests, through rmcp, the dev-only MCP conformance oracle; nothing duscope builds or ships compiles it" },
+]
 
 [licenses]
 # MIT-0 and Zlib since DEV-2: jsonschema's tree needs them (borrow-or-share is
