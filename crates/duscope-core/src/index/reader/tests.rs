@@ -1018,3 +1018,134 @@ fn p5_cli_02_a_directory_reads_the_device_it_lies_on() {
     assert_eq!(index.dir_dev(index.len()), None);
     assert_eq!(index.failure(), None);
 }
+
+// P2-QRY-10: the size index is not part of the format's contract.
+
+/// The size index as a program writing within the format may leave it:
+/// what the change is, the statements that make it from the index duscope
+/// writes, and whether the queries can still name it.
+const SIZE_INDEXES: [(&str, &str, bool); 10] = [
+    ("dropped", "DROP INDEX files_allocated;", false),
+    (
+        "partial",
+        "DROP INDEX files_allocated; \
+         CREATE INDEX files_allocated ON files (allocated DESC) WHERE allocated > 0;",
+        false,
+    ),
+    (
+        "on-apparent",
+        "DROP INDEX files_allocated; CREATE INDEX files_allocated ON files (apparent DESC);",
+        false,
+    ),
+    (
+        "an-expression",
+        "DROP INDEX files_allocated; CREATE INDEX files_allocated ON files (allocated + 0 DESC);",
+        false,
+    ),
+    (
+        "allocated-second",
+        "DROP INDEX files_allocated; CREATE INDEX files_allocated ON files (id, allocated DESC);",
+        false,
+    ),
+    (
+        "on-another-table",
+        "DROP INDEX files_allocated; \
+         CREATE INDEX files_allocated ON type_stats (allocated DESC);",
+        false,
+    ),
+    (
+        "unique",
+        "DROP INDEX files_allocated; \
+         CREATE UNIQUE INDEX files_allocated ON files (allocated DESC, id);",
+        false,
+    ),
+    (
+        "ascending",
+        "DROP INDEX files_allocated; CREATE INDEX files_allocated ON files (allocated);",
+        true,
+    ),
+    (
+        "capitals-and-a-second-key",
+        "DROP INDEX files_allocated; \
+         CREATE INDEX FILES_ALLOCATED ON files (allocated DESC, apparent);",
+        true,
+    ),
+    ("as-written", "", true),
+];
+
+/// A copy of the index file at `file`, beside it as `name`, changed by
+/// `sql` through a connection that may write anything, and opened as a
+/// saved scan.
+fn changed_copy(file: &Path, name: &str, sql: &str) -> Index {
+    let copy = file.with_file_name(format!("{name}.db"));
+    fs::copy(file, &copy).unwrap();
+    let db = Connection::open(&copy).unwrap();
+    db.execute_batch(sql).unwrap();
+    drop(db);
+    Index::open(&copy).unwrap()
+}
+
+/// A size index counts when the queries can name it: `files_allocated` on
+/// `files`, over the whole table, not unique, its first key `allocated` in
+/// either direction. The walk's statement prepares on each that counts, and
+/// fails on a file without one or with a partial one.
+#[test]
+fn p2_qry_10_a_size_index_counts_where_the_queries_can_name_it() {
+    let env = TestEnv::new();
+    let mut tree = MemProvider::new("/t");
+    tree.file("a/x", 10).file("a/y", 20).file("b/z", 20);
+    let file = small_index(&env.tmp_dir(), &tree, "abcdef012345", 1);
+    let walk = "SELECT id FROM files INDEXED BY files_allocated \
+                WHERE id BETWEEN 0 AND 9 ORDER BY allocated DESC, id";
+    for (name, sql, usable) in SIZE_INDEXES {
+        let copy = changed_copy(&file, name, sql);
+        assert_eq!(copy.size_index(), usable, "{name}");
+        let prepared = copy.db().prepare(walk).map(drop);
+        if usable {
+            prepared.unwrap();
+        } else if matches!(name, "dropped" | "partial" | "on-another-table") {
+            assert!(prepared.is_err(), "{name}");
+        }
+        assert!(copy.failure().is_none(), "{name}");
+    }
+}
+
+/// On a file whose size index the queries cannot name, every list query
+/// answers as on the file duscope wrote, at the root and in subtrees: the
+/// same rows, in the same order, and nothing fails. So does a file whose
+/// size index runs the other way. The scan has every attribute, so that
+/// `stale` reads access times and `by-type` modes.
+#[test]
+fn p2_qry_10_every_query_answers_alike_without_the_size_index() {
+    let env = TestEnv::new();
+    let dir = env.tmp_dir();
+    let (_arena, _rollup, _root, index) = fixture_index(&dir, Attrs::Full);
+    let subtrees: Vec<u32> = index
+        .child_dirs(0)
+        .into_iter()
+        .take(2)
+        .map(|(d, _)| d)
+        .collect();
+    let want = answers(&index, true);
+    let want_under: Vec<_> = subtrees
+        .iter()
+        .map(|&d| answers(&Subtree::new(&index, d), true))
+        .collect();
+    for (name, sql, usable) in SIZE_INDEXES {
+        if !matches!(name, "dropped" | "partial" | "ascending") {
+            continue;
+        }
+        let copy = changed_copy(index.file(), name, sql);
+        // Compared whole, not printed: the lists are long.
+        assert!(answers(&copy, true) == want, "{name}");
+        for (&d, want) in subtrees.iter().zip(&want_under) {
+            assert!(
+                answers(&Subtree::new(&copy, d), true) == *want,
+                "{name} under {d}"
+            );
+        }
+        assert!(copy.failure().is_none(), "{name}: {:?}", copy.failure());
+        assert_eq!(copy.size_index(), usable, "{name}");
+    }
+    assert!(index.failure().is_none(), "{:?}", index.failure());
+}

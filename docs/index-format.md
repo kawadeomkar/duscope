@@ -262,8 +262,11 @@ Created after the rows are inserted:
 There is no name or extension index, and no path column: a path is resolved
 through `parent_id`, and a directory's own files are an id range. For the
 largest files of a small subtree the id range is faster than `files_allocated`;
-duscope chooses between them itself (with `INDEXED BY`), since SQLite's planner
-prefers the range even where the index is thousands of times faster.
+where the file has the index, duscope chooses between them itself (with
+`INDEXED BY`), since SQLite's planner prefers the range even where the index is
+thousands of times faster. On a file without a usable one duscope reads the
+tables, and answers every query alike, only more slowly
+([Compatibility](#compatibility)).
 
 The indexes are built once, after the rows, with SQLite's default page cache
 (about 2 MB). SQLite sorts each index's keys in that much memory and spills the
@@ -356,10 +359,12 @@ version. A reader refuses a file of any other major, older or newer, and an
 `index_version` that is not `major.minor`, before it reads the other tables:
 `index_version_mismatch`, exit 5, with a hint to scan again.
 
-Of the indexes, a reader names `files_allocated` (`INDEXED BY`, for `top
---files`, `stale` and `by-type`'s examples), so on a file without it those verbs
-fail `index_corrupt`. It names no other index: a file without one answers
-alike, more slowly.
+A reader relies on no secondary index. duscope names `files_allocated`
+(`INDEXED BY`, for `top --files`, `stale` and `by-type`'s examples) only when
+the file has a usable one: an index of that name on `files`, neither partial nor
+unique, whose first key is `allocated`, in either direction. Otherwise it reads
+the tables, and it names no other index, so a file without one answers every
+query alike, only more slowly.
 
 Within 2.0, flag bits 13 and 14 and the index `dirs_automount` came without a
 new minor version, since a reader that does not know them reads the file as
@@ -410,8 +415,8 @@ A program that writes index files for duscope to read keeps within these.
 
 The first version, written from the first release that saves indexes.
 
-Of the secondary indexes, a reader relies on `files_allocated` alone
-([Compatibility](#compatibility)). Files written before duscope dropped two
+No reader relies on a secondary index ([Compatibility](#compatibility)).
+Files written before duscope dropped two
 others also hold `dirs_cum_allocated` (`dirs (cum_allocated DESC)`) and
 `files_mtime` (`files (mtime)`), which no query read. They are still 2.0 and
 answer every query the same; only a hand-written query may run slower without

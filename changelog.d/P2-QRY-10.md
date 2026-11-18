@@ -5,3 +5,8 @@
   `stale --atime`, instead of reading every entry: on a scan of a million entries, tens of
   milliseconds instead of up to a second and more. The rows are the same. `--glob`, `--regex`,
   `--exclude`, `--sort` other than size, `-r` and `--all` still read every entry.
+
+### Fixed
+
+- `top --files`, `stale` and `by-type` answer from an index file without the size index
+  `files_allocated`, only slower, where they failed `index_corrupt`.

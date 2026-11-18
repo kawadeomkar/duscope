@@ -329,6 +329,83 @@ fn p2_qry_12_every_directory_of_the_fixture_tree_with_modes_answers_as_the_walk(
     every_subtree_answers_as_the_walk(&full, &[3]).unwrap();
 }
 
+/// A copy of the file `index` reads, beside it as `name`, changed by `sql`
+/// through a connection that may write anything, and opened as a saved
+/// scan.
+fn changed(index: &Index, name: &str, sql: &str) -> Index {
+    let copy = index.file().with_file_name(format!("{name}.db"));
+    fs::copy(index.file(), &copy).unwrap();
+    let db = rusqlite::Connection::open(&copy).unwrap();
+    db.execute_batch(sql).unwrap();
+    drop(db);
+    Index::open(&copy).unwrap()
+}
+
+/// On a file whose size index the queries cannot name (none, a partial
+/// one, one on another column), `by-type` answers from the tables as on
+/// the file duscope wrote, and as the walk, in every subtree: each class's
+/// largest files, ties by id, come from a pass over `files` in the size
+/// index's order. With and without modes, and with ties within and across
+/// classes.
+#[test]
+fn p2_qry_10_by_type_answers_from_the_tables_without_the_size_index() {
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("tree");
+    executables(&root);
+    let mut ties = MemProvider::new("/r");
+    ties.file("photos/a.jpg", 900_000)
+        .file("photos/b.jpg", 900_000)
+        .file("photos/c.png", 900_000)
+        .file("app/node_modules/x/logo.png", 900_000)
+        .file("src/main.rs", 40_000)
+        .file("src/lib.rs", 40_000)
+        .file("src/mod.rs", 40_000)
+        .file("notes.md", 9_000)
+        .file("README", 9_000)
+        .link("photos/again.jpg", "photos/a.jpg");
+    let classes = Classes::vendored();
+    for (what, index) in [
+        (
+            "modes",
+            scanned(&root, &env.tmp_dir().join("full"), Attrs::Full),
+        ),
+        (
+            "basic",
+            scanned(&root, &env.tmp_dir().join("basic"), Attrs::Basic),
+        ),
+        ("ties", index_of(&ties, &env.tmp_dir().join("ties"))),
+    ] {
+        for (name, sql) in [
+            ("dropped", "DROP INDEX files_allocated;"),
+            (
+                "partial",
+                "DROP INDEX files_allocated; \
+                 CREATE INDEX files_allocated ON files (allocated DESC) WHERE allocated > 0;",
+            ),
+            (
+                "on-apparent",
+                "DROP INDEX files_allocated; \
+                 CREATE INDEX files_allocated ON files (apparent DESC);",
+            ),
+        ] {
+            let bare = changed(&index, name, sql);
+            for examples in [0, 1, 2, 3, 10] {
+                let q = query(&classes, examples);
+                let want = from_index(&index, &q).expect("the tables answer");
+                assert_eq!(
+                    from_index(&bare, &q),
+                    Some(want),
+                    "{what}, {name}, {examples}"
+                );
+            }
+            every_subtree_answers_as_the_walk(&bare, &[0, 1, 3, 10])
+                .unwrap_or_else(|e| panic!("{what}, {name}: {e}"));
+            assert!(!bare.size_index(), "{what}, {name}");
+        }
+        assert!(index.failure().is_none(), "{what}: {:?}", index.failure());
+    }
+}
+
 /// A tree with one entry per pick: a path of directories from a set that
 /// holds the rules' names, then a file named from a set of extensions with
 /// a size from a set that holds 0, or a symbolic link to an earlier file.

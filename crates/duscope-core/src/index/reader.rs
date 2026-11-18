@@ -11,6 +11,12 @@
 //! checked first: a reader opens every minor of its major and refuses the
 //! others; `tool_version` must name a duscope version.
 //!
+//! The format promises no secondary index, so the queries name one only
+//! where the file has it: the size index, `files_allocated`, which the
+//! plans walk for the largest files ([`crate::query::plan`]), is looked up
+//! once at open (`Index::size_index`), and a file without one usable is
+//! read from its tables, answering alike, only more slowly.
+//!
 //! Entries are read in blocks of 256 ids, a query for each table, and the
 //! 32 blocks used last are kept: a query that walks the ids in
 //! order reads each block once, and one that climbs from an entry to the
@@ -160,6 +166,8 @@ pub struct Index {
     attrs: Attrs,
     len: u32,
     root: PathBuf,
+    /// Whether the file has a size index the plans can name.
+    sizes_indexed: bool,
     /// The blocks read last, the latest first.
     blocks: RefCell<Vec<Block>>,
     /// Entries read one at a time, until their block has been missed
@@ -267,6 +275,7 @@ impl Index {
             tool_version: meta.text("tool_version"),
         };
         Ok(Index {
+            sizes_indexed: has_size_index(&db).map_err(|e| corrupt(e.to_string()))?,
             db,
             path: path.to_owned(),
             root: PathBuf::from(OsStr::from_bytes(&root_bytes)),
@@ -329,6 +338,15 @@ impl Index {
     /// The connection, for the query plans.
     pub(crate) fn db(&self) -> &Connection {
         &self.db
+    }
+
+    /// Whether the file has a size index the queries can name with
+    /// `INDEXED BY files_allocated`, which fails on a file without one: an
+    /// index of that name on `files`, over the whole table, whose first key
+    /// is `allocated`, in either direction, and not unique. Without one,
+    /// the queries that would walk it read the tables instead.
+    pub(crate) fn size_index(&self) -> bool {
+        self.sizes_indexed
     }
 
     /// The index version the file records.
@@ -1710,6 +1728,25 @@ fn schema_objects(db: &Connection) -> rusqlite::Result<(i64, Option<String>)> {
         }
     }
     Ok((objects, virtual_table))
+}
+
+/// Whether the file's schema, already checked, has a size index the queries
+/// can name ([`Index::size_index`]), read from `SQLite`'s own description of
+/// it rather than its statement: `files_allocated` among the indexes of
+/// `files` (names in any case, as `SQLite` matches them), not partial, which
+/// `INDEXED BY` refuses for a query its condition does not cover, and not
+/// unique, which the planner would trust to hold one file of each size;
+/// its first key the column `allocated`, not an expression.
+fn has_size_index(db: &Connection) -> rusqlite::Result<bool> {
+    db.query_row(
+        "SELECT count(*) FROM pragma_index_list('files') AS l, \
+         pragma_index_xinfo('files_allocated') AS x \
+         WHERE l.name = 'files_allocated' COLLATE NOCASE AND l.partial = 0 \
+         AND l.\"unique\" = 0 AND x.seqno = 0 AND x.name = 'allocated' COLLATE NOCASE",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
 }
 
 /// Whether `sql`, a statement of the schema, creates a virtual table:
