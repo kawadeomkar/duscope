@@ -356,7 +356,8 @@ A confirmed vulnerability is fixed like this. The full procedure is in
    advisory's temporary private fork, and the reporter is invited to review it.
 2. A CVE is requested through GitHub, from the advisory.
 3. The fix ships as a patch release of the latest minor, whose changelog has only a `Security`
-   section.
+   section: from `main` when no other change waits there to be released, and otherwise from a
+   branch made from the latest release, so that the patch carries the fix alone.
 4. The advisory is published with the release.
 5. A `RUSTSEC` advisory is filed when a library crate (`duscope-core`, `duscope-walk`,
    `duscope-treemap`, `duscope-tui`, `duscope-mcp`) is affected, so that `cargo audit` reports
