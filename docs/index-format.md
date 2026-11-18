@@ -6,7 +6,7 @@ directory, mode 0600. The index directory is the one `--index-dir`,
 `$XDG_CACHE_HOME/duscope` (an absolute `XDG_CACHE_HOME`), else
 `~/Library/Caches/duscope` on macOS and `~/.cache/duscope` on Linux. duscope writes the file once,
 after the scan, and never changes it: a rescan writes a new file. This page
-describes `index_version` 2.0, whose DDL is
+describes `index_version` 2.1, whose DDL is
 [schemas/index/v2.sql](../schemas/index/v2.sql).
 
 ## Reading the file
@@ -323,7 +323,7 @@ stays 0; bits 7 to 11, 13 and 14 are set on directories only, and bit 12 on file
 
 | Key | Value | Meaning |
 | --- | --- | --- |
-| `index_version` | TEXT | this file's version, `major.minor`: `2.0` |
+| `index_version` | TEXT | this file's version, `major.minor`: `2.1` (`2.0` before v0.3.0) |
 | `scan_id` | TEXT | the scan's id: the first 12 lowercase hex digits of SHA-256(root ‖ `started_at` ‖ 8 random bytes), and the file's name |
 | `root` | BLOB | the scanned root, symbolic links resolved |
 | `root_as_given` | BLOB | the root as it was typed |
@@ -354,10 +354,11 @@ stays 0; bits 7 to 11, 13 and 14 are set on directories only, and bit 12 on file
 A reader opens every minor version of its major and ignores the columns,
 tables, `scan_meta` keys and flag bits it does not know: it reads `flags`
 through masks of the bits it knows. A minor version only adds nullable columns,
-tables or keys. A change to what an existing column means is a new major
-version. A reader refuses a file of any other major, older or newer, and an
-`index_version` that is not `major.minor`, before it reads the other tables:
-`index_version_mismatch`, exit 5, with a hint to scan again.
+tables, keys or flag bits, and each addition takes one; adding or dropping a
+secondary index changes no version. A change to what an existing column means
+is a new major version. A reader refuses a file of any other major, older or
+newer, and an `index_version` that is not `major.minor`, before it reads the
+other tables: `index_version_mismatch`, exit 5, with a hint to scan again.
 
 A reader relies on no secondary index. duscope names `files_allocated`
 (`INDEXED BY`, for `top --files`, `stale` and `by-type`'s examples) only when
@@ -365,13 +366,6 @@ the file has a usable one: an index of that name on `files`, neither partial nor
 unique, whose first key is `allocated`, in either direction. Otherwise it reads
 the tables, and it names no other index, so a file without one answers every
 query alike, only more slowly.
-
-Within 2.0, flag bits 13 and 14 and the index `dirs_automount` came without a
-new minor version, since a reader that does not know them reads the file as
-before ([Changelog](#changelog)). Whether a new flag bit or index takes a minor
-version, and which indexes the format promises, are for the 1.0 release's
-versioning freeze to settle; this page describes the files duscope writes and
-reads until then.
 
 ## What duscope opens
 
@@ -411,14 +405,22 @@ A program that writes index files for duscope to read keeps within these.
 
 ## Changelog
 
+### 2.1
+
+Written from v0.3.0. Flag bit 13 (`skipped_containers`), with the `options`
+key `skip_containers` and the directories it leaves out counted in
+`excluded_count`; flag bit 14 (`automount`), with the index `dirs_automount`. A
+reader of 2.0 opens a 2.1 file and reads a directory with bit 13 as excluded,
+since bit 10 is set beside it, and one with bit 14 as an empty directory.
+Builds of `main` between v0.2.0 and v0.3.0 wrote both bits, and the index, in
+files marked 2.0; a reader reads those as it reads 2.1.
+
 ### 2.0
 
 The first version, written from the first release that saves indexes.
 
 No reader relies on a secondary index ([Compatibility](#compatibility)).
-Files written before duscope dropped two
-others also hold `dirs_cum_allocated` (`dirs (cum_allocated DESC)`) and
-`files_mtime` (`files (mtime)`), which no query read. They are still 2.0 and
-answer every query the same; only a hand-written query may run slower without
-them. Files written before duscope added `dirs_automount` and flag bit 14 lack
-both; they are still 2.0, and their scans recorded no automount point.
+Files written before duscope dropped two others also hold `dirs_cum_allocated`
+(`dirs (cum_allocated DESC)`) and `files_mtime` (`files (mtime)`), which no
+query read. They are still 2.0 and answer every query the same; only a
+hand-written query may run slower without them.

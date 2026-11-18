@@ -1,4 +1,4 @@
--- duscope index schema, index_version 2.0: the DDL of the SQLite file each scan writes.
+-- duscope index schema, index_version 2.1: the DDL of the SQLite file each scan writes.
 --
 -- docs/index-format.md describes every column. A new nullable column is a minor
 -- version, which older readers open and ignore; a change of meaning is a major one,
@@ -127,7 +127,7 @@ CREATE TABLE type_stats (
     apparent  INTEGER NOT NULL
 );
 
-INSERT INTO scan_meta (key, value) VALUES ('index_version', '2.0');
+INSERT INTO scan_meta (key, value) VALUES ('index_version', '2.1');
 
 -- Indexes, created after the bulk insert.
 CREATE INDEX dirs_parent_name ON dirs (parent_id, name);

@@ -787,7 +787,7 @@ fn p2_idx_03_scans_lists_and_checks_the_saved_scans() {
     );
     let row = &listed["entries"][0];
     assert_eq!(row["root"], home);
-    assert_eq!(row["index_version"], "2.0");
+    assert_eq!(row["index_version"], "2.1");
     assert_eq!(
         row["allocated_bytes"],
         second["scan"]["total_allocated_bytes"]

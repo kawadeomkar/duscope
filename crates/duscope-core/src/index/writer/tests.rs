@@ -204,7 +204,7 @@ fn p2_idx_02_scan_meta_has_every_key() {
         })
         .unwrap()
     };
-    assert_eq!(value("index_version"), Value::Text("2.0".to_owned()));
+    assert_eq!(value("index_version"), Value::Text("2.1".to_owned()));
     assert_eq!(value("root"), Value::Blob(b"/t".to_vec()));
     assert_eq!(
         value("n_entries"),

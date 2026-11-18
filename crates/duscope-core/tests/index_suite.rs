@@ -295,6 +295,32 @@ fn p2_idx_06_a_file_holding_the_two_dropped_indexes_answers_alike() {
 }
 
 #[test]
+fn p2_idx_01_a_save_is_2_1_and_reads_as_its_2_0_copy() {
+    let env = TestEnv::new();
+    let file = write(&env.tmp_dir(), 1_700_000_000_000_000_000);
+    let current = Index::open(&file).unwrap();
+    assert_eq!(current.version(), "2.1");
+    // An earlier minor of the same file: what 2.1 added reads alike, since
+    // a reader reads flags through the masks of the bits it knows.
+    let earlier = changed(
+        &file,
+        "earlier.db",
+        "UPDATE scan_meta SET value = '2.0' WHERE key = 'index_version';",
+    );
+    let earlier = Index::open(&earlier).unwrap();
+    assert_eq!(earlier.version(), "2.0");
+    let top = |index: &Index| {
+        query::top(index, &TopQuery::default())
+            .entries
+            .iter()
+            .map(|row| (row.path.clone(), row.allocated_bytes))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(top(&earlier), top(&current));
+    assert!(earlier.failure().is_none(), "{:?}", earlier.failure());
+}
+
+#[test]
 fn p2_test_01_a_newer_minor_opens_and_another_major_is_refused() {
     let env = TestEnv::new();
     let file = write(&env.tmp_dir(), 1_700_000_000_000_000_000);

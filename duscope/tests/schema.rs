@@ -78,7 +78,7 @@ fn p2_qry_08_golden_of_the_layout_with_a_saved_scans_rows() {
         &format!("schema_json_tree@{os}.snap"),
         &duscope_testkit::normalize(&String::from_utf8(out.stdout).unwrap(), &root),
     );
-    assert_eq!(answer["result"]["index_version"], "2.0");
+    assert_eq!(answer["result"]["index_version"], "2.1");
     // The root, sub/ and four files.
     assert_eq!(rows(&answer, "dirs"), 2);
     assert_eq!(rows(&answer, "files"), 4);
