@@ -1,7 +1,8 @@
 # Security policy
 
-Last reviewed: 2026-11-09, against the MCP server as built (P2-SEC-01). The next review is
-P5-SEC-01's, before 1.0, against the MCP server's delete tool and `clean`.
+Last reviewed: 2026-11-15, against the code as built (P5-SEC-01), the MCP server's delete tool
+and `clean` among it, with the calls that reach the filesystem listed as
+[The filesystem calls](#the-filesystem-calls) describes.
 
 duscope measures directory trees. It reads metadata, writes snapshot indexes of what it found
 into its own index directory, and answers queries about them. It opens no network socket.
@@ -47,10 +48,14 @@ upgrade.
   directory when a tree holds it. Outside the index directory it changes only what it is told
   to: `clean` moves or deletes the entries it is given, `-o FILE` writes that file, and
   `agent --skill` writes the skill's files into `.agents/skills/duscope/` and
-  `.claude/skills/duscope/` under `--dir` or the working directory. Inside it, `scans --prune`
-  removes saved scans past keeping, the temporary files of index writes that will not finish,
-  and spilled envelopes over a week old, and nothing else: a file in `out` without a spill's
-  name stays, and an `out` that is a symbolic link is refused.
+  `.claude/skills/duscope/` under `--dir` or the working directory. Each writes a regular file
+  through a temporary file beside it, made only where nothing is at its name. `agent --skill`
+  refuses a symbolic link at each folder below `--dir` and at each skill file before it writes
+  anything; it checks by path, so someone who can write those folders while it runs could still
+  swap one for a link, and the skill's own files would be written where it leads. Inside it,
+  `scans --prune` removes saved scans past keeping, the temporary files of index writes that
+  will not finish, and spilled envelopes over a week old, and nothing else: a file in `out`
+  without a spill's name stays, and an `out` that is a symbolic link is refused.
 - **What the scans reveal.** Every path a scan measured, and its sizes and times, stays private
   to the user who ran the scan, and to the MCP clients that user starts `duscope mcp` for,
   within its `--roots`.

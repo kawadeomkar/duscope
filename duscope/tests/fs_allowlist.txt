@@ -416,10 +416,19 @@ statx: libc::SYS_statx
 
 ## duscope/src/agent/mod.rs
 
-write_skill: .exists(), fs::create_dir_all, fs::remove_file, fs::rename, fs::write
-  agent --skill: the skill's files in the skill folders under --dir or the
-  working directory (a person's), each written to <name>.tmp-<pid> beside it
-  and renamed into place.
+unlinked: fs::symlink_metadata
+  agent --skill: an lstat of each entry below --dir or the working directory
+  (a person's, but its contents may be anyone's: a cloned repository) on the
+  way to each skill file, and of the file, so a symbolic link is refused
+  before anything is written and never followed.
+write_skill: File::create_new, fs::create_dir, fs::create_dir_all, fs::remove_file, fs::rename
+  agent --skill: --dir or the working directory (a person's) made when it is
+  not there; below it, each missing folder made on its own (mkdir does not
+  follow a link at its name), after unlinked found no link on the way; each
+  file written to <name>.tmp-<pid> beside it, made with O_CREAT|O_EXCL so a
+  link planted at that guessable name is never followed, and renamed into
+  place (rename replaces a link and never follows one; unlinked refuses one
+  there).
 
 ## duscope/src/log.rs
 
@@ -457,10 +466,12 @@ handle: fs::symlink_metadata
 
 ## duscope/src/verbs/export.rs
 
-whole: File::create, fs::metadata, fs::remove_file, fs::rename
+whole: File::create_new, fs::metadata, fs::remove_file, fs::rename
   The -o file a person names: a stat (a FIFO or a device is written directly),
-  else the export goes to .<name>.<pid>.part beside it and is renamed over the
-  file once whole.
+  else the export goes to .<name>.<pid>.part beside it, made with
+  O_CREAT|O_EXCL so a link planted at that name, which others who may write the
+  directory can guess, is never followed, and is renamed over the file once
+  whole.
 
 ## duscope/src/verbs/import.rs
 

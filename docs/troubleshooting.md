@@ -573,7 +573,8 @@ cannot tell is not a mount point, under an item: that item fails
 with this code ([mcp.md](mcp.md#the---roots-rule)). `scans --prune` refuses an
 index directory whose `scans` or `out` is a symbolic link, before it removes
 anything: it removes saved scans, temporary files and spills from the index
-directory's own folders alone.
+directory's own folders alone. `agent --skill` refuses a folder below `--dir`,
+or a skill file, that is a symbolic link, before it writes anything.
 
 What to do: `--skip-refused` acts on the other items. `duscope_delete` takes no
 such parameter, though the hint names the flag: call it again without the
@@ -585,7 +586,8 @@ mounted on its own cannot be unmounted: for one under an item, the hint names
 For `scans --prune`, remove a linked `out`; duscope makes `out` again when it
 next spills. For a linked `scans`, put the folder it leads to in its place, or
 take another way [`untrusted_index`](#untrusted_index) gives: removing the link
-instead leaves the saved scans in that folder unread.
+instead leaves the saved scans in that folder unread. For `agent --skill`, remove
+the link, or give `--dir` a folder that holds none.
 
 ### `expectation_mismatch`
 
