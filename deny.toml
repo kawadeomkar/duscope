@@ -27,7 +27,17 @@ all-features = true
 # an exception is an `ignore` entry with a reason.
 unsound = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    # 0.2.1 patches v0.2.0 and keeps its dependencies, beside rustix 1.1.6 (for
+    # RUSTSEC-2026-0486, a patch release). main moved rmcp to 3.9.0 (DEV-143)
+    # and the bundled SQLite to 3.54 (DEV-144, Rust 1.89), and waives chrono;
+    # each advisory below is in a crate only the tests build, or in code duscope
+    # never reaches.
+    { id = "RUSTSEC-2026-0457", reason = "rmcp's OAuth client: rmcp is the dev-only MCP conformance oracle, built with `client` and `transport-async-rw` alone, so the OAuth client is not compiled" },
+    { id = "RUSTSEC-2026-0462", reason = "rmcp's Streamable HTTP clients: rmcp is the dev-only MCP conformance oracle, built with `client` and `transport-async-rw` alone, so no HTTP client is compiled" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; it reaches only the tests, through rmcp, the dev-only MCP conformance oracle" },
+    { id = "RUSTSEC-2026-0459", reason = "duscope never reads a -wal: every index is opened mode=ro&immutable=1, ATTACH is refused, and the writer opens only an empty file it has just created" },
+]
 
 [licenses]
 # MIT-0 and Zlib since DEV-2: jsonschema's tree needs them (borrow-or-share is
