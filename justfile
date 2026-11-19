@@ -164,12 +164,15 @@ platform-tests:
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
     # Each platform builds its own share of the list: twenty-eight on macOS and thirty on Linux.
-    # A renamed test must not drop out unnoticed.
+    # A renamed test must not drop out unnoticed. A build that fails says so (cargo's errors are
+    # above), not that the tests were not found.
     case "$(uname -s)" in
       Darwin) expected=28 ;;
       *) expected=30 ;;
     esac
-    found=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}" | grep -c ': test$' || true)
+    listed=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}") \
+      || { echo "platform-tests: the tests did not build" >&2; exit 1; }
+    found=$(grep -c ': test$' <<<"$listed" || true)
     [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
     cargo_test -- --ignored --exact "${tests[@]}"
 
