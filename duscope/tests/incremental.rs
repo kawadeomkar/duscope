@@ -522,6 +522,155 @@ mod macos {
         drop(detach);
     }
 
+    /// How the saved scan `merged` differs from `fresh` in the tables two
+    /// scans of one tree hold alike; empty when they are equal.
+    fn index_differences(merged: &Connection, fresh: &Connection) -> Vec<String> {
+        let tables = [
+            ("dirs", "id"),
+            ("files", "id"),
+            ("hardlinks", "dev, ino"),
+            ("clones", "dev, clone_id"),
+            ("shared_members", "id"),
+            ("scan_errors", "dir_id, name"),
+            ("type_stats", "ext"),
+        ];
+        tables
+            .into_iter()
+            .filter_map(|(table, order)| {
+                let (got, want) = (rows(merged, table, order), rows(fresh, table, order));
+                (got != want).then(|| differing(table, &columns(fresh, table), &got, &want))
+            })
+            .collect()
+    }
+
+    /// A saved scan of `tree`, on the image `image` attached at `mount`,
+    /// from whose mark the history reports nothing below the tree with
+    /// nothing changed since, and the volume's device. A replay delivers the
+    /// whole stored chunk of history that holds its mark, so a tree made
+    /// just before its scan has every directory reported until unrelated
+    /// events close the chunk: between tries, files are made and removed
+    /// beside the tree. Before each scan the image is attached again, which
+    /// writes out what fseventsd holds of it in memory, so the replay that
+    /// checks the scan's mark sees the history as every later one will.
+    fn settled_scan(env: &TestEnv, image: &Path, mount: &Path, tree: &Path) -> (String, u64) {
+        let noise = mount.join("noise");
+        fs::create_dir_all(&noise).unwrap();
+        for round in 0..10 {
+            env.hdiutil(&[&"detach", &"-force", &mount]);
+            attach(env, image, mount);
+            let dev = dev_of(mount);
+            let id = save(env, tree);
+            let mark = mark_of(&index(env, &id), dev);
+            // fseventsd numbers a change a moment after it is made.
+            std::thread::sleep(Duration::from_secs(2));
+            let replayed = replay(dev, &mark, tree, REPLAY_TIMEOUT).unwrap();
+            let below = |dirs: &[PathBuf]| dirs.iter().any(|dir| dir.starts_with(tree));
+            if replayed.history_done
+                && !below(&replayed.dirs)
+                && !below(&replayed.must_scan_subdirs)
+            {
+                eprintln!("the history settled after {round} rounds of noise");
+                return (id, dev);
+            }
+            for i in 0..30_000 {
+                fs::write(noise.join(i.to_string()), b"").unwrap();
+            }
+            for i in 0..30_000 {
+                fs::remove_file(noise.join(i.to_string())).unwrap();
+            }
+        }
+        panic!("the history still reports the tree's making");
+    }
+
+    /// Appends `mib` MiB to `file`, written to the disk.
+    fn append(file: &mut fs::File, mib: usize) {
+        let chunk = vec![7u8; 1 << 20];
+        for _ in 0..mib {
+            std::io::Write::write_all(file, &chunk).unwrap();
+        }
+        file.sync_all().unwrap();
+    }
+
+    /// The incremental rescan against the full scan with a file appended
+    /// to while its writer holds it open, which `FSEvents` reports only
+    /// when it is closed (DEV-214), beside one appended to and closed,
+    /// which it reports at once. The tree is made on an image and the
+    /// history settled before the scan, so the replay reports the closed
+    /// file's directory alone: without that every directory is read again
+    /// and the test proves nothing. The writer is this test, whose user the
+    /// rescan's is.
+    #[test]
+    #[ignore = "attaches a disk image and replays its FSEvents history; DUSCOPE_TEST_PLATFORM=1"]
+    fn p5_core_11_macos_an_incremental_rescan_equals_a_full_scan_with_a_file_held_open() {
+        let env = TestEnv::new();
+        if !platform_tests() {
+            return;
+        }
+        let work = fs::canonicalize(env.tmp_dir()).unwrap().join("image");
+        let mount = work.join("mnt");
+        fs::create_dir_all(&mount).unwrap();
+        let image = image(&env, &work, "64m");
+        attach(&env, &image, &mount);
+        let detach = Detach(&env, mount.clone());
+        let tree = mount.join("tree");
+        // A MiB each, as the appends are: APFS gives a file that grows into
+        // part of a 64 KiB chunk the rest of it, and frees it at a time of
+        // its own.
+        for rel in ["a/held.img", "b/closed.log", "c/untouched.bin"] {
+            fs::create_dir_all(tree.join(rel).parent().unwrap()).unwrap();
+            append(&mut fs::File::create(tree.join(rel)).unwrap(), 1);
+        }
+        // More than seven directories, so the ones the history reports stay
+        // under its 15% bound.
+        for i in 0..60 {
+            fs::create_dir_all(tree.join(format!("pad/p{i}"))).unwrap();
+            fs::write(tree.join(format!("pad/p{i}/x.txt")), i.to_string()).unwrap();
+        }
+        let (parent, dev) = settled_scan(&env, &image, &mount, &tree);
+
+        let open = |rel: &str| {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(tree.join(rel))
+                .unwrap()
+        };
+        let mut held = open("a/held.img");
+        append(&mut held, 8);
+        append(&mut open("b/closed.log"), 8);
+        let mark = mark_of(&index(&env, &parent), dev);
+        wait_for("the closed file in the history", || {
+            let replayed = replay(dev, &mark, &tree, REPLAY_TIMEOUT).unwrap();
+            replayed.dirs.contains(&tree.join("b"))
+        });
+        let replayed = replay(dev, &mark, &tree, REPLAY_TIMEOUT).unwrap();
+        assert!(
+            !replayed.dirs.contains(&tree.join("a")),
+            "the history reports the held file's directory: {:?}",
+            replayed.dirs
+        );
+
+        let answer = ok(&rescan(&env, &tree, 1, &["--incremental", "--json"]));
+        let scan = &answer["scan"];
+        assert_eq!(scan["incremental"], true, "{scan}");
+        assert_eq!(scan["fallback_reason"], Value::Null);
+        let read = scan["rescanned_dirs"].as_u64().unwrap();
+        let dirs = scan["dir_count"].as_u64().unwrap();
+        assert!(read < dirs / 4, "{read} of {dirs} directories read");
+        let merged = scan["id"].as_str().unwrap().to_owned();
+        let fresh = save(&env, &tree);
+        let differences = index_differences(&index(&env, &merged), &index(&env, &fresh));
+        assert!(
+            differences.is_empty(),
+            "the incremental rescan's index differs from a full scan's:\n{}",
+            differences.join("\n")
+        );
+        // The held file alone: the tree's times lie years before the test
+        // clock's scans, and nothing in it is sparse.
+        assert_eq!(scan["volatile_count"], 1, "{scan}");
+        drop(held);
+        drop(detach);
+    }
+
     /// A volume whose history fseventsd does not keep (an image attached
     /// with `-nobrowse`): the scan records no mark, and the rescan reads
     /// the whole tree, `volume_changed`, or with `--incremental` fails.

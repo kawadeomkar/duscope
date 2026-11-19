@@ -128,6 +128,7 @@ platform-tests:
       platform::macos::fsevents::tests::p5_walk_01_macos_a_remount_since_the_mark_voids_a_replay_below_the_root
       macos::p5_core_01_macos_an_incremental_rescan_equals_a_full_scan_of_the_fixture_tree
       macos::p5_core_01_macos_a_volume_without_history_is_rescanned_whole
+      macos::p5_core_11_macos_an_incremental_rescan_equals_a_full_scan_with_a_file_held_open
       p5_walk_02_linux_btrfs_subvolumes_are_boundaries_and_reflinks_share_extents
       p5_walk_02_linux_xfs_reflinks_share_extents
       p5_walk_02_linux_an_overlay_is_entered_and_confined_by_its_own_mount
@@ -163,11 +164,11 @@ platform-tests:
       tests::p5_test_01_macos_an_image_left_attached_in_a_test_directory_is_kept
     )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Each platform builds its own share of the list: twenty-eight on macOS and thirty on Linux.
+    # Each platform builds its own share of the list: twenty-nine on macOS and thirty on Linux.
     # A renamed test must not drop out unnoticed. A build that fails says so (cargo's errors are
     # above), not that the tests were not found.
     case "$(uname -s)" in
-      Darwin) expected=28 ;;
+      Darwin) expected=29 ;;
       *) expected=30 ;;
     esac
     listed=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}") \

@@ -11,6 +11,16 @@
 //! A volume the scan entered below its root that fails one is read whole
 //! instead.
 //!
+//! The history reports a change to a file's contents when the file is
+//! closed, not when it is written, so a file that grows while its writer
+//! holds it open is in none of its reports (DEV-214). [`plan`] adds the
+//! volatile set, read again whatever the history reports: the files a
+//! process of the scanning user holds open for writing below the root
+//! ([`Provider::open_for_write`], listed before the replay, so a file
+//! closed after the list is in it), the saved scan's entries whose `mtime`
+//! or `ctime` lies within [`VOLATILE_WINDOW_NS`] before its start or after
+//! it, and its sparse files. The directory of each is read again.
+//!
 //! [`merge`] then walks the saved scan's root with the walk's own options,
 //! but reads from disk only the directories it must: the root, every
 //! directory the history reports, every one on the way down to them, their
@@ -64,6 +74,19 @@ const MOST_CHANGED_PERCENT: usize = 15;
 /// The post-check reads 1% of the directories taken from the saved scan,
 /// and at least this many (all of them when there are fewer).
 const POST_CHECK_MIN: usize = 1000;
+
+/// An entry of the saved scan whose `mtime` or `ctime` lies within this
+/// long before the scan's start, or after it, is volatile: it may be a file
+/// still being written, which the history reports only once it is closed,
+/// and its directory is read again (DEV-214). 24 hours, provisional until
+/// the nightly's rescan figures (P5-BENCH-04) show what it costs.
+const VOLATILE_WINDOW_NS: i64 = 24 * 3600 * 1_000_000_000;
+
+/// An entry whose times lie within this long before a scan's start, or
+/// after it, is unsettled: a filesystem may still be settling its size, so
+/// no later rescan takes its row on trust, whatever [`VOLATILE_WINDOW_NS`]
+/// is (DEV-214). 5 seconds.
+const UNSETTLED_WINDOW_NS: i64 = 5 * 1_000_000_000;
 
 /// Why a rescan read the whole tree: the scan block's `fallback_reason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -219,8 +242,8 @@ pub struct Checks<'a> {
     pub tool_version: &'a str,
 }
 
-/// An incremental rescan, its checks passed: the saved tree and what its
-/// history reports changed in it.
+/// An incremental rescan, its checks passed: the saved tree, what its
+/// history reports changed in it, and the volatile set.
 #[derive(Debug)]
 pub struct Plan {
     root: PathBuf,
@@ -230,6 +253,7 @@ pub struct Plan {
     saved: Saved,
     changes: Changes,
     reported: usize,
+    volatile: usize,
 }
 
 impl Plan {
@@ -245,15 +269,30 @@ impl Plan {
     pub fn saved_dirs(&self) -> usize {
         self.saved.dirs.len()
     }
+
+    /// The entries of the volatile set, each counted once: the files held
+    /// open for writing in directories the saved scan read, and its entries
+    /// with recent times or flagged sparse (`volatile_count`).
+    #[must_use]
+    pub fn volatile(&self) -> usize {
+        self.volatile
+    }
 }
 
-/// Runs the checks of an incremental rescan of `index`'s scan.
+/// Runs the checks of an incremental rescan of `index`'s scan, and finds
+/// its volatile set, asking `provider`, the one the rescan walks with, for
+/// the files held open for writing.
 ///
 /// # Errors
 ///
 /// [`Stop::NoHistory`] where the platform keeps none, [`Stop::Fallback`]
 /// for a failed check, [`Stop::Index`] when the saved scan cannot be read.
-pub fn plan(index: &Index, checks: &Checks<'_>, history: &dyn History) -> Result<Plan, Stop> {
+pub fn plan(
+    index: &Index,
+    checks: &Checks<'_>,
+    history: &dyn History,
+    provider: &dyn Provider,
+) -> Result<Plan, Stop> {
     // Sampled before any replay: whatever changes after it is the next
     // rescan's to read.
     let Some(event_id) = history.now() else {
@@ -292,6 +331,8 @@ pub fn plan(index: &Index, checks: &Checks<'_>, history: &dyn History) -> Result
     options_unchanged(index, &options, checks)?;
     let saved = Saved::load(index).map_err(Stop::Index)?;
     let root = index.root_path().to_owned();
+    // Listed before the replay: a file closed after this is in it.
+    let open = provider.open_for_write(&root);
     let mut changes = Changes::default();
     replay(&saved, &root, history, &mut changes)?;
     let reported = changes.count(&saved);
@@ -305,6 +346,8 @@ pub fn plan(index: &Index, checks: &Checks<'_>, history: &dyn History) -> Result
             ),
         ));
     }
+    let (dirs, volatile) = volatile(index, &saved, &root, &open).map_err(Stop::Index)?;
+    changes.volatile = dirs;
     changes.close();
     Ok(Plan {
         root,
@@ -312,7 +355,66 @@ pub fn plan(index: &Index, checks: &Checks<'_>, history: &dyn History) -> Result
         saved,
         changes,
         reported,
+        volatile,
     })
+}
+
+/// The volatile set of `index`'s scan, `saved`, rooted at `root`, with the
+/// files `open` for writing: the directories that hold its entries, as
+/// paths below the root, and the entries, counted once each. An open file
+/// counts only in a directory the saved scan read; any other directory,
+/// new or not entered, is read again or left out whatever this says.
+fn volatile(
+    index: &Index,
+    saved: &Saved,
+    root: &Path,
+    open: &[PathBuf],
+) -> Result<(HashSet<Vec<u8>>, usize), CoreError> {
+    let mut entries: HashSet<(u32, Vec<u8>)> = HashSet::new();
+    for path in open {
+        let Some(rel) = relative(root, path) else {
+            continue;
+        };
+        let (parent, name) = match rel.iter().rposition(|&c| c == b'/') {
+            Some(slash) => (&rel[..slash], &rel[slash + 1..]),
+            None => (&b""[..], &rel[..]),
+        };
+        if let Some(dir) = saved.at(parent).filter(|dir| saved.entered(dir)) {
+            entries.insert((dir.id, name.to_vec()));
+        }
+    }
+    let since = index
+        .meta()
+        .started_at
+        .saturating_sub(VOLATILE_WINDOW_NS.max(UNSETTLED_WINDOW_NS));
+    let corrupt = |e: rusqlite::Error| CoreError::IndexCorrupt {
+        file: index.file().display().to_string(),
+        message: e.to_string(),
+    };
+    let mut stmt = index
+        .db()
+        .prepare(
+            "SELECT parent_id, name FROM files WHERE mtime >= ?1 OR ctime >= ?1 \
+             OR (flags & ?2) != 0 \
+             UNION ALL SELECT parent_id, name FROM dirs \
+             WHERE parent_id IS NOT NULL AND (mtime >= ?1 OR ctime >= ?1)",
+        )
+        .map_err(corrupt)?;
+    let rows = stmt
+        .query_map(rusqlite::params![since, Flags::SPARSE.bits()], |row| {
+            Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(corrupt)?;
+    for row in rows {
+        entries.insert(row.map_err(corrupt)?);
+    }
+    let held: HashSet<u32> = entries.iter().map(|(dir, _)| *dir).collect();
+    let dirs = held
+        .into_iter()
+        .filter_map(|id| saved.dir(id))
+        .map(|dir| saved.rel(dir))
+        .collect();
+    Ok((dirs, entries.len()))
 }
 
 /// A duration in days, for a message.
@@ -538,6 +640,10 @@ struct Changes {
     changed: HashSet<Vec<u8>>,
     /// Directories whose whole subtree is read again.
     deep: HashSet<Vec<u8>>,
+    /// Directories that hold an entry of the volatile set: their listings
+    /// are read again, and their subdirectories decided as any directory's
+    /// are.
+    volatile: HashSet<Vec<u8>>,
     /// Every directory on the way down to one of those, which the walk
     /// reads to reach them.
     above: HashSet<Vec<u8>>,
@@ -557,7 +663,7 @@ impl Changes {
 
     /// Fills `above` from the rest.
     fn close(&mut self) {
-        for rel in self.changed.iter().chain(&self.deep) {
+        for rel in self.changed.iter().chain(&self.deep).chain(&self.volatile) {
             let mut at = rel.len();
             while let Some(slash) = rel[..at].iter().rposition(|&c| c == b'/') {
                 self.above.insert(rel[..slash].to_vec());
@@ -574,6 +680,7 @@ impl Changes {
     fn reads(&self, parent: &[u8], rel: &[u8]) -> bool {
         self.changed.contains(parent)
             || self.changed.contains(rel)
+            || self.volatile.contains(rel)
             || self.above.contains(rel)
             || self.under_deep(rel)
     }
@@ -1159,6 +1266,10 @@ impl Provider for Pruning<'_> {
 
     fn cachedir_tag(&self, dir: &Path) -> bool {
         self.inner.cachedir_tag(dir)
+    }
+
+    fn open_for_write(&self, under: &Path) -> Vec<PathBuf> {
+        self.inner.open_for_write(under)
     }
 
     fn default_threads(&self) -> usize {

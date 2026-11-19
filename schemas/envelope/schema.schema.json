@@ -247,6 +247,19 @@
           "minimum": 0,
           "type": "integer"
         },
+        "volatile_count": {
+          "description": "The entries an incremental rescan read again whatever the history\nreported, since the history reports a file's new contents only once\nit is closed: files a process of the scanning user held open for\nwriting below the root, and the saved scan's entries whose times lie\nwithin a day of its start or after it, or that it flagged sparse.\nNull for any other scan, and for a saved scan read back, whose index\ndoes not keep it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-platforms": [
+            "macos"
+          ],
+          "x-since": "0.3"
+        },
         "volumes": {
           "description": "The volumes the scan met within the path read, entered or not: the\none the path lies on, and those mounted at or under it; at the scan's\nroot, every one.",
           "items": {
@@ -275,6 +288,7 @@
         "incremental",
         "parent_scan_id",
         "rescanned_dirs",
+        "volatile_count",
         "fallback_reason",
         "volumes",
         "excluded_count",

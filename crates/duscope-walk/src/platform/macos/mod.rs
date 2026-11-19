@@ -5,6 +5,7 @@
 mod bulk;
 mod ffi;
 pub(in crate::platform) mod fsevents;
+mod open_files;
 mod stat;
 #[cfg(test)]
 mod tests;
@@ -439,6 +440,12 @@ impl Provider for MacProvider {
     fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
         let name = NameRef::from(path.file_name().unwrap_or(path.as_os_str()));
         stat::entry_of_path(path, name, opts)
+    }
+
+    /// The files the scanning user's processes hold open for writing, from
+    /// libproc ([`open_files`]).
+    fn open_for_write(&self, under: &Path) -> Vec<PathBuf> {
+        open_files::open_for_write(under, crate::effective_uid())
     }
 
     /// The thread sweep's count (P1-BENCH-01), from bench-macos's

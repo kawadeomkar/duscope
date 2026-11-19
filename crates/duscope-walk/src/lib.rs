@@ -236,6 +236,17 @@ pub trait Provider: Send + Sync {
         platform::cachedir_tag(dir)
     }
 
+    /// The regular files below `under` that a process of the scanning user
+    /// holds open for writing, by path. A platform whose change history
+    /// reports a file's new contents only when the file is closed (macOS's
+    /// `FSEvents`) lists them, so an incremental rescan reads their
+    /// directories again (DEV-214); it opens none of them. A provider that
+    /// wraps another forwards it. The default: none.
+    fn open_for_write(&self, under: &Path) -> Vec<PathBuf> {
+        let _ = under;
+        Vec::new()
+    }
+
     /// The workers a walk runs when [`WalkOptions::threads`] is 0: twice the
     /// logical CPUs, clamped to 4..=32 (D40). bench-linux's thread sweep,
     /// `bench/results/thread-sweep-linux-x86_64.json` (P1-BENCH-01), holds it

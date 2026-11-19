@@ -273,6 +273,11 @@ A tree is anyone's: its names, links and sizes are input, as are the files of ot
   Besides these, it reads the two system tables that describe the layout: macOS's
   `/usr/share/firmlinks` and Linux's `/proc/self/mountinfo`. It writes nothing.
 
+  On macOS an incremental `rescan` also asks libproc which files the scanning user's own
+  processes hold open for writing below the root: each such process's descriptors, and each
+  vnode descriptor's open flags and path. It needs no privilege, reads no other user's
+  processes, and opens none of the files.
+
   `explain`, and so the `duscope_explain` tool, is not the scanner: for its git facts it reads
   what git reads (`.git` and what it names, `.gitignore`, `info/exclude`, the configuration and
   the file its `core.excludesFile` names, and the repository's index). It parses them and runs
