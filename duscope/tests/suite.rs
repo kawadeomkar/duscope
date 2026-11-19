@@ -406,8 +406,25 @@ struct RssGate {
 }
 
 /// The gate's passes. `scan` holds P1-TEST-01's budgets. `scan --save`, what
-/// acceptance target 5 names, has budgets of its own, not yet set: they come
-/// from the nightly's figures on both platforms (P2-IDX-07).
+/// acceptance target 5 names, holds budgets of its own (P2-IDX-07): the
+/// higher of bench-linux's two medians in the nightlies of 2026-11-17 and
+/// 2026-11-18 (runs 44055647418 and 44242692726, both of a8b32350), plus 10%
+/// and rounded up to a whole byte, as Gate 1 → 2 tightened its budgets to
+/// what was measured. Those medians were 101.8, 95.3 and 92.8 bytes per entry
+/// on T1, T2 and T3 with basic attributes, and 129.0, 124.0 and 118.9 with
+/// `--attrs full`; no median moved by more than 5.8% from one night to the
+/// other (T3, basic), inside the margin. One set of budgets holds both
+/// platforms, and macOS has no `--save` figures yet (bench-macos is paused,
+/// `docs/runners.md`): its first nightly's figures confirm these budgets or
+/// raise them.
+///
+/// The `--save` pass's cap stays unset, as `scan`'s does. The small scan's
+/// peak is the fixed cost of a run on the machine, which differs with the
+/// platform and the number of cores: with `--save` bench-linux's medians were
+/// 9.57 to 10.09 MB, and on the same small tree a release build on an arm64
+/// Mac (18 cores, 16 workers) measured 13.60 to 13.93 MB outside the nightly,
+/// so a cap set from Linux's figures would fail macOS with nothing changed.
+/// It waits for macOS's nightly figures.
 const RSS_GATES: [RssGate; 2] = [
     RssGate {
         name: "scan",
@@ -428,8 +445,14 @@ const RSS_GATES: [RssGate; 2] = [
         name: "scan --save",
         flags: &["--save"],
         budgets: [
-            ("basic", [("T1", None), ("T2", None), ("T3", None)]),
-            ("full", [("T1", None), ("T2", None), ("T3", None)]),
+            (
+                "basic",
+                [("T1", Some(112)), ("T2", Some(105)), ("T3", Some(103))],
+            ),
+            (
+                "full",
+                [("T1", Some(142)), ("T2", Some(137)), ("T3", Some(131))],
+            ),
         ],
         baseline_cap: None,
     },
@@ -496,6 +519,9 @@ fn p2_idx_07_the_rss_gate_runs_scan_save_and_says_when_a_limit_is_pending() {
         rss_command("bin", "/root", "basic", save.flags),
         "'bin' scan --attrs basic --json --treemap never --save '/root'"
     );
+    // The --save pass holds every tree at both levels to a budget; its cap
+    // alone waits for macOS's figures.
+    assert_eq!(pending_limits(save), ["the small scan's cap"]);
     // A limit not set is reported, a limit set is not.
     let all_set = RssGate {
         name: "set",
