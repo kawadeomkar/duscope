@@ -131,13 +131,26 @@ fn p4_tui_01_a_resize_redraws_at_the_new_size() {
     let env = TestEnv::new();
     let mut terminal = viewer(&env, 100, 30, &[]);
     terminal.wait_until(up).unwrap();
-    // Every frame reaches the last row, where the key line goes.
-    let last_row_drawn =
-        |rows: u16| move |s: &Screen| up(s) && !s.row_text(rows - 1).trim().is_empty();
-    terminal.wait_until(last_row_drawn(30)).unwrap();
+    // The viewer's own frame at `cols`×`rows`: the key line on the last row,
+    // and the panes' bottom border ending at the last column of the row
+    // above. What a resize leaves of the frame before, cut or padded to the
+    // new size, has neither, while a shrink keeps a row of it on the last
+    // line: `q` sent on that went out with the resize's SIGWINCH, and
+    // crossterm's event source could hold it unread (crossterm#1126).
+    let frame_at = |cols: u16, rows: u16| {
+        move |s: &Screen| {
+            let border = s.row_text(rows - 2);
+            let border = border.trim_end();
+            up(s)
+                && s.row_text(rows - 1).contains("q quit")
+                && border.ends_with('╯')
+                && border.chars().count() == usize::from(cols)
+        }
+    };
+    terminal.wait_until(frame_at(100, 30)).unwrap();
     for (cols, rows) in [(140, 45), (80, 24)] {
         terminal.resize(cols, rows).unwrap();
-        terminal.wait_until(last_row_drawn(rows)).unwrap();
+        terminal.wait_until(frame_at(cols, rows)).unwrap();
     }
     terminal.send(Key::Char('q')).unwrap();
     assert_eq!(exited(&mut terminal), 0);
