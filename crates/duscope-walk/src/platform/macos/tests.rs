@@ -1,5 +1,6 @@
 //! P1-WALK-03: the macOS provider against `lstat`, its stat queue against
-//! its bulk reads, and the record decoder on hand-packed records.
+//! its bulk reads, and the record decoder on hand-packed records; P5-CORE-11:
+//! the files the scanning user holds open for writing.
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
@@ -15,7 +16,9 @@ use duscope_testkit::TestEnv;
 use super::bulk::{self, Decoded, Outcome, Probe, Request};
 use super::{MacProvider, ffi, stat};
 use crate::platform::posix;
-use crate::{Boundary, DirHandle, Entry, Flags, Kind, ScanEvent, Share, WalkOptions, walk_with};
+use crate::{
+    Boundary, DirHandle, Entry, Flags, Kind, Provider, ScanEvent, Share, WalkOptions, walk_with,
+};
 
 /// A clock on which every bulk refill waits on I/O: each reading moves the
 /// wall clock 10 ms and the CPU clock 1 µs.
@@ -1317,4 +1320,60 @@ fn p1_bench_02_the_default_follows_the_result_file() {
         );
         assert_ne!(request.attrs.forkattr & libc::ATTR_CMNEXT_CLONEID, 0);
     }
+}
+
+#[test]
+fn p5_core_11_the_vnode_record_has_the_kernels_layout() {
+    // sizeof(struct vnode_fdinfowithpath) in <sys/proc_info.h>: a shorter
+    // record would make proc_pidfdinfo refuse every descriptor.
+    assert_eq!(size_of::<ffi::VnodeFdInfoWithPath>(), 1200);
+}
+
+#[test]
+fn p5_core_11_open_for_write_lists_this_users_files_below_the_root_alone() {
+    let env = TestEnv::new();
+    let tmp = std::fs::canonicalize(env.tmp_dir()).unwrap();
+    let (under, beside) = (tmp.join("under"), tmp.join("beside"));
+    for dir in [&under, &beside] {
+        std::fs::create_dir_all(dir.join("d")).unwrap();
+    }
+    // Held open for writing below the root and beside it, open for reading
+    // only, and written and closed.
+    let written = under.join("d/written.log");
+    let held = std::fs::File::create(&written).unwrap();
+    let outside = std::fs::File::create(beside.join("d/outside.log")).unwrap();
+    std::fs::write(under.join("read.txt"), b"x").unwrap();
+    let read = std::fs::File::open(under.join("read.txt")).unwrap();
+    std::fs::write(under.join("closed.txt"), b"x").unwrap();
+    let provider = MacProvider::default();
+    assert_eq!(
+        provider.open_for_write(&under),
+        std::slice::from_ref(&written)
+    );
+    assert_eq!(
+        provider.open_for_write(&tmp),
+        [beside.join("d/outside.log"), written.clone()]
+    );
+    // Below the Data volume's mount point, the same file as a walk that
+    // enters the volume there reaches it, beside the firmlinked spelling.
+    if let Some(data) = super::firmlinks().iter().find_map(|link| {
+        Some(
+            Path::new(super::DATA_MOUNT)
+                .join(&link.target)
+                .join(written.strip_prefix(&link.source).ok()?),
+        )
+    }) {
+        assert!(provider.open_for_write(Path::new("/")).contains(&written));
+        assert!(provider.open_for_write(Path::new("/")).contains(&data));
+        assert!(
+            provider
+                .open_for_write(Path::new(super::DATA_MOUNT))
+                .contains(&data)
+        );
+    }
+    // Another user's processes hold none of this process's files.
+    let other = crate::effective_uid().wrapping_add(1);
+    assert!(super::open_files::open_for_write(&under, other).is_empty());
+    drop((held, outside, read));
+    assert!(provider.open_for_write(&tmp).is_empty());
 }

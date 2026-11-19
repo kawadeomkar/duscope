@@ -129,9 +129,24 @@ checks:
   when there are fewer), and every file it took that shares its blocks or its
   inode, and one of them changed where the history reports no change.
 
+FSEvents records a change to a file's contents when the file is closed, not as
+it is written, so a file that grows while its writer holds it open (a virtual
+machine's disk, a database, a log, a download) is in none of its reports. So an
+incremental rescan also reads again, whatever the history reports, the
+directory of each entry of a volatile set, which `scan.volatile_count` counts:
+
+- the files a process of the scanning user holds open for writing below the
+  root, which libproc lists with no privilege and without opening them;
+- the saved scan's entries whose modification or status-change time lies
+  within four hours before its start, or after it;
+- the files the saved scan recorded as sparse.
+
 What it cannot see: on the startup disk's Data volume, changes made from
 recoveryOS or another system between a shutdown and the next startup (CAVEATS
-in `duscope man`). FSEvents records no reads either, so a rescan of a scan
+in `duscope man`); and a file idle at the saved scan that another user's
+process has opened for writing since and still holds open, which is in neither
+the history nor the volatile set, and keeps its saved size until it is closed.
+FSEvents records no reads either, so a rescan of a scan
 taken with `--attrs full` keeps the access times that scan read for what it
 takes from it, and `stale --atime` judges those files by the times read then.
 `duscope rescan --full` always reads the whole tree.

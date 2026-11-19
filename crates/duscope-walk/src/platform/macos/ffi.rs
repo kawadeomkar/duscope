@@ -1,6 +1,7 @@
 //! The macOS calls the provider makes, as safe wrappers, and the constants
-//! of `<sys/attr.h>`, `<sys/stat.h>`, `<sys/vnode.h>` and
-//! `<sys/resource.h>` that the `libc` crate does not declare. Every `unsafe`
+//! and types of `<sys/attr.h>`, `<sys/stat.h>`, `<sys/vnode.h>`,
+//! `<sys/resource.h>` and `<sys/proc_info.h>` that the `libc` crate does
+//! not declare. Every `unsafe`
 //! block of the macOS provider is in this file; the `FSEvents`,
 //! `CoreFoundation` and libdispatch calls, which `libc` does not declare,
 //! are in `fsevents.rs`.
@@ -332,4 +333,133 @@ pub(super) fn os_build() -> Option<String> {
     let value = value.split(|&b| b == 0).next()?;
     let build = std::str::from_utf8(value).ok()?;
     (!build.is_empty()).then(|| build.to_owned())
+}
+
+/// `PROC_UID_ONLY` (`<sys/proc_info.h>`): `proc_listpids` lists the
+/// processes of one effective user.
+const PROC_UID_ONLY: u32 = 4;
+/// `PROC_PIDFDVNODEPATHINFO` (`<sys/proc_info.h>`): a vnode descriptor's
+/// open flags, vnode and path.
+const PROC_PIDFDVNODEPATHINFO: c_int = 2;
+/// `FWRITE` (`<sys/fcntl.h>`): a descriptor open for writing, among the
+/// kernel's open flags that `proc_fileinfo` reports.
+pub(super) const FWRITE: u32 = 0x0002;
+
+/// `struct proc_fileinfo` (`<sys/proc_info.h>`).
+#[repr(C)]
+#[allow(dead_code, clippy::struct_field_names)] // the kernel's layout and names, of which the open flags are read
+struct ProcFileInfo {
+    fi_openflags: u32,
+    fi_status: u32,
+    fi_offset: libc::off_t,
+    fi_type: i32,
+    fi_guardflags: u32,
+}
+
+/// `struct vnode_fdinfowithpath` (`<sys/proc_info.h>`), 1,200 bytes.
+#[repr(C)]
+pub(super) struct VnodeFdInfoWithPath {
+    pfi: ProcFileInfo,
+    pvip: libc::vnode_info_path,
+}
+
+/// The processes whose effective user is `uid`, as `proc_listpids` lists
+/// them.
+pub(super) fn pids_of_user(uid: libc::uid_t) -> io::Result<Vec<libc::pid_t>> {
+    let width = size_of::<libc::pid_t>();
+    // SAFETY: with no buffer, proc_listpids writes nothing and returns the
+    // bytes the list needs.
+    let need = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
+    let need = usize::try_from(need).map_err(|_| io::Error::last_os_error())?;
+    // Room for the processes started since the size was asked.
+    let mut pids: Vec<libc::pid_t> = vec![0; need / width + 64];
+    let bytes = c_int::try_from(pids.len() * width).unwrap_or(c_int::MAX);
+    // SAFETY: `pids` holds `bytes` bytes, the most proc_listpids writes.
+    let got = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), bytes) };
+    let got = usize::try_from(got).map_err(|_| io::Error::last_os_error())?;
+    pids.truncate(got / width);
+    pids.retain(|&pid| pid > 0);
+    Ok(pids)
+}
+
+/// The descriptors process `pid` holds, as `PROC_PIDLISTFDS` lists them.
+pub(super) fn fds_of(pid: libc::pid_t) -> io::Result<Vec<libc::proc_fdinfo>> {
+    let width = size_of::<libc::proc_fdinfo>();
+    // SAFETY: with no buffer, proc_pidinfo writes nothing and returns the
+    // bytes the list needs, or 0 with errno set.
+    let need =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if need <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let need = usize::try_from(need).unwrap_or(0);
+    // Room for the descriptors opened since the size was asked.
+    let empty = libc::proc_fdinfo {
+        proc_fd: 0,
+        proc_fdtype: 0,
+    };
+    let mut fds = vec![empty; need / width + 16];
+    let bytes = c_int::try_from(fds.len() * width).unwrap_or(c_int::MAX);
+    // SAFETY: `fds` holds `bytes` bytes, the most proc_pidinfo writes.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            bytes,
+        )
+    };
+    if got <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    fds.truncate(usize::try_from(got).unwrap_or(0) / width);
+    Ok(fds)
+}
+
+/// What a vnode descriptor of a process is.
+#[derive(Debug)]
+pub(super) struct VnodeFd {
+    /// The kernel's open flags: [`FWRITE`] and the rest.
+    pub(super) open_flags: u32,
+    /// The vnode's type: [`VREG`] for a regular file.
+    pub(super) vtype: u32,
+    /// The path the kernel builds for the vnode, firmlinks taken.
+    pub(super) path: Vec<u8>,
+}
+
+/// The descriptor `fd` of process `pid`, a vnode, as
+/// `PROC_PIDFDVNODEPATHINFO` reports it.
+pub(super) fn vnode_fd(pid: libc::pid_t, fd: i32) -> io::Result<VnodeFd> {
+    let size = c_int::try_from(size_of::<VnodeFdInfoWithPath>()).unwrap_or(c_int::MAX);
+    // SAFETY: every field of the struct is an integer or an array of them,
+    // for which zero bytes are a value; proc_pidfdinfo writes at most `size`
+    // bytes, the struct's own, into it.
+    let (got, info) = unsafe {
+        let mut info = MaybeUninit::<VnodeFdInfoWithPath>::zeroed().assume_init();
+        let got = libc::proc_pidfdinfo(
+            pid,
+            fd,
+            PROC_PIDFDVNODEPATHINFO,
+            (&raw mut info).cast(),
+            size,
+        );
+        (got, info)
+    };
+    if got != size {
+        return Err(io::Error::last_os_error());
+    }
+    let path: Vec<u8> = info
+        .pvip
+        .vip_path
+        .as_flattened()
+        .iter()
+        .map(|&c| c.cast_unsigned())
+        .take_while(|&b| b != 0)
+        .collect();
+    Ok(VnodeFd {
+        open_flags: info.pfi.fi_openflags,
+        vtype: info.pvip.vip_vi.vi_type.cast_unsigned(),
+        path,
+    })
 }

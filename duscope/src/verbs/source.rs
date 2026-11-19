@@ -782,6 +782,7 @@ pub(super) fn read_block(
         // What a rescan read, and why it read the whole tree, belong to
         // its own output: the index keeps neither.
         rescanned_dirs: None,
+        volatile_count: None,
         fallback_reason: None,
         volumes: volumes
             .iter()

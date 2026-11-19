@@ -60,6 +60,9 @@ pub struct Scanned {
     /// For a rescan that read again only what changed, the directories it
     /// read; `None` for any other scan.
     pub incremental: Option<u64>,
+    /// For a rescan that read again only what changed, the entries of its
+    /// volatile set (`volatile_count`); `None` for any other scan.
+    pub volatile: Option<u64>,
     /// Why a rescan read the whole tree although it was not asked to
     /// (`fallback_reason`); `None` for any other scan.
     pub fallback: Option<&'static str>,
@@ -183,6 +186,7 @@ pub fn scan_block(
         incremental: scanned.incremental.is_some(),
         parent_scan_id: scanned.parent.as_ref().map(ToString::to_string),
         rescanned_dirs: scanned.incremental,
+        volatile_count: scanned.volatile,
         fallback_reason: scanned.fallback,
         volumes: arena
             .volumes()
@@ -825,6 +829,7 @@ pub(super) fn scan_by<E>(
         finished_ns: now(walk_args)?,
         parent: None,
         incremental: None,
+        volatile: None,
         fallback: None,
         source: "scan",
         full_disk_access_missing,
@@ -1396,6 +1401,7 @@ pub(super) mod tests {
             finished_ns: 0,
             parent: None,
             incremental: None,
+            volatile: None,
             fallback: None,
             source: "scan",
             full_disk_access_missing: false,
@@ -1459,6 +1465,7 @@ pub(super) mod tests {
             finished_ns: 0,
             parent: None,
             incremental: None,
+            volatile: None,
             fallback: None,
             source: "scan",
             full_disk_access_missing: false,
@@ -1548,6 +1555,7 @@ pub(super) mod tests {
             finished_ns: 0,
             parent: None,
             incremental: None,
+            volatile: None,
             fallback: None,
             source: "scan",
             full_disk_access_missing: false,
@@ -1760,6 +1768,7 @@ pub(super) mod tests {
             finished_ns: 0,
             parent: None,
             incremental: None,
+            volatile: None,
             fallback: None,
             source: "scan",
             full_disk_access_missing: false,

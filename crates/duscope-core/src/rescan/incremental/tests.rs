@@ -1,14 +1,16 @@
 //! P5-CORE-01: the incremental rescan's checks and merge on trees on disk,
 //! with the history scripted as `FSEvents` reports such changes, so they
 //! run on every platform: a merged index equals a full scan's, and every
-//! fallback reason is reached. The real history's replay of the fixture
-//! tree is `duscope/tests/incremental.rs`, in the platform tests.
+//! fallback reason is reached. P5-CORE-11: each source of the volatile set
+//! reads again a file the history does not report. The real history's
+//! replay of the fixture tree is `duscope/tests/incremental.rs`, in the
+//! platform tests.
 
 use std::cell::Cell;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
@@ -22,7 +24,8 @@ use duscope_walk::{
 use rusqlite::types::Value;
 
 use super::{
-    Changes, Checks, Fallback, History, MAX_AGE_NS, Merged, Pruning, Stop, merge, plan, sample,
+    Changes, Checks, Fallback, History, MAX_AGE_NS, Merged, Pruning, Stop, VOLATILE_WINDOW_NS,
+    merge, plan, sample,
 };
 use crate::CoreError;
 use crate::arena::Arena;
@@ -115,6 +118,13 @@ fn now_ns() -> i64 {
     i64::try_from(since.as_nanos()).unwrap()
 }
 
+/// When a test's saved scan is dated: the window and a minute from now, so
+/// that nothing in a tree made now is volatile (`VOLATILE_WINDOW_NS`) but
+/// what a test dates otherwise.
+fn settled_ns() -> i64 {
+    now_ns() + VOLATILE_WINDOW_NS + 60_000_000_000
+}
+
 /// A scan's `scan_meta`, started at `started`.
 fn meta(root: &Path, id: &str, started: i64, options: &str, excluded: u64) -> ScanMeta {
     ScanMeta {
@@ -201,20 +211,34 @@ fn incremental_with(
     dir: &Path,
     history: &dyn History,
 ) -> Result<(Index, Merged), Stop> {
+    let provider = provider(walk).unwrap();
+    incremental_by(&*provider, walk, parent, root, dir, history)
+        .map(|(index, merged, _)| (index, merged))
+}
+
+/// [`incremental_with`] read through `provider`, with the entries of its
+/// volatile set.
+fn incremental_by(
+    provider: &dyn Provider,
+    walk: &WalkOptions,
+    parent: &Index,
+    root: &Path,
+    dir: &Path,
+    history: &dyn History,
+) -> Result<(Index, Merged, usize), Stop> {
     let checks = Checks {
         now_ns: parent.meta().started_at + 3_600_000_000_000,
         max_age_ns: MAX_AGE_NS,
         tool_version: "0.0.0",
     };
-    let planned = plan(parent, &checks, history)?;
+    let planned = plan(parent, &checks, history, provider)?;
     let mut arena = Arena::new(Attrs::Basic);
-    let provider = provider(walk).unwrap();
     let merged = merge(
         &planned,
         parent,
         root,
         walk,
-        &*provider,
+        provider,
         history,
         &mut |event| arena.push(event).unwrap(),
     )?;
@@ -226,7 +250,7 @@ fn incremental_with(
         merged.summary.excluded,
     );
     meta.incremental = true;
-    Ok((write(arena, &meta, dir), merged))
+    Ok((write(arena, &meta, dir), merged, planned.volatile()))
 }
 
 /// Every row of `table`, in its key's order.
@@ -332,7 +356,7 @@ fn p5_core_01_a_merged_index_equals_a_full_scan_after_scripted_changes() {
     // goes, leaving the other alone in a directory nothing touches.
     let clones = clone(&root.join("keep/k7/f.txt"), &root.join("keep/k8/c2"));
     let index_dir = env.tmp_dir().join("index");
-    let (parent, _) = full(&root, &index_dir, "parent", now_ns(), "{}");
+    let (parent, _) = full(&root, &index_dir, "parent", settled_ns(), "{}");
 
     // Creates, deletes, renames, links and chmods, each with the
     // directories FSEvents reports for it.
@@ -414,7 +438,7 @@ fn p5_core_08_a_merge_of_many_grafts_equals_a_full_scan() {
         &root,
         &env.tmp_dir().join("index"),
         "parent",
-        now_ns(),
+        settled_ns(),
         "{}",
     );
     file(&root.join("wide/new.txt"), 3000);
@@ -442,7 +466,7 @@ fn fallback_of(env: &TestEnv, change: impl FnOnce(&Path), replay: Answer<'_>) ->
         &root,
         &env.tmp_dir().join("index"),
         "parent",
-        now_ns(),
+        settled_ns(),
         "{}",
     );
     change(&root);
@@ -561,13 +585,14 @@ fn p5_core_01_age_options_and_history_are_checked_before_any_replay() {
     );
     let replay = |_: &Path| -> Result<Replay, FsEventsError> { panic!("replayed") };
     let history = script(&replay);
+    let native = provider(&opts()).unwrap();
     let checked = |now_ns: i64, tool_version: &str, history: &dyn History| {
         let checks = Checks {
             now_ns,
             max_age_ns: MAX_AGE_NS,
             tool_version,
         };
-        match plan(&parent, &checks, history) {
+        match plan(&parent, &checks, history, &*native) {
             Err(Stop::Fallback(reason, _)) => Some(reason),
             Err(Stop::NoHistory) => None,
             other => panic!("{other:?}"),
@@ -614,7 +639,7 @@ fn p5_core_01_age_options_and_history_are_checked_before_any_replay() {
         tool_version: "0.0.0",
     };
     assert!(matches!(
-        plan(&followed, &checks, &history),
+        plan(&followed, &checks, &history, &*native),
         Err(Stop::Fallback(Fallback::HistoryGone, _))
     ));
 }
@@ -864,7 +889,7 @@ fn p5_core_01_under_attrs_full_an_incremental_saved_scan_is_read_whole() {
             max_age_ns: MAX_AGE_NS,
             tool_version: "0.0.0",
         };
-        match plan(&saved, &checks, &history) {
+        match plan(&saved, &checks, &history, &*provider) {
             Ok(_) => None,
             Err(Stop::Fallback(reason, _)) => Some(reason),
             Err(other) => panic!("{other:?}"),
@@ -919,7 +944,15 @@ fn p5_sec_04_a_saved_scan_whose_rows_break_the_layout_is_index_corrupt() {
         drop(db);
         Index::open(&file).unwrap()
     };
-    assert!(plan(&copy("sound", ""), &checks, &history).is_ok());
+    assert!(
+        plan(
+            &copy("sound", ""),
+            &checks,
+            &history,
+            &*provider(&opts()).unwrap()
+        )
+        .is_ok()
+    );
     for (case, sql, reported) in [
         (
             "cycle",
@@ -949,7 +982,12 @@ fn p5_sec_04_a_saved_scan_whose_rows_break_the_layout_is_index_corrupt() {
             "dirs row 3: its parent_id is NULL, which only the root's may be",
         ),
     ] {
-        match plan(&copy(case, sql), &checks, &history) {
+        match plan(
+            &copy(case, sql),
+            &checks,
+            &history,
+            &*provider(&opts()).unwrap(),
+        ) {
             Err(Stop::Index(CoreError::IndexCorrupt { message, .. })) => {
                 assert_eq!(message, reported, "{case}");
             }
@@ -1052,8 +1090,8 @@ fn p5_walk_06_an_incremental_rescan_asks_its_provider_for_automount_points() {
         max_age_ns: MAX_AGE_NS,
         tool_version: "0.0.0",
     };
-    let planned = plan(&parent, &checks, &history).unwrap();
     let inner = Automounts(provider(&opts()).unwrap());
+    let planned = plan(&parent, &checks, &history, &inner).unwrap();
     let pruning = Pruning {
         inner: &inner,
         plan: &planned,
@@ -1068,4 +1106,174 @@ fn p5_walk_06_an_incremental_rescan_asks_its_provider_for_automount_points() {
         let entry = pruning.root(&root.join(name), &opts()).unwrap();
         assert_eq!(pruning.untriggered_automount(&entry), automount, "{name}");
     }
+}
+
+/// The platform's provider, which reports the files `open` held open for
+/// writing.
+struct Holding {
+    inner: Box<dyn Provider>,
+    open: Vec<PathBuf>,
+}
+
+impl Provider for Holding {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<ScanError>,
+    ) -> io::Result<()> {
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+
+    fn open_for_write(&self, _under: &Path) -> Vec<PathBuf> {
+        self.open.clone()
+    }
+}
+
+/// The incremental rescan of `parent`'s root through `provider`, the
+/// history reporting nothing, against a full scan made after it: the
+/// directories it read and the entries of its volatile set.
+fn unreported(env: &TestEnv, provider: &dyn Provider, parent: &Index) -> (u64, usize) {
+    let root = parent.root_path().to_owned();
+    let quiet = |under: &Path| Ok(reporting(under, &[]));
+    let history = script(&quiet);
+    let (merged, outcome, volatile) = incremental_by(
+        provider,
+        &opts(),
+        parent,
+        &root,
+        &env.tmp_dir().join("merged"),
+        &history,
+    )
+    .unwrap();
+    let (fresh, _) = full(&root, &env.tmp_dir().join("fresh"), "fresh", now_ns(), "{}");
+    assert_same(&merged, &fresh);
+    (outcome.rescanned_dirs, volatile)
+}
+
+#[test]
+fn p5_core_11_a_file_held_open_for_writing_is_read_again() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    let (parent, _) = full(
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        settled_ns(),
+        "{}",
+    );
+    // Rewritten in place by a writer that still holds it, which FSEvents
+    // reports only once it is closed: the history reports nothing.
+    fs::write(root.join("b/bfile"), vec![9u8; 50_000]).unwrap();
+    let held = Holding {
+        inner: provider(&opts()).unwrap(),
+        // Beside it, a file outside the root and one in a directory the
+        // saved scan does not hold, which count for nothing.
+        open: vec![
+            root.join("b/bfile"),
+            root.with_file_name("elsewhere.log"),
+            root.join("new/dir/file"),
+        ],
+    };
+    // The root and the file's directory alone.
+    assert_eq!(unreported(&env, &held, &parent), (2, 1));
+}
+
+#[test]
+fn p5_core_11_a_file_rewritten_in_place_inside_the_window_is_read_again() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    let started = settled_ns();
+    // Written an hour before the saved scan, and an hour after its start;
+    // the rest of the tree further back than the window.
+    let hour = 3_600_000_000_000;
+    for (rel, at) in [
+        ("keep/k40/f.txt", started - hour),
+        ("keep/k41/f.txt", started + hour),
+    ] {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(at.cast_unsigned());
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .open(root.join(rel))
+            .unwrap();
+        written.set_modified(at).unwrap();
+    }
+    let (parent, _) = full(&root, &env.tmp_dir().join("index"), "parent", started, "{}");
+    // Rewritten in place, their sizes changed, with their events
+    // suppressed.
+    for rel in ["keep/k40/f.txt", "keep/k41/f.txt"] {
+        fs::write(root.join(rel), vec![3u8; 9000]).unwrap();
+    }
+    let native = provider(&opts()).unwrap();
+    // The root, `keep/` on the way down, and the files' directories.
+    assert_eq!(unreported(&env, &*native, &parent), (4, 2));
+}
+
+/// macOS alone flags a file sparse (`docs/index-format.md`), so elsewhere
+/// the source holds nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn p5_core_11_a_sparse_file_is_read_again() {
+    use std::os::unix::fs::FileExt;
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    let hole = root.join("keep/k50/hole.bin");
+    fs::File::create(&hole).unwrap().set_len(64 << 20).unwrap();
+    let (parent, _) = full(
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        settled_ns(),
+        "{}",
+    );
+    let flags: u32 = parent
+        .db()
+        .query_row(
+            "SELECT flags FROM files WHERE name = CAST('hole.bin' AS BLOB)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if flags & duscope_walk::Flags::SPARSE.bits() == 0 {
+        duscope_testkit::skip(
+            "this filesystem made no sparse file, so the sparse source is unchecked",
+        );
+        return;
+    }
+    // A chunk of data written into the hole: the size stays, the blocks
+    // do not, and the history reports nothing.
+    let written = fs::OpenOptions::new().write(true).open(&hole).unwrap();
+    written
+        .write_all_at(&vec![5u8; 64 * 1024], 1 << 20)
+        .unwrap();
+    written.sync_all().unwrap();
+    drop(written);
+    let native = provider(&opts()).unwrap();
+    // The root, `keep/` on the way down, and the file's directory.
+    assert_eq!(unreported(&env, &*native, &parent), (3, 1));
+}
+
+#[test]
+fn p5_core_11_a_volatile_directory_is_read_and_its_children_decided() {
+    let mut changes = Changes::default();
+    changes.volatile.insert(b"v/w".to_vec());
+    changes.close();
+    assert!(changes.reads(b"v", b"v/w"));
+    // The way down to it is read; its subdirectories are decided by their
+    // times, as any directory's are, where a reported one's are read.
+    assert!(changes.reads(b"", b"v"));
+    assert!(!changes.reads(b"v/w", b"v/w/x"));
+    assert!(!changes.reads(b"v", b"v/q"));
 }

@@ -346,33 +346,45 @@ fn incremental(
         tool_version: env!("CARGO_PKG_VERSION"),
     };
     let history = FsEvents;
-    let plan = match rescan::plan(&parent.index, &checks, &history) {
+    // This platform's provider, the one a rescan reads with: the plan asks
+    // it for the files held open for writing, and the merge walks with it.
+    let provider = match duscope_walk::provider(&WalkOptions::default()) {
+        Ok(provider) => provider,
+        Err(e) => return Ok(Err(Stop::Walk(e))),
+    };
+    let plan = match rescan::plan(&parent.index, &checks, &history, &*provider) {
         Ok(plan) => plan,
         Err(stop) => return Ok(Err(stop)),
     };
     log::info!(
-        "incremental rescan: {} of the saved scan's {} directories changed",
+        "incremental rescan: {} of the saved scan's {} directories changed; {} volatile entries \
+         read again",
         thousands(plan.reported() as u64),
-        thousands(plan.saved_dirs() as u64)
+        thousands(plan.saved_dirs() as u64),
+        thousands(plan.volatile() as u64)
     );
     let mut read_again = 0;
-    let read = |root: &Path, opts: &WalkOptions, sink: &mut dyn FnMut(ScanEvent)| {
-        let provider = match duscope_walk::provider(opts) {
-            Ok(provider) => provider,
-            Err(e) => return Ok(Err(e)),
-        };
-        match rescan::merge(&plan, &parent.index, root, opts, &*provider, &history, sink) {
+    let read =
+        |root: &Path, opts: &WalkOptions, sink: &mut dyn FnMut(ScanEvent)| match rescan::merge(
+            &plan,
+            &parent.index,
+            root,
+            opts,
+            &*provider,
+            &history,
+            sink,
+        ) {
             Ok(merged) => {
                 read_again = merged.rescanned_dirs;
                 Ok(Ok(merged.summary))
             }
             Err(Stop::Walk(e)) => Ok(Err(e)),
             Err(stop) => Err(stop),
-        }
-    };
+        };
     let scanned = scan::scan_by(walk, excludes, read)?;
     Ok(scanned.map(|mut scanned| {
         scanned.incremental = Some(read_again);
+        scanned.volatile = Some(plan.volatile() as u64);
         scanned
     }))
 }

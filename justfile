@@ -98,7 +98,10 @@ check-full: check
 # The ignored platform tests, named here: an #[ignore]d test joins them (and CI's platform
 # job) only when it is listed. They mount filesystems, attach images and scan /, need root
 # and skip without it; CI runs each test binary under `sudo -E`. Built in release for the
-# scan of /, and for the test that a release build ignores the test variables (P5-SEC-06).
+# scan of /, and for the test that a release build ignores the test variables (P5-SEC-06),
+# but for the two FSEvents equality tests, built in debug: there the test clock dates every
+# scan, as a release build does not, so the tree a test has just made lies years before its
+# scan and outside the incremental rescan's volatile window (DEV-227).
 # The system-tree du parity and the RSS budget run in nightly-bench.yml.
 platform-tests:
     #!/usr/bin/env bash
@@ -126,7 +129,6 @@ platform-tests:
       p0_test_03_macos_spotlight_keeps_no_volume_for_the_images_the_tests_attach
       platform::macos::fsevents::tests::p5_walk_01_macos_no_log_on_an_image_gives_fsevents_disabled
       platform::macos::fsevents::tests::p5_walk_01_macos_a_remount_since_the_mark_voids_a_replay_below_the_root
-      macos::p5_core_01_macos_an_incremental_rescan_equals_a_full_scan_of_the_fixture_tree
       macos::p5_core_01_macos_a_volume_without_history_is_rescanned_whole
       p5_walk_02_linux_btrfs_subvolumes_are_boundaries_and_reflinks_share_extents
       p5_walk_02_linux_xfs_reflinks_share_extents
@@ -162,19 +164,34 @@ platform-tests:
       p5_test_01_linux_hfsplus_is_foreign_with_links_and_case_unknown
       tests::p5_test_01_macos_an_image_left_attached_in_a_test_directory_is_kept
     )
+    # The FSEvents equality tests, from a debug build (above); macOS only.
+    debug_tests=(
+      macos::p5_core_01_macos_an_incremental_rescan_equals_a_full_scan_of_the_fixture_tree
+      macos::p5_core_11_macos_an_incremental_rescan_equals_a_full_scan_with_a_file_held_open
+    )
     cargo_test() { DUSCOPE_TEST_PLATFORM=1 cargo test --release --workspace --locked "$@"; }
-    # Each platform builds its own share of the list: twenty-eight on macOS and thirty on Linux.
-    # A renamed test must not drop out unnoticed. A build that fails says so (cargo's errors are
-    # above), not that the tests were not found.
+    debug_test() { DUSCOPE_TEST_PLATFORM=1 cargo test -p duscope --test incremental --locked "$@"; }
+    # Each platform builds its own share of the lists: twenty-seven in release and two in debug
+    # on macOS, thirty in release on Linux. A renamed test must not drop out unnoticed. A build
+    # that fails says so (cargo's errors are above), not that the tests were not found.
     case "$(uname -s)" in
-      Darwin) expected=28 ;;
-      *) expected=30 ;;
+      Darwin) expected=27 debug_expected=2 ;;
+      *) expected=30 debug_expected=0 ;;
     esac
     listed=$(cargo_test --quiet -- --ignored --exact --list "${tests[@]}") \
       || { echo "platform-tests: the tests did not build" >&2; exit 1; }
     found=$(grep -c ': test$' <<<"$listed" || true)
     [[ $found -eq $expected ]] || { echo "platform-tests: $found of this platform's $expected tests found; update the list" >&2; exit 1; }
+    if [[ $debug_expected -gt 0 ]]; then
+      listed=$(debug_test --quiet -- --ignored --exact --list "${debug_tests[@]}") \
+        || { echo "platform-tests: the debug tests did not build" >&2; exit 1; }
+      found=$(grep -c ': test$' <<<"$listed" || true)
+      [[ $found -eq $debug_expected ]] || { echo "platform-tests: $found of this platform's $debug_expected debug tests found; update the list" >&2; exit 1; }
+    fi
     cargo_test -- --ignored --exact "${tests[@]}"
+    if [[ $debug_expected -gt 0 ]]; then
+      debug_test -- --ignored --exact "${debug_tests[@]}"
+    fi
 
 fmt:
     cargo fmt --all --check

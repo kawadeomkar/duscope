@@ -379,7 +379,9 @@ fuzz_target!(|data: &[u8]| {
         max_age_ns: MAX_AGE_NS,
         tool_version: TOOL_VERSION,
     };
-    match rescan::plan(&index, &checks, &Script) {
+    // A provider that holds no file open for writing, which the volatile
+    // set asks of the rescan's.
+    match rescan::plan(&index, &checks, &Script, &MemProvider::new("/r")) {
         Ok(_) | Err(Stop::Fallback(..) | Stop::Index(CoreError::IndexCorrupt { .. })) => {}
         Err(other) => panic!("{other:?}"),
     }
