@@ -40,8 +40,13 @@ crossbeam-utils = "=0.8.23"
 # capture and the key, mouse and resize events. Default features: ratatui-crossterm
 # asks for them, so `bracketed-paste` and `derive-more` are compiled in whatever
 # this line says (DEV-72); the viewer turns bracketed paste on while it holds
-# the terminal, so that a paste is never read as keys (P4-TUI-06).
-crossterm = "=0.29.0"
+# the terminal, so that a paste is never read as keys (P4-TUI-06). `use-dev-tty`
+# reads the terminal and SIGWINCH through poll(2) (select on macOS), which reports
+# what is left unread again: the default source, mio's edge-triggered epoll and
+# kqueue, gave the resize of a wake-up and left a key that came with it unread
+# until the next (crossterm-rs/crossterm#1126). It brings filedescriptor 0.8.3
+# and thiserror 1 (DEV-211).
+crossterm = { version = "=0.29.0", features = ["use-dev-tty"] }
 # The gzip of `export --format gpscan` (P2-CLI-02): the pure-Rust backend
 # (miniz_oxide) alone.
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }

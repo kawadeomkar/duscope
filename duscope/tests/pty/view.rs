@@ -385,3 +385,33 @@ fn p4_tui_08_sigterm_restores_the_terminal_and_ends_the_viewer() {
 fn p4_tui_08_sighup_restores_the_terminal_and_ends_the_viewer() {
     ended_by("HUP", 1);
 }
+
+#[test]
+fn p4_tui_01_a_key_sent_as_resizes_land_is_answered() {
+    let env = TestEnv::new();
+    let mut terminal = viewer(&env, 100, 30, &[]);
+    terminal.wait_until(up).unwrap();
+    for round in 0..10 {
+        // Resizes back to back, the last to where the burst began, and a key
+        // straight after them: the key comes in with the last SIGWINCH.
+        // crossterm's default event source gave that resize and left the key
+        // unread until the next one (crossterm-rs/crossterm#1126), on macOS
+        // in every run; `use-dev-tty` reads both through poll(2) (DEV-211).
+        for i in 0..20 {
+            let (cols, rows) = if i % 2 == 0 { (120, 36) } else { (100, 30) };
+            terminal.resize(cols, rows).unwrap();
+        }
+        let (key, title) = if round % 2 == 0 {
+            ('2', "list · ")
+        } else {
+            ('1', "treemap · ")
+        };
+        terminal.send(Key::Char(key)).unwrap();
+        terminal
+            .wait_until_for(|s| s.text().contains(title), Duration::from_secs(5))
+            .unwrap_or_else(|e| panic!("round {round}: `{key}` unanswered: {e}"));
+    }
+    terminal.send(Key::Char('q')).unwrap();
+    assert_eq!(exited(&mut terminal), 0);
+    assert_restored(&terminal);
+}
