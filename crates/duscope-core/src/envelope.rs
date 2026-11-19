@@ -289,9 +289,9 @@ pub struct ScanBlock {
     /// reported, since the history reports a file's new contents only once
     /// it is closed: files a process of the scanning user held open for
     /// writing below the root, and the saved scan's entries whose times lie
-    /// within a day of its start or after it, or that it flagged sparse.
-    /// Null for any other scan, and for a saved scan read back, whose index
-    /// does not keep it.
+    /// within four hours before its start or after it, or that it flagged
+    /// sparse. Null for any other scan, and for a saved scan read back,
+    /// whose index does not keep it.
     pub volatile_count: Option<u64>,
     /// Why a rescan read the whole tree although it was not asked to:
     /// `index_too_old`, `volume_changed`, `history_gone`,

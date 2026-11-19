@@ -598,7 +598,9 @@ mod macos {
     /// history settled before the scan, so the replay reports the closed
     /// file's directory alone: without that every directory is read again
     /// and the test proves nothing. The writer is this test, whose user the
-    /// rescan's is.
+    /// rescan's is. It runs from a debug build, whose test clock dates the
+    /// scans years after the tree's real times, so that only the held file
+    /// is volatile (DEV-227).
     #[test]
     #[ignore = "attaches a disk image and replays its FSEvents history; DUSCOPE_TEST_PLATFORM=1"]
     fn p5_core_11_macos_an_incremental_rescan_equals_a_full_scan_with_a_file_held_open() {
@@ -606,6 +608,11 @@ mod macos {
         if !platform_tests() {
             return;
         }
+        assert!(
+            cfg!(debug_assertions),
+            "a release build dates the scans by the real clock, which puts the whole tree in the \
+             volatile window: run this test from a debug build (just platform-tests does)"
+        );
         let work = fs::canonicalize(env.tmp_dir()).unwrap().join("image");
         let mount = work.join("mnt");
         fs::create_dir_all(&mount).unwrap();

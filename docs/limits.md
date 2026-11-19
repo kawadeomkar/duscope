@@ -138,7 +138,7 @@ directory of each entry of a volatile set, which `scan.volatile_count` counts:
 - the files a process of the scanning user holds open for writing below the
   root, which libproc lists with no privilege and without opening them;
 - the saved scan's entries whose modification or status-change time lies
-  within a day before its start, or after it;
+  within four hours before its start, or after it;
 - the files the saved scan recorded as sparse.
 
 What it cannot see: on the startup disk's Data volume, changes made from

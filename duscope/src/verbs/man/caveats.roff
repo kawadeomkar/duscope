@@ -98,7 +98,8 @@ next startup, so a rescan after such changes can miss them.
 The history records a change to a file's contents when the file is
 closed, so a rescan also reads again, whatever the history reports, the
 files a process of the same user holds open for writing, the entries of
-the saved scan whose times lie within a day of it, and its sparse files.
+the saved scan whose times lie within four hours before it, and its
+sparse files.
 A file idle at the saved scan that another user's process has opened since
 and is still writing is in neither, and keeps its saved size until it is
 closed.

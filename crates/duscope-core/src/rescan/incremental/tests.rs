@@ -118,9 +118,9 @@ fn now_ns() -> i64 {
     i64::try_from(since.as_nanos()).unwrap()
 }
 
-/// When a test's saved scan is dated: a day and a minute from now, so that
-/// nothing in a tree made now is volatile (`VOLATILE_WINDOW_NS`) but what a
-/// test dates otherwise.
+/// When a test's saved scan is dated: the window and a minute from now, so
+/// that nothing in a tree made now is volatile (`VOLATILE_WINDOW_NS`) but
+/// what a test dates otherwise.
 fn settled_ns() -> i64 {
     now_ns() + VOLATILE_WINDOW_NS + 60_000_000_000
 }
@@ -1196,7 +1196,7 @@ fn p5_core_11_a_file_rewritten_in_place_inside_the_window_is_read_again() {
     tree(&root);
     let started = settled_ns();
     // Written an hour before the saved scan, and an hour after its start;
-    // the rest of the tree a day and more before it.
+    // the rest of the tree further back than the window.
     let hour = 3_600_000_000_000;
     for (rel, at) in [
         ("keep/k40/f.txt", started - hour),

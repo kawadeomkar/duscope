@@ -78,9 +78,11 @@ const POST_CHECK_MIN: usize = 1000;
 /// An entry of the saved scan whose `mtime` or `ctime` lies within this
 /// long before the scan's start, or after it, is volatile: it may be a file
 /// still being written, which the history reports only once it is closed,
-/// and its directory is read again (DEV-214). 24 hours, provisional until
-/// the nightly's rescan figures (P5-BENCH-04) show what it costs.
-const VOLATILE_WINDOW_NS: i64 = 24 * 3600 * 1_000_000_000;
+/// and its directory is read again (DEV-214). 4 hours (DEV-227), provisional
+/// until the nightly's rescan figures (P5-BENCH-04) show what it costs: on
+/// the fixture tree 24 hours read ten times the directories a rescan reads
+/// without the window.
+const VOLATILE_WINDOW_NS: i64 = 4 * 3600 * 1_000_000_000;
 
 /// An entry whose times lie within this long before a scan's start, or
 /// after it, is unsettled: a filesystem may still be settling its size, so
