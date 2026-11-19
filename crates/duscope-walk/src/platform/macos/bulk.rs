@@ -40,10 +40,8 @@ const DIR: attrgroup_t = libc::ATTR_DIR_LINKCOUNT
     | libc::ATTR_DIR_MOUNTSTATUS
     | libc::ATTR_DIR_ALLOCSIZE
     | libc::ATTR_DIR_DATALENGTH;
-const FILE: attrgroup_t = libc::ATTR_FILE_LINKCOUNT
-    | libc::ATTR_FILE_ALLOCSIZE
-    | libc::ATTR_FILE_DATALENGTH
-    | libc::ATTR_FILE_DATAALLOCSIZE;
+const FILE: attrgroup_t =
+    libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE | libc::ATTR_FILE_DATALENGTH;
 /// The common attributes `--attrs full` adds: creation and access times,
 /// owner, group and permissions. They come in the same records.
 const FULL: attrgroup_t = libc::ATTR_CMN_CRTIME
@@ -178,7 +176,6 @@ pub(super) struct Record<'a> {
     pub(super) mount_status: u32,
     pub(super) alloc: u64,
     pub(super) len: u64,
-    pub(super) data_alloc: u64,
     pub(super) clone_id: u64,
     pub(super) ext_flags: u64,
 }
@@ -557,9 +554,6 @@ pub(super) fn parse<'a>(record: &'a [u8], request: &Request) -> Option<Record<'a
         }
         if file & libc::ATTR_FILE_DATALENGTH != 0 {
             r.len = c.u64()?;
-        }
-        if file & libc::ATTR_FILE_DATAALLOCSIZE != 0 {
-            r.data_alloc = c.u64()?;
         }
     }
     let fork = attrs.forkattr;

@@ -54,6 +54,9 @@ pub(crate) struct MacProvider {
     clones_unavailable: AtomicBool,
     /// The walk root as given and its real path, resolved once.
     root: Mutex<Option<(PathBuf, Option<PathBuf>)>>,
+    /// Whether the walk workers keep the `QoS` class they start with
+    /// (`DUSCOPE_TEST_QOS=default`, in a debug build).
+    keep_qos: bool,
     /// Test knobs: read every directory through the stat queue as if the
     /// bulk read had answered this.
     #[cfg(test)]
@@ -71,7 +74,10 @@ impl MacProvider {
     /// [`platform::setup`](super::setup)).
     pub(crate) fn new() -> MacProvider {
         super::setup();
-        MacProvider::default()
+        MacProvider {
+            keep_qos: keeps_qos(std::env::var_os("DUSCOPE_TEST_QOS").as_deref()),
+            ..MacProvider::default()
+        }
     }
 
     /// The real path of the walk root `given`, which may hold `..` or be
@@ -228,6 +234,13 @@ fn data_volume() -> Option<u64> {
             Some(stat::entry_of_path(source, name, &opts).ok()?.dev)
         })
     })
+}
+
+/// Whether `DUSCOPE_TEST_QOS`, set to `value`, leaves the walk workers'
+/// `QoS` class alone: `default`, in a debug build only, for the thread sweep's
+/// A/B (P5-BENCH-05).
+fn keeps_qos(value: Option<&OsStr>) -> bool {
+    cfg!(debug_assertions) && value.is_some_and(|v| v == "default")
 }
 
 /// Turns off dataless-file materialisation for the process, so reading an
@@ -427,6 +440,19 @@ impl Provider for MacProvider {
 
     fn clones_unavailable(&self, _opts: &WalkOptions) -> bool {
         self.clones_unavailable.load(Ordering::Relaxed)
+    }
+
+    /// Asks for `QOS_CLASS_USER_INITIATED`: a scan started from a context
+    /// that lowers `QoS` would otherwise run on the efficiency cores, at a
+    /// third of the speed or less (DEV-217). A failure is logged and the
+    /// class left as it is.
+    fn worker_started(&self) {
+        if self.keep_qos {
+            return;
+        }
+        if let Err(e) = ffi::set_user_initiated_qos() {
+            log::debug!("the walk worker keeps its QoS class: {e}");
+        }
     }
 
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {

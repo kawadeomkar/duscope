@@ -1274,6 +1274,10 @@ impl Provider for Pruning<'_> {
         self.inner.open_for_write(under)
     }
 
+    fn worker_started(&self) {
+        self.inner.worker_started();
+    }
+
     fn default_threads(&self) -> usize {
         self.inner.default_threads()
     }

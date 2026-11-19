@@ -51,6 +51,8 @@
 //!   crates rather than the `crossbeam` umbrella.
 //! - `run` is also given the worker's number, which the walk's per-worker
 //!   counters are kept by (`-v`).
+//! - Each worker calls `started` as it begins, before its first job, for the
+//!   provider's setup of its thread (a `QoS` class on macOS).
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use crossbeam_utils::sync::{Parker, Unparker};
@@ -123,16 +125,18 @@ impl<Job, Event> PoolShared<Job, Event> {
 
 // duscope: scoped threads borrowing `run`, upstream's `run_job`; the channel capacity is a parameter
 // rather than upstream's `Options` field, and a failed spawn returns the error (dropping the pool
-// stops and joins the workers already started).
-pub(crate) fn start_pool<'scope, 'env, Job, Event, Run>(
+// stops and joins the workers already started). Each worker calls `started` before its loop.
+pub(crate) fn start_pool<'scope, 'env, Job, Event, Started, Run>(
     scope: &'scope Scope<'scope, 'env>,
     threads: usize,
     queued_batches_per_worker: usize,
+    started: &'scope Started,
     run: &'scope Run,
 ) -> io::Result<Pool<'scope, Job, Event>>
 where
     Job: Send + 'scope,
     Event: Send + 'scope,
+    Started: Fn() + Sync,
     Run: Fn(Job, usize, &Worker<Job>, &PoolShared<Job, Event>) + Sync,
 {
     let workers: Vec<_> = (0..threads).map(|_| Worker::new_lifo()).collect();
@@ -160,6 +164,7 @@ where
         let handle = thread::Builder::new()
             .name(format!("duscope-walk-{idx}"))
             .spawn_scoped(scope, move || {
+                started();
                 worker_loop(idx, &worker, &parker, &shared, run);
             })?;
         pool.handles.push(handle);

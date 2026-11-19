@@ -236,6 +236,13 @@ pub trait Provider: Send + Sync {
         platform::cachedir_tag(dir)
     }
 
+    /// Called on each walk worker as it starts, before its first read, for
+    /// what a worker thread asks of the system: on macOS a `QoS` class, so a
+    /// scan started from a context that lowers it is not held to the
+    /// efficiency cores (DEV-217). A provider that wraps another forwards
+    /// it. The default: nothing.
+    fn worker_started(&self) {}
+
     /// The regular files below `under` that a process of the scanning user
     /// holds open for writing, by path. A platform whose change history
     /// reports a file's new contents only when the file is closed (macOS's
@@ -1308,8 +1315,9 @@ pub fn walk_with<P: Provider + ?Sized>(
     let run = |job: Job, idx: usize, worker: &Worker<Job>, shared: &PoolShared<Job, Event>| {
         state.run(job, idx, worker, shared);
     };
+    let started = || provider.worker_started();
     thread::scope(|scope| {
-        let pool = scheduler::start_pool(scope, threads, QUEUED_BATCHES_PER_WORKER, &run)
+        let pool = scheduler::start_pool(scope, threads, QUEUED_BATCHES_PER_WORKER, &started, &run)
             .map_err(WalkError::Spawn)?;
         pool.inject(Job::ReadDir(Arc::new(root_dir)));
         let finished = loop {

@@ -8,8 +8,9 @@
 //! in 2099 lists what the real clock does; the Full Disk Access probe is not
 //! mocked; and `mcp` offers no fixture tool, keeps no shortened deadline and
 //! sends no early progress. `DUSCOPE_TEST_PANIC`, `DUSCOPE_TEST_OPENER` and
-//! `DUSCOPE_TEST_PLAN_GATE` act in the viewer or after a panic, and
-//! `DUSCOPE_TEST_TRASH` on a real removal: they are set, not observed. The
+//! `DUSCOPE_TEST_PLAN_GATE` act in the viewer or after a panic,
+//! `DUSCOPE_TEST_TRASH` on a real removal, and `DUSCOPE_TEST_QOS` on the
+//! walk workers' scheduling: they are set, not observed. The
 //! knobs are held to the names the binary's sources hold, so a new one
 //! cannot be left out.
 
@@ -75,6 +76,8 @@ fn knobs(env: &TestEnv) -> Vec<(&'static str, String)> {
         // its commands to the other.
         ("DUSCOPE_TEST_PLAN_GATE", file("gate")),
         ("DUSCOPE_TEST_OPENER", file("opened")),
+        // The macOS walk workers keep the QoS class they start with.
+        ("DUSCOPE_TEST_QOS", "default".to_owned()),
     ]
 }
 
