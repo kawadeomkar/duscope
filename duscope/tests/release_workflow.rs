@@ -588,8 +588,20 @@ enum Release {
     Unsigned,
     /// A lightweight tag.
     Lightweight,
-    /// On a commit of a side branch instead of main.
+    /// On a commit of a side branch, never pushed, instead of main.
     OffMain,
+    /// `tag`, signed, on a commit of the pushed branch `branch` that main
+    /// does not have (main moves on after the branch leaves it), with the
+    /// workspace at the tag's version: a release cut from a hotfix branch.
+    Hotfix {
+        tag: &'static str,
+        branch: &'static str,
+    },
+    /// `v0.0.1` on `hotfix/v0.0.1` after main's `v0.1.0`: a patch of an
+    /// older minor.
+    Superseded,
+    /// `v0.0.1-rc.1` on main, with the workspace at that version.
+    Prerelease,
     /// After tagging, main replaces the signer's key with another.
     Revoked,
     /// The changelog section still says Unreleased.
@@ -601,8 +613,28 @@ enum Release {
 impl Release {
     fn tag(self) -> &'static str {
         match self {
-            Release::Named(tag) => tag,
+            Release::Named(tag) | Release::Hotfix { tag, .. } => tag,
+            Release::Prerelease => "v0.0.1-rc.1",
             _ => "v0.0.1",
+        }
+    }
+
+    /// The version of the workspace's published crate and of the changelog
+    /// section: the tag's, but for `Named`, whose tag may name another.
+    fn version(self) -> &'static str {
+        match self {
+            Release::Named(_) => "0.0.1",
+            _ => &self.tag()[1..],
+        }
+    }
+
+    /// The branch the tagged commit is on besides main's history, and
+    /// pushed, if any.
+    fn branch(self) -> Option<&'static str> {
+        match self {
+            Release::Hotfix { branch, .. } => Some(branch),
+            Release::Superseded => Some("hotfix/v0.0.1"),
+            _ => None,
         }
     }
 }
@@ -688,6 +720,7 @@ impl Sandbox {
             ("CARGO_HOME".into(), cargo_home),
             ("CARGO_NET_OFFLINE".into(), "true".into()),
             ("RUNNER_TEMP".into(), dir.join("runner-temp").into()),
+            ("GITHUB_OUTPUT".into(), dir.join("github-output").into()),
         ];
         Sandbox {
             _temp: temp,
@@ -757,9 +790,10 @@ impl Sandbox {
             "Cargo.toml",
             "[workspace]\nmembers = [\"probe\", \"kit\"]\nresolver = \"3\"\n",
         );
+        let version = release.version();
         write(
             "probe/Cargo.toml",
-            "[package]\nname = \"probe\"\nversion = \"0.0.1\"\nedition = \"2024\"\n",
+            &format!("[package]\nname = \"probe\"\nversion = \"{version}\"\nedition = \"2024\"\n"),
         );
         write("probe/src/lib.rs", "");
         write(
@@ -779,7 +813,7 @@ impl Sandbox {
         };
         write(
             "CHANGELOG.md",
-            &format!("# Changelog\n\n## [0.0.1] - {date}\n\n### Added\n\n- A probe.\n"),
+            &format!("# Changelog\n\n## [{version}] - {date}\n\n### Added\n\n- A probe.\n"),
         );
         write("changelog.d/README.md", "The fragment format.\n");
         if release == Release::Fragment {
@@ -790,8 +824,9 @@ impl Sandbox {
         self.git(work, &["commit", "-q", "-m", "A release"]);
     }
 
-    /// Builds `release` and runs release.yml's verify-tag script on it.
-    fn verify(release: Release) -> Output {
+    /// Builds `release` and runs release.yml's verify-tag script on it;
+    /// returns what the script did and what it wrote to `$GITHUB_OUTPUT`.
+    fn verify(release: Release) -> (Output, String) {
         let sb = Sandbox::new();
         let (key_a, public_a) = sb.key("release-a");
         let (key_b, public_b) = sb.key("release-b");
@@ -808,9 +843,13 @@ impl Sandbox {
         sb.commit_workspace(&work, release, &signers(&public_a));
 
         let tag = release.tag();
-        if release == Release::OffMain {
-            sb.git(&work, &["switch", "-q", "-c", "side"]);
-            sb.git(&work, &["commit", "-q", "--allow-empty", "-m", "Off main"]);
+        let side = match release {
+            Release::OffMain => Some("side"),
+            _ => release.branch(),
+        };
+        if let Some(side) = side {
+            sb.git(&work, &["switch", "-q", "-c", side]);
+            sb.git(&work, &["commit", "-q", "--allow-empty", "-m", "A fix"]);
         }
         let key = if release == Release::UnknownSigner {
             &key_b
@@ -836,15 +875,26 @@ impl Sandbox {
                 ],
             ),
         };
-        if release == Release::OffMain {
+        let tag_ref = format!("refs/tags/{tag}");
+        let mut push = vec!["push", "-q", "origin", "main", tag_ref.as_str()];
+        if side.is_some() {
             sb.git(&work, &["switch", "-q", "main"]);
+        }
+        if let Some(branch) = release.branch() {
+            // main moves on with work the patch must not carry.
+            sb.git(&work, &["commit", "-q", "--allow-empty", "-m", "Next"]);
+            push.push(branch);
+        }
+        if release == Release::Superseded {
+            // A newer minor, released from main.
+            sb.git(&work, &["tag", "-a", "-m", "v0.1.0", "v0.1.0"]);
+            push.push("refs/tags/v0.1.0");
         }
         if release == Release::Revoked {
             Sandbox::write(&work.join(".github/allowed_signers"), &signers(&public_b));
             sb.git(&work, &["commit", "-q", "-am", "Rotate the release key"]);
         }
-        let tag_ref = format!("refs/tags/{tag}");
-        sb.git(&work, &["push", "-q", "origin", "main", &tag_ref]);
+        sb.git(&work, &push);
 
         // The runner's checkout: a clone at the tagged commit, fetched through
         // upload-pack as actions/checkout fetches. A local clone copies
@@ -858,19 +908,23 @@ impl Sandbox {
         let path = sb.dir.join("verify-tag.sh");
         fs::write(&path, script).unwrap();
         // As GitHub runs `shell: bash`.
-        sb.command("bash", &ci)
+        let out = sb
+            .command("bash", &ci)
             .args(["--noprofile", "--norc", "-eo", "pipefail"])
             .arg(&path)
             .env("TAG", tag)
             .output()
-            .unwrap()
+            .unwrap();
+        let outputs = fs::read_to_string(sb.dir.join("github-output")).unwrap_or_default();
+        (out, outputs)
     }
 }
 
 /// Runs a release through verify-tag and asserts the outcome; a refusal must
-/// carry `reason` in its error annotation.
-fn check(release: Release, reason: Option<&str>) {
-    let out = Sandbox::verify(release);
+/// carry `reason` in its error annotation. Returns the step's outputs, the
+/// `name=value` lines it wrote to `$GITHUB_OUTPUT`.
+fn check(release: Release, reason: Option<&str>) -> String {
+    let (out, outputs) = Sandbox::verify(release);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let name = release.tag();
@@ -896,11 +950,110 @@ fn check(release: Release, reason: Option<&str>) {
             );
         }
     }
+    outputs
+}
+
+/// The value of `latest` in verify-tag's outputs: whether the tag is the
+/// newest release.
+fn latest(outputs: &str) -> &str {
+    outputs
+        .lines()
+        .find_map(|line| line.strip_prefix("latest="))
+        .unwrap_or_else(|| panic!("verify-tag set no `latest` output: {outputs:?}"))
 }
 
 #[test]
 fn p0_ci_02_verify_tag_accepts_a_signed_tag_on_main() {
-    check(Release::Good, None);
+    assert_eq!(latest(&check(Release::Good, None)), "true");
+}
+
+#[test]
+fn p0_ci_02_verify_tag_accepts_a_patch_on_its_hotfix_branch() {
+    let hotfix = Release::Hotfix {
+        tag: "v0.0.1",
+        branch: "hotfix/v0.0.1",
+    };
+    assert_eq!(latest(&check(hotfix, None)), "true");
+}
+
+#[test]
+fn p0_ci_02_verify_tag_refuses_a_hotfix_branch_of_another_tag() {
+    check(
+        Release::Hotfix {
+            tag: "v0.0.1",
+            branch: "hotfix/v0.0.2",
+        },
+        Some("which is not on main or hotfix/v0.0.1 (it is on hotfix/v0.0.2)"),
+    );
+}
+
+#[test]
+fn p0_ci_02_verify_tag_refuses_a_minor_or_pre_release_on_a_hotfix_branch() {
+    let refused = Some("but a hotfix branch releases a patch alone");
+    check(
+        Release::Hotfix {
+            tag: "v0.1.0",
+            branch: "hotfix/v0.1.0",
+        },
+        refused,
+    );
+    check(
+        Release::Hotfix {
+            tag: "v0.0.2-rc.1",
+            branch: "hotfix/v0.0.2-rc.1",
+        },
+        refused,
+    );
+}
+
+#[test]
+fn p0_ci_02_verify_tag_says_whether_the_tag_is_the_newest_release() {
+    // A patch of an older minor, after a newer minor's release, and a
+    // pre-release are released but are not the newest release.
+    assert_eq!(latest(&check(Release::Superseded, None)), "false");
+    assert_eq!(latest(&check(Release::Prerelease, None)), "false");
+}
+
+#[test]
+fn p0_ci_02_only_the_newest_release_is_latest_and_bumps_the_tap() {
+    let workflow = read(WORKFLOW);
+    let jobs = jobs(&workflow);
+    // verify-tag's output reaches host and homebrew through plan, which
+    // both need.
+    let verify = job(&jobs, "verify-tag");
+    assert_eq!(
+        verify.block("outputs"),
+        ["latest: ${{ steps.verify.outputs.latest }}"]
+    );
+    assert!(
+        verify.lines.iter().any(|line| line.trim() == "id: verify"),
+        "the step `Verify the tag` has no `id: verify`"
+    );
+    let plan = job(&jobs, "plan");
+    assert!(
+        plan.block("outputs")
+            .contains(&"latest: ${{ needs.verify-tag.outputs.latest }}"),
+        "plan does not pass verify-tag's `latest` on"
+    );
+    // GitHub makes a new release its latest unless told otherwise.
+    let host = job(&jobs, "host");
+    let text = host.lines.join("\n");
+    assert!(
+        text.contains("LATEST: ${{ needs.plan.outputs.latest }}"),
+        "{text}"
+    );
+    let create = host.step_script("Create GitHub Release");
+    assert!(
+        create.contains("gh release create ") && create.contains(" --latest=\"$LATEST\" "),
+        "{create}"
+    );
+    // The tap's formula is the newest release.
+    let homebrew = job(&jobs, "homebrew");
+    let condition = homebrew.key("if").unwrap();
+    assert!(
+        condition.contains("needs.plan.outputs.latest == 'true'"),
+        "{condition}"
+    );
 }
 
 #[test]
@@ -914,7 +1067,10 @@ fn p0_ci_02_verify_tag_refuses_a_signer_outside_allowed_signers() {
 
 #[test]
 fn p0_ci_02_verify_tag_refuses_a_tag_off_main_or_off_version() {
-    check(Release::OffMain, Some("which is not on main"));
+    check(
+        Release::OffMain,
+        Some("which is not on main or hotfix/v0.0.1"),
+    );
     check(
         Release::Named("v0.0.2"),
         Some("these crates have another version: probe 0.0.1"),

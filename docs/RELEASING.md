@@ -1,9 +1,11 @@
 # Releasing duscope
 
 This is the checklist every `v*` tag follows, step by step, from plan/SPEC.md "Versioning,
-branching and releases" (P1-REL-01). A release is a signed tag on a commit of `main`; pushing
-it runs [release.yml](../.github/workflows/release.yml), which builds, attests, hosts and
-publishes everything. Nothing is published by hand.
+branching and releases" (P1-REL-01). A release is a signed tag on a commit of `main`, or, for
+a patch `main` cannot carry, of its hotfix branch
+([From a hotfix branch](#from-a-hotfix-branch)); pushing it runs
+[release.yml](../.github/workflows/release.yml), which builds, attests, hosts and publishes
+everything. Nothing is published by hand.
 
 Tags `v0.1.0` to `v0.4.0` close phases 1 to 4 and `v1.0.0` the phase-5 gate. Between gates a
 patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never features.
@@ -112,6 +114,80 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
 A patch release (`vX.Y.Z` with Z > 0) follows steps 2 to 4 and 6 to 7. In place of step 1, the
 latest nightly result on `main` is at most 72 hours old; the gate is not re-judged.
 
+A security release may be tagged without a nightly result of the last 72 hours when no bench
+runner reports (the nightly skips every platform:
+[runners.md](runners.md#when-a-runner-is-offline)), and its release notes say so in one
+sentence. Minor releases, and the other patch releases, keep the rule. The sentence is the
+note of the version's section: before the assemble, add the section undated above the newest
+one in `CHANGELOG.md` with the sentence under it, and `scripts/changelog.py assemble` dates the
+heading and keeps the sentence above the assembled sections, which the GitHub Release takes as
+its notes:
+
+```markdown
+## [X.Y.Z] - Unreleased
+
+No nightly benchmark result of the last 72 hours stands behind this release: no benchmark runner was reporting.
+```
+
+#### From a hotfix branch
+
+A patch is tagged on `main` when `main` can be released as it stands. When it cannot, because
+it holds work since the minor's tag that a patch must not carry, the patch ships from
+`hotfix/vX.Y.Z`, a branch from the tag of the minor's latest release (`vX.Y.0`, or its
+latest patch). `verify-tag` accepts a tag whose commit is on `main` or on the hotfix branch of
+the tag's own name, and only a patch's: a `vX.Y.0` or a pre-release on a hotfix branch, and a
+tag on any other branch, release nothing. The branch holds the fix, the backports of `Fixed`
+entries, the version bump and the assembled changelog; nothing else ships. In order:
+
+1. **The branch.** Make it from the tag and push it:
+
+   ```sh
+   git switch -c hotfix/vX.Y.Z vX.Y.W        # the minor's latest release
+   git push origin hotfix/vX.Y.Z
+   ```
+
+   A tag runs the `release.yml` of the commit it tags. On a branch from a tag made before
+   `verify-tag` accepted hotfix branches, that copy refuses the tag, so the branch first takes
+   the change itself: a cherry-pick of the commit on `main` that made it
+   (`git log --oneline origin/main -- .github/workflows/release.yml` lists it), with any later
+   fix of `release.yml` the release needs.
+2. **The fix and the backports.** Each is a `git cherry-pick -x` of its commit on `main`, with
+   its fragment cut to the `Fixed` or `Security` lines it ships, in a pull request into
+   `hotfix/vX.Y.Z` labelled `full-ci`, which runs `main`'s full set of checks. No branch
+   protection holds a hotfix branch
+   ([github-settings.md](github-settings.md#owned-by-other-packages)), so merge each only once
+   its checks pass.
+3. **The release commit.** Steps 2 and 3, on a branch `rel-vX.Y.Z` from `hotfix/vX.Y.Z` and
+   through a pull request into it, labelled `full-ci` as well as `no-changelog`.
+4. **The tag.** Step 4 on the branch, at the release commit. `verify-tag` reads the signers
+   from `main`'s `.github/allowed_signers`, as for every tag. Keep the branch afterwards: a
+   re-run of the whole release verifies the tag again.
+
+   ```sh
+   git switch hotfix/vX.Y.Z && git pull --ff-only
+   git tag -s vX.Y.Z -m "duscope X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+   The GitHub Release is marked latest, and the tap's formula bumped, only when no release
+   tag names a higher version, so a patch of an older minor leaves both at the newer one.
+5. **Back on `main`.** After the release, a pull request on `main`, `REL: vX.Y.Z on main` with
+   the `no-changelog` label, adds the version's section to `CHANGELOG.md` and removes the
+   fragments whose entries the release shipped, so the next minor does not list them again.
+   `CHANGELOG.md` changes only at a release, so while `main` has made none since the branch's
+   tag, the tag's file is `main`'s with the new section; otherwise copy the section in by
+   hand, in version order. The release commit deleted the fragments it assembled: remove each
+   from `main`, or, where `main`'s copy holds more than the release shipped, those lines alone.
+
+   ```sh
+   git switch -c rel-vX.Y.Z-main origin/main
+   git restore --source vX.Y.Z CHANGELOG.md
+   git diff --numstat CHANGELOG.md          # lines added, none removed
+   git diff --name-only --diff-filter=D vX.Y.Z^ vX.Y.Z -- changelog.d   # the shipped fragments
+   # remove those fragments, or cut them, then
+   git commit -am "REL: vX.Y.Z on main"
+   ```
+
 ### Security releases
 
 A vulnerability reported through [SECURITY.md](../SECURITY.md) is fixed in private, then ships
@@ -128,8 +204,9 @@ as a patch release of the latest minor, the only one supported before 1.0. In or
    only a `### Security` heading and one line naming the advisory and the CVE. CI does not run
    in the private fork, so run `just check-full` on both platforms before merging. Then merge
    the fix from the advisory page into `main`.
-4. **The release.** Follow [Patch releases](#patch-releases) at once. Its changelog section is
-   the `Security` section alone. `scripts/changelog.py assemble` takes every fragment, so any
+4. **The release.** Follow [Patch releases](#patch-releases) at once, without a recent nightly
+   result if no bench runner reports, as it says. From `main`, the changelog section is the
+   `Security` section alone. `scripts/changelog.py assemble` takes every fragment, so any
    other fragment waiting on `main` is moved aside for the assemble and put back before the
    release commit, for the next release:
 
@@ -141,8 +218,12 @@ as a patch release of the latest minor, the only one supported before 1.0. In or
    for f in "$held"/*.md; do [ -e "$f" ] && mv "$f" changelog.d/; done
    ```
 
-   A tag must be on `main`, so the patch also carries whatever else `main` holds. Merge the fix
-   before anything that should wait for the next minor, or hold that back until the release.
+   A tag on `main` carries whatever else `main` holds. When that includes work a patch must
+   not carry, the release ships from `hotfix/vX.Y.Z` instead
+   ([From a hotfix branch](#from-a-hotfix-branch)): the fix, once merged into `main`, is
+   cherry-picked onto the branch with its fragment, beside any `Fixed` backports, and the
+   section holds their lines alone. No fragment is moved aside there, and the pull request
+   back on `main` removes the fix's fragment with the others the release shipped.
 5. **Disclosure.** Publish the advisory once the release's assets and crates are live, and no
    later than 90 days after the report. Publishing it adds it, with the CVE, to the GitHub
    Advisory Database, from which Dependabot alerts the crates' dependents.
