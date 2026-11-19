@@ -739,11 +739,16 @@ impl Index {
         }
     }
 
-    /// Keeps a failed query's error as the first failed read, when it is.
+    /// Keeps a failed query's error as the first failed read, when it is:
+    /// an [`CoreError::IndexCorrupt`]'s message alone, as [`Index::fail`]
+    /// keeps a read's, since each verb names the file when it reports it.
     pub(crate) fn record(&self, e: &CoreError) {
         let mut failed = self.failed.borrow_mut();
         if failed.is_none() {
-            *failed = Some(e.to_string());
+            *failed = Some(match e {
+                CoreError::IndexCorrupt { message, .. } => message.clone(),
+                e => e.to_string(),
+            });
         }
     }
 

@@ -149,6 +149,33 @@ fn p2_qry_02_a_rule_above_the_root_classes_everything() {
 
 /// Every directory of `index` (the root included) read as a subtree
 /// answers from the tables as the walk answers, for each count of examples.
+/// Each verb names the file when it reports a failed read, so the read
+/// keeps only what failed: kept with the file, it was printed twice.
+#[test]
+fn p2_qry_02_a_failed_read_is_kept_without_the_file() {
+    let env = TestEnv::new();
+    let mut tree = MemProvider::new("/r");
+    tree.file("photos/a.jpg", 900_000)
+        .file("src/main.rs", 40_000);
+    let file = index_of(&tree, &env.tmp_dir()).file().to_owned();
+    // Sizes that are not integers, in a scan the test saved.
+    let db = rusqlite::Connection::open(&file).unwrap();
+    db.execute_batch("UPDATE files SET apparent = 1.5, allocated = 2.5")
+        .unwrap();
+    drop(db);
+    let named = file.display().to_string();
+    let index = Index::open(&file).unwrap();
+    assert!(from_index(&index, &query(&Classes::vendored(), 1)).is_none());
+    let failure = index.failure().expect("by-type's read failed");
+    assert!(failure.contains("allocated"), "{failure}");
+    assert!(!failure.contains(&named), "{failure}");
+    let index = Index::open(&file).unwrap();
+    assert!(crate::query::ranked_files(&index, 0, 5, None).is_none());
+    let failure = index.failure().expect("top --files's read failed");
+    assert!(failure.contains("allocated"), "{failure}");
+    assert!(!failure.contains(&named), "{failure}");
+}
+
 fn every_subtree_answers_as_the_walk(index: &Index, examples: &[usize]) -> Result<(), String> {
     let classes = Classes::vendored();
     for id in 0..index.len() {
