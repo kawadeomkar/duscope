@@ -1,20 +1,18 @@
 //! P3-AGT-01: `duscope agent` through the binary: the briefing's golden, every
 //! SQL example in it run against a saved scan of the fixture tree, and the
-//! words its first 4,096 characters (the MCP server's `instructions`) must
-//! carry. P3-AGT-02: `duscope agent --skill`: the skill's golden, both
-//! folders written, the client's limits, and a skill that is there kept
-//! unless `--force`.
+//! words the MCP server's `instructions`, the briefing up to its last whole
+//! line within 4,096 characters (P3-MCP-02), must carry. P3-AGT-02:
+//! `duscope agent --skill`: the skill's golden, both folders written, the
+//! client's limits, and a skill that is there kept unless `--force`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::path::Path;
 use std::process::Output;
 
+use duscope_mcp::discover::ServerConfig;
 use duscope_testkit::{TestEnv, golden};
 use serde_json::Value;
-
-/// What the MCP server's `instructions` hold of the briefing.
-const INSTRUCTIONS_CHARS: usize = 4096;
 
 fn run(env: &TestEnv, args: &[&str]) -> Output {
     env.cmd().args(args).output().unwrap()
@@ -95,10 +93,14 @@ fn p3_agt_01_every_sql_example_runs_on_the_fixture_tree() {
 }
 
 #[test]
-fn p3_agt_01_the_first_4096_characters_carry_the_trigger_vocabulary() {
+fn p3_agt_01_the_mcp_instructions_carry_the_trigger_vocabulary() {
     let env = TestEnv::new();
     let text = briefing(&env);
-    let instructions: String = text.chars().take(INSTRUCTIONS_CHARS).collect();
+    // The server's own cut: what a client is given, not the briefing's first
+    // 4,096 characters, which can end half way through a line.
+    let config = ServerConfig::new(&text);
+    let instructions = config.instructions();
+    assert!(text.starts_with(instructions), "not the briefing's opening");
     // The words that should bring duscope to mind (the skill's trigger
     // keywords), the invariants `--help` cannot state, and the handle flow.
     for needed in [
@@ -120,7 +122,8 @@ fn p3_agt_01_the_first_4096_characters_carry_the_trigger_vocabulary() {
     ] {
         assert!(
             instructions.contains(needed),
-            "the first {INSTRUCTIONS_CHARS} characters lack {needed:?}"
+            "the MCP instructions ({} characters) lack {needed:?}",
+            instructions.chars().count()
         );
     }
 }
