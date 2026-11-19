@@ -19,6 +19,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use clap::CommandFactory;
@@ -96,46 +97,107 @@ pub fn skill() -> [(&'static str, String); 2] {
 /// skill that is there is replaced only when `force`; otherwise nothing is
 /// written. Each file goes to a temporary name beside it first and is
 /// renamed over the old one, so a reader never sees half a file.
+///
+/// The folder may be one someone else prepared (a cloned repository), so
+/// nothing below `base` is followed: a symbolic link at a folder on the way
+/// to a file (`.claude`, `skills`, `duscope`, `references`) or at the file
+/// is refused before anything is written, each missing folder is made on
+/// its own (`mkdir` does not follow a link at its name), and each temporary
+/// file only where nothing is at its name (`O_CREAT|O_EXCL`).
 fn write_skill(base: &Path, force: bool) -> Result<Vec<PathBuf>, Failure> {
     let files = skill();
-    let targets: Vec<(PathBuf, &str)> = SKILL_DIRS
-        .iter()
-        .flat_map(|dir| {
-            files
-                .iter()
-                .map(move |(name, text)| (base.join(dir).join(name), text.as_str()))
-        })
-        .collect();
-    if !force && let Some((there, _)) = targets.iter().find(|(path, _)| path.exists()) {
-        return Err(Failure::new(
-            Exit::Usage,
-            "usage",
-            format!("{} is already there", there.display()),
-        )
-        .hint("Run duscope agent --skill --force to replace the skill"));
-    }
-    let failed = |path: &Path, e: std::io::Error| {
-        Failure::new(
-            Exit::Runtime,
-            "io_error",
-            format!("cannot write {}: {e}", path.display()),
-        )
-    };
-    for (path, text) in &targets {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| failed(parent, e))?;
+    let mut targets: Vec<(PathBuf, &str)> = Vec::new();
+    let mut missing: Vec<PathBuf> = Vec::new();
+    for dir in SKILL_DIRS {
+        for (name, text) in &files {
+            let path = unlinked(base, &Path::new(dir).join(name), force, &mut missing)?;
+            targets.push((path, text.as_str()));
         }
+    }
+    if !missing.is_empty() {
+        // The folder given is the person's, links and all.
+        fs::create_dir_all(base).map_err(|e| cannot_write(base, &e))?;
+    }
+    for dir in &missing {
+        fs::create_dir(dir).map_err(|e| cannot_write(dir, &e))?;
+    }
+    for (path, text) in &targets {
         let mut temporary = path.clone().into_os_string();
         temporary.push(format!(".tmp-{}", std::process::id()));
         let temporary = PathBuf::from(temporary);
-        fs::write(&temporary, text)
-            .and_then(|()| fs::rename(&temporary, path))
-            .map_err(|e| {
+        fs::File::create_new(&temporary)
+            .map_err(|e| cannot_write(&temporary, &e))
+            .and_then(|mut file| {
+                file.write_all(text.as_bytes())
+                    .and_then(|()| fs::rename(&temporary, path))
+                    .map_err(|e| cannot_write(path, &e))
+            })
+            .inspect_err(|_| {
                 let _ = fs::remove_file(&temporary);
-                failed(path, e)
             })?;
     }
     Ok(targets.into_iter().map(|(path, _)| path).collect())
+}
+
+/// `base` joined with `relative`, a skill file's path in it, once each
+/// entry on the way, from `base`'s child to the file, is found not to be a
+/// symbolic link (`refused_path`), and the file not there unless `force`
+/// (`usage`). The folders on the way that are not there go to `missing`,
+/// parents first, each once.
+fn unlinked(
+    base: &Path,
+    relative: &Path,
+    force: bool,
+    missing: &mut Vec<PathBuf>,
+) -> Result<PathBuf, Failure> {
+    let mut path = base.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        path.push(component);
+        let last = components.peek().is_none();
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(Failure::new(
+                    Exit::Runtime,
+                    "refused_path",
+                    format!(
+                        "{} is a symbolic link, which agent --skill does not follow, so nothing \
+                         was written",
+                        path.display()
+                    ),
+                )
+                .hint(
+                    "Remove the link, or run duscope agent --skill --dir with a folder that \
+                     holds none",
+                ));
+            }
+            Ok(_) if last && !force => {
+                return Err(Failure::new(
+                    Exit::Usage,
+                    "usage",
+                    format!("{} is already there", path.display()),
+                )
+                .hint("Run duscope agent --skill --force to replace the skill"));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if !last && !missing.contains(&path) {
+                    missing.push(path.clone());
+                }
+            }
+            Err(e) => return Err(cannot_write(&path, &e)),
+        }
+    }
+    Ok(path)
+}
+
+/// `io_error` for `path`.
+fn cannot_write(path: &Path, e: &io::Error) -> Failure {
+    Failure::new(
+        Exit::Runtime,
+        "io_error",
+        format!("cannot write {}: {e}", path.display()),
+    )
 }
 
 /// The briefing, its placeholders filled in.

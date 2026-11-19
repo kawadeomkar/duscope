@@ -370,11 +370,11 @@ fn p2_idx_03_prune_keeps_five_and_removes_a_stale_temp_file() {
         fs::write(file, b"half an index").unwrap();
     }
     age(&old, Duration::from_secs(25 * 3600));
-    // Spill files: a week old, and a day.
+    // Spill files, named as a spill is: a week old, and a day.
     let out_dir = env.index_dir().join("out");
     fs::create_dir_all(&out_dir).unwrap();
-    let old_spill = out_dir.join("old.json");
-    let new_spill = out_dir.join("new.json");
+    let old_spill = out_dir.join("fresh-top-20291231T000000Z.json");
+    let new_spill = out_dir.join("fresh-top-20300101T000000Z.json");
     fs::write(&old_spill, b"{}").unwrap();
     fs::write(&new_spill, b"{}").unwrap();
     age(&old_spill, Duration::from_secs(8 * 86_400));
@@ -435,6 +435,71 @@ fn p2_idx_03_prune_keeps_five_and_removes_a_stale_temp_file() {
         ],
     ));
     assert_eq!(again["entries"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn p5_sec_01_prune_removes_only_spills_and_refuses_an_out_that_is_a_link() {
+    let env = TestEnv::new();
+    let out_dir = env.index_dir().join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+    // Every one a week old and more: spills, and files that are not.
+    let spills = [
+        "0123456789ab-top-20300101T000000Z.json",
+        "fresh-scans---prune-20300101T000000Z-2.json",
+    ];
+    let others = [
+        "report-final.xlsx",
+        "old.json",
+        "0123456789ab-top-20300101T000000Z.json.bak",
+    ];
+    for name in spills.iter().chain(&others) {
+        fs::write(out_dir.join(name), b"{}").unwrap();
+        age(&out_dir.join(name), Duration::from_secs(8 * 86_400));
+    }
+    let prune = [
+        "scans",
+        "--prune",
+        "--json",
+        "--test-now",
+        "2030-03-01T00:00:00Z",
+    ];
+    let pruned = ok(&run(&env, &prune));
+    let mut removed: Vec<(&str, &str)> = pruned["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["kind"].as_str().unwrap(), e["path"].as_str().unwrap()))
+        .collect();
+    removed.sort_unstable();
+    let spill_paths: Vec<String> = spills
+        .iter()
+        .map(|name| out_dir.join(name).to_str().unwrap().to_owned())
+        .collect();
+    let expected: Vec<(&str, &str)> = spill_paths.iter().map(|p| ("spill", p.as_str())).collect();
+    assert_eq!(removed, expected);
+    for name in others {
+        assert!(out_dir.join(name).exists(), "{name}");
+    }
+    // `out` a link to a folder elsewhere: refused, before anything goes.
+    let elsewhere = env.tmp_dir().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let theirs = elsewhere.join(spills[0]);
+    fs::write(&theirs, b"{}").unwrap();
+    age(&theirs, Duration::from_secs(8 * 86_400));
+    fs::remove_dir_all(&out_dir).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &out_dir).unwrap();
+    let refused = run(&env, &prune);
+    assert_eq!(refused.status.code(), Some(1));
+    let error = &envelope(&refused)["error"];
+    assert_eq!(error["code"], "refused_path");
+    assert_eq!(
+        error["message"],
+        format!(
+            "{} is a symbolic link, not the index directory's own folder of spills",
+            out_dir.display()
+        )
+    );
+    assert!(theirs.exists());
 }
 
 #[test]

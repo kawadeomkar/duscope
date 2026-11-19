@@ -6,7 +6,8 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Output;
+use std::process::{Output, Stdio};
+use std::time::{Duration, Instant};
 
 use duscope_core::query::timegrammar;
 use duscope_testkit::{TestEnv, golden};
@@ -261,5 +262,65 @@ fn p2_idx_05_a_rescan_from_elsewhere_reads_the_scans_own_files() {
             .unwrap()
             .iter()
             .any(|f| f == "path")
+    );
+}
+
+#[test]
+fn p5_sec_01_a_rescan_refuses_a_pattern_file_that_became_a_fifo() {
+    let env = TestEnv::new();
+    let root = env.tmp_dir().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("a.log"), b"x").unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let patterns = env.work_dir().join("excludes.txt");
+    fs::write(&patterns, "*.log\n").unwrap();
+    let root_arg = root.to_str().unwrap();
+    let patterns_arg = patterns.to_str().unwrap();
+    ok(&run(
+        &env,
+        &[
+            "scan",
+            root_arg,
+            "--save",
+            "--json",
+            "--exclude-from",
+            patterns_arg,
+        ],
+    ));
+    // The file the saved scan names is now a FIFO nothing writes to: read,
+    // it would block the rescan for ever.
+    fs::remove_file(&patterns).unwrap();
+    let made = env.command("mkfifo").arg(&patterns).status().unwrap();
+    assert!(made.success(), "mkfifo {}", patterns.display());
+    let later = timegrammar::iso8601(timegrammar::parse_date(env.test_now()).unwrap().ns + 1);
+    let mut child = env
+        .cmd()
+        .env("DUSCOPE_TEST_NOW", later)
+        .args(["rescan", root_arg, "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("the rescan blocked on the FIFO");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(refused["error"]["code"], "usage");
+    assert_eq!(
+        refused["error"]["message"],
+        format!("--exclude-from {patterns_arg}: not a regular file")
     );
 }

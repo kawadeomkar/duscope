@@ -786,14 +786,24 @@ fn options(args: &WalkArgs, excludes: &[String]) -> Result<WalkOptions, Failure>
     })
 }
 
+/// The most read of a file a scan's options name: each `--exclude-from`
+/// and `--ignore-from` file, and the `[caches] extra` table. A rescan reads
+/// the files a saved scan names, and a saved scan may come from anyone
+/// (`--trust`). No real one comes near it: most ignore files are under a
+/// kilobyte, a long one (Homebrew's `.gitignore`) is 7 KB, and the vendored
+/// cache rules are 2.6 KB, so a mebibyte is over a hundred times any of
+/// them.
+const OPTION_FILE_CAP: u64 = 1 << 20;
+
 /// The cache rules: the vendored ones, with the configuration's
 /// `[caches] extra` table merged over them.
 fn caches(args: &WalkArgs) -> Result<Caches, Failure> {
     cache_rules(args.caches_extra.as_deref())
 }
 
-/// The cache rules: the vendored ones, with the configuration's
-/// `[caches] extra` table merged over them.
+/// The cache rules: the vendored ones, with the `[caches] extra` table
+/// merged over them, the configuration's or on a rescan the saved scan's: a
+/// regular file of at most [`OPTION_FILE_CAP`] bytes, links followed.
 pub(super) fn cache_rules(extra: Option<&Path>) -> Result<Caches, Failure> {
     let Some(file) = extra else {
         return Ok(Caches::vendored());
@@ -802,8 +812,17 @@ pub(super) fn cache_rules(extra: Option<&Path>) -> Result<Caches, Failure> {
         Failure::new(Exit::Usage, "usage", format!("[caches] extra {message}"))
             .hint("Fix the configuration file, or run duscope with --config none")
     };
-    let text =
-        std::fs::read_to_string(file).map_err(|e| refused(format!("{}: {e}", file.display())))?;
+    let text = duscope_walk::read_regular(file, OPTION_FILE_CAP)
+        .and_then(|bytes| {
+            // What read_to_string said.
+            String::from_utf8(bytes).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                )
+            })
+        })
+        .map_err(|e| refused(format!("{}: {e}", file.display())))?;
     let user =
         Caches::parse(&text, &file.display().to_string()).map_err(|e| refused(e.to_string()))?;
     Ok(Caches::vendored().merged(user))
@@ -858,10 +877,12 @@ fn exclude_pattern(pattern: &str, flag: &str) -> Result<Exclude, Failure> {
         .map_err(|e| Failure::new(Exit::Usage, "usage", format!("{flag} {pattern:?}: {e}")))
 }
 
-/// The contents of a file a flag names; a file that cannot be read is a
-/// usage error.
+/// The contents of a file a flag names, a regular file of at most
+/// [`OPTION_FILE_CAP`] bytes, links followed; a file that cannot be read,
+/// or is refused (a FIFO, a device, a directory, a longer file), is a usage
+/// error.
 fn read_flag_file(file: &Path, flag: &str) -> Result<Vec<u8>, Failure> {
-    std::fs::read(file).map_err(|e| {
+    duscope_walk::read_regular(file, OPTION_FILE_CAP).map_err(|e| {
         Failure::new(
             Exit::Usage,
             "usage",
@@ -1005,16 +1026,21 @@ fn not_yet(flag: &str, what: &str) -> Failure {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::cell::Cell;
+    use std::fs::{self, OpenOptions};
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
 
     use clap::Parser;
     use duscope_core::arena::Arena;
     use duscope_core::query::SizeKind;
     use duscope_core::rollup::roll_up;
+    use duscope_testkit::TestEnv;
     use duscope_walk::{Attrs, MemProvider, ScanEvent, WalkOptions, walk_with};
 
-    use super::{Scanned, scan_block, warnings};
+    use super::{OPTION_FILE_CAP, Scanned, cache_rules, read_flag_file, scan_block, warnings};
     use crate::cli::{Cli, Verb};
     use crate::out::{Format, Output, Units};
     use crate::verbs::query::top_envelope;
@@ -1137,5 +1163,150 @@ mod tests {
         assert_eq!(warning.count, Some(1));
         // The file that vanished is not a row.
         assert_eq!(envelope.entries.len(), 1);
+    }
+
+    /// A FIFO and a writer blocked opening it, which wakes only once the
+    /// FIFO is opened for reading: the witness of an open. A read that
+    /// opens it gets no bytes and the end of the file, so it does not block.
+    struct Witness {
+        fifo: PathBuf,
+        woke: mpsc::Receiver<()>,
+        seen: Cell<bool>,
+        writer: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Witness {
+        fn new(env: &TestEnv, fifo: PathBuf) -> Witness {
+            let made = env.command("mkfifo").arg(&fifo).status().unwrap();
+            assert!(made.success(), "mkfifo {}", fifo.display());
+            let (tx, woke) = mpsc::channel();
+            let path = fifo.clone();
+            let writer = thread::spawn(move || {
+                let _open = OpenOptions::new().write(true).open(&path);
+                let _ = tx.send(());
+            });
+            // Time for the writer to block in open(2).
+            thread::sleep(Duration::from_millis(100));
+            Witness {
+                fifo,
+                woke,
+                seen: Cell::new(false),
+                writer: Some(writer),
+            }
+        }
+
+        /// Whether the FIFO was opened for reading since the writer
+        /// blocked.
+        fn opened(&self) -> bool {
+            if self.woke.recv_timeout(Duration::from_millis(200)).is_ok() {
+                self.seen.set(true);
+            }
+            self.seen.get()
+        }
+    }
+
+    impl Drop for Witness {
+        /// Opens the FIFO for reading where nothing has, which wakes the
+        /// writer still blocked, and waits for it.
+        fn drop(&mut self) {
+            if !self.seen.get() && self.woke.try_recv().is_err() {
+                let _read = OpenOptions::new().read(true).open(&self.fifo);
+            }
+            if let Some(writer) = self.writer.take() {
+                let _ = writer.join();
+            }
+        }
+    }
+
+    /// The failure's code and message.
+    fn refusal(failure: &super::Failure) -> (&str, &str) {
+        (failure.code, failure.message.as_str())
+    }
+
+    #[test]
+    fn p5_sec_01_a_pattern_or_caches_file_that_is_not_a_regular_file_is_refused() {
+        let env = TestEnv::new();
+        let dir = env.tmp_dir();
+        // A FIFO, refused without being opened: it never blocks the read.
+        let fifo = Witness::new(&env, dir.join("fifo"));
+        let named = fifo.fifo.display();
+        let failure = read_flag_file(&fifo.fifo, "--exclude-from").unwrap_err();
+        assert_eq!(
+            refusal(&failure),
+            (
+                "usage",
+                format!("--exclude-from {named}: not a regular file").as_str()
+            )
+        );
+        let failure = cache_rules(Some(&fifo.fifo)).unwrap_err();
+        assert_eq!(
+            refusal(&failure),
+            (
+                "usage",
+                format!("[caches] extra {named}: not a regular file").as_str()
+            )
+        );
+        assert!(!fifo.opened(), "the FIFO was opened");
+        // A link to a device is followed, and the device refused unread.
+        let zero = dir.join("zero");
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        let failure = read_flag_file(&zero, "--ignore-from").unwrap_err();
+        assert_eq!(
+            refusal(&failure),
+            (
+                "usage",
+                format!("--ignore-from {}: not a regular file", zero.display()).as_str()
+            )
+        );
+        assert_eq!(cache_rules(Some(&zero)).unwrap_err().code, "usage");
+        // A directory.
+        let failure = read_flag_file(&dir, "--exclude-from").unwrap_err();
+        assert_eq!(
+            refusal(&failure),
+            (
+                "usage",
+                format!("--exclude-from {}: is a directory", dir.display()).as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn p5_sec_01_a_pattern_or_caches_file_past_its_cap_is_refused() {
+        let env = TestEnv::new();
+        let dir = env.tmp_dir();
+        // Sparse: a length, no blocks.
+        let at_cap = dir.join("at-cap");
+        fs::File::create(&at_cap)
+            .unwrap()
+            .set_len(OPTION_FILE_CAP)
+            .unwrap();
+        let past = dir.join("past");
+        fs::File::create(&past)
+            .unwrap()
+            .set_len(OPTION_FILE_CAP + 1)
+            .unwrap();
+        assert_eq!(
+            read_flag_file(&at_cap, "--exclude-from").unwrap().len() as u64,
+            OPTION_FILE_CAP
+        );
+        let too_long = format!("more than {OPTION_FILE_CAP} bytes, the most read of this file");
+        let failure = read_flag_file(&past, "--exclude-from").unwrap_err();
+        assert_eq!(
+            refusal(&failure),
+            (
+                "usage",
+                format!("--exclude-from {}: {too_long}", past.display()).as_str()
+            )
+        );
+        let failure = cache_rules(Some(&past)).unwrap_err();
+        assert_eq!(
+            refusal(&failure),
+            (
+                "usage",
+                format!("[caches] extra {}: {too_long}", past.display()).as_str()
+            )
+        );
+        // The vendored rules are far from it.
+        assert!(duscope_core::rules::CACHES_TOML.len() as u64 * 100 < OPTION_FILE_CAP);
     }
 }

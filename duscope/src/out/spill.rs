@@ -10,6 +10,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use duscope_core::envelope::{SCHEMA_VERSION, Spill, SpilledEnvelope, Tool, Warning};
+use duscope_core::index::ScanId;
 use duscope_core::query::clock;
 use serde::Serialize;
 
@@ -64,6 +65,45 @@ pub fn write(dir: &Path, scan: Option<&str>, verb: &str, json: &[u8]) -> Result<
     }
 }
 
+/// Whether `name` is one [`write()`] gives a file, so that `scans --prune`
+/// removes nothing else: `<scan>-<verb>-<stamp>.json`, or
+/// `<scan>-<verb>-<stamp>-<n>.json` (`<n>` from 2 to 100) where that name
+/// was taken; `<scan>` a scan id or `fresh`, `<verb>` lowercase letters,
+/// digits and dashes, `<stamp>` the time as [`compact`] writes it,
+/// `20261031T235959Z`.
+pub fn is_spill_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".json") else {
+        return false;
+    };
+    let stem = match stem.rsplit_once('-') {
+        Some((before, n))
+            if !n.starts_with('0') && n.parse::<u8>().is_ok_and(|n| (2..=100).contains(&n)) =>
+        {
+            before
+        }
+        _ => stem,
+    };
+    let Some((rest, stamp)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    let Some((scan, verb)) = rest.split_once('-') else {
+        return false;
+    };
+    let stamped = match stamp.as_bytes() {
+        [date @ .., b'T', h0, h1, m0, m1, s0, s1, b'Z'] if date.len() == 8 => date
+            .iter()
+            .chain([h0, h1, m0, m1, s0, s1])
+            .all(u8::is_ascii_digit),
+        _ => false,
+    };
+    stamped
+        && (scan == "fresh" || ScanId::parse(scan).is_some())
+        && !verb.is_empty()
+        && verb
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// An ISO-8601 time as a file name takes it: `20261031T235959Z`.
 fn compact(iso: &str) -> String {
     iso.chars().filter(char::is_ascii_alphanumeric).collect()
@@ -104,5 +144,62 @@ pub fn stub<T: Serialize>(
         },
         preview: entries.into_iter().take(PREVIEW).collect(),
         warnings,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use duscope_testkit::TestEnv;
+
+    use super::{is_spill_name, write};
+
+    #[test]
+    fn p5_sec_01_a_spill_name_is_one_write_gives() {
+        let env = TestEnv::new();
+        let dir = env.tmp_dir().join("out");
+        // Three in the same second: the second and third take a number.
+        let mut written = Vec::new();
+        for (scan, verb) in [
+            (Some("0123456789ab"), "top"),
+            (Some("0123456789ab"), "top"),
+            (None, "scans --prune"),
+            (Some("0123456789ab"), "by-type"),
+            (Some("0123456789ab"), "by-type"),
+            (Some("0123456789ab"), "by-type"),
+        ] {
+            written.push(write(&dir, scan, verb, b"{}").unwrap());
+        }
+        for path in &written {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(is_spill_name(name), "{name}");
+        }
+        assert!(written[5].to_str().unwrap().ends_with("-3.json"));
+        for name in [
+            "0123456789ab-top-20261031T235959Z.json",
+            "fresh-scans---prune-20261031T235959Z-2.json",
+            "0123456789ab-by-type-20261031T235959Z-100.json",
+        ] {
+            assert!(is_spill_name(name), "{name}");
+        }
+        for name in [
+            "report-final.xlsx",
+            "old.json",
+            "notes-top-20261031T235959Z.json",
+            "0123456789AB-top-20261031T235959Z.json",
+            "0123456789a-top-20261031T235959Z.json",
+            "0123456789ab-Top-20261031T235959Z.json",
+            "0123456789ab--20261031T235959Z.json",
+            "0123456789ab-top-2026-10-31.json",
+            "0123456789ab-top-20261031T2359Z.json",
+            "0123456789ab-top-20261031T235959Z.json.bak",
+            "0123456789ab-top-20261031T235959Z-1.json",
+            "0123456789ab-top-20261031T235959Z-02.json",
+            "0123456789ab-top-20261031T235959Z-101.json",
+            "0123456789ab-top-20261031T235959Z.JSON",
+            "fresh-top-20261031T235959Z",
+            "fresh-top-1234567\u{e9}T00000Z.json",
+        ] {
+            assert!(!is_spill_name(name), "{name}");
+        }
     }
 }

@@ -90,6 +90,18 @@ pub(crate) fn cachedir_tag(_dir: &std::path::Path) -> bool {
     false
 }
 
+/// The regular file at `path`, at most `cap` bytes, links followed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn read_regular(path: &std::path::Path, cap: u64) -> std::io::Result<Vec<u8>> {
+    posix::read_regular(path, cap)
+}
+
+/// The regular file at `path`: not read on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn read_regular(_path: &std::path::Path, _cap: u64) -> std::io::Result<Vec<u8>> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
 /// Blocks until SIGINT arrives (`true`) or [`stand_down_interrupt`] is
 /// called (`false`).
 #[cfg(any(target_os = "linux", target_os = "macos"))]

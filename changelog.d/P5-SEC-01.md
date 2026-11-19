@@ -1,0 +1,4 @@
+### Fixed
+
+- `rescan`, and every command that reads `--exclude-from`, `--ignore-from` or the configuration's `[caches] extra` table, no longer waits for ever on a FIFO, or fills memory from a device, named as one of those files: each is read only when it is a regular file of at most 1 MiB, links followed, and is otherwise refused as a usage error that names the file and why (`not a regular file`, `is a directory`, or the cap).
+- `scans --prune` removes from the index directory's `out` only the files a spilled envelope is written to (`<scan>-<verb>-<time>.json`), where it removed every file there older than a week, and refuses an `out` that is a symbolic link (`refused_path`) before it removes anything.
