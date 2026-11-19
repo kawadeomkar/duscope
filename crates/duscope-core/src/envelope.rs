@@ -10,9 +10,12 @@
 //! (`src/schema_drift.rs`) compares each derived schema with its checked-in file
 //! under `schemas/`.
 
-/// The version of the envelope's shape, frozen at 0.2 (P2-CLI-01): it
-/// changes additively only, a minor at a time, and `schemas/envelope/`
-/// describes it with every published minor under `history/`.
+/// The version of the envelope's shape, frozen at 0.2 (P2-CLI-01) until the
+/// 1.0.0 release makes it 1.0. Until then the envelope changes additively
+/// only and this stays 0.2: a field it gains is marked `x-since` with the
+/// release of the binary that first prints it, not with a `schema_version`
+/// (DEV-204). `schemas/envelope/` describes it, and `history/0.2/` keeps it
+/// as v0.2.0 printed it (`schemas/README.md`).
 pub const SCHEMA_VERSION: &str = "0.2";
 
 /// The warning codes of the conventions appendix, the only values of
