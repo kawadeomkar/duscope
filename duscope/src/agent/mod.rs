@@ -3,10 +3,10 @@
 //! by itself (P3-AGT-02). The text is `briefing.md.tmpl`; when it runs, the
 //! binary fills in its own verbs from the command line, its exit codes, and
 //! the envelope's error codes (the conventions' `ERROR_CODES`) with the exit
-//! code of each, so those lists cannot drift from the code. The MCP server's `instructions` are the briefing's first
-//! 4,096 characters (P3-MCP-03), which is why the template opens with the
-//! words that should bring duscope to mind, the invariants and the handle
-//! flow.
+//! code of each, so those lists cannot drift from the code. The MCP server's
+//! `instructions` are the briefing up to its last whole line within 4,096
+//! characters (P3-MCP-02), which is why the template opens with the words
+//! that should bring duscope to mind, the invariants and the handle flow.
 //!
 //! The skill is `skill.md.tmpl` around the same briefing: a frontmatter
 //! whose `description` and `when_to_use` carry the words that should bring
