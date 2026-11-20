@@ -1,16 +1,16 @@
 # duscope
 
 > [!NOTE]
-> **v0.2.0, saved scans.** duscope scans, saves each scan as a SQLite index and
-> answers `top`, `tree`, `by-type`, `stale`, `caches`, `summary` and `explain`
-> from it in milliseconds, compares two scans (`diff`) and takes read-only SQL
-> (`query --sql`); it prints one JSON envelope, exports to ncdu, GrandPerspective
-> and QDirStat, imports ncdu's, gdu's and GrandPerspective's files, and renders
-> the treemap in the terminal, as SVG or as PNG. v0.2.0 also carries the
-> interactive viewer (`duscope view`), `clean`, `duscope agent` and the MCP
-> server, though the server offers no tools until v0.3; they are held to their
-> own gates in v0.3 (the MCP server and `agent`) and v0.4 (the viewer and
-> `clean`).
+> **v0.3.0, agents.** `duscope mcp` serves eleven read-only tools to MCP clients
+> over stdio. They scan a directory, list the saved scans and answer `summary`,
+> `top`, `by-type`, `stale`, `caches`, `explain`, `diff`, `schema` and read-only
+> SQL from them, each in its verb's JSON envelope, and reach nothing outside the
+> directories given to `--roots`; `--allow-delete` adds a twelfth, which moves
+> entries to the Trash. `duscope agent --skill` writes the skill an agent's client
+> loads: in the project's evaluation, agents used 29.5% fewer tokens with it
+> ([bench/README.md](bench/README.md#the-agent-eval)). v0.3.0 also carries the
+> interactive viewer (`duscope view`) and `clean`, held to their own gate in v0.4,
+> and, on macOS, rescans that read only what changed.
 
 duscope is a disk-usage analyzer for macOS and Linux. It scans a directory tree
 once, in parallel, and:
@@ -329,8 +329,8 @@ used 29.5% fewer tokens with it ([bench/README.md](bench/README.md#the-agent-eva
 stdout, and run by an agent's client every verb writes JSON.
 
 `duscope mcp` serves scans to MCP clients over stdio, and they reach nothing
-outside the directories given to `--roots` (v0.2.0's server offers no tools;
-they come with v0.3). Each client takes one line:
+outside the directories given to `--roots` (its tools need v0.3.0 or later:
+v0.2.0's server offers none). Each client takes one line:
 
 ```sh
 claude mcp add --transport stdio duscope -- duscope mcp --roots ~
