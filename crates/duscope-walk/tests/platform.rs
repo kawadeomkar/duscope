@@ -1977,3 +1977,20 @@ fn p5_test_01_linux_hfsplus_is_foreign_with_links_and_case_unknown() {
         ("hfsplus", VolumeClass::Foreign, None, true)
     );
 }
+
+/// P5-WALK-07: the walk's workers ask for a `QoS` class on macOS alone, so the
+/// Linux build of this test, which walks through the platform's provider,
+/// names no `QoS` function, and the macOS build imports the one it calls.
+#[test]
+fn p5_walk_07_only_the_macos_build_asks_for_a_qos_class() {
+    let binary = fs::read(std::env::current_exe().unwrap()).unwrap();
+    // Spelled backwards here, so that this test's own string is not what
+    // it finds.
+    let symbol: Vec<u8> = b"pn_fles_ssalc_soq_tes_daerhtp"
+        .iter()
+        .rev()
+        .copied()
+        .collect();
+    let named = binary.windows(symbol.len()).any(|w| w == symbol.as_slice());
+    assert_eq!(named, cfg!(target_os = "macos"));
+}

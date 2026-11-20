@@ -519,7 +519,6 @@ impl Packed {
                 fixed.extend(self.links.to_ne_bytes());
                 fixed.extend(self.alloc.to_ne_bytes());
                 fixed.extend(self.len.to_ne_bytes());
-                fixed.extend(self.alloc.to_ne_bytes()); // data alloc
             }
             if attrs.forkattr != 0 {
                 fixed.extend(0u64.to_ne_bytes());
@@ -1376,4 +1375,114 @@ fn p5_core_11_open_for_write_lists_this_users_files_below_the_root_alone() {
     assert!(super::open_files::open_for_write(&under, other).is_empty());
     drop((held, outside, read));
     assert!(provider.open_for_write(&tmp).is_empty());
+}
+
+#[test]
+fn p5_walk_07_the_file_list_leaves_dataallocsize_out() {
+    // Requested and parsed since P1-WALK-03 and read by nothing (DEV-217);
+    // `allocated` is ATTR_FILE_ALLOCSIZE's.
+    let basic = libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE | libc::ATTR_FILE_DATALENGTH;
+    for (attrs, clones) in [
+        (crate::Attrs::Basic, false),
+        (crate::Attrs::Basic, true),
+        (crate::Attrs::Full, false),
+    ] {
+        let opts = WalkOptions {
+            attrs,
+            clones,
+            ..WalkOptions::default()
+        };
+        let request = Request::bulk(&opts);
+        assert_eq!(request.attrs.fileattr, basic, "{attrs:?}, clones {clones}");
+        assert_eq!(request.attrs.fileattr & libc::ATTR_FILE_DATAALLOCSIZE, 0);
+    }
+}
+
+/// The macOS provider, noting the `QoS` class of each thread a directory is
+/// read on.
+struct Classes {
+    inner: MacProvider,
+    seen: std::sync::Mutex<Vec<u32>>,
+}
+
+impl Provider for Classes {
+    fn read_dir(
+        &self,
+        dir: &DirHandle,
+        opts: &WalkOptions,
+        out: &mut Vec<Entry>,
+        errs: &mut Vec<crate::ScanError>,
+    ) -> std::io::Result<()> {
+        self.seen.lock().unwrap().push(ffi::qos_class().unwrap());
+        self.inner.read_dir(dir, opts, out, errs)
+    }
+
+    fn worker_started(&self) {
+        self.inner.worker_started();
+    }
+
+    fn volume(&self, path: &Path) -> std::io::Result<crate::VolumeInfo> {
+        self.inner.volume(path)
+    }
+
+    fn root(&self, path: &Path, opts: &WalkOptions) -> std::io::Result<Entry> {
+        self.inner.root(path, opts)
+    }
+}
+
+/// The `QoS` classes the walk's workers read a tree of twenty directories
+/// at, through `inner`.
+fn worker_classes(env: &TestEnv, inner: MacProvider) -> Vec<u32> {
+    let root = env.tmp_dir().join("qos");
+    for i in 0..20 {
+        std::fs::create_dir_all(root.join(format!("d{i}"))).unwrap();
+        std::fs::write(root.join(format!("d{i}/f")), b"x").unwrap();
+    }
+    let provider = Classes {
+        inner,
+        seen: std::sync::Mutex::new(Vec::new()),
+    };
+    let opts = WalkOptions {
+        threads: 4,
+        ..WalkOptions::default()
+    };
+    walk_with(&provider, &root, &opts, |_| {}).unwrap();
+    provider.seen.into_inner().unwrap()
+}
+
+#[test]
+fn p5_walk_07_workers_read_at_the_user_initiated_class() {
+    let env = TestEnv::new();
+    let user_initiated = libc::qos_class_t::QOS_CLASS_USER_INITIATED as u32;
+    let classes = worker_classes(&env, MacProvider::default());
+    assert_eq!(classes.len(), 21, "the root and its twenty directories");
+    assert!(
+        classes.iter().all(|&class| class == user_initiated),
+        "{classes:x?}"
+    );
+    // With the knob a worker keeps the class a thread starts with.
+    let default = std::thread::spawn(|| ffi::qos_class().unwrap())
+        .join()
+        .unwrap();
+    assert_ne!(default, user_initiated);
+    let kept = MacProvider {
+        keep_qos: true,
+        ..MacProvider::default()
+    };
+    let classes = worker_classes(&TestEnv::new(), kept);
+    assert!(
+        classes.iter().all(|&class| class == default),
+        "{classes:x?}"
+    );
+}
+
+#[test]
+fn p5_walk_07_the_knob_keeps_the_class_in_a_debug_build_alone() {
+    let value = |v: &str| Some(std::ffi::OsString::from(v));
+    assert_eq!(
+        super::keeps_qos(value("default").as_deref()),
+        cfg!(debug_assertions)
+    );
+    assert!(!super::keeps_qos(value("user_initiated").as_deref()));
+    assert!(!super::keeps_qos(None));
 }

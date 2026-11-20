@@ -463,3 +463,40 @@ pub(super) fn vnode_fd(pid: libc::pid_t, fd: i32) -> io::Result<VnodeFd> {
         path,
     })
 }
+
+/// Asks for `QOS_CLASS_USER_INITIATED` for the calling thread.
+pub(super) fn set_user_initiated_qos() -> io::Result<()> {
+    // SAFETY: pthread_set_qos_class_self_np takes a class and a relative
+    // priority by value and changes the calling thread's scheduling alone.
+    let rc = unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(rc))
+    }
+}
+
+/// The calling thread's `QoS` class, as its `qos_class_t` value.
+#[cfg(test)]
+pub(super) fn qos_class() -> io::Result<u32> {
+    let mut class = 0u32;
+    let mut priority: c_int = 0;
+    // SAFETY: pthread_self names the calling thread, which is running; the
+    // call writes a qos_class_t, a u32, into `class` and an int into
+    // `priority`, both ours and live for the call. The class is read as the
+    // u32 it is, never as the enum.
+    let rc = unsafe {
+        libc::pthread_get_qos_class_np(
+            libc::pthread_self(),
+            (&raw mut class).cast(),
+            &raw mut priority,
+        )
+    };
+    if rc == 0 {
+        Ok(class)
+    } else {
+        Err(io::Error::from_raw_os_error(rc))
+    }
+}
