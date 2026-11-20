@@ -22,7 +22,7 @@ use duscope_core::index::{Index, ScanId, index_path};
 use duscope_core::query::{
     ScanQuery, ScanSelector, TreeView, clock, resolve_scan, short_id, timegrammar,
 };
-use duscope_core::rescan::{self, Checks, Fallback, FsEvents, ScanOptions, Stop};
+use duscope_core::rescan::{self, Checks, Costs, Fallback, FsEvents, ScanOptions, Stop};
 use duscope_core::resolve::resolve_path;
 use duscope_walk::{ScanEvent, Skip, WalkOptions};
 
@@ -48,7 +48,7 @@ struct Parent {
 /// What the rescan was asked to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// Only what changed where it can, else the whole tree.
+    /// Only what changed where it can and that is cheaper, else the whole tree.
     Auto,
     /// The whole tree (`--full`).
     Full,
@@ -137,13 +137,15 @@ fn read_again(
     let began = Instant::now();
     let (mut scanned, fallback) = match mode {
         Mode::Full => (scan::scan(walk, excludes)?, None),
-        Mode::Auto | Mode::Incremental => match incremental(parent, walk, excludes, max_age_ns)? {
-            Ok(scanned) => (scanned, None),
-            Err(stop) => {
-                let fallback = refused(mode, stop, parent)?;
-                (scan::scan(walk, excludes)?, fallback)
+        Mode::Auto | Mode::Incremental => {
+            match incremental(parent, walk, excludes, mode, max_age_ns)? {
+                Ok(scanned) => (scanned, None),
+                Err(stop) => {
+                    let fallback = refused(mode, stop, parent)?;
+                    (scan::scan(walk, excludes)?, fallback)
+                }
             }
-        },
+        }
     };
     let took = began.elapsed();
     scanned.parent = Some(parent.id.clone());
@@ -333,17 +335,22 @@ fn walk_args(parent: &Parent) -> WalkArgs {
 }
 
 /// The incremental rescan of `parent`: the scan, with the directories it
-/// read again, or why it could not be one.
+/// read again, or why it could not be one. With neither `--full` nor
+/// `--incremental` (`mode` auto) the walk is taken where it is predicted
+/// cheaper than the replay (DEV-215); `--incremental` replays whatever it
+/// costs.
 fn incremental(
     parent: &Parent,
     walk: &WalkArgs,
     excludes: &[String],
+    mode: Mode,
     max_age_ns: i64,
 ) -> Result<Result<Scanned, Stop>, Failure> {
     let checks = Checks {
         now_ns: scan::now(walk)?,
         max_age_ns,
         tool_version: env!("CARGO_PKG_VERSION"),
+        costs: matches!(mode, Mode::Auto).then(Costs::default),
     };
     let history = FsEvents;
     // This platform's provider, the one a rescan reads with: the plan asks

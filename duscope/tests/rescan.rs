@@ -2,7 +2,8 @@
 //! index whose dirs totals equal a fresh scan's and whose `scan_meta` carries
 //! the parent and its options, `latest` reading the child, and
 //! `--incremental` not available where no change history is kept
-//! (P5-CORE-01 brings it to macOS).
+//! (P5-CORE-01 brings it to macOS); P5-CORE-12: a rescan with neither flag
+//! reads a small tree whole, where the walk is cheaper than a replay.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -334,4 +335,47 @@ fn p5_sec_01_a_rescan_refuses_a_pattern_file_that_became_a_fifo() {
         refused["error"]["message"],
         format!("--exclude-from {patterns_arg}: not a regular file")
     );
+}
+
+#[test]
+fn p5_core_12_a_rescan_of_a_small_tree_walks_and_says_why() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("small");
+    for dir in ["a", "b/c"] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+        fs::write(root.join(dir).join("f"), b"bytes").unwrap();
+    }
+    save(&env, &root);
+    let path = root.to_str().unwrap();
+    let history = duscope_walk::fsevents::current_event_id().is_some();
+    // With neither flag: a walk of a few entries is predicted cheaper than
+    // any replay of the volume's history, so the tree is read whole, and
+    // the scan block says why. Linux keeps no history, and gives no reason.
+    let auto = ok(&rescan(&env, 1, &[path, "--json"]));
+    assert_eq!(auto["scan"]["incremental"], false);
+    let why = if history {
+        "replay_slower".into()
+    } else {
+        Value::Null
+    };
+    assert_eq!(auto["scan"]["fallback_reason"], why);
+    let table = rescan(&env, 2, &[path, "--format", "table"]);
+    let footer = String::from_utf8(table.stdout).unwrap();
+    assert_eq!(
+        footer.contains(" · full rescan: replay slower · "),
+        history,
+        "{footer}"
+    );
+    if history {
+        // `--incremental` replays whatever the prediction: it reads what
+        // changed, or fails for a reason of the history's own.
+        let asked = rescan(&env, 3, &[path, "--incremental", "--json"]);
+        let answer: Value = serde_json::from_slice(&asked.stdout).unwrap();
+        if asked.status.success() {
+            assert_eq!(answer["scan"]["incremental"], true, "{answer}");
+        } else {
+            let message = answer["error"]["message"].as_str().unwrap();
+            assert!(!message.contains("replay_slower"), "{message}");
+        }
+    }
 }

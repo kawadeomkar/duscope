@@ -504,10 +504,14 @@
               ]
             },
             {
+              "const": "replay_slower",
+              "x-since": "0.4"
+            },
+            {
               "type": "string"
             }
           ],
-          "description": "Why a rescan read the whole tree although it was not asked to:\n`index_too_old`, `volume_changed`, `history_gone`,\n`fsevents_disabled`, `options_changed`, `too_many_changes`,\n`events_dropped` or `post_check_failed`; null for any other scan,\nfor a saved scan read back, whose index does not keep it, and on a\nplatform that keeps no change history (Linux), where every rescan\nreads the whole tree.",
+          "description": "Why a rescan read the whole tree although it was not asked to:\n`index_too_old`, `volume_changed`, `history_gone`,\n`fsevents_disabled`, `options_changed`, `too_many_changes`,\n`events_dropped`, `post_check_failed`, or `replay_slower`, when the\nwalk was the cheaper read; null for any other scan, for a saved scan\nread back, whose index does not keep it, and on a platform that keeps\nno change history (Linux), where every rescan reads the whole tree.",
           "type": [
             "string",
             "null"

@@ -21,6 +21,13 @@
 //! or `ctime` lies within [`VOLATILE_WINDOW_NS`] before its start or after
 //! it, and its sparse files. The directory of each is read again.
 //!
+//! A replay costs what the volume's history since the mark costs, not what
+//! changed below the root: at least about a second (DEV-122), where a warm
+//! walk costs about 3.5 µs an entry. So `rescan` with neither `--full` nor
+//! `--incremental` ([`Checks::costs`]) takes the walk when it is predicted
+//! cheaper, and gives up a replay that runs past twice the saved scan's own
+//! duration, both as [`Fallback::ReplaySlower`] (DEV-215).
+//!
 //! [`merge`] then walks the saved scan's root with the walk's own options,
 //! but reads from disk only the directories it must: the root, every
 //! directory the history reports, every one on the way down to them, their
@@ -47,7 +54,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use duscope_walk::fsevents::{self, REPLAY_TIMEOUT, Replay};
 use duscope_walk::{
@@ -74,6 +81,36 @@ const MOST_CHANGED_PERCENT: usize = 15;
 /// The post-check reads 1% of the directories taken from the saved scan,
 /// and at least this many (all of them when there are fewer).
 const POST_CHECK_MIN: usize = 1000;
+
+/// What a warm walk costs an entry, in nanoseconds: the M5 Pro's warm T2,
+/// for the rule that weighs a replay against the walk (DEV-215).
+pub const WALK_NS_PER_ENTRY: u64 = 3_500;
+
+/// The least a replay costs, whatever changed: DEV-122's quiet directory.
+pub const REPLAY_FLOOR: Duration = Duration::from_millis(1_100);
+
+/// The rule `rescan` with neither `--full` nor `--incremental` weighs a
+/// replay by (DEV-215): the walk is predicted at the saved scan's entries
+/// times [`walk_ns_per_entry`](Costs::walk_ns_per_entry), the replay at
+/// [`replay_floor`](Costs::replay_floor), and the cheaper one is taken; a
+/// replay still running at twice the saved scan's own duration is given up.
+/// A crude rule: both paths are exact, and it changes the cost alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Costs {
+    /// What a warm walk costs an entry, in nanoseconds.
+    pub walk_ns_per_entry: u64,
+    /// The least a replay costs.
+    pub replay_floor: Duration,
+}
+
+impl Default for Costs {
+    fn default() -> Costs {
+        Costs {
+            walk_ns_per_entry: WALK_NS_PER_ENTRY,
+            replay_floor: REPLAY_FLOOR,
+        }
+    }
+}
 
 /// An entry of the saved scan whose `mtime` or `ctime` lies within this
 /// long before the scan's start, or after it, is volatile: it may be a file
@@ -112,11 +149,14 @@ pub enum Fallback {
     EventsDropped,
     /// A directory or file read again differs from what the history says.
     PostCheckFailed,
+    /// The walk is predicted cheaper than the replay, or the replay ran
+    /// past twice the saved scan's own duration ([`Costs`]).
+    ReplaySlower,
 }
 
 impl Fallback {
     /// Every reason, in the order the conventions list them.
-    pub const ALL: [Fallback; 8] = [
+    pub const ALL: [Fallback; 9] = [
         Fallback::IndexTooOld,
         Fallback::VolumeChanged,
         Fallback::HistoryGone,
@@ -125,6 +165,7 @@ impl Fallback {
         Fallback::TooManyChanges,
         Fallback::EventsDropped,
         Fallback::PostCheckFailed,
+        Fallback::ReplaySlower,
     ];
 
     /// The `fallback_reason` value.
@@ -139,6 +180,7 @@ impl Fallback {
             Fallback::TooManyChanges => "too_many_changes",
             Fallback::EventsDropped => "events_dropped",
             Fallback::PostCheckFailed => "post_check_failed",
+            Fallback::ReplaySlower => "replay_slower",
         }
     }
 
@@ -154,6 +196,7 @@ impl Fallback {
             Fallback::TooManyChanges => "too many changes",
             Fallback::EventsDropped => "events dropped",
             Fallback::PostCheckFailed => "post-check failed",
+            Fallback::ReplaySlower => "replay slower",
         }
     }
 }
@@ -195,13 +238,21 @@ pub trait History {
     /// The latest event id, sampled before any replay; `None` where the
     /// platform keeps no history.
     fn now(&self) -> Option<u64>;
-    /// What changed on the volume on `dev` below `under` since `mark`.
+    /// What changed on the volume on `dev` below `under` since `mark`, read
+    /// for at most `limit`: a replay that has not reached the history's end
+    /// by then says so ([`Replay::history_done`]).
     ///
     /// # Errors
     ///
     /// The history cannot be read from `mark` ([`FsEventsError::fallback`]
     /// says why).
-    fn replay(&self, dev: u64, mark: &FsEventsMark, under: &Path) -> Result<Replay, FsEventsError>;
+    fn replay(
+        &self,
+        dev: u64,
+        mark: &FsEventsMark,
+        under: &Path,
+        limit: Duration,
+    ) -> Result<Replay, FsEventsError>;
     /// The mark of the volume on `dev` at the event id `now`, for the new
     /// scan's `scan_volumes`.
     fn mark(&self, dev: u64, now: u64) -> Option<FsEventsMark>;
@@ -219,8 +270,14 @@ impl History for FsEvents {
         fsevents::current_event_id()
     }
 
-    fn replay(&self, dev: u64, mark: &FsEventsMark, under: &Path) -> Result<Replay, FsEventsError> {
-        fsevents::replay(dev, mark, under, REPLAY_TIMEOUT)
+    fn replay(
+        &self,
+        dev: u64,
+        mark: &FsEventsMark,
+        under: &Path,
+        limit: Duration,
+    ) -> Result<Replay, FsEventsError> {
+        fsevents::replay(dev, mark, under, limit)
     }
 
     fn mark(&self, dev: u64, now: u64) -> Option<FsEventsMark> {
@@ -242,6 +299,10 @@ pub struct Checks<'a> {
     /// This duscope's version: a scan another one wrote may have read its
     /// tree otherwise.
     pub tool_version: &'a str,
+    /// The rule that takes the walk where it is predicted cheaper than the
+    /// replay, for `rescan` with neither `--full` nor `--incremental`;
+    /// `None` replays whatever it costs (`--incremental`).
+    pub costs: Option<Costs>,
 }
 
 /// An incremental rescan, its checks passed: the saved tree, what its
@@ -331,12 +392,18 @@ pub fn plan(
         ));
     }
     options_unchanged(index, &options, checks)?;
+    // After the checks above, which a walk would face too: this one is of
+    // cost alone.
+    let limit = match checks.costs {
+        Some(costs) => replay_limit(index, costs)?,
+        None => REPLAY_TIMEOUT,
+    };
     let saved = Saved::load(index).map_err(Stop::Index)?;
     let root = index.root_path().to_owned();
     // Listed before the replay: a file closed after this is in it.
     let open = provider.open_for_write(&root);
     let mut changes = Changes::default();
-    replay(&saved, &root, history, &mut changes)?;
+    replay(&saved, &root, history, limit, &mut changes)?;
     let reported = changes.count(&saved);
     let total = saved.dirs.len().max(1);
     if reported.saturating_mul(100) > total.saturating_mul(MOST_CHANGED_PERCENT) {
@@ -419,6 +486,29 @@ fn volatile(
     Ok((dirs, entries.len()))
 }
 
+/// How long the replays of `index`'s scan may run under `costs`: none,
+/// [`Fallback::ReplaySlower`], when a walk of its entries is predicted
+/// cheaper than the replay's floor; else twice the scan's own duration, at
+/// most [`REPLAY_TIMEOUT`].
+fn replay_limit(index: &Index, costs: Costs) -> Result<Duration, Stop> {
+    let entries = u64::from(index.len());
+    let walk = Duration::from_nanos(entries.saturating_mul(costs.walk_ns_per_entry));
+    if walk < costs.replay_floor {
+        return Err(Stop::fallback(
+            Fallback::ReplaySlower,
+            format!(
+                "a walk of the saved scan's {entries} entries, about {:.2} s, is predicted \
+                 cheaper than a replay of the FSEvents history, at least {:.1} s",
+                walk.as_secs_f64(),
+                costs.replay_floor.as_secs_f64()
+            ),
+        ));
+    }
+    let meta = index.meta();
+    let took = u64::try_from(meta.finished_at.saturating_sub(meta.started_at)).unwrap_or(0);
+    Ok(REPLAY_TIMEOUT.min(Duration::from_nanos(took.saturating_mul(2))))
+}
+
 /// A duration in days, for a message.
 #[allow(clippy::cast_precision_loss)]
 fn days(ns: i64) -> String {
@@ -481,15 +571,22 @@ fn mtime_ns(meta: &std::fs::Metadata) -> i64 {
 }
 
 /// Replays each entered volume's history, at the root and at each
-/// directory where the scan entered the volume below it, into `changes`.
-/// A volume entered below the root whose history cannot be read is read
-/// again whole; the root's volume without one fails the check.
+/// directory where the scan entered the volume below it, into `changes`:
+/// under the cost rule all of them within `limit`, else each within
+/// [`REPLAY_TIMEOUT`]. A volume entered below the root whose history cannot
+/// be read is read again whole; the root's volume without one fails the
+/// check.
 fn replay(
     saved: &Saved,
     root: &Path,
     history: &dyn History,
+    limit: Duration,
     changes: &mut Changes,
 ) -> Result<(), Stop> {
+    // Under the cost rule a replay that runs out of time means the walk was
+    // cheaper; under REPLAY_TIMEOUT, a history that cannot be read in time.
+    let bounded = limit < REPLAY_TIMEOUT;
+    let deadline = Instant::now() + limit;
     for volume in saved.volumes.iter().filter(|v| v.entered) {
         for point in saved.entry_points(volume.dev) {
             let at_root = point.is_empty();
@@ -526,7 +623,12 @@ fn replay(
                 )?;
                 continue;
             };
-            let replayed = match history.replay(volume.dev, mark, &under) {
+            let left = if bounded {
+                deadline.saturating_duration_since(Instant::now())
+            } else {
+                REPLAY_TIMEOUT
+            };
+            let replayed = match history.replay(volume.dev, mark, &under, left) {
                 Ok(replayed) => replayed,
                 Err(e) => {
                     let reason = e.fallback().map_or(Fallback::VolumeChanged, Fallback::from);
@@ -534,28 +636,7 @@ fn replay(
                     continue;
                 }
             };
-            let lost = if replayed.dropped {
-                Some(Fallback::EventsDropped)
-            } else if replayed.ids_wrapped
-                || !replayed.history_done
-                || replayed.must_scan_subdirs.contains(&under)
-            {
-                Some(Fallback::HistoryGone)
-            } else {
-                None
-            };
-            if let Some(reason) = lost {
-                let detail = match reason {
-                    Fallback::EventsDropped => "FSEvents dropped events since the scan".to_owned(),
-                    _ if !replayed.history_done => format!(
-                        "the FSEvents history did not reach its end within {} s",
-                        REPLAY_TIMEOUT.as_secs()
-                    ),
-                    _ => format!(
-                        "the FSEvents history cannot narrow the rescan of {}",
-                        under.display()
-                    ),
-                };
+            if let Some((reason, detail)) = lost(&replayed, &under, bounded.then_some(limit)) {
                 read_whole(changes, reason, detail)?;
                 continue;
             }
@@ -596,6 +677,47 @@ fn replay(
         }
     }
     Ok(())
+}
+
+/// Why `replayed`, the replay below `under`, cannot stand in for reading
+/// it, and what failed, in a sentence; `None` when it can. `bound` is the
+/// cost rule's limit, when it set one: a replay that ran out of it is
+/// slower than the walk rather than lost.
+fn lost(replayed: &Replay, under: &Path, bound: Option<Duration>) -> Option<(Fallback, String)> {
+    if replayed.dropped {
+        return Some((
+            Fallback::EventsDropped,
+            "FSEvents dropped events since the scan".to_owned(),
+        ));
+    }
+    if let Some(limit) = bound.filter(|_| !replayed.history_done && !replayed.ids_wrapped) {
+        return Some((
+            Fallback::ReplaySlower,
+            format!(
+                "the FSEvents history did not reach its end within {:.1} s, twice the saved \
+                 scan's own duration, past which the walk is cheaper",
+                limit.as_secs_f64()
+            ),
+        ));
+    }
+    if replayed.ids_wrapped
+        || !replayed.history_done
+        || replayed.must_scan_subdirs.iter().any(|dir| dir == under)
+    {
+        let detail = if replayed.history_done {
+            format!(
+                "the FSEvents history cannot narrow the rescan of {}",
+                under.display()
+            )
+        } else {
+            format!(
+                "the FSEvents history did not reach its end within {} s",
+                REPLAY_TIMEOUT.as_secs()
+            )
+        };
+        return Some((Fallback::HistoryGone, detail));
+    }
+    None
 }
 
 /// The modification and status-change times of the directory at `path`,
