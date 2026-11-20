@@ -392,13 +392,18 @@ pub fn plan(
         ));
     }
     options_unchanged(index, &options, checks)?;
+    let saved = Saved::load(index).map_err(Stop::Index)?;
+    // A root whose history can never be replayed says so before a replay is
+    // weighed against the walk.
+    if let Some(volume) = saved.root_volume() {
+        replayable(volume, history).map_err(|(reason, detail)| Stop::fallback(reason, detail))?;
+    }
     // After the checks above, which a walk would face too: this one is of
     // cost alone.
     let limit = match checks.costs {
         Some(costs) => replay_limit(index, costs)?,
         None => REPLAY_TIMEOUT,
     };
-    let saved = Saved::load(index).map_err(Stop::Index)?;
     let root = index.root_path().to_owned();
     // Listed before the replay: a file closed after this is in it.
     let open = provider.open_for_write(&root);
@@ -490,6 +495,34 @@ fn volatile(
 /// [`Fallback::ReplaySlower`], when a walk of its entries is predicted
 /// cheaper than the replay's floor; else twice the scan's own duration, at
 /// most [`REPLAY_TIMEOUT`].
+/// The mark `volume`'s history is replayed from, or why the saved scan
+/// alone says it cannot be: a volume whose history a rescan never reuses,
+/// or one the scan recorded no history for.
+fn replayable<'a>(
+    volume: &'a SavedVolume,
+    history: &dyn History,
+) -> Result<&'a FsEventsMark, (Fallback, String)> {
+    if !history.reusable(&volume.fs_type) {
+        return Err((
+            Fallback::FseventsDisabled,
+            format!(
+                "the volume at {} is {}, whose FSEvents history a rescan never reuses",
+                String::from_utf8_lossy(&volume.mount_point),
+                volume.fs_type
+            ),
+        ));
+    }
+    volume.mark.as_ref().ok_or_else(|| {
+        (
+            Fallback::VolumeChanged,
+            format!(
+                "the saved scan recorded no FSEvents history for the volume at {}",
+                String::from_utf8_lossy(&volume.mount_point)
+            ),
+        )
+    })
+}
+
 fn replay_limit(index: &Index, costs: Costs) -> Result<Duration, Stop> {
     let entries = u64::from(index.len());
     let walk = Duration::from_nanos(entries.saturating_mul(costs.walk_ns_per_entry));
@@ -600,28 +633,12 @@ fn replay(
                     Ok(())
                 }
             };
-            if !history.reusable(&volume.fs_type) {
-                read_whole(
-                    changes,
-                    Fallback::FseventsDisabled,
-                    format!(
-                        "the volume at {} is {}, whose FSEvents history a rescan never reuses",
-                        String::from_utf8_lossy(&volume.mount_point),
-                        volume.fs_type
-                    ),
-                )?;
-                continue;
-            }
-            let Some(mark) = &volume.mark else {
-                read_whole(
-                    changes,
-                    Fallback::VolumeChanged,
-                    format!(
-                        "the saved scan recorded no FSEvents history for the volume at {}",
-                        String::from_utf8_lossy(&volume.mount_point)
-                    ),
-                )?;
-                continue;
+            let mark = match replayable(volume, history) {
+                Ok(mark) => mark,
+                Err((reason, detail)) => {
+                    read_whole(changes, reason, detail)?;
+                    continue;
+                }
             };
             let left = if bounded {
                 deadline.saturating_duration_since(Instant::now())
@@ -974,6 +991,12 @@ impl Saved {
     /// Where the scan read the volume on `dev`: the root (an empty path)
     /// when it is the root's, and each directory where it entered the
     /// volume below the root.
+    /// The volume the root is on, when the scan entered it.
+    fn root_volume(&self) -> Option<&SavedVolume> {
+        let dev = self.dirs.first()?.dev;
+        self.volumes.iter().find(|v| v.entered && v.dev == dev)
+    }
+
     fn entry_points(&self, dev: u64) -> Vec<Vec<u8>> {
         let mut points = Vec::new();
         if self.dirs.first().is_some_and(|root| root.dev == dev) {

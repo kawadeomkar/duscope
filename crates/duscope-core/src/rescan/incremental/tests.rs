@@ -1360,6 +1360,50 @@ fn p5_core_12_a_small_tree_walks_before_any_replay() {
 }
 
 #[test]
+fn p5_core_12_a_root_whose_history_cannot_be_replayed_says_so_before_the_rule() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    let quiet = |under: &Path| Ok(reporting(under, &[]));
+    let native = provider(&opts()).unwrap();
+    let costs = Some(Costs::default());
+    // The tree is small enough for the rule to take the walk; the reason is
+    // still the volume's, whose history a rescan never reuses.
+    let (parent, _) = full(
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        settled_ns(),
+        "{}",
+    );
+    let disabled = Script {
+        reusable: false,
+        ..script(&quiet)
+    };
+    assert!(matches!(
+        plan(&parent, &checks_at(&parent, costs), &disabled, &*native),
+        Err(Stop::Fallback(Fallback::FseventsDisabled, _))
+    ));
+    // Or the saved scan's, which recorded no history for its volume.
+    let mut arena = Arena::new(Attrs::Basic);
+    walk_with(&*native, &root, &opts(), |event| {
+        arena.push(event).unwrap();
+    })
+    .unwrap();
+    let unmarked = write(
+        arena,
+        &meta(&root, "unmarked", settled_ns(), "{}", 0),
+        &env.tmp_dir().join("unmarked"),
+    );
+    let history = script(&quiet);
+    assert!(matches!(
+        plan(&unmarked, &checks_at(&unmarked, costs), &history, &*native),
+        Err(Stop::Fallback(Fallback::VolumeChanged, _))
+    ));
+    assert_eq!(history.replays.get(), 0);
+}
+
+#[test]
 fn p5_core_12_a_replay_past_twice_the_saved_scans_duration_is_given_up() {
     let env = TestEnv::new();
     let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
