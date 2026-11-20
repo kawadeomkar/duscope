@@ -25,6 +25,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use duscope_core::CoreError;
 use duscope_core::arena::Arena;
@@ -284,6 +285,7 @@ impl History for Script {
         _dev: u64,
         _mark: &FsEventsMark,
         under: &Path,
+        _limit: Duration,
     ) -> Result<Replay, FsEventsError> {
         Ok(Replay {
             root: under.to_owned(),
@@ -378,6 +380,9 @@ fuzz_target!(|data: &[u8]| {
         now_ns: fixture.meta.started_at,
         max_age_ns: MAX_AGE_NS,
         tool_version: TOOL_VERSION,
+        // No prediction, as under `--incremental`: a saved tree of a few
+        // entries would take the walk before any replay is made.
+        costs: None,
     };
     // A provider that holds no file open for writing, which the volatile
     // set asks of the rescan's.
