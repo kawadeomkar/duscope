@@ -520,7 +520,10 @@ What to do: narrow the statement (a subtree with `under(id, :root_id)`, a
 Exit 2. What was asked cannot be done here: duscope runs on Linux and macOS
 only; or `rescan --incremental` was asked where only a full read would do, which
 on Linux is always, since Linux keeps no change history, and on macOS when a
-check of the history fails (the message gives the reason).
+check of the history fails (the message gives the reason). A check of cost alone
+never refuses it: `--incremental` replays the history even where reading the
+whole tree would be quicker, which `rescan` without it does
+(`fallback_reason: replay_slower`).
 
 What to do: `duscope rescan` without `--incremental` reads the whole tree, and
 `duscope diff OLD latest --under ROOT`, with `OLD` the saved scan's id and

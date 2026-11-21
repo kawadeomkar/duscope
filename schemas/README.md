@@ -61,7 +61,10 @@ The schemas list the values of the enumerated fields, from `WARNING_CODES`,
 - a field whose values grow (the warning codes, the error codes, `flags`, the
   skip and exclude reasons, `regenerable_by`, what `scans --prune` removed) is
   `anyOf` its known values or any string, so a reader of one release's schema
-  accepts a later release's output.
+  accepts a later release's output. A value a later release adds to a field
+  that marks its values' releases (`fallback_reason`) is a branch of its own,
+  `{"const": "<value>", "x-since": "<release>"}`, between the first release's
+  values and any string.
 
 A field only one platform fills is marked `x-platforms`.
 

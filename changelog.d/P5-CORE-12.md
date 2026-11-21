@@ -1,0 +1,3 @@
+### Changed
+
+- `rescan` with neither `--full` nor `--incremental` reads the whole tree where that is predicted cheaper than replaying the volume's FSEvents history (macOS), and says so with `fallback_reason: replay_slower`. A replay costs what the volume's history since the saved scan costs, about a second at the least whatever changed, where a warm walk costs about 3.5 µs an entry, so a saved scan of fewer than about 300,000 entries is read whole; a replay that runs past twice the saved scan's own duration is given up for the walk, with the same reason. Both read the tree exactly; `--incremental` replays whatever it costs, and `--full` reads the whole tree, as before.

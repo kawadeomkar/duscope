@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use duscope_testkit::TestEnv;
 use duscope_walk::fsevents::Replay;
@@ -24,8 +25,8 @@ use duscope_walk::{
 use rusqlite::types::Value;
 
 use super::{
-    Changes, Checks, Fallback, History, MAX_AGE_NS, Merged, Pruning, Stop, VOLATILE_WINDOW_NS,
-    merge, plan, sample,
+    Changes, Checks, Costs, Fallback, History, MAX_AGE_NS, Merged, Pruning, REPLAY_TIMEOUT, Stop,
+    VOLATILE_WINDOW_NS, merge, plan, sample,
 };
 use crate::CoreError;
 use crate::arena::Arena;
@@ -52,6 +53,11 @@ struct Script<'a> {
     replays: Cell<usize>,
     /// Whether the volumes' histories may stand in for a read.
     reusable: bool,
+    /// How long a replay takes on the history's own clock: one given less
+    /// time stops before the history's end, as a real one does.
+    took: Duration,
+    /// The time the last replay was given.
+    limit: Cell<Option<Duration>>,
 }
 
 impl History for Script<'_> {
@@ -64,10 +70,16 @@ impl History for Script<'_> {
         _dev: u64,
         mark: &FsEventsMark,
         under: &Path,
+        limit: Duration,
     ) -> Result<Replay, FsEventsError> {
         assert_eq!(*mark, scan_mark());
         self.replays.set(self.replays.get() + 1);
-        (self.replay)(under)
+        self.limit.set(Some(limit));
+        let replayed = (self.replay)(under)?;
+        Ok(Replay {
+            history_done: replayed.history_done && self.took <= limit,
+            ..replayed
+        })
     }
 
     fn mark(&self, _dev: u64, now: u64) -> Option<FsEventsMark> {
@@ -88,6 +100,8 @@ fn script(replay: Answer<'_>) -> Script<'_> {
         replay,
         replays: Cell::new(0),
         reusable: true,
+        took: Duration::ZERO,
+        limit: Cell::new(None),
     }
 }
 
@@ -180,6 +194,18 @@ fn full_with(
     started: i64,
     options: &str,
 ) -> (Index, WalkSummary) {
+    full_lasting(walk, root, dir, id, (started, started + 1), options)
+}
+
+/// [`full_with`] of a scan that started and finished at `times`.
+fn full_lasting(
+    walk: &WalkOptions,
+    root: &Path,
+    dir: &Path,
+    id: &str,
+    (started, finished): (i64, i64),
+    options: &str,
+) -> (Index, WalkSummary) {
     let mut arena = Arena::new(Attrs::Basic);
     let provider = provider(walk).unwrap();
     let summary = walk_with(&*provider, root, walk, |mut event| {
@@ -189,7 +215,10 @@ fn full_with(
         arena.push(event).unwrap();
     })
     .unwrap();
-    let meta = meta(root, id, started, options, summary.excluded);
+    let meta = ScanMeta {
+        finished_at: finished,
+        ..meta(root, id, started, options, summary.excluded)
+    };
     (write(arena, &meta, dir), summary)
 }
 
@@ -230,6 +259,7 @@ fn incremental_by(
         now_ns: parent.meta().started_at + 3_600_000_000_000,
         max_age_ns: MAX_AGE_NS,
         tool_version: "0.0.0",
+        costs: None,
     };
     let planned = plan(parent, &checks, history, provider)?;
     let mut arena = Arena::new(Attrs::Basic);
@@ -591,6 +621,7 @@ fn p5_core_01_age_options_and_history_are_checked_before_any_replay() {
             now_ns,
             max_age_ns: MAX_AGE_NS,
             tool_version,
+            costs: None,
         };
         match plan(&parent, &checks, history, &*native) {
             Err(Stop::Fallback(reason, _)) => Some(reason),
@@ -618,9 +649,7 @@ fn p5_core_01_age_options_and_history_are_checked_before_any_replay() {
     // No history on this platform: no check failed, and none ran.
     let none = Script {
         now: None,
-        replay: &replay,
-        replays: Cell::new(0),
-        reusable: true,
+        ..script(&replay)
     };
     assert_eq!(checked(started + 8 * day, "9.9.9", &none), None);
     // A scan that followed links read outside the root's history.
@@ -637,6 +666,7 @@ fn p5_core_01_age_options_and_history_are_checked_before_any_replay() {
         now_ns: started,
         max_age_ns: MAX_AGE_NS,
         tool_version: "0.0.0",
+        costs: None,
     };
     assert!(matches!(
         plan(&followed, &checks, &history, &*native),
@@ -683,6 +713,7 @@ fn p5_core_01_reasons_are_the_conventions_values() {
             "too_many_changes",
             "events_dropped",
             "post_check_failed",
+            "replay_slower",
         ]
     );
     assert_eq!(Fallback::OptionsChanged.words(), "options changed");
@@ -888,6 +919,7 @@ fn p5_core_01_under_attrs_full_an_incremental_saved_scan_is_read_whole() {
             now_ns: started + 3_600_000_000_000,
             max_age_ns: MAX_AGE_NS,
             tool_version: "0.0.0",
+            costs: None,
         };
         match plan(&saved, &checks, &history, &*provider) {
             Ok(_) => None,
@@ -931,6 +963,7 @@ fn p5_sec_04_a_saved_scan_whose_rows_break_the_layout_is_index_corrupt() {
         now_ns: started + 3_600_000_000_000,
         max_age_ns: MAX_AGE_NS,
         tool_version: "0.0.0",
+        costs: None,
     };
     // Each case a copy of the saved scan in a directory of its own, changed
     // there: an index is never edited in place.
@@ -1089,6 +1122,7 @@ fn p5_walk_06_an_incremental_rescan_asks_its_provider_for_automount_points() {
         now_ns: parent.meta().started_at + 3_600_000_000_000,
         max_age_ns: MAX_AGE_NS,
         tool_version: "0.0.0",
+        costs: None,
     };
     let inner = Automounts(provider(&opts()).unwrap());
     let planned = plan(&parent, &checks, &history, &inner).unwrap();
@@ -1276,4 +1310,158 @@ fn p5_core_11_a_volatile_directory_is_read_and_its_children_decided() {
     assert!(changes.reads(b"", b"v"));
     assert!(!changes.reads(b"v/w", b"v/w/x"));
     assert!(!changes.reads(b"v", b"v/q"));
+}
+
+/// The checks of an incremental rescan of `parent` an hour after it, under
+/// the replay-or-walk rule `costs` (`None`: `--incremental`).
+fn checks_at(parent: &Index, costs: Option<Costs>) -> Checks<'static> {
+    Checks {
+        now_ns: parent.meta().started_at + 3_600_000_000_000,
+        max_age_ns: MAX_AGE_NS,
+        tool_version: "0.0.0",
+        costs,
+    }
+}
+
+#[test]
+fn p5_core_12_a_small_tree_walks_before_any_replay() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    let (parent, _) = full(
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        settled_ns(),
+        "{}",
+    );
+    let quiet = |under: &Path| Ok(reporting(under, &[]));
+    let history = script(&quiet);
+    let native = provider(&opts()).unwrap();
+    // A few hundred entries: their walk, well under a millisecond, is
+    // predicted cheaper than a replay, which costs 1.1 s at the least.
+    match plan(
+        &parent,
+        &checks_at(&parent, Some(Costs::default())),
+        &history,
+        &*native,
+    ) {
+        Err(Stop::Fallback(Fallback::ReplaySlower, detail)) => {
+            assert!(detail.contains("predicted cheaper"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(history.replays.get(), 0, "decided before any replay");
+    // `--incremental` replays whatever it costs, for as long as the
+    // history takes up to REPLAY_TIMEOUT.
+    assert!(plan(&parent, &checks_at(&parent, None), &history, &*native).is_ok());
+    assert_eq!(history.replays.get(), 1);
+    assert_eq!(history.limit.get(), Some(REPLAY_TIMEOUT));
+}
+
+#[test]
+fn p5_core_12_a_root_whose_history_cannot_be_replayed_says_so_before_the_rule() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    let quiet = |under: &Path| Ok(reporting(under, &[]));
+    let native = provider(&opts()).unwrap();
+    let costs = Some(Costs::default());
+    // The tree is small enough for the rule to take the walk; the reason is
+    // still the volume's, whose history a rescan never reuses.
+    let (parent, _) = full(
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        settled_ns(),
+        "{}",
+    );
+    let disabled = Script {
+        reusable: false,
+        ..script(&quiet)
+    };
+    assert!(matches!(
+        plan(&parent, &checks_at(&parent, costs), &disabled, &*native),
+        Err(Stop::Fallback(Fallback::FseventsDisabled, _))
+    ));
+    // Or the saved scan's, which recorded no history for its volume.
+    let mut arena = Arena::new(Attrs::Basic);
+    walk_with(&*native, &root, &opts(), |event| {
+        arena.push(event).unwrap();
+    })
+    .unwrap();
+    let unmarked = write(
+        arena,
+        &meta(&root, "unmarked", settled_ns(), "{}", 0),
+        &env.tmp_dir().join("unmarked"),
+    );
+    let history = script(&quiet);
+    assert!(matches!(
+        plan(&unmarked, &checks_at(&unmarked, costs), &history, &*native),
+        Err(Stop::Fallback(Fallback::VolumeChanged, _))
+    ));
+    assert_eq!(history.replays.get(), 0);
+}
+
+#[test]
+fn p5_core_12_a_replay_past_twice_the_saved_scans_duration_is_given_up() {
+    let env = TestEnv::new();
+    let root = fs::canonicalize(env.tmp_dir()).unwrap().join("tree");
+    tree(&root);
+    // A saved scan that took a second, and a rule whose floor is nothing,
+    // so the replay is tried: it has two seconds.
+    let started = settled_ns();
+    let (parent, _) = full_lasting(
+        &opts(),
+        &root,
+        &env.tmp_dir().join("index"),
+        "parent",
+        (started, started + 1_000_000_000),
+        "{}",
+    );
+    let costs = Some(Costs {
+        replay_floor: Duration::ZERO,
+        ..Costs::default()
+    });
+    let quiet = |under: &Path| Ok(reporting(under, &[]));
+    let native = provider(&opts()).unwrap();
+    let taking = |took: Duration| Script {
+        took,
+        ..script(&quiet)
+    };
+    // Three seconds on the history's clock: given up for the walk.
+    let slow = taking(Duration::from_secs(3));
+    match plan(&parent, &checks_at(&parent, costs), &slow, &*native) {
+        Err(Stop::Fallback(Fallback::ReplaySlower, detail)) => {
+            assert!(
+                detail.contains("twice the saved scan's own duration"),
+                "{detail}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    // What is left of the two seconds when the replay starts.
+    let given = slow.limit.get().unwrap();
+    assert!(
+        given <= Duration::from_secs(2) && given > Duration::from_millis(1900),
+        "{given:?}"
+    );
+    // A second and a half: within it.
+    let quick = taking(Duration::from_millis(1500));
+    assert!(plan(&parent, &checks_at(&parent, costs), &quick, &*native).is_ok());
+    // `--incremental` waits for the slow one.
+    let slow = taking(Duration::from_secs(3));
+    assert!(plan(&parent, &checks_at(&parent, None), &slow, &*native).is_ok());
+}
+
+#[test]
+fn p5_core_12_the_envelope_lists_every_reason() {
+    use crate::envelope::values;
+    assert_eq!(
+        values::FALLBACK_REASONS,
+        Fallback::ALL.map(Fallback::as_str)
+    );
+    // The release that first prints each later reason, as the schemas'
+    // `x-since` says.
+    assert_eq!(values::FALLBACK_REASONS_SINCE, [("replay_slower", "0.4")]);
 }

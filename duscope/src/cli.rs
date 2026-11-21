@@ -912,6 +912,8 @@ pub struct RescanArgs {
     ///
     /// By default a rescan does so where it can, else scans the whole tree
     ///
+    /// By default it also scans the whole tree where that is quicker than a replay
+    ///
     /// It can on macOS, from the FSEvents history; on Linux it never can
     #[arg(long)]
     pub incremental: bool,

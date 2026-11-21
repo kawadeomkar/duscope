@@ -149,7 +149,7 @@ pub mod values {
     /// What became of an item `clean` was told to move or delete.
     pub const OUTCOMES: [&str; 3] = ["trashed", "deleted", "failed"];
     /// Why a rescan read the whole tree (`fallback_reason`).
-    pub const FALLBACK_REASONS: [&str; 8] = [
+    pub const FALLBACK_REASONS: [&str; 9] = [
         "index_too_old",
         "volume_changed",
         "history_gone",
@@ -158,7 +158,12 @@ pub mod values {
         "too_many_changes",
         "events_dropped",
         "post_check_failed",
+        "replay_slower",
     ];
+    /// Of those, the ones a release after the field's first added, each
+    /// with the release that first prints it, which the schemas mark
+    /// `x-since`.
+    pub const FALLBACK_REASONS_SINCE: [(&str, &str); 1] = [("replay_slower", "0.4")];
 }
 
 /// `values` with null, for a nullable field's values.
@@ -173,6 +178,26 @@ fn nullable(values: &[&'static str]) -> Vec<Option<&'static str>> {
 #[cfg(test)]
 fn known<T: serde::Serialize>(values: T) -> serde_json::Value {
     serde_json::json!([{"enum": values}, {"type": "string"}])
+}
+
+/// [`known`] for a nullable field whose values later releases added to:
+/// the values of its first release and null, then each of `added` in a
+/// branch of its own, which the schema file marks with its `x-since`.
+#[cfg(test)]
+fn known_since(values: &[&'static str], added: &[(&str, &str)]) -> serde_json::Value {
+    let first: Vec<&'static str> = values
+        .iter()
+        .copied()
+        .filter(|value| !added.iter().any(|(later, _)| later == value))
+        .collect();
+    let mut branches = vec![serde_json::json!({"enum": nullable(&first)})];
+    branches.extend(
+        added
+            .iter()
+            .map(|&(value, _)| serde_json::json!({"const": value})),
+    );
+    branches.push(serde_json::json!({"type": "string"}));
+    serde_json::Value::Array(branches)
 }
 
 /// The error codes alone, for [`ErrorObject::code`]'s values.
@@ -296,11 +321,16 @@ pub struct ScanBlock {
     /// Why a rescan read the whole tree although it was not asked to:
     /// `index_too_old`, `volume_changed`, `history_gone`,
     /// `fsevents_disabled`, `options_changed`, `too_many_changes`,
-    /// `events_dropped` or `post_check_failed`; null for any other scan,
-    /// for a saved scan read back, whose index does not keep it, and on a
-    /// platform that keeps no change history (Linux), where every rescan
-    /// reads the whole tree.
-    #[cfg_attr(test, schemars(extend("anyOf" = known(nullable(&values::FALLBACK_REASONS)))))]
+    /// `events_dropped`, `post_check_failed`, or `replay_slower`, when the
+    /// walk was the cheaper read; null for any other scan, for a saved scan
+    /// read back, whose index does not keep it, and on a platform that keeps
+    /// no change history (Linux), where every rescan reads the whole tree.
+    #[cfg_attr(
+        test,
+        schemars(extend(
+            "anyOf" = known_since(&values::FALLBACK_REASONS, &values::FALLBACK_REASONS_SINCE)
+        ))
+    )]
     pub fallback_reason: Option<&'static str>,
     /// The volumes the scan met within the path read, entered or not: the
     /// one the path lies on, and those mounted at or under it; at the scan's

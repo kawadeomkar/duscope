@@ -15,7 +15,8 @@ use crate::index::Index;
 mod incremental;
 
 pub use incremental::{
-    Checks, Fallback, FsEvents, History, MAX_AGE_NS, Merged, Plan, Stop, merge, plan,
+    Checks, Costs, Fallback, FsEvents, History, MAX_AGE_NS, Merged, Plan, REPLAY_FLOOR, Stop,
+    WALK_NS_PER_ENTRY, merge, plan,
 };
 
 /// The options a scan was taken with, as `scan_meta.options` records them

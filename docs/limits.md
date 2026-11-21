@@ -120,6 +120,13 @@ checks:
 - `events_dropped`: FSEvents dropped events since the scan.
 - `too_many_changes`: the history reports more than 15% of the scan's
   directories.
+- `replay_slower`: with neither `--full` nor `--incremental`, the walk is the
+  cheaper read. A replay costs what the volume's history since the scan costs,
+  about a second at the least whatever changed below the root, where a warm
+  walk costs about 3.5 µs an entry: a saved scan of fewer than about 300,000
+  entries is read whole, and a replay that runs past twice the saved scan's own
+  duration is given up for the walk. `--incremental` replays whatever it
+  costs.
 - `options_changed`: another version of duscope took the saved scan, or a file
   its options name (`--exclude-from`, `--ignore-from`, the configuration's
   cache rules) changed since.
