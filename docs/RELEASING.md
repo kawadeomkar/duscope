@@ -33,8 +33,12 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    # entries of [workspace.dependencies] (Cargo.toml), and the two versions in
    # server.json, then:
    cargo update --workspace
+   cargo update --workspace --manifest-path fuzz/Cargo.toml   # fuzz/ is a workspace of its own
    git commit -am "REL: vX.Y.Z"
    ```
+
+   `fuzz/Cargo.lock` names the workspace crates too, at their versions; without the second
+   update it keeps the previous release's, which `cargo fuzz` rewrites on every run.
 
 3. **Within budget.** On the release commit:
 
@@ -57,18 +61,27 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    `build-time` (against the ceiling `BUILD_TIME_BUDGET_SECS` in `ci.yml`) on that
    commit must be green too.
 
-4. **Tag and watch.** On `main` at the release commit, sign the tag with the key in
-   [.github/allowed_signers](../.github/allowed_signers) and push it. A squash merge leaves the
-   pull request's own commits off `main`, and `verify-tag` refuses a tag on one of them:
+4. **Tag and watch.** Sign the tag on the release commit, the `REL: vX.Y.Z` squash on `main`,
+   with the key in [.github/allowed_signers](../.github/allowed_signers) and push it. Name the
+   commit by its SHA, never by `main`'s tip: a pull request merged after the release commit
+   moves the tip, and `verify-tag` refuses a commit whose `changelog.d` holds fragments, as it
+   refuses one of the pull request's own commits, which a squash merge leaves off `main`:
 
    ```sh
-   git switch main && git pull --ff-only     # the release commit, not a branch's
-   git tag -s vX.Y.Z -m "duscope X.Y.Z"
+   git fetch origin main
+   rel=$(git log origin/main -1 --format=%H --grep='^REL: vX\.Y\.Z (#')   # the release commit
+   git show -s --format='%h %s' "$rel"       # REL: vX.Y.Z (#N)
+   git tag -s vX.Y.Z -m "duscope X.Y.Z" "$rel"
    git push origin vX.Y.Z
    # The tag's run: release.yml also runs on every pull request.
    gh run watch "$(gh run list --workflow release.yml --event push --branch vX.Y.Z --limit 1 \
      --json databaseId --jq '.[0].databaseId')"
    ```
+
+   A tag `verify-tag` refused has published nothing; move it to the release commit rather than
+   leave it. Delete it on GitHub, then locally (`git push origin :refs/tags/vX.Y.Z`, then
+   `git tag -d vX.Y.Z`; the tag ruleset lets the owner through and says "Bypassed rule
+   violations"), check that both are gone, and tag again as above.
 
    Watch `verify-tag`, the builds, the `.deb` jobs and their install tests, `host` and
    `publish-crates` to the end, then check the attestations:
@@ -88,8 +101,15 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    [dist-workspace.toml](../dist-workspace.toml), at the image version its log names under
    "Runner Image"), check the tag out twice, at two paths, and run `just repro-dist <target>`
    in each, with the target installed (`rustup target add`) and, for a musl target,
-   `musl-tools`, as the job installs them. The two builds print one SHA-256, and the
-   archive's binary has it too:
+   `musl-tools`, as the job installs them, and with `cargo-auditable` at the path the job
+   installed it at (the log's "cargo-auditable installed at" line; for v0.3.0,
+   `/home/runner/.cargo/bin/` on Ubuntu and `/Users/runner/.install-action/bin/` on macOS) and no
+   other copy in `$CARGO_HOME/bin`, which cargo searches before `PATH`. cargo-auditable makes
+   itself the workspace crates' `RUSTC_WORKSPACE_WRAPPER` by that path, and cargo hashes the
+   wrapper's path into their `-C metadata`: v0.3.0's musl archive rebuilds exactly through
+   `/home/runner/.cargo/bin/cargo-auditable`, and differs through a copy at `/root/.cargo/bin/`
+   or `/opt/tools/`. The two checkouts share one copy, so they cannot show it. The two builds
+   print one SHA-256, and the archive's binary has it too:
 
    ```sh
    just repro-dist aarch64-apple-darwin      # in each checkout of the tag: the same SHA-256
@@ -212,8 +232,10 @@ entries, the version bump and the assembled changelog; nothing else ships. In or
    re-run of the whole release verifies the tag again.
 
    ```sh
-   git switch hotfix/vX.Y.Z && git pull --ff-only
-   git tag -s vX.Y.Z -m "duscope X.Y.Z"
+   git fetch origin hotfix/vX.Y.Z
+   rel=$(git log origin/hotfix/vX.Y.Z -1 --format=%H --grep='^REL: vX\.Y\.Z (#')
+   git show -s --format='%h %s' "$rel"       # REL: vX.Y.Z (#N)
+   git tag -s vX.Y.Z -m "duscope X.Y.Z" "$rel"
    git push origin vX.Y.Z
    ```
 
