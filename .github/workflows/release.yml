@@ -38,7 +38,8 @@
 # from dist's output: the verify-tag job, which plan needs; the publish-crates job;
 # the token read-only at the top, widened per job; the tag pattern narrowed to v*;
 # a timeout on every job; cargo-auditable and just installed at pinned versions with
-# checksums (dist installs the latest cargo-auditable); dist installed by its
+# checksums (dist installs the latest cargo-auditable), cargo-auditable then run from one
+# path (CARGO_AUDITABLE_DIR, DEV-229); dist installed by its
 # installer checked against DIST_INSTALLER_SHA256 before it runs, in place of dist's
 # `curl | sh` (the installer checks the archive it downloads); the `just repro`
 # environment for the builds; every action pinned to a commit SHA with its version in
@@ -76,6 +77,10 @@ env:
   DIST_INSTALLER_SHA256: "a7b3b0812d624a09a534ba272aa8e04c801e56a83d553327a4a8632bc03abb94"
   # Embeds the dependency list in each binary (`cargo auditable`).
   CARGO_AUDITABLE_VERSION: "0.7.7"
+  # Where the builds run it from, at the justfile's cargo_auditable_dir: cargo hashes its
+  # path into the workspace crates' -C metadata, so a rebuild equals an archive's binary only
+  # through the same path (docs/RELEASING.md, DEV-229).
+  CARGO_AUDITABLE_DIR: "/opt/duscope-build/bin"
   # The .deb builder, at the justfile's pin.
   CARGO_DEB_VERSION: "3.8.0"
 
@@ -273,6 +278,13 @@ jobs:
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-auditable@${{ env.CARGO_AUDITABLE_VERSION }},just@${{ env.JUST_VERSION }}
+      - name: Run cargo-auditable from the release's path
+        # `just auditable-path` copies it to CARGO_AUDITABLE_DIR and takes it out of
+        # $CARGO_HOME/bin; PATH then starts at CARGO_AUDITABLE_DIR.
+        shell: bash
+        run: |
+          just auditable-path
+          echo "$CARGO_AUDITABLE_DIR" >> "$GITHUB_PATH"
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
@@ -283,6 +295,7 @@ jobs:
         run: just repro-env target | tee -a "$GITHUB_ENV"
       - name: Build artifacts
         run: |
+          just auditable-path check
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
@@ -436,6 +449,13 @@ jobs:
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deb@${{ env.CARGO_DEB_VERSION }},cargo-auditable@${{ env.CARGO_AUDITABLE_VERSION }},just@${{ env.JUST_VERSION }}
+      - name: Run cargo-auditable from the release's path
+        # As build-local-artifacts does; on a pull request, where that job does not run,
+        # `just deb` builds its own binary through it.
+        shell: bash
+        run: |
+          just auditable-path
+          echo "$CARGO_AUDITABLE_DIR" >> "$GITHUB_PATH"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: deb-assets
@@ -468,7 +488,9 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           BINARY: ${{ steps.binary.outputs.path }}
-        run: just deb "$TARGET" "$BINARY" reuse
+        run: |
+          just auditable-path check
+          just deb "$TARGET" "$BINARY" reuse
       - name: Lintian
         # initial-upload-closes-no-bugs fires while debian/changelog has a single
         # entry (before the first release after v0.0.1); the package is not
