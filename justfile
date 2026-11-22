@@ -29,6 +29,11 @@ cargo_deb_version := "3.8.0"
 # Embeds the dependency list in the binary `just deb` builds, as release.yml's
 # cargo-dist builds do.
 cargo_auditable_version := "0.7.7"
+# Where release.yml's builds run cargo-auditable from (`just auditable-path`). It makes itself
+# the workspace crates' RUSTC_WORKSPACE_WRAPPER by its own path, and cargo hashes that path
+# into their -C metadata, so a build equals a release archive's binary only through this path
+# (DEV-229).
+cargo_auditable_dir := "/opt/duscope-build/bin"
 cargo_dist_version := "0.33.1"
 # The commit of dist's v0.33.1 tag: a tag can move, a commit cannot.
 cargo_dist_rev := "665cb7d48902a30386857f8f679e1b1942876f06"
@@ -297,9 +302,61 @@ repro-dist target target_dir="target":
     if [[ $target == *-musl ]]; then
       RUSTFLAGS+=" -Ctarget-feature=+crt-static -Clink-self-contained=yes"
     fi
+    if ! where=$('{{just_executable()}}' --justfile '{{justfile()}}' auditable-path check 2>&1); then
+      echo "repro-dist: $where; this build will not equal a release archive's binary" >&2
+    fi
     cargo auditable build --profile dist --locked --target "$target" --package duscope --target-dir '{{target_dir}}'
     binary='{{target_dir}}'/"$target"/dist/duscope
     if command -v sha256sum >/dev/null; then sha256sum "$binary"; else shasum -a 256 "$binary"; fi
+
+# cargo-auditable at the path release.yml's builds run it from, cargo_auditable_dir: `move` puts
+# there the copy cargo would run (the one `just setup` installed), with sudo when the directory
+# needs it, and takes it out of $CARGO_HOME/bin, which cargo searches first when PATH does not
+# name it; `check` fails unless cargo would run that path's copy. The directory then goes on PATH before any
+# other copy (docs/RELEASING.md).
+# Put cargo-auditable where release.yml runs it from (`move`), or check that cargo runs it from there
+auditable-path mode="move":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mode={{quote(mode)}}
+    want={{quote(cargo_auditable_dir)}}/cargo-auditable
+    cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+    # The copy `cargo auditable` runs, found as cargo finds a subcommand: along PATH, after
+    # $CARGO_HOME/bin when PATH does not name that directory.
+    runs() {
+      local dir dirs named=""
+      IFS=: read -ra dirs <<< "$PATH"
+      for dir in "${dirs[@]}"; do
+        [[ ${dir%/} != "${cargo_bin%/}" ]] || named=1
+      done
+      [[ -n $named ]] || dirs=("$cargo_bin" "${dirs[@]}")
+      for dir in "${dirs[@]}"; do
+        if [[ -n $dir && -f $dir/cargo-auditable && -x $dir/cargo-auditable ]]; then
+          echo "$dir/cargo-auditable"; return
+        fi
+      done
+      return 1
+    }
+    case $mode in
+      check)
+        found=$(runs) || { echo "cargo-auditable is not installed (just setup)" >&2; exit 1; }
+        [[ $found == "$want" ]] || { echo "cargo-auditable runs from $found, not $want (just auditable-path)" >&2; exit 1; }
+        echo "cargo-auditable runs from $want" ;;
+      move)
+        found=$(runs) || { echo "auditable-path: install cargo-auditable {{cargo_auditable_version}} first (just setup)" >&2; exit 1; }
+        if [[ $found != "$want" ]]; then
+          sudo=""; [[ -w $(dirname "$want") || $(id -u) -eq 0 ]] || sudo=sudo
+          $sudo mkdir -p "$(dirname "$want")"
+          $sudo cp -L "$found" "$want"
+          $sudo chmod 755 "$want"
+          echo "cargo-auditable installed at $want (copied from $found)"
+          if [[ $found == "$cargo_bin/cargo-auditable" ]]; then
+            rm "$found"
+          fi
+        fi
+        [[ ":$PATH:" == *":$(dirname "$want"):"* ]] || echo "auditable-path: put $(dirname "$want") on PATH, before any other copy of cargo-auditable" >&2 ;;
+      *) echo "auditable-path: mode is move or check, not $mode" >&2; exit 1 ;;
+    esac
 
 # The environment of the reproducible build as KEY=value lines: repro builds under it, and release.yml's cargo-dist builds too
 repro-env target_dir="target/repro":

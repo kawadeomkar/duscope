@@ -2,13 +2,14 @@
 //! verify-tag, the token is widened only where a job needs it, actions are
 //! pinned, the crates publish in dependency order), the cargo-dist
 //! configuration, and the verify-tag step itself, run against throwaway
-//! repositories with tags signed by throwaway keys.
+//! repositories with tags signed by throwaway keys; and where its builds run
+//! cargo-auditable from (P5-SEC-01, DEV-229).
 //!
 //! release.yml is read as text, as `ci_workflow.rs` reads ci.yml: jobs are the
 //! keys indented by two spaces under `jobs:`, job-level keys by four. These
 //! tests never run the duscope binary. The verify-tag test needs git (2.34 or
 //! later, for SSH signatures), ssh-keygen, bash, jq and cargo on PATH, as the
-//! release runner has them.
+//! release runner has them; the cargo-auditable path test needs just and bash.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -524,6 +525,128 @@ fn p0_ci_02_release_builds_use_the_repro_environment() {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .collect();
     assert_eq!(profile, ["inherits = \"release\""]);
+}
+
+/// cargo hashes the path of cargo-auditable, the workspace crates'
+/// `RUSTC_WORKSPACE_WRAPPER`, into their `-C metadata`, so each job that builds a
+/// release binary runs it from the justfile's `cargo_auditable_dir` and checks
+/// that cargo will before it builds; `just repro-dist` checks too (DEV-229).
+#[test]
+fn p5_sec_01_release_builds_run_cargo_auditable_from_one_path() {
+    let workflow = read(WORKFLOW);
+    let justfile = read("justfile");
+    let dir = justfile
+        .lines()
+        .find_map(|line| line.strip_prefix("cargo_auditable_dir := "))
+        .map(|value| value.trim_matches('"').to_owned());
+    assert!(
+        dir.as_deref().is_some_and(|d| d.starts_with('/')),
+        "{dir:?}"
+    );
+    assert_eq!(workflow_env(&workflow, "CARGO_AUDITABLE_DIR"), dir);
+
+    let jobs = jobs(&workflow);
+    for (id, build) in [
+        ("build-local-artifacts", "dist build"),
+        ("deb", "just deb "),
+    ] {
+        let job = job(&jobs, id);
+        let position = |needle: &str| {
+            job.lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{id} has no line with `{needle}`"))
+        };
+        let step = "Run cargo-auditable from the release's path";
+        assert_eq!(
+            job.step_script(step),
+            "just auditable-path\necho \"$CARGO_AUDITABLE_DIR\" >> \"$GITHUB_PATH\"\n",
+            "{id}"
+        );
+        let install = position("cargo-auditable@${{ env.CARGO_AUDITABLE_VERSION }}");
+        let moved = position(&format!("- name: {step}"));
+        let check = position("just auditable-path check");
+        assert!(
+            install < moved && moved < check && check < position(build),
+            "{id}: cargo-auditable installed, moved, checked, then the build"
+        );
+    }
+
+    let recipe: Vec<&str> = justfile
+        .lines()
+        .skip_while(|line| !line.starts_with("repro-dist "))
+        .take_while(|line| !line.is_empty())
+        .collect();
+    let at = |needle: &str| {
+        recipe
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("just repro-dist has no line with `{needle}`"))
+    };
+    assert!(
+        at("auditable-path check") < at("cargo auditable build"),
+        "just repro-dist checks cargo-auditable's path after it builds"
+    );
+}
+
+/// `just auditable-path check` names the copy cargo would run, found as cargo
+/// finds a subcommand (along `PATH`, after `$CARGO_HOME/bin` when `PATH` does
+/// not name it), and fails unless that copy is the one at `cargo_auditable_dir`.
+#[test]
+fn p5_sec_01_auditable_path_check_names_the_copy_cargo_runs() {
+    let just = tool("just", "just (CONTRIBUTING.md)");
+    tool("bash", "bash (apt-get install bash)");
+    let temp = tempfile::tempdir().unwrap();
+    let dir = fs::canonicalize(temp.path()).unwrap();
+    let cargo_home = dir.join("cargo");
+    let elsewhere = dir.join("elsewhere");
+    let plant = |bin: &Path| {
+        fs::create_dir_all(bin).unwrap();
+        let copy = bin.join("cargo-auditable");
+        fs::write(&copy, "#!/bin/sh\n").unwrap();
+        let mut mode = fs::metadata(&copy).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+        fs::set_permissions(&copy, mode).unwrap();
+        copy
+    };
+    let cargo_bin = cargo_home.join("bin");
+    let search = |dirs: &[&Path]| {
+        let mut path = OsString::new();
+        for dir in dirs {
+            path.push(dir);
+            path.push(":");
+        }
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        path
+    };
+    let check = |path: &OsString| {
+        let out = Command::new(&just)
+            .arg("--justfile")
+            .arg(root().join("justfile"))
+            .args(["auditable-path", "check"])
+            .env("CARGO_HOME", &cargo_home)
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "the check passed: {out:?}");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    let runs_from = |copy: &Path| format!("runs from {}, not ", copy.display());
+    let on_path = plant(&elsewhere);
+    let stderr = check(&search(&[&elsewhere]));
+    assert!(stderr.contains(&runs_from(&on_path)), "{stderr}");
+    let in_cargo_home = plant(&cargo_bin);
+    let stderr = check(&search(&[&elsewhere]));
+    assert!(
+        stderr.contains(&runs_from(&in_cargo_home)),
+        "$CARGO_HOME/bin, not on PATH, comes first: {stderr}"
+    );
+    let stderr = check(&search(&[&elsewhere, &cargo_bin]));
+    assert!(
+        stderr.contains(&runs_from(&on_path)),
+        "$CARGO_HOME/bin on PATH takes its place there: {stderr}"
+    );
 }
 
 /// The keys of `.github/allowed_signers`: `principal [options] type base64`.

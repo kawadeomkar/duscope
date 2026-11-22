@@ -55,7 +55,9 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    `aarch64-apple-darwin`; a musl target needs what step 4 installs. Its `cargo auditable` is
    clean when its build succeeds: it embeds the Cargo.lock dependency list that
    `just deny advisories` has just checked against the advisory database, as release.yml's
-   builds do. The `dependencies` test fails when `DEPENDENCIES.md`'s tables and
+   builds do. The recipe warns when cargo would run cargo-auditable from another path than
+   release.yml's (step 4); the build still checks the list, though its binary will not equal
+   the archive's. The `dependencies` test fails when `DEPENDENCIES.md`'s tables and
    the direct dependencies of the published crates differ (a `cargo tree` count does not
    match the table, which covers all six published crates). The CI jobs `size`, `repro` and
    `build-time` (against the ceiling `BUILD_TIME_BUDGET_SECS` in `ci.yml`) on that
@@ -101,15 +103,19 @@ patch release (`v0.2.1`) carries `Fixed` and `Security` entries only, never feat
    [dist-workspace.toml](../dist-workspace.toml), at the image version its log names under
    "Runner Image"), check the tag out twice, at two paths, and run `just repro-dist <target>`
    in each, with the target installed (`rustup target add`) and, for a musl target,
-   `musl-tools`, as the job installs them, and with `cargo-auditable` at the path the job
-   installed it at (the log's "cargo-auditable installed at" line; for v0.3.0,
-   `/home/runner/.cargo/bin/` on Ubuntu and `/Users/runner/.install-action/bin/` on macOS) and no
-   other copy in `$CARGO_HOME/bin`, which cargo searches before `PATH`. cargo-auditable makes
-   itself the workspace crates' `RUSTC_WORKSPACE_WRAPPER` by that path, and cargo hashes the
-   wrapper's path into their `-C metadata`: v0.3.0's musl archive rebuilds exactly through
-   `/home/runner/.cargo/bin/cargo-auditable`, and differs through a copy at `/root/.cargo/bin/`
-   or `/opt/tools/`. The two checkouts share one copy, so they cannot show it. The two builds
-   print one SHA-256, and the archive's binary has it too:
+   `musl-tools`, as the job installs them, and with `cargo-auditable` where the job ran it from
+   (the log's "cargo-auditable installed at" line). From v0.4.0 that is `/opt/duscope-build/bin/`
+   on every runner, the justfile's `cargo_auditable_dir` and release.yml's `CARGO_AUDITABLE_DIR`:
+   `just auditable-path` copies the cargo-auditable `just setup` installed there (with `sudo` the
+   first time) and takes it out of `$CARGO_HOME/bin`, which cargo searches first when `PATH`
+   does not name it; put the directory on `PATH` ahead of any other copy, and
+   `just auditable-path check` says whether cargo runs it from there. Up to v0.3.0 it was where `taiki-e/install-action` put it:
+   `/home/runner/.cargo/bin/` on Ubuntu and `/Users/runner/.install-action/bin/` on macOS.
+   cargo-auditable makes itself the workspace crates' `RUSTC_WORKSPACE_WRAPPER` by its own path,
+   and cargo hashes the wrapper's path into their `-C metadata`: v0.3.0's musl archive rebuilds
+   exactly through `/home/runner/.cargo/bin/cargo-auditable`, and differs through a copy at
+   `/root/.cargo/bin/` or `/opt/tools/`. The two checkouts share one copy, so they cannot show
+   it. The two builds print one SHA-256, and the archive's binary has it too:
 
    ```sh
    just repro-dist aarch64-apple-darwin      # in each checkout of the tag: the same SHA-256
