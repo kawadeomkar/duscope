@@ -16,6 +16,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -239,7 +240,7 @@ fn p5_bench_04_save_times_scan_save_end_to_end_and_the_write_on_t4() {
 /// rescan's walk, roll-up and write, and loading the parent before them, on
 /// both platforms; on Linux the incremental rescan is refused in the binary's
 /// words, and on macOS it is measured, or refused with the reason (a tree
-/// built moments before is all one chunk of FSEvents history). The tree
+/// built moments before is all one chunk of `FSEvents` history). The tree
 /// matches its stamp after.
 #[test]
 fn p5_bench_04_rescan_times_each_phase_at_each_level() {
@@ -372,11 +373,15 @@ impl Job {
         let step = self.step(&format!("- name: {name}"));
         let at = step.iter().position(|l| l.trim() == "run: |").unwrap();
         let indent = step[at].len() - step[at].trim_start().len() + 2;
-        step[at + 1..]
+        let mut script = String::new();
+        for line in step[at + 1..]
             .iter()
             .take_while(|l| l.trim().is_empty() || l.len() - l.trim_start().len() >= indent)
-            .map(|l| format!("{}\n", l.get(indent..).unwrap_or_default()))
-            .collect()
+        {
+            script.push_str(line.get(indent..).unwrap_or_default());
+            script.push('\n');
+        }
+        script
     }
 
     /// The upload step whose `name:` is `artifact`.
@@ -463,8 +468,17 @@ fn p5_bench_04_the_nightly_records_every_new_figure_on_both_runners() {
         publish.lines.iter().any(|l| l.trim() == "pattern: bench-*"),
         "publish downloads the bench-* artifacts"
     );
+}
 
-    // The steps' scripts, run against stand-ins that record their arguments.
+/// P5-BENCH-04: the nightly's two new steps, run under bash against
+/// stand-ins for `bench/run.sh` and `caffeinate` that record their
+/// arguments: `save` reads the trees the harness reads (on bench-macos, cold
+/// on the image the cold command remounts, as the harness's cold runs do),
+/// `rescan` the warm trees alone, and each step leaves its file and status
+/// for the upload and fail steps.
+#[test]
+fn p5_bench_04_the_nightly_steps_read_the_trees_the_harness_reads() {
+    let workflow = read(NIGHTLY);
     let stand_in = tempfile::tempdir().unwrap();
     let dir = fs::canonicalize(stand_in.path()).unwrap();
     fs::create_dir_all(dir.join("bench")).unwrap();
@@ -690,7 +704,7 @@ fn p5_bench_04_the_lines_the_harness_reads_are_the_binarys() {
     for (module, pattern, file, prefix) in cases {
         let line = filled(&literal(file, prefix));
         assert!(!line.contains('\n'), "{line}");
-        lines.push_str(&format!("{module}\t{pattern}\tduscope: {line}\n"));
+        writeln!(lines, "{module}\t{pattern}\tduscope: {line}").unwrap();
     }
     let check = tempfile::NamedTempFile::new().unwrap();
     fs::write(check.path(), &lines).unwrap();
@@ -710,8 +724,14 @@ fn p5_bench_04_the_lines_the_harness_reads_are_the_binarys() {
         .output()
         .unwrap();
     succeeded(&out, &format!("the harness's patterns against\n{lines}"));
-    // The replay's bounds are debug lines of duscope_walk::platform::macos::fsevents,
-    // the one target the rescans' filter takes at debug.
+}
+
+/// P5-BENCH-04: the replay's bounds are debug lines of
+/// `duscope_walk::platform::macos::fsevents`, the one target the rescans' log
+/// filter takes at debug.
+#[test]
+fn p5_bench_04_the_replays_lines_come_from_the_target_the_log_filter_names() {
+    let fsevents = "crates/duscope-walk/src/platform/macos/fsevents.rs";
     let source = read(fsevents);
     for message in [
         "\"cannot tell whether FSEvents logs ",
