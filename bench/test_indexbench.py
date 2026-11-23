@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import calendar
 import os
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -18,6 +21,84 @@ import indexbench  # noqa: E402
 import measure  # noqa: E402
 import ptyrun  # noqa: E402
 import trees  # noqa: E402
+
+
+class Save(unittest.TestCase):
+    """P5-BENCH-04: `scan --save` end to end, and the write per entry on every
+    tree, T4's through `import`."""
+
+    WRITE = "duscope: write: 50,001 entries in 0.043 s: 0.87 µs/entry\n"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_p5_bench_04_save_runs_the_harness_command_with_save_and_t4_through_import(self):
+        t2, t4 = trees.tree("T2", 0.001), trees.tree("T4", 0.001, exports=True)
+        self.assertEqual(
+            indexbench.save_argv("duscope", t2, "/trees/T2", "/idx"),
+            ["duscope", "scan", "--json", "--treemap", "never", "--save", "-v", "--index-dir", "/idx", "/trees/T2"],
+        )
+        self.assertEqual(indexbench.save_argv("duscope", t4, "/trees/T4.ncdu.json", "/idx"),
+                         ["duscope", "import", "/trees/T4.ncdu.json", "--json", "-v", "--index-dir", "/idx"])
+        self.assertEqual(trees.built_path(t4, "/trees"), "/trees/T4-x0.001.ncdu.json")
+        self.assertEqual(indexbench.SAVE_TREES, "T1,T2,T3,T4")
+
+    def test_p5_bench_04_an_import_prints_the_write_alone(self):
+        self.assertEqual(indexbench.parse_write(self.WRITE, export=True),
+                         {"entries": 50_001, "write_s": 0.043, "us_per_entry": 0.87, "walk_s": None, "rollup_s": None})
+        self.assertEqual(indexbench.parse_write(Verbose.STDERR, export=False)["walk_s"], 1.234)
+        with self.assertRaises(measure.MeasureError):
+            indexbench.parse_write("duscope: roll-up: 0.001 s\n", export=True)
+
+    def test_p5_bench_04_saves_are_timed_whole_and_each_index_removed(self):
+        """A stand-in saves an index and prints the write line; each run is
+        timed around the process, the index removed after it, the caches
+        dropped before each cold one, and the warm-up runs left out."""
+        stub = os.path.join(self.tmp, "duscope")
+        drops = os.path.join(self.tmp, "drops")
+        with open(stub, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/sh\n"
+                "while [ $# -gt 0 ]; do [ \"$1\" = --index-dir ] && dir=$2; shift; done\n"
+                "mkdir -p \"$dir/scans\" && : > \"$dir/scans/abc.db\"\n"
+                "echo 'duscope: write: 26 entries in 0.004 s: 150.00 µs/entry' >&2\n"
+                "echo '{\"ok\": true}'\n"
+            )
+        os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR)
+        index = os.path.join(self.tmp, "index")
+        logs = []
+        argv = [stub, "import", "T4.ncdu.json", "--json", "-v", "--index-dir", index]
+        timed, printed = indexbench.save_runs(argv, index, True, 3, 2, f"echo >> {drops}", logs.append, "T4 cold import")
+        self.assertEqual(len(timed), 3)
+        self.assertTrue(all(r.wall > 0 and r.rss for r in timed))
+        self.assertEqual([p["us_per_entry"] for p in printed], [150.0] * 3)
+        self.assertEqual(os.listdir(os.path.join(index, "scans")), [])
+        with open(drops, encoding="utf-8") as f:
+            self.assertEqual(len(f.read().splitlines()), 5, "a drop before every run, the warm-up ones too")
+        self.assertEqual(len(logs), 3)
+        os.chmod(stub, 0o755)
+        with open(stub, "a", encoding="utf-8") as f:
+            f.write("exit 3\n")
+        with self.assertRaisesRegex(measure.MeasureError, "exited 3"):
+            indexbench.save_runs(argv, index, True, 1, 0, None, logs.append, "T4 warm import")
+        self.assertEqual(os.listdir(os.path.join(index, "scans")), [], "a failed run's index is removed too")
+
+    def test_p5_bench_04_a_save_row_holds_the_runs_and_the_figures_read_it(self):
+        runs = [measure.Run(w, 0.1, 0.2, 1000) for w in (2.0, 1.0, 3.0)]
+        printed = [{"entries": 1_000_001, "write_s": s, "us_per_entry": s * 1.0, "walk_s": 0.3, "rollup_s": 0.05}
+                   for s in (1.6, 1.7, 1.65)]
+        row = indexbench.save_row(trees.tree("T2"), "warm", runs, printed)
+        self.assertEqual((row["tool"], row["p50_s"], row["run_count"], row["entries"]), ("scan --save", 2.0, 3, 1_000_001))
+        self.assertEqual((row["write_us_per_entry_p50"], row["write_s_p50"], row["walk_s_p50"]), (1.65, 1.65, 0.3))
+        self.assertEqual(row["command"], indexbench.SAVE_COMMANDS["scan --save"])
+        imported = indexbench.save_row(trees.tree("T4", exports=True), "cold", runs,
+                                       [dict(p, walk_s=None, rollup_s=None) for p in printed])
+        self.assertEqual((imported["tool"], imported["walk_s_p50"], imported["rollup_s_p50"]), ("import", None, None))
+        self.assertEqual(indexbench.figures([row, imported]), {
+            "T2": {"save_p50_s": {"warm": 2.0}, "write_us_per_entry_p50": {"warm": 1.65}},
+            "T4": {"save_p50_s": {"cold": None}, "write_us_per_entry_p50": {"cold": 1.65}},
+        })
 
 
 class Verbose(unittest.TestCase):

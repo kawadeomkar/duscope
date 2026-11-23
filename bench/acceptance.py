@@ -11,7 +11,11 @@ writes one file, `<out-dir>/<platform>.json`:
 - `index`: the index measurements on T2 (`bench/run.sh index`), whose warm
   write per entry goal 2 holds;
 - `rescan`: the incremental rescan's cost against a full one
-  (bench/rescanbench.py), which macOS can measure and Linux cannot.
+  (bench/rescanbench.py), which macOS can measure and Linux cannot;
+- `diskus`: the harness again, duscope paired with diskus at `-j` = the
+  logical CPUs and twice them, in each mode a diskus target binds this
+  platform in, so that the judge holds duscope to diskus at its best of those
+  two and its default, three threads a CPU (P5-BENCH-04, DEV-213).
 
 `judge` reads the result files (by default `linux.json` and `macos.json` in
 `bench/results/1.0/`), prints each goal-1 and goal-2 target with the number
@@ -89,6 +93,19 @@ TARGETS: Tuple[Target, ...] = (
 )
 
 
+# diskus, whose default is three threads a logical CPU, is far from its best
+# on many cores (sharkdp/diskus#38): the acceptance run also measures it at
+# these multiples of the logical CPUs, and a diskus target reads the fastest.
+DISKUS = "diskus"
+DISKUS_THREADS = (1, 2)
+DISKUS_DEFAULT_PER_CPU = 3
+
+
+def diskus_name(threads: int) -> str:
+    """The harness's name for diskus at `-j threads`."""
+    return f"{DISKUS}-j{threads}"
+
+
 def ascii(text: str) -> str:
     """`text` for a terminal that may not take UTF-8."""
     for wide, narrow in (("≤", "<="), ("×", "x"), ("µ", "u"), ("→", "->")):
@@ -142,6 +159,30 @@ def _why_not(run: dict, tool: str, tree: str, mode: str) -> str:
     return f"{tool} was not among the run's competitors"
 
 
+def _listed(items: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def diskus_ratios(doc: dict, tree: str, mode: str) -> Tuple[Dict[str, float], Optional[str]]:
+    """duscope's ratio to diskus at each other thread count the file's
+    `diskus` part measured on `tree` in `mode`, by its label (`diskus -j 20`),
+    and why there is none when there is not."""
+    part = doc.get("diskus")
+    if not isinstance(part, dict) or not part.get("run"):
+        reason = part.get("reason") if isinstance(part, dict) else None
+        return {}, reason or "the file measured diskus at no other -j"
+    found = {}
+    threads = [int(n) for n in part.get("threads") or []]
+    for n in threads:
+        value = _ratio(part["run"], tree, mode, diskus_name(n))
+        if value is not None:
+            found[f"{DISKUS} -j {n}"] = value
+    if found:
+        return found, None
+    return found, f"diskus at {_listed([f'-j {n}' for n in threads] or ['no other -j'])} was not paired with duscope on {tree} {mode}"
+
+
 def judge_one(target: Target, tree: str, doc: Optional[dict]) -> Verdict:
     if doc is None:
         return Verdict(target, tree, None, "not measured", f"no {target.platform} result file")
@@ -160,10 +201,23 @@ def judge_one(target: Target, tree: str, doc: Optional[dict]) -> Verdict:
     found = {c: _ratio(run, tree, target.mode, c) for c in target.against}
     present = {c: v for c, v in found.items() if v is not None}
     missing = [_why_not(run, c, tree, target.mode) for c, v in found.items() if v is None]
+    notes: List[str] = []
+    if target.against == (DISKUS,):
+        # diskus at its best: its default, -j the CPUs and -j twice them.
+        others, why = diskus_ratios(doc, tree, target.mode)
+        if others:
+            counted = (["its default"] if DISKUS in present else []) + [label[len(DISKUS) + 1:] for label in others]
+            present.update(others)
+            fastest = max(present.items(), key=lambda kv: kv[1])[0]
+            at = "its default" if fastest == DISKUS else fastest[len(DISKUS) + 1:]
+            notes.append(f"diskus at {at}, the fastest of {_listed(counted)}")
+        if why:
+            notes.append(f"diskus at its default alone: {why}" if present else why)
     if not present:
-        return Verdict(target, tree, None, "not measured", "; ".join(missing))
+        return Verdict(target, tree, None, "not measured", "; ".join(missing + notes))
     against, value = max(present.items(), key=lambda kv: kv[1])
-    notes = [f"against {against}, the faster"] if len(target.against) > 1 else []
+    if len(target.against) > 1:
+        notes.insert(0, f"against {against}, the faster")
     notes += missing
     return Verdict(target, tree, value, "met" if value <= target.limit else "MISSED", "; ".join(notes))
 
@@ -390,6 +444,51 @@ def _part(what: str, failures: List[str], harness, run_it) -> Optional[dict]:
     return doc
 
 
+def diskus_modes(plat: str, requested: Sequence[str], cold: bool) -> List[str]:
+    """The modes of `requested` a diskus target binds `plat` in; cold only
+    where diskus is paired cold (`cold`)."""
+    binds = {t.mode for t in TARGETS if t.platform == plat and DISKUS in t.against}
+    return [m for m in requested if m in binds and (m == "warm" or cold)]
+
+
+def _diskus_part(args, harness, plat: str, key: str, duscope: str, overrides: Dict[str, str], common: List[str],
+                 work: str, failures: List[str]) -> dict:
+    """diskus at `-j` = the logical CPUs and twice them, each paired with
+    duscope as the harness pairs a competitor, on the run's trees, in the
+    modes a diskus target binds this platform in: the part's object, its
+    `run` the harness's result file or None with the reason."""
+    cores = os.cpu_count() or 1
+    threads = [k * cores for k in DISKUS_THREADS]
+    requested = ["warm", "cold"] if args.mode == "both" else [args.mode]
+    cold = args.cold_competitors is None or DISKUS in harness._names(
+        args.cold_competitors, tools.COMPETITORS + ("du",), "competitor", allow_none=True)
+    modes = diskus_modes(plat, requested, cold)
+    part: dict = {"threads": threads, "default_threads": DISKUS_DEFAULT_PER_CPU * cores, "modes": modes,
+                  "version": None, "run": None, "reason": None}
+    if not modes:
+        part["reason"] = f"no diskus target binds {plat} in the modes this run measured"
+        return part
+    diskus = tools.resolve(tools.PINS[DISKUS], key, args.tools_dir, True, overrides.get(DISKUS), harness.log)
+    part["version"] = diskus.version
+    if diskus.status != "ready" or diskus.path is None:
+        part["reason"] = f"diskus {diskus.status}: {diskus.reason}"
+        return part
+    out = os.path.join(work, "diskus.json")
+    mode = modes[0] if len(modes) == 1 else "both"
+    at = common.index("--mode") + 1
+    argv = ["run", "--subject", "duscope", "--tool-path", f"duscope={duscope}", "--trees", args.trees,
+            "--competitors", "none", "--runs", str(args.runs), "--out", out, *common[:at], mode, *common[at + 1:]]
+    # The tree first: diskus takes its options after the path as well.
+    for n in threads:
+        argv += ["--command", f"{diskus_name(n)}={shlex.quote(diskus.path)} {{tree}} -j {n}"]
+    run_args = harness.parser().parse_args(argv)
+    harness.log("diskus at its other thread counts: " + " ".join(argv))
+    part["run"] = _part("diskus", failures, harness, lambda: (harness.cmd_run(run_args), out))
+    if part["run"] is None:
+        part["reason"] = "the harness could not measure diskus at its other thread counts; see failures"
+    return part
+
+
 def cmd_acceptance(args, harness) -> int:
     key = tools.platform_key()
     plat = key.split("-")[0]
@@ -441,6 +540,10 @@ def cmd_acceptance(args, harness) -> int:
         harness.log("the harness: " + " ".join(argv))
         run_doc = _part("run", failures, harness, lambda: (harness.cmd_run(run_args), run_out))
 
+        diskus_doc = None
+        if DISKUS in competitors:
+            diskus_doc = _diskus_part(args, harness, plat, key, duscope.path, overrides, common, work, failures)
+
         index_doc = None
         if any(t.name == "T2" for t in tree_list):
             index_out = os.path.join(work, "index.json")
@@ -477,6 +580,7 @@ def cmd_acceptance(args, harness) -> int:
         "run": run_doc,
         "index": index_doc,
         "rescan": rescan_doc,
+        "diskus": diskus_doc,
         "failures": failures,
     }
     harness.write_result(doc, out)
