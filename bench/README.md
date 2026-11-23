@@ -40,6 +40,8 @@ for release binaries, and rustup with the stable toolchain for the competitors b
 | `show FILE` | print a result file as a table |
 | `sweep` | measure duscope at each thread count and apply the defaults rule ([The thread sweep](#the-thread-sweep)) |
 | `index` | measure a saved scan's write, queries and size, and the D34 comparison ([Index measurements](#index-measurements)) |
+| `save` | time `scan --save` end to end and the write per entry, T4's through `import` ([The main path](#the-main-path)) |
+| `rescan` | time the rescan by phase at shares of the directories changed ([The rescan by phase](#the-rescan-by-phase)) |
 | `redraw` | measure the viewer's redraw at 120x40 on T2 ([The redraw budget](#the-redraw-budget)) |
 | `acceptance` | the 1.0 acceptance run on this machine: the harness, the index measurements and the rescans, in one file ([The 1.0 acceptance run](#the-10-acceptance-run)) |
 | `judge [FILE...]` | each goal-1 and goal-2 target against the 1.0 files, and their summary ([Judging it](#judging-it)) |
@@ -79,6 +81,7 @@ checkout does not delete them.
 | `T1` | gdu-shaped: a random recursive tree, sparse files | 100,000 | 400,000 | `duscope-bench-T1-v1` | 26 s | 162 MiB (56 GB apparent) |
 | `T2` | fdu-shaped: fdu 0.5.0's `balanced` corpus at 1M entries | 125,000 | 875,000 | `fdu-balanced-v1` | 55 s | 3.2 GiB |
 | `T3` | flat: one directory of empty files | 0 | 1,000,000 | `duscope-bench-T3-v1` | 45 s | 229 MiB |
+| `T4` | generated: T2's layout, log-normal file sizes, as an ncdu export | 125,000 | 875,000 | `duscope-bench-T4-v1` | 7 s (4 jobs) | 74 MiB of export (81 GB apparent) |
 
 Every name, size, content byte and timestamp is a function of the seed: each choice is SHA-256
 over the seed, a namespace and an index, so every platform and every Python builds the same
@@ -103,6 +106,20 @@ tree. Every mtime (and atime) is 2023-11-14T22:13:20Z plus an even number of sec
   listing. Its directories are `d-<index>-<token>` and files `f-<index>-<token><ext>`, not names
   from a real home directory: it is fdu's shape, not a home-like tree.
 - **T3** is the flat stress case: 1,000,000 empty files `f0000000` … `f0999999` in its root.
+- **T4** is never on disk (P5-BENCH-04, DEV-213). T2's files are 0 to 4 KiB, so their allocated
+  sizes take two values and the keys of the index on `files.allocated` arrive nearly sorted,
+  which flatters the write. T4 has T2's layout (directory i's parent is directory i / 8, files
+  in uniformly chosen directories, fdu's names, extensions and times) with a seed of its own,
+  and each file's size is drawn from a log-normal spread: median 4 KiB, σ 2.5 in natural log,
+  so one file in two fits a 4 KiB block, one in a hundred is over 1.2 MiB, and the tree holds
+  81 GB; each file's allocated size is its size in whole 4 KiB blocks. Such sizes on disk would
+  take tens of GB, so T4 is an ncdu JSON export, `<trees-dir>/T4.ncdu.json`, that `duscope
+  import` carries to the writer a scan uses. The sizes are drawn by Marsaglia's polar method in
+  `decimal`, whose ln, sqrt and exp are correctly rounded on every platform, so the export is
+  the same bytes everywhere; it names `/duscope-bench/T4` as its root and 2023-11-15T03:46:40Z
+  as its scan time, never a path or a time of the machine that made it. Its stamp's digest is
+  the first 16 bytes of the file's SHA-256, and a version of its own (`EXPORT_VERSION`) rebuilds
+  T4 alone. `--trees all` is T1 to T3; `build`, `verify` and `save` take T4 by name.
 
 A build writes the tree to `<trees-dir>/<name>` and then a stamp, `<trees-dir>/<name>.json`,
 with the spec, the build time and a digest. The digest is the sum, modulo 2^128, of the first 16
@@ -138,7 +155,8 @@ checked against the SHA-256 digests in `tools.py` before anything is unpacked; c
 run `cargo install --locked` on the stable toolchain, and cargo checks the crates' checksums.
 Nothing installs outside `--tools-dir`, and the download requests carry no identity beyond the
 user agent `duscope-bench`. The commands are those of gdu's README benchmark where the tool
-appears there, and otherwise the plain invocation; every tool runs at its default thread count.
+appears there, and otherwise the plain invocation; every tool runs at its default thread count,
+and the 1.0 acceptance run also measures diskus at two others ([Judging it](#judging-it)).
 A tool that cannot run on a platform (dumac on Linux) or has no build the script can install there
 (ncdu on macOS) is listed in the result file as skipped, with the reason.
 
@@ -203,7 +221,8 @@ platform names the OS only: `host.arch` tells an arm64 run from an x86_64 one, a
 compares results (`compare.py`) keys on both. These
 files are not committed to `main`: `bench/.gitignore` ignores them, and the nightly job pushes
 its own to the `bench-results` branch, where `compare.py` reads baselines. Results a package
-means to keep (`thread-sweep-*.json`, `results/1.0/`) have other names and are committed.
+means to keep (`thread-sweep-*.json`, `rescan-<platform>.json`, `results/1.0/`) have other names
+and are committed.
 
 Every field is always present; a field that does not apply is `null`. Times are seconds.
 
@@ -418,6 +437,117 @@ status 1 means something could not be measured, not that a gate failed.
 `nightly-bench.yml` runs it on each bench runner after the harness, and publishes the file to
 `bench-results` beside the harness's.
 
+## The main path
+
+The gates time `scan --json` without `--save`, but a query verb's first run on a path scans and
+saves, so the write, the largest cost of that path, was on no gate (P5-BENCH-04, DEV-213). Two
+subcommands measure the main path, and `nightly-bench.yml` runs both on each bench runner after
+the index measurements and publishes their files to `bench-results` beside the others.
+
+`bench/run.sh save --duscope target/release/duscope` measures T1, T2, T3 and T4 unless `--trees`
+names others, warm and cold by default, 10 runs (`--runs`) after 2 warm-up ones (`--warmup`) on
+each warm tree:
+
+- **`scan --save` end to end** on the trees on disk: the harness's own duscope command, `duscope
+  scan --json --treemap never`, with `--save -v --index-dir DIR`. Each run is timed around the
+  process (wall clock, user and system CPU time, peak RSS), since its saved index is removed
+  before the next, which hyperfine cannot do between runs. Each index is written beside the trees
+  it was read from, so a cold run (the caches dropped before it, as `run` drops them) writes where
+  it reads; `--cold-trees-dir` and `--cold-cmd` mean what they mean in `run`.
+- **The write per entry**, from each run's `-v` line, on every tree: T1 to T3's from their scans,
+  and T4's from `duscope import T4.ncdu.json -v`, which carries the export to the writer a scan
+  uses. T4's row is the import's, not a scan's: its time end to end reads JSON, not a disk.
+
+The result file is `<date>-<platform>-save.json` in `--results-dir` (`…-save-x<scale>.json` on
+scaled trees), or `--out`. It holds the usual header; `trees`, each with its `source` (`disk` or
+`ncdu export`); `results`, one row per tree and mode as `run`'s rows are, its tool `scan --save`
+or `import`, with `entries`, `write_us_per_entry_p50`, `write_s_p50`, `walk_s_p50` and
+`rollup_s_p50` (null for an import), and `verbose`, what `-v` printed of each run; `figures`, by
+tree and mode, `save_p50_s` (null for T4) and `write_us_per_entry_p50`; and `failures`. Exit
+status 1 means something could not be measured.
+
+### The rescan by phase
+
+`bench/run.sh rescan --duscope target/release/duscope` times `rescan` by phase on T1 and T2
+(`--trees`), warm, at each share of the directories changed in `--levels` (`0,0.1,1,10`, in
+percent, run in ascending order). Each level runs `--warmup` unrecorded rounds (1), then `--runs`
+recorded ones (10). A round creates one 4 KiB file, `.duscope-bench-rescan`, in each directory of
+the level's share of the tree's, spread over them in build order (at least one; none at 0);
+waits `--settle` seconds (2) for fseventsd where the platform keeps a history; runs `rescan
+--incremental` and `rescan --full` from the same saved scan, the incremental one first on even
+rounds and second on odd ones; takes the full rescan as the next round's parent; and removes the
+files. The directories' times are put back once a level, after its last round: putting a
+directory's times back is, in FSEvents' history, a change to its parent, and put back after every
+round they added each changed directory's parent to the next replay, which at 10% of T2 is past
+the 15% of its directories an incremental rescan reads at most. Each tree matches its stamp again
+at the end, which the command checks.
+
+Linux keeps no change history, so `rescan --incremental` is refused there in the binary's words
+and the full rescan, every rescan Linux makes, is measured at each level alone. On macOS a refusal
+(too many changes, a history that dropped events) ends the incremental rescans of its level, with
+the binary's message, and the next level tries again.
+
+Each rescan runs with `DUSCOPE_LOG=info,duscope_walk::platform::macos::fsevents=debug`, `-v`'s
+lines and the FSEvents replay's debug lines alone: `--debug` would also turn on the walk's log of
+each directory's errors, which costs every directory a rescan reads. The harness stamps each
+stderr line with the time it arrives, so the time between two lines is what the binary did
+between them; where the binary prints a phase's time, that is taken:
+
+| Phase | Incremental rescan | Full rescan |
+| --- | --- | --- |
+| `parent_s`, loading the parent | from the start to the replay's first line: the process's start, the saved scan opened and checked, its directories loaded, the files held open for writing listed | from the start to the walk's start (its line's time less the walk's and the roll-up's): the process's start, the saved scan opened |
+| `replay_s`, the replay | from the replay's first line to its last | null |
+| `volatile_s` | from the replay's last line to the plan's (`incremental rescan: …`): the saved scan's recent entries read out of it | null |
+| `plan_s` | the three above together, from the start to the plan's line | null |
+| `walk_s` | `incremental walk: … in X s`, the changed directories | `walk:` (macOS), or `listing:` and `stat:` (Linux) |
+| `read_back_s`, the read-back | `incremental merge: … in X s`, the other rows read back out of the saved scan | null |
+| `post_check_s` | `post-check: … in X s` | null |
+| `rollup_s`, `write_s` | `roll-up:` and `write:` | the same |
+| `rest_s` | the rest of the run: the output, the process's exit and the gaps between the phases | the same |
+
+The replay's first line is the one its check of whether the volume logs at all prints, at debug,
+when it cannot tell: where the volume's `.fseventsd` is closed to the user, as the Data volume's
+is to all but root, which is where the bench trees live. Elsewhere (a volume whose `.fseventsd`
+the user can read, or a run as root) no such line comes, and loading the parent and the replay
+are one figure, `plan_s` less `volatile_s`; the kind's `notes` say so. `duscope/tests/main_path_bench.rs`
+holds each line the harness reads to the binary's source.
+
+Two things of the binary's own shape what an incremental rescan reads, and the file records them
+round by round (`rescanned_dirs`, `volatile_count`). The volatile set reads again the directory of
+every entry changed within 4 hours of the saved scan (DEV-227), so a tree built or changed in the
+last 4 hours is read again where it changed, and the levels run in ascending order so that an
+earlier level's directories are fewer than a later one's own. And a replay delivers the whole
+stored chunk of FSEvents history that holds the scan's mark, so a tree built minutes before reads
+as wholly changed (`too_many_changes`) until that chunk closes, which time or tens of thousands of
+file creations elsewhere on the volume bring about. Measure trees built hours before.
+
+The result file is `<date>-<platform>-rescan.json` in `--results-dir` (`…-rescan-x<scale>.json` on
+scaled trees), or `--out`. It holds the usual header, with `harness.levels`, `settle_s` and
+`log_filter`; `trees`, each with `incremental` (`measured` or `not measured`, and the `reason`)
+and its `levels`: each level's `percent`, `changed_dirs`, `rounds`, `rescanned_dirs`,
+`volatile_count` and `short_runs` (rounds whose incremental rescan read fewer directories than the
+change touched: the history had not recorded it yet, and the run fails; raise `--settle`), and
+for each kind its `status`, `reason`, `wall_p50_s`, `phases_p50_s`, `notes` and `runs` (each one's
+wall time and phases); `results`, rows as `run`'s, one per tree, level and kind, `rescan --full at
+1%` paired with `rescan --incremental at 1%`, so that its `subject_ratio_p50` is the incremental
+rescan's time over the full one's; and `failures`.
+
+`results/rescan-<platform>.json` is committed from one session a platform: Linux's on a quiet
+machine, and macOS's by hand on bench-macos's machine, overnight, with the nightly's layout
+(DEV-206):
+
+```sh
+# macOS: the trees the nightly's warm runs read, built hours before
+caffeinate -is bench/run.sh rescan --duscope target/release/duscope \
+  --trees-dir ~/duscope-bench/trees --out bench/results/rescan-macos.json
+# Linux: the musl build, as bench-linux's nightly builds it
+bench/run.sh rescan --duscope target/x86_64-unknown-linux-musl/release/duscope \
+  --out bench/results/rescan-linux.json
+```
+
+No figure of `save` or `rescan` holds a target yet: a new figure holds none until two weeks of
+nightlies exist, and is then held to its p50 plus 10%, as the budgets are (DEV-213).
+
 ## The redraw budget
 
 `bench/run.sh redraw --duscope target/release/duscope` measures the two numbers Gate 4 → 5 asks
@@ -548,9 +678,18 @@ It runs three parts, in this order, and writes `results/1.0/<platform>.json` (`-
     an incremental rescan reads at most (`too_many_changes`): no platform reads it incrementally.
   - The cold runs' disk image on bench-macos is attached with `-nobrowse`, and fseventsd keeps no
     history for it, so the part reads the warm trees alone (`--trees-dir`).
+- **`diskus`**, when `--competitors` names diskus: the harness again, duscope paired with diskus
+  at `-j` = the logical CPUs and twice them (`diskus-j10` and `diskus-j20` on 10 CPUs, as
+  `--command` tools, `diskus TREE -j N`), in each mode a diskus target binds the platform in:
+  warm and cold on Linux (cold only where diskus is among the cold competitors), warm on macOS.
+  diskus's default, three threads a CPU, is far from its best on many cores
+  ([sharkdp/diskus#38](https://github.com/sharkdp/diskus/issues/38)), and the `run` part has it
+  already (P5-BENCH-04, DEV-213). The part holds `threads`, `default_threads`, `modes`, the
+  diskus `version`, and `run`, the harness's file, or null with the `reason`.
 
-The file holds the usual header (`host`, `harness.commit`, the duscope `version`), `run`, `index`
-and `rescan` (each null when the part could not run), and `failures`, what could not be measured.
+The file holds the usual header (`host`, `harness.commit`, the duscope `version`), `run`, `index`,
+`rescan` and `diskus` (each null when the part could not run), and `failures`, what could not be
+measured.
 The command ends by judging its own platform's targets on stderr, and exits 1 when something
 could not be measured, never because a target was missed.
 
@@ -564,17 +703,20 @@ state them:
 
 | Goal | Target | Read from | Source |
 | --- | --- | --- | --- |
-| 1 | Linux warm p50 ≤ 1.2× diskus, on T1–T3 | `run`: diskus's `subject_ratio_p50` | goal 1; target (1); Gate 1 → 2 |
+| 1 | Linux warm p50 ≤ 1.2× diskus, on T1–T3 | diskus at its best: the largest of its `subject_ratio_p50` at its default (`run`) and at `-j` the CPUs and twice them (`diskus`) | goal 1; target (1); Gate 1 → 2; DEV-213 |
 | 1 | Linux warm p50 ≤ 1.15× the faster of pdu and fdu | the larger of the two ratios | goal 1; target (1); Gate 1 → 2 |
-| 1 | Linux cold p50 ≤ 1.15× diskus | diskus's cold ratio | goal 1; target (1); Gate 1 → 2 |
-| 1 | macOS warm p50 ≤ 1.0× diskus, ≤ 1.2× dua, ≤ 1.3× dumac | each one's warm ratio | goal 1; target (2); deferred from Gate 1 → 2 (DEV-52) |
+| 1 | Linux cold p50 ≤ 1.15× diskus | diskus's cold ratio at its best | goal 1; target (1); Gate 1 → 2; DEV-213 |
+| 1 | macOS warm p50 ≤ 1.0× diskus, ≤ 1.2× dua, ≤ 1.3× dumac | each one's warm ratio, diskus's at its best | goal 1; target (2); deferred from Gate 1 → 2 (DEV-52) |
 | 1 | macOS cold p50 ≤ 1.2× dua | dua's cold ratio | goal 1; target (2); deferred from Gate 1 → 2 (DEV-52) |
 | 2 | Linux warm index write ≤ 2.75 µs per entry, on T2 | `index`: `write_us_per_entry_warm_p50` | goal 2; target (3); DEV-107; Gate 2 → 3 |
 
 The ratio is the harness's paired one (`subject_ratio_p50`, [Reading results](#reading-results)):
 the median over the pair's rounds of duscope's time over the competitor's. A competitor that was
 not measured leaves its line `not measured` with the tool's reason; for the faster of pdu and fdu
-the one measured is judged, and the line says the other was not. The judge also says when a file
+the one measured is judged, and the line says the other was not. A diskus target takes the
+fastest diskus of the three the file measured and says which (`diskus at -j 20, the fastest of
+its default, -j 10 and -j 20`); a file without the `diskus` part is judged at diskus's default,
+and the line says so. The judge also says when a file
 was not measured as the targets name it: a scaled run, Linux trees off ext4, macOS trees off APFS
 or a Mac off Apple silicon. Goal 2's other half, that the write starts only after the treemap or
 JSON is out, is no number: `p2_idx_02_the_write_starts_after_the_output` holds it on every
@@ -798,12 +940,12 @@ the result file.
 | --- | --- |
 | `run.sh` | the entry point `just bench` calls; picks the Python |
 | `harness.py` | the command line, host facts and the result file |
-| `trees.py` | the tree generator and the digest |
+| `trees.py` | the tree generator, T4's export and the digest |
 | `tools.py` | the pinned tools and their installation |
-| `measure.py` | hyperfine in interleaved pairs, and the statistics |
+| `measure.py` | hyperfine in interleaved pairs, a run timed around its process, and the statistics |
 | `drop-caches.sh` | the cold-run cache drop |
 | `test_bench.py` | unit tests, run by `duscope/tests/bench_harness.rs` |
-| `indexbench.py` | the index measurements (`index`) |
+| `indexbench.py` | the index measurements (`index`) and the main path (`save`) |
 | `redraw.py` | the viewer's redraw budget (`redraw`) |
 | `test_redraw.py` | its unit tests, run with `test_bench.py`; `duscope/tests/pty/nav_redraw.rs` runs it whole |
 | `eval/run.sh`, `eval/agent_eval.py` | the agent eval: the command line, a run's setup, the result file and the decisions |
@@ -814,7 +956,7 @@ the result file.
 | `test_eval.py` | the eval's unit and end-to-end tests (with the stub), run with `test_bench.py` |
 | `test_indexbench.py` | its unit tests, run with `test_bench.py`; `duscope/tests/index_bench.rs` runs it whole |
 | `acceptance.py` | the 1.0 acceptance run (`acceptance`), the goal-1 and goal-2 targets, the judgement and the summary (`judge`) |
-| `rescanbench.py` | the acceptance run's incremental rescans against full ones |
+| `rescanbench.py` | the acceptance run's incremental rescans against full ones, and the rescan by phase (`rescan`) |
 | `crosscheck.py` | the Linux cross-check: a hosted runner's ratios against bench-linux's nightly ones (`crosscheck`) |
 | `test_acceptance.py`, `test_crosscheck.py` | their unit tests, run with `test_bench.py`; `duscope/tests/acceptance_bench.rs` runs `acceptance` whole and the cross-check's workflow step |
 | `results/1.0/` | the acceptance run's files, one per platform, and their generated summary, `README.md` |
