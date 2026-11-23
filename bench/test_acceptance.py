@@ -24,6 +24,7 @@ import acceptance
 import harness
 import measure
 import rescanbench
+import tools
 import trees
 
 Pair = Tuple[str, str, str]  # tree, mode, competitor
@@ -413,6 +414,309 @@ class Rescans(unittest.TestCase):
         with self.assertRaises(rescanbench.Refused) as refused:
             d.rescan(self.root, "abc", rescanbench.INCREMENTAL)
         self.assertEqual(str(refused.exception), "no history")
+
+
+def with_diskus(d: dict, ratios: Dict[Tuple[str, str, int], float], threads: Tuple[int, ...] = (10, 20)) -> dict:
+    """`d` with an acceptance file's `diskus` part: each ratio duscope's to
+    diskus at `-j n` on a tree in a mode."""
+    d["diskus"] = {
+        "threads": list(threads), "default_threads": 30, "modes": ["warm", "cold"], "version": "diskus 0.9.0",
+        "run": run_doc({(t, m, acceptance.diskus_name(n)): v for (t, m, n), v in ratios.items()}), "reason": None,
+    }
+    return d
+
+
+class DiskusAtItsBest(unittest.TestCase):
+    """P5-BENCH-04: `judge` holds duscope to diskus at the best of -j = the
+    logical CPUs, twice them, and its default (DEV-213)."""
+
+    def verdict(self, d: Optional[dict], index: int, tree: str = "T1") -> acceptance.Verdict:
+        return acceptance.judge_one(acceptance.TARGETS[index], tree, d)
+
+    def test_p5_bench_04_the_judge_takes_the_fastest_of_diskus_three(self):
+        d = with_diskus(doc("linux", {("T1", "warm", "diskus"): 0.40}), {("T1", "warm", 10): 0.55, ("T1", "warm", 20): 0.62})
+        v = self.verdict(d, 0)
+        self.assertEqual((v.value, v.status, v.note), (0.62, "met", "diskus at -j 20, the fastest of its default, -j 10 and -j 20"))
+        # A diskus faster at -j 10 than duscope's limit allows is a miss its default would hide.
+        d = with_diskus(doc("linux", {("T1", "cold", "diskus"): 1.1}), {("T1", "cold", 10): 1.3, ("T1", "cold", 20): 1.2})
+        v = self.verdict(d, 2)
+        self.assertEqual((v.value, v.status, v.note), (1.3, "MISSED", "diskus at -j 10, the fastest of its default, -j 10 and -j 20"))
+        d = with_diskus(doc("macos", {("T2", "warm", "diskus"): 0.9}), {("T2", "warm", 18): 0.7, ("T2", "warm", 36): 0.8}, (18, 36))
+        v = self.verdict(d, 3, "T2")
+        self.assertEqual((v.value, v.note), (0.9, "diskus at its default, the fastest of its default, -j 18 and -j 36"))
+        # The other targets read their own competitors alone.
+        self.assertEqual(self.verdict(with_diskus(doc("macos", {("T1", "warm", "dua"): 0.5}), {("T1", "warm", 10): 2.0}), 4).value, 0.5)
+
+    def test_p5_bench_04_without_the_other_counts_diskus_is_judged_at_its_default_and_says_so(self):
+        v = self.verdict(doc("linux", {("T1", "warm", "diskus"): 0.4}), 0)
+        self.assertEqual((v.value, v.note), (0.4, "diskus at its default alone: the file measured diskus at no other -j"))
+        d = doc("linux", {("T1", "warm", "diskus"): 0.4})
+        d["diskus"] = {"threads": [10, 20], "run": None, "reason": "diskus failed: not installed"}
+        self.assertEqual(self.verdict(d, 0).note, "diskus at its default alone: diskus failed: not installed")
+        d = with_diskus(doc("linux", {("T1", "cold", "diskus"): 0.4}), {("T1", "warm", 10): 0.5})
+        self.assertEqual(self.verdict(d, 2).note,
+                         "diskus at its default alone: diskus at -j 10 and -j 20 was not paired with duscope on T1 cold")
+        # Its default not measured, the other counts are judged and the note says why.
+        tools_ = [{"name": "diskus", "status": "failed", "reason": "the download failed"}]
+        d = with_diskus(doc("linux", {}, tools=tools_), {("T1", "warm", 10): 0.5, ("T1", "warm", 20): 0.45})
+        v = self.verdict(d, 0)
+        self.assertEqual((v.value, v.status), (0.5, "met"))
+        self.assertEqual(v.note, "diskus at -j 10, the fastest of -j 10 and -j 20; diskus failed: the download failed")
+        v = self.verdict(doc("linux", {}, tools=tools_), 0)
+        self.assertEqual((v.value, v.status), (None, "not measured"))
+        self.assertIn("diskus failed: the download failed", v.note)
+
+    def test_p5_bench_04_diskus_runs_at_its_other_counts_where_a_diskus_target_binds(self):
+        both = ["warm", "cold"]
+        self.assertEqual(acceptance.diskus_modes("linux", both, True), both)
+        self.assertEqual(acceptance.diskus_modes("linux", both, False), ["warm"])
+        self.assertEqual(acceptance.diskus_modes("macos", both, True), ["warm"], "no macOS target reads diskus cold")
+        self.assertEqual(acceptance.diskus_modes("macos", ["cold"], True), [])
+        self.assertEqual(acceptance.DISKUS_THREADS, (1, 2))
+
+    def test_p5_bench_04_the_diskus_part_pairs_duscope_with_diskus_at_the_cpus_and_twice_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = harness.parser().parse_args(["acceptance", "--duscope", "d", "--trees", "T1", "--runs", "3"])
+            common = ["--scale", "1", "--jobs", "1", "--mode", "both", "--cold-cmd", "true", "--warmup", "2",
+                      "--trees-dir", tmp, "--tools-dir", tmp, "--hyperfine", "hyperfine"]
+            seen = []
+
+            def run(run_args) -> int:
+                seen.append(run_args)
+                with open(run_args.out, "w", encoding="utf-8") as f:
+                    json.dump({"subject": "duscope", "results": []}, f)
+                return 0
+
+            ready = tools.Resolved(tools.PINS["diskus"], "ready", "release", "/opt/a dir/diskus", "diskus 0.9.0")
+            failures: List[str] = []
+            with mock.patch.object(harness, "cmd_run", run), mock.patch.object(tools, "resolve", lambda *a: ready), \
+                    mock.patch.object(acceptance.os, "cpu_count", lambda: 10), contextlib.redirect_stderr(io.StringIO()):
+                part = acceptance._diskus_part(args, harness, "macos", "macos-arm64", "/bin/duscope", {}, common, tmp, failures)
+            [got] = seen
+            self.assertEqual((part["threads"], part["default_threads"], part["modes"], part["version"]), ([10, 20], 30, ["warm"], "diskus 0.9.0"))
+            self.assertEqual((got.subject, got.competitors, got.mode, got.runs, got.trees), ("duscope", "none", "warm", 3, "T1"))
+            self.assertEqual(got.command, ["diskus-j10='/opt/a dir/diskus' {tree} -j 10", "diskus-j20='/opt/a dir/diskus' {tree} -j 20"])
+            self.assertEqual((part["run"], failures), ({"subject": "duscope", "results": []}, []))
+            # diskus not installed: the part says so and nothing runs.
+            gone = tools.Resolved(tools.PINS["diskus"], "failed", "release", reason="not installed")
+            with mock.patch.object(harness, "cmd_run", run), mock.patch.object(tools, "resolve", lambda *a: gone):
+                part = acceptance._diskus_part(args, harness, "linux", "linux-x86_64", "/bin/duscope", {}, common, tmp, failures)
+            self.assertEqual((part["run"], part["reason"], len(seen)), (None, "diskus failed: not installed", 1))
+
+
+def line_at(at: float, text: str) -> Tuple[float, str]:
+    return at, f"duscope: {text}"
+
+
+class RescanPhases(unittest.TestCase):
+    """P5-BENCH-04: the rescan by phase, from the binary's lines and the time
+    each reached the harness."""
+
+    DEBUG = "debug: duscope_walk::platform::macos::fsevents: "
+    INCREMENTAL = [
+        line_at(0.030, DEBUG + "cannot tell whether FSEvents logs /System/Volumes/Data: Permission denied (os error 13)"),
+        line_at(1.180, DEBUG + "FSEvents replay of /Users/a/T2 from 5012005366: 125 directories, 0 subtrees, dropped false, wrapped false, done true"),
+        line_at(1.300, "incremental rescan: 125 of the saved scan's 125,001 directories changed; 0 volatile entries read again"),
+        line_at(1.320, "incremental walk: 125 directories read, 124876 subtrees taken from the saved scan in 0.015 s"),
+        line_at(2.300, "incremental merge: 999000 entries taken from the saved scan in 0.980 s"),
+        line_at(2.330, "post-check: 1249 of 124876 directories taken from the saved scan read again in 0.028 s"),
+        line_at(2.400, "walk: 1,000,001 entries, 125,001 directories, 3,400 MB in 1.030 s: 970,874 entries/s, 3,300 MB/s"),
+        line_at(2.400, "roll-up: 0.045 s"),
+        line_at(3.300, "write: 1,000,001 entries in 0.800 s: 0.80 µs/entry"),
+    ]
+    FULL_LINUX = [
+        line_at(1.400, "listing: 125,001 directories in 0.412 s: 303,400 directories/s"),
+        line_at(1.400, "stat: 1,000,001 entries, 3,400 MB in 0.822 s: 1,216,546 entries/s, 4,136 MB/s"),
+        line_at(1.400, "roll-up: 0.045 s"),
+        line_at(3.100, "write: 1,000,001 entries in 1.650 s: 1.65 µs/entry"),
+    ]
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def phases(self, lines, wall: float, which: str):
+        got, notes = rescanbench.phases(lines, wall, which)
+        return {k: (round(v, 6) if v is not None else None) for k, v in got.items()}, notes
+
+    def test_p5_bench_04_an_incremental_rescans_phases_are_read_from_its_lines(self):
+        got, notes = self.phases(self.INCREMENTAL, 3.35, rescanbench.INCREMENTAL)
+        self.assertEqual(got, {
+            "parent_s": 0.03, "replay_s": 1.15, "volatile_s": 0.12, "plan_s": 1.3, "walk_s": 0.015,
+            "read_back_s": 0.98, "post_check_s": 0.028, "rollup_s": 0.045, "write_s": 0.8, "rest_s": 0.182,
+        })
+        self.assertEqual(notes, [])
+        self.assertEqual(tuple(got), rescanbench.PHASES)
+
+    def test_p5_bench_04_without_the_replays_first_line_the_parent_and_the_replay_are_one_figure(self):
+        got, notes = self.phases(self.INCREMENTAL[1:], 3.35, rescanbench.INCREMENTAL)
+        self.assertEqual((got["parent_s"], got["replay_s"], got["volatile_s"], got["plan_s"]), (None, None, 0.12, 1.3))
+        self.assertIn("loading the parent and the replay are plan_s less volatile_s", notes[0])
+        got, notes = self.phases(self.INCREMENTAL[2:], 3.35, rescanbench.INCREMENTAL)
+        self.assertEqual((got["parent_s"], got["replay_s"], got["volatile_s"], got["plan_s"]), (None, None, None, 1.3))
+        self.assertIn("are plan_s alone", notes[0])
+        with self.assertRaisesRegex(measure.MeasureError, "no plan, incremental walk"):
+            rescanbench.phases(self.INCREMENTAL[:3] + self.INCREMENTAL[6:], 3.35, rescanbench.INCREMENTAL)
+
+    def test_p5_bench_04_a_full_rescans_phases_on_linux_and_macos(self):
+        got, notes = self.phases(self.FULL_LINUX, 3.15, rescanbench.FULL)
+        self.assertEqual(got, {
+            "parent_s": 0.121, "replay_s": None, "volatile_s": None, "plan_s": None, "walk_s": 1.234,
+            "read_back_s": None, "post_check_s": None, "rollup_s": 0.045, "write_s": 1.65, "rest_s": 0.1,
+        })
+        self.assertEqual(notes, [])
+        macos = [self.INCREMENTAL[6], self.INCREMENTAL[7], line_at(3.3, "write: 1,000,001 entries in 0.900 s: 0.90 µs/entry")]
+        got, _ = self.phases(macos, 3.35, rescanbench.FULL)
+        self.assertEqual((got["parent_s"], got["walk_s"], got["write_s"], got["rest_s"]), (1.325, 1.03, 0.9, 0.05))
+        with self.assertRaisesRegex(measure.MeasureError, "no roll-up and write lines"):
+            rescanbench.phases(self.FULL_LINUX[:2], 3.15, rescanbench.FULL)
+
+    def test_p5_bench_04_each_level_changes_its_share_of_the_directories(self):
+        t2, t1 = trees.tree("T2"), trees.tree("T1")
+        every = trees.directory_paths(t2)
+        for percent, count in ((0, 0), (0.1, 125), (1, 1250), (10, 12_500)):
+            got = rescanbench.level_dirs(t2, percent)
+            self.assertEqual((len(got), len(set(got))), (count, count), percent)
+            self.assertTrue(set(got) <= set(every[1:]))
+        self.assertEqual(len(rescanbench.level_dirs(t1, 0.1)), 100)
+        spread = rescanbench.level_dirs(t2, 10)
+        self.assertEqual((spread[0], spread[1]), (every[1], every[11]))
+        self.assertEqual(len(rescanbench.level_dirs(trees.tree("T2", 0.0002), 0.1)), 1, "at least one")
+        self.assertEqual((rescanbench.level_dirs(trees.tree("T3"), 1), rescanbench.level_dirs(trees.tree("T3"), 0)), (["."], []))
+        self.assertEqual(rescanbench.LEVELS, (0.0, 0.1, 1.0, 10.0))
+        self.assertEqual(rescanbench.parse_levels("10,0,0.1,1,1"), [0.0, 0.1, 1.0, 10.0])
+        for bad in ("", "x", "-1", "101", "1,,y"):
+            with self.assertRaises(ValueError):
+                rescanbench.parse_levels(bad)
+
+
+class FakePhased:
+    """Stands in for rescanbench.Duscope in the rescans by phase: each rescan
+    an id in order and the given phases; `refuse` the message of an
+    incremental rescan refused at the calls `refuse_at` (all when None)."""
+
+    def __init__(self, refuse: Optional[str] = None, refuse_at: Optional[List[int]] = None):
+        self.calls: List[Tuple[str, ...]] = []
+        self.refuse = refuse
+        self.refuse_at = refuse_at
+        self.count = 0
+
+    def save(self, root: str) -> str:
+        self.calls.append(("save",))
+        return "P0"
+
+    def phased(self, root: str, parent: str, which: str):
+        self.count += 1
+        self.calls.append((which, parent))
+        incremental = which == rescanbench.INCREMENTAL
+        if incremental and self.refuse and (self.refuse_at is None or self.count in self.refuse_at):
+            raise rescanbench.Refused(self.refuse)
+        spent = dict.fromkeys(rescanbench.PHASES)
+        spent.update(walk_s=0.1, rollup_s=0.01, write_s=0.2, rest_s=0.01, parent_s=0.02)
+        if incremental:
+            spent.update(replay_s=0.1, volatile_s=0.01, plan_s=0.13, read_back_s=0.05, post_check_s=0.01)
+        scan = {"id": f"S{self.count}", "rescanned_dirs": 3 if incremental else None, "dir_count": 26,
+                "volatile_count": 1 if incremental else None}
+        return measure.Run(0.5 if incremental else 2.0, 0.1, 0.1, 1000), scan, spent, []
+
+    def keep(self, scan: Optional[str]) -> None:
+        self.calls.append(("keep", scan))
+
+
+class RescanLevels(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.t = trees.tree("T2", 0.0002)
+        self.stamp = trees.build(self.t, self.tmp, 1)
+        self.root = trees.tree_root(self.t, self.tmp)
+
+    def levels(self, fake: FakePhased, levels=(0.0, 10.0), runs: int = 2, warmup: int = 1):
+        slept: List[float] = []
+        cleared, undone = mock.Mock(wraps=rescanbench.clear), mock.Mock(wraps=rescanbench.undo)
+        with mock.patch.object(rescanbench, "clear", cleared), mock.patch.object(rescanbench, "undo", undone):
+            found, rows, failures = rescanbench.measure_levels(fake, self.t, self.root, levels, runs, warmup, 1.5,
+                                                               lambda _: None, slept.append)
+        self.assertEqual(trees.walk_digest(self.root), self.stamp["digest"], "each level puts the times back")
+        return found, rows, failures, slept, cleared.call_count, undone.call_count
+
+    def test_p5_bench_04_rounds_alternate_from_the_last_full_rescan_and_times_are_put_back_once_a_level(self):
+        fake = FakePhased()
+        found, rows, failures, slept, cleared, undone = self.levels(fake)
+        inc, full = rescanbench.INCREMENTAL, rescanbench.FULL
+        self.assertEqual(fake.calls[:9], [
+            ("save",), (inc, "P0"), ("keep", "P0"),
+            (inc, "P0"), (full, "P0"), ("keep", "S3"),    # level 0, the warm-up round
+            (full, "S3"), (inc, "S3"), ("keep", "S4"),   # its first recorded round, from the full rescan
+        ])
+        self.assertEqual(fake.calls[-1], ("keep", None))
+        self.assertEqual(slept, [1.5] * 6)
+        self.assertEqual((cleared, undone), (6, 2), "the change removed every round, the times put back once a level")
+        self.assertEqual((found["incremental"], found["reason"], found["dir_count"]), ("measured", None, 26))
+        zero, ten = found["levels"]
+        self.assertEqual((zero["percent"], zero["changed_dirs"], ten["changed_dirs"]), (0.0, 0, 2))
+        self.assertEqual((ten["rounds"], ten["rescanned_dirs"], ten["volatile_count"], ten["short_runs"]), (2, [3, 3], [1, 1], 0))
+        self.assertEqual(ten[inc]["phases_p50_s"]["read_back_s"], 0.05)
+        self.assertEqual((ten[inc]["wall_p50_s"], ten[full]["wall_p50_s"], ten[full]["phases_p50_s"]["read_back_s"]), (0.5, 2.0, None))
+        self.assertEqual(len(ten[inc]["runs"]), 2)
+        self.assertEqual([(r["tool"], r["paired_with"], r["run_count"]) for r in rows], [
+            (f"{inc} at 0%", None, 2), (f"{full} at 0%", f"{inc} at 0%", 2),
+            (f"{inc} at 10%", None, 2), (f"{full} at 10%", f"{inc} at 10%", 2),
+        ])
+        self.assertEqual(rows[3]["subject_ratio_p50"], 0.25)
+        self.assertEqual(failures, [])
+
+    def test_p5_bench_04_linux_measures_the_full_rescan_alone_at_every_level(self):
+        fake = FakePhased(refuse="this platform keeps no change history to read only what changed: every rescan reads the whole tree")
+        found, rows, failures, slept, _, _ = self.levels(fake)
+        self.assertEqual((found["incremental"], slept), ("not measured", []), "no history to wait for")
+        self.assertIn("keeps no change history", found["reason"])
+        for level in found["levels"]:
+            self.assertEqual((level[rescanbench.INCREMENTAL]["status"], level[rescanbench.FULL]["status"]), ("not measured", "measured"))
+            self.assertEqual(level["rescanned_dirs"], [])
+        self.assertEqual([c[0] for c in fake.calls[3:]].count(rescanbench.INCREMENTAL), 0)
+        self.assertEqual([(r["tool"], r["paired_with"]) for r in rows], [(f"{rescanbench.FULL} at 0%", None), (f"{rescanbench.FULL} at 10%", None)])
+        self.assertEqual(failures, [])
+
+    def test_p5_bench_04_a_refusal_ends_the_incremental_rescans_of_its_level_alone(self):
+        too_many = "an incremental rescan of saved scan P0 is not possible (too_many_changes): 9 of 26 directories changed"
+        # Refused before the levels: each level tries again.
+        found, _, _, _, _, _ = self.levels(FakePhased(refuse=too_many, refuse_at=[1]))
+        self.assertEqual((found["incremental"], [lv[rescanbench.INCREMENTAL]["status"] for lv in found["levels"]]),
+                         ("measured", ["measured", "measured"]))
+        # Refused in the first level's warm-up round: that level's are not measured, the next one's are.
+        found, rows, _, _, _, _ = self.levels(FakePhased(refuse=too_many, refuse_at=[2]))
+        zero, ten = found["levels"]
+        self.assertEqual((zero[rescanbench.INCREMENTAL]["status"], zero[rescanbench.INCREMENTAL]["reason"]), ("not measured", too_many))
+        self.assertEqual(ten[rescanbench.INCREMENTAL]["status"], "measured")
+        self.assertEqual(found["incremental"], "measured")
+        # Refused after a recorded round: that round stands, unpaired, and the reason says when.
+        found, rows, _, _, _, _ = self.levels(FakePhased(refuse=too_many, refuse_at=[6]))
+        zero = found["levels"][0][rescanbench.INCREMENTAL]
+        self.assertEqual((zero["status"], len(zero["runs"]), zero["reason"]),
+                         ("measured", 1, f"refused after 1 recorded round: {too_many}"))
+        self.assertEqual([(r["tool"], r["paired_with"]) for r in rows[:2]],
+                         [(f"{rescanbench.INCREMENTAL} at 0%", None), (f"{rescanbench.FULL} at 0%", None)])
+        # Refused everywhere: the tree says why.
+        found, _, _, _, _, _ = self.levels(FakePhased(refuse=too_many))
+        self.assertEqual((found["incremental"], found["reason"]), ("not measured", too_many))
+
+    def test_p5_bench_04_a_round_that_read_less_than_its_change_is_a_failure(self):
+        fake = FakePhased()
+        with mock.patch.object(rescanbench, "level_dirs", lambda t, p: rescanbench.trees.directory_paths(t)[1:5] if p else []):
+            _, _, failures, _, _, _ = self.levels(fake)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("rescan T2 at 10%: 2 of 2 incremental rescans read fewer directories than the 4", failures[0])
+        self.assertIn("raise --settle", failures[0])
+
+    def test_p5_bench_04_rescan_refuses_bad_options(self):
+        for bad in (["--levels", "x"], ["--levels", "200"], ["--runs", "0"], ["--warmup", "-1"], ["--settle", "-1"]):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                status = harness.main(["rescan", "--duscope", "duscope", *bad])
+            self.assertEqual(status, 2, (bad, err.getvalue()))
+        args = harness.parser().parse_args(["rescan", "--duscope", "d"])
+        self.assertEqual((args.trees, args.levels, args.runs, args.warmup, args.settle), ("T1,T2", "0,0.1,1,10", 10, 1, rescanbench.SETTLE_S))
 
 
 class Command(unittest.TestCase):

@@ -16,6 +16,10 @@ import os
 import shlex
 import statistics
 import subprocess
+import sys
+import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -153,6 +157,65 @@ def row(
         "subject_times_s": subject_times,
         "subject_ratio_p50": ratio,
     }
+
+
+def _usage_run(wall: float, usage) -> Run:
+    # ru_maxrss is bytes on macOS and KiB on Linux.
+    rss = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
+    return Run(wall, usage.ru_utime, usage.ru_stime, int(rss))
+
+
+def timed(argv: Sequence[str]) -> Tuple[int, Run, str, str]:
+    """Runs `argv` once, timed around the process: its exit status, the run
+    (wall clock, user and system CPU time, peak RSS), its stdout and its
+    stderr. For what hyperfine cannot time: a command whose next run needs
+    its answer, or whose output must go between runs."""
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        started = time.perf_counter()
+        process = subprocess.Popen(list(argv), stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+        _, status, usage = os.wait4(process.pid, 0)
+        wall = time.perf_counter() - started
+        process.returncode = os.waitstatus_to_exitcode(status)
+        out.seek(0)
+        err.seek(0)
+        stdout = out.read().decode("utf-8", "replace")
+        stderr = err.read().decode("utf-8", "replace")
+    return process.returncode, _usage_run(wall, usage), stdout, stderr
+
+
+Line = Tuple[float, str]
+
+
+def timed_lines(argv: Sequence[str], env: Optional[Dict[str, str]] = None) -> Tuple[int, Run, str, List[Line]]:
+    """`timed`, with each line of stderr as (seconds since the start, line),
+    the time it reached this process: a thread reads the pipe as the program
+    writes it, while this one waits for the program to end. A line the
+    program writes unbuffered, as duscope's logger does, is stamped within a
+    scheduling delay of its write, so the gap between two lines times what
+    the program did between them. `env` replaces the environment."""
+    lines: List[Line] = []
+    with tempfile.TemporaryFile() as out:
+        started = time.perf_counter()
+        process = subprocess.Popen(
+            list(argv), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.PIPE, env=env,
+        )
+        assert process.stderr is not None
+        pipe = process.stderr
+
+        def read() -> None:
+            for raw in iter(pipe.readline, b""):
+                lines.append((time.perf_counter() - started, raw.decode("utf-8", "replace").rstrip("\r\n")))
+
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        _, status, usage = os.wait4(process.pid, 0)
+        wall = time.perf_counter() - started
+        reader.join()
+        pipe.close()
+        process.returncode = os.waitstatus_to_exitcode(status)
+        out.seek(0)
+        stdout = out.read().decode("utf-8", "replace")
+    return process.returncode, _usage_run(wall, usage), stdout, lines
 
 
 def check_cold(command: str) -> None:

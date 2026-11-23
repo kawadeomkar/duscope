@@ -6,6 +6,8 @@
     verify [options]   walk built trees and compare them with their stamps
     tools              list the pinned tools and how each installs per platform
     show FILE          print a result file as a table
+    save               scan --save end to end and the write per entry (bench/indexbench.py)
+    rescan             the rescan by phase at each share of directories changed (bench/rescanbench.py)
     acceptance         the 1.0 acceptance run on this machine (bench/acceptance.py)
     judge [FILE...]    the goal-1 and goal-2 targets against the 1.0 files
     crosscheck ...     a hosted runner's ratios against bench-linux's (DEV-157)
@@ -80,8 +82,9 @@ def _pairs(values: Optional[List[str]], flag: str) -> Dict[str, str]:
     return out
 
 
-def _tree_options(p: argparse.ArgumentParser, default: str = "T1") -> None:
-    p.add_argument("--trees", default=default, help=f"T1, T2, T3, a comma-separated list, or all (default {default})")
+def _tree_options(p: argparse.ArgumentParser, default: str = "T1", exports: bool = False) -> None:
+    named = "T1, T2, T3, T4" if exports else "T1, T2, T3"
+    p.add_argument("--trees", default=default, help=f"{named}, a comma-separated list, or all: T1-T3 (default {default})")
     p.add_argument("--scale", type=float, default=1.0, help="build the trees scaled by this factor, 0 < F <= 1 (default 1)")
     p.add_argument("--trees-dir", default=os.path.join(BENCH, ".trees"), help="where the trees live (default bench/.trees)")
 
@@ -121,7 +124,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--keep-raw", action="store_true", help="keep hyperfine's per-round exports under bench/.runs/")
 
     build = sub.add_parser("build", help="build the trees")
-    _tree_options(build)
+    _tree_options(build, exports=True)
     _jobs_option(build)
     build.add_argument("--force", action="store_true", help="rebuild even when the stamp matches")
 
@@ -129,7 +132,7 @@ def parser() -> argparse.ArgumentParser:
     _tool_options(install, "all")
 
     verify = sub.add_parser("verify", help="walk built trees and compare their digests with the stamps")
-    _tree_options(verify)
+    _tree_options(verify, exports=True)
 
     sub.add_parser("tools", help="list the pinned tools, one tab-separated line each")
 
@@ -164,6 +167,29 @@ def parser() -> argparse.ArgumentParser:
     index.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
     index.add_argument("--out", help="the result file (default <results-dir>/<date>-<platform>-index.json)")
     index.add_argument("--hyperfine", default="hyperfine", help="the hyperfine command (default hyperfine on PATH)")
+    saved = sub.add_parser("save", help="time scan --save end to end and the write per entry, T4's through import (P5-BENCH-04)")
+    _tree_options(saved, indexbench.SAVE_TREES, exports=True)
+    _jobs_option(saved)
+    saved.add_argument("--duscope", required=True, metavar="PATH", help="the duscope executable to measure")
+    saved.add_argument("--mode", choices=("warm", "cold", "both"), default="both", help="warm caches, cold caches, or both (default both)")
+    saved.add_argument("--cold-cmd", default=shlex.quote(os.path.join(BENCH, "drop-caches.sh")), help="the command that drops the caches before each cold run (default bench/drop-caches.sh)")
+    saved.add_argument("--cold-trees-dir", help="where the trees the cold runs measure live, their saved scans written beside them (default --trees-dir)")
+    saved.add_argument("--runs", type=int, default=10, help="measured saves of each tree in each mode (default 10)")
+    saved.add_argument("--warmup", type=int, default=2, help="unmeasured saves before each warm tree's (default 2)")
+    saved.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
+    saved.add_argument("--out", help="the result file (default <results-dir>/<date>-<platform>-save.json)")
+
+    rescanned = sub.add_parser("rescan", help="time the rescan by phase at each share of directories changed (P5-BENCH-04)")
+    _tree_options(rescanned, "T1,T2")
+    _jobs_option(rescanned)
+    rescanned.add_argument("--duscope", required=True, metavar="PATH", help="the duscope executable to measure")
+    rescanned.add_argument("--levels", default=",".join(f"{p:g}" for p in rescanbench.LEVELS), help="the shares of the directories each level changes, in percent, comma-separated (default 0,0.1,1,10)")
+    rescanned.add_argument("--runs", type=int, default=10, help="recorded rounds at each level (default 10)")
+    rescanned.add_argument("--warmup", type=int, default=1, help="unrecorded rounds before each level's (default 1)")
+    rescanned.add_argument("--settle", type=float, default=rescanbench.SETTLE_S, help=f"seconds a round waits for the change history after its change, where there is one (default {rescanbench.SETTLE_S:g})")
+    rescanned.add_argument("--results-dir", default=os.path.join(BENCH, "results"), help="where the result file goes (default bench/results)")
+    rescanned.add_argument("--out", help="the result file (default <results-dir>/<date>-<platform>-rescan.json)")
+
     drawn = sub.add_parser("redraw", help="measure the viewer's redraw at 120x40 on T2 (P4-TEST-01)")
     _tree_options(drawn, "T2")
     _jobs_option(drawn)
@@ -308,10 +334,13 @@ def git_commit() -> Optional[str]:
 # --- Commands ------------------------------------------------------------------
 
 
-def _trees(args) -> List[trees.Tree]:
-    names = _names(args.trees, trees.SPECS, "tree")
+def _trees(args, exports: bool = False) -> List[trees.Tree]:
+    """The trees `--trees` names; `all` is the three on disk, and T4, the
+    generated scan, is taken where `exports` allows it and only by name."""
+    known = {**trees.SPECS, **trees.EXPORTS} if exports else trees.SPECS
+    names = list(trees.SPECS) if args.trees == "all" else _names(args.trees, known, "tree")
     try:
-        return [trees.tree(n, args.scale) for n in names]
+        return [trees.tree(n, args.scale, exports) for n in names]
     except trees.TreeError as e:
         raise UsageError(str(e)) from None
 
@@ -328,7 +357,7 @@ def _resolve_tools(args, names: List[str], key: str) -> List[tools.Resolved]:
 
 
 def cmd_build(args) -> int:
-    for t in _trees(args):
+    for t in _trees(args, exports=True):
         trees.build(t, args.trees_dir, args.jobs, force=args.force, log=log)
     return 0
 
@@ -346,7 +375,7 @@ def cmd_install(args) -> int:
 
 def cmd_verify(args) -> int:
     bad = 0
-    for t in _trees(args):
+    for t in _trees(args, exports=True):
         observed, expected = trees.verify(t, args.trees_dir)
         ok = observed == expected
         bad += not ok
@@ -587,6 +616,8 @@ def write_result(result: Dict[str, object], out: str) -> None:
 COMMANDS = {
     "sweep": lambda args: sweep.cmd_sweep(args, sys.modules[__name__]),
     "index": lambda args: indexbench.cmd_index(args, sys.modules[__name__]),
+    "save": lambda args: indexbench.cmd_save(args, sys.modules[__name__]),
+    "rescan": lambda args: rescanbench.cmd_rescan(args, sys.modules[__name__]),
     "redraw": lambda args: redraw.cmd_redraw(args, sys.modules[__name__]),
     "acceptance": lambda args: acceptance.cmd_acceptance(args, sys.modules[__name__]),
     "judge": lambda args: acceptance.cmd_judge(args, sys.modules[__name__]),

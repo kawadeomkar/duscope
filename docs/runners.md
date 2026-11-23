@@ -10,9 +10,9 @@ runner is set up, and what keeps a public repository's code off them.
 Every night at 03:17 Pacific the workflow runs `bench/run.sh` (the three trees,
 the pinned competitors, warm and cold caches) on bench-linux, and on bench-macos
 when it is not [paused](#paused), as it is now, and pushes the result files to
-the `bench-results` branch as `<date>-<platform>.json`, with the index and
-redraw measurements beside them as `<date>-<platform>-index.json` and
-`<date>-<platform>-redraw.json`.
+the `bench-results` branch as `<date>-<platform>.json`, with the index, main
+path, rescan and redraw measurements beside them as
+`<date>-<platform>-index.json`, `-save.json`, `-rescan.json` and `-redraw.json`.
 [bench/README.md](../bench/README.md) documents the harness and the result file;
 `bench/compare.py` reads the files as baselines.
 
@@ -284,9 +284,14 @@ The trees take 3.6 GiB on APFS (bench/README.md, "The trees") and about 2.5
 million inodes; T1's files are sparse, and the harness refuses a filesystem that
 would write the holes out. ext4 gives one inode per 16 KiB by default, so it needs
 a filesystem of 40 GiB or more, or more inodes at `mkfs` time. The competitors
-built from source and cargo's cache take about 2 GiB more. Keep 20 GiB and 3
-million inodes free (`df -h`, `df -i`). Nothing else should write to that disk
-during the nightly window.
+built from source and cargo's cache take about 2 GiB more. T4, the generated
+scan the main path's write is measured on, is one 74 MiB file beside the trees
+(and one beside the image's on bench-macos); each saved scan the main path and
+the rescans write, up to about 110 MB, is removed before the next. The rescans
+add a file to as many as one directory in ten of T1 and T2 and remove it,
+putting the directories' times back, so the trees still match their stamps.
+Keep 20 GiB and 3 million inodes free (`df -h`, `df -i`). Nothing else should
+write to that disk during the nightly window.
 
 ### Registering
 

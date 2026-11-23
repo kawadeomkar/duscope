@@ -10,9 +10,11 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shlex
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -197,6 +199,111 @@ class Trees(unittest.TestCase):
             parallel = trees.build(t, os.path.join(scratch, "b"), jobs=3)
             self.assertEqual(serial["digest"], parallel["digest"])
             self.assertEqual(parallel["jobs"], 3)
+
+
+class T4(unittest.TestCase):
+    """P5-BENCH-04: T4, the generated scan with log-normal sizes."""
+
+    SEED = trees.EXPORTS["T4"].seed
+
+    def test_p5_bench_04_t4_has_t2s_layout_and_is_named_only_where_it_is_read(self):
+        t4, t2 = trees.tree("T4", exports=True), trees.tree("T2")
+        self.assertEqual((t4.dirs, t4.files, t4.entries), (t2.dirs, t2.files, 1_000_000))
+        self.assertTrue(t4.export)
+        self.assertFalse(t2.export)
+        self.assertNotEqual(t4.spec.seed, t2.spec.seed)
+        small = trees.tree("T4", 0.001, exports=True)
+        self.assertEqual(small.dirname, "T4-x0.001")
+        paths = trees.directory_paths(small)
+        self.assertEqual(paths[9], f"{paths[1]}/{paths[9].rsplit('/', 1)[-1]}")  # directory 8's parent is directory 0
+        # `all` is the trees on disk; T4 is taken by name, where `exports` allows it.
+        with self.assertRaises(trees.TreeError):
+            trees.tree("T4")
+        args = harness.parser().parse_args(["save", "--duscope", "d", "--trees", "all"])
+        self.assertEqual([t.name for t in harness._trees(args, exports=True)], ["T1", "T2", "T3"])
+        args = harness.parser().parse_args(["save", "--duscope", "d"])
+        self.assertEqual([t.name for t in harness._trees(args, exports=True)], ["T1", "T2", "T3", "T4"])
+        with self.assertRaises(harness.UsageError):
+            harness._trees(harness.parser().parse_args(["run", "--trees", "T2,T4"]))
+
+    def test_p5_bench_04_t4_sizes_follow_a_log_normal_spread(self):
+        # Pinned: `decimal` gives these on every platform and every Python.
+        self.assertEqual([trees.lognormal_size(self.SEED, i) for i in range(6)], [4792, 26519, 450292, 1136, 169, 445])
+        sizes = [trees.lognormal_size(self.SEED, i) for i in range(5_000)]
+        logs = [math.log(s) for s in sizes if s > 0]
+        self.assertAlmostEqual(statistics.median(sizes) / trees.T4_MEDIAN, 1, delta=0.1)
+        self.assertAlmostEqual(statistics.pstdev(logs), float(trees.T4_SIGMA), delta=0.1)
+        allocated = [trees.allocated_size(s) for s in sizes]
+        self.assertTrue(all(a % trees.T4_BLOCK == 0 and s <= a < s + trees.T4_BLOCK for s, a in zip(sizes, allocated)))
+        self.assertEqual(trees.allocated_size(0), 0)
+        # Where T2's allocated sizes take two values, T4's take hundreds even here.
+        self.assertGreater(len(set(allocated)), 200)
+
+    def test_p5_bench_04_t4_is_byte_identical_across_two_generations_from_one_seed(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            t = trees.tree("T4", 0.03, exports=True)  # 26,250 files: above PARALLEL_MIN_FILES
+            serial = trees.build(t, os.path.join(scratch, "a"), jobs=1)
+            again = trees.build(t, os.path.join(scratch, "b"), jobs=1)
+            parallel = trees.build(t, os.path.join(scratch, "c"), jobs=3)
+            files = [trees.export_path(t, os.path.join(scratch, d)) for d in "abc"]
+            with open(files[0], "rb") as f:
+                first = f.read()
+            for other in files[1:]:
+                with open(other, "rb") as f:
+                    self.assertEqual(f.read(), first, other)
+            self.assertEqual({serial["digest"], again["digest"], parallel["digest"]}, {trees.file_digest(files[0])})
+            self.assertEqual(serial["apparent_bytes"], parallel["apparent_bytes"])
+            # The export names no path of the machine that made it.
+            self.assertNotIn(scratch.encode(), first)
+        # A small one, pinned: duscope/tests/main_path_bench.rs pins it too.
+        with tempfile.TemporaryDirectory() as scratch:
+            stamp = trees.build(trees.tree("T4", 0.0002, exports=True), scratch, jobs=1)
+            self.assertEqual((stamp["digest"], stamp["apparent_bytes"]), ("57095a3efa018889f8593d2855b86c5a", 5999273))
+
+    def test_p5_bench_04_t4_is_an_ncdu_export_of_its_entries(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            t = trees.tree("T4", 0.001, exports=True)
+            stamp = trees.build(t, scratch, jobs=1)
+            with open(trees.export_path(t, scratch), encoding="utf-8") as f:
+                major, minor, meta, root = json.load(f)
+            self.assertEqual((major, minor, meta["timestamp"]), (1, 2, trees.T4_SCANNED_AT_S))
+            counts = {"dirs": 0, "files": 0, "apparent": 0}
+            stack = [root]
+            while stack:
+                node = stack.pop()
+                info, *children = node
+                counts["dirs"] += 1
+                for child in children:
+                    if isinstance(child, list):
+                        stack.append(child)
+                    else:
+                        self.assertEqual(child["dsize"], trees.allocated_size(child["asize"]))
+                        self.assertLessEqual(child["mtime"], trees.T4_SCANNED_AT_S)
+                        counts["files"] += 1
+                        counts["apparent"] += child["asize"]
+            self.assertEqual(root[0]["name"], trees.T4_ROOT)
+            self.assertEqual((counts["dirs"], counts["files"], counts["apparent"]), (t.dirs + 1, t.files, stamp["apparent_bytes"]))
+
+    def test_p5_bench_04_t4_is_rebuilt_when_its_file_changes_and_alone(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            t4 = trees.tree("T4", 0.0002, exports=True)
+            t2 = trees.tree("T2", 0.0002)
+            stamp, kept = trees.build(t4, scratch, jobs=1), trees.build(t2, scratch, jobs=1)
+            self.assertEqual(trees.build(t4, scratch, jobs=1)["built_at"], stamp["built_at"])
+            self.assertEqual(trees.verify(t4, scratch), (stamp["digest"], stamp["digest"]))
+            with open(trees.export_path(t4, scratch), "a", encoding="utf-8") as f:
+                f.write(" ")
+            observed, expected = trees.verify(t4, scratch)
+            self.assertNotEqual(observed, expected)
+            rebuilt = trees.build(t4, scratch, jobs=1)
+            self.assertEqual(rebuilt["digest"], stamp["digest"])
+            self.assertEqual(trees.read_stamp(t2, scratch), kept)
+            # A stamp of another export version is no stamp of this one.
+            with mock.patch.object(trees, "EXPORT_VERSION", trees.EXPORT_VERSION + 1):
+                self.assertIsNone(trees.read_stamp(t4, scratch))
+                self.assertEqual(trees.read_stamp(t2, scratch), kept)
+            os.remove(trees.export_path(t4, scratch))
+            self.assertIsNone(trees.read_stamp(t4, scratch))
 
 
 class Tools(unittest.TestCase):

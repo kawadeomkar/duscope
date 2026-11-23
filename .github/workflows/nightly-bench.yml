@@ -5,9 +5,10 @@
 # label `bench-macos` and a Linux x86_64 box with `bench-linux`, described in
 # docs/runners.md. The subject is duscope, built from the checkout; `du` is one
 # of the competitors. The result files go to the `bench-results` branch as
-# <date>-<platform>.json, with the index and redraw measurements beside them as
-# <date>-<platform>-index.json and <date>-<platform>-redraw.json, never to main,
-# and bench/compare.py reads baselines from there. Each bench job then checks the binary's du parity on a system tree
+# <date>-<platform>.json, with the index, main path, rescan and redraw
+# measurements beside them as <date>-<platform>-index.json, -save.json,
+# -rescan.json and -redraw.json, never to main, and bench/compare.py reads
+# baselines from there. Each bench job then checks the binary's du parity on a system tree
 # (/Applications, /usr), its peak RSS on the trees (P1-TEST-01) and that of
 # `top` and `stale` with --all on T2 (P2-QRY-13), the viewer's reads to open a
 # saved scan of T2 (P4-TUI-09), and holds the fixture tree to P0-TEST-01's
@@ -318,6 +319,70 @@ jobs:
           exit 1
         env:
           STATUS: ${{ steps.index.outputs.status }}
+      # P5-BENCH-04: the main path (bench/README.md, "The main path"):
+      # `scan --save` end to end on T1 to T3, warm and cold, and the write per
+      # entry on every tree, T4's through `import`. The warm runs read
+      # the internal disk and the cold ones the image the cold command remounts,
+      # each saved scan written beside its trees. The result goes to
+      # bench-results beside the others; no figure holds a target until two weeks
+      # of nightlies exist (DEV-213).
+      - name: Main path measurements
+        id: save
+        if: ${{ !cancelled() && env.SWEEP != 'true' }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          image="$home/trees.sparsebundle"
+          volume="$home/trees-volume"
+          cold="$PWD/bench/drop-caches.sh --remount $(printf %q "$image") $(printf %q "$volume")"
+          status=0
+          file=$(caffeinate -is bench/run.sh save --duscope "$DUSCOPE_BIN" --trees T1,T2,T3,T4 --mode "$MODE" \
+            --scale "$SCALE" --trees-dir "$home/trees" --cold-trees-dir "$volume/trees" --cold-cmd "$cold" \
+            --results-dir "$RUNNER_TEMP/save-results") || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [[ -n $file && -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.save.outputs.file != '' }}
+        with:
+          name: bench-macos-save
+          path: ${{ steps.save.outputs.file }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Fail when the main path measurements did
+        if: ${{ !cancelled() && steps.save.outputs.status != '' && steps.save.outputs.status != '0' }}
+        run: |
+          echo "::error title=nightly-bench::bench/run.sh save exited $STATUS; the job log and the result file say why"
+          exit 1
+        env:
+          STATUS: ${{ steps.save.outputs.status }}
+      # P5-BENCH-04: the rescan by phase at 0, 0.1%, 1% and 10% of the
+      # directories changed (bench/README.md, "The rescan by phase"), on T1 and T2
+      # on the internal disk, whose history fseventsd keeps (the image is attached
+      # -nobrowse and keeps none); each level's change is undone, the trees
+      # left as their stamps say.
+      - name: Rescan measurements
+        id: rescan
+        if: ${{ !cancelled() && env.SWEEP != 'true' }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          status=0
+          file=$(caffeinate -is bench/run.sh rescan --duscope "$DUSCOPE_BIN" --trees T1,T2 --scale "$SCALE" \
+            --trees-dir "$home/trees" --results-dir "$RUNNER_TEMP/rescan-results") || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [[ -n $file && -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.rescan.outputs.file != '' }}
+        with:
+          name: bench-macos-rescan
+          path: ${{ steps.rescan.outputs.file }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Fail when the rescan measurements did
+        if: ${{ !cancelled() && steps.rescan.outputs.status != '' && steps.rescan.outputs.status != '0' }}
+        run: |
+          echo "::error title=nightly-bench::bench/run.sh rescan exited $STATUS; the job log and the result file say why"
+          exit 1
+        env:
+          STATUS: ${{ steps.rescan.outputs.status }}
       # P4-TEST-01: the viewer's redraw at 120x40 on T2, and in T3's folder of a
       # million files (bench/README.md, "The redraw budget"). The result goes to
       # bench-results beside the harness's; Gate 4 -> 5 reads its two lines, from
@@ -524,6 +589,65 @@ jobs:
           exit 1
         env:
           STATUS: ${{ steps.index.outputs.status }}
+      # P5-BENCH-04: the main path (bench/README.md, "The main path"):
+      # `scan --save` end to end on T1 to T3, warm and cold, and the write per
+      # entry on every tree, T4's through `import`. Each saved scan is written
+      # beside its trees. The result goes to
+      # bench-results beside the others; no figure holds a target until two weeks
+      # of nightlies exist (DEV-213).
+      - name: Main path measurements
+        id: save
+        if: ${{ !cancelled() && env.SWEEP != 'true' }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          status=0
+          file=$(bench/run.sh save --duscope "$DUSCOPE_BIN" --trees T1,T2,T3,T4 --mode "$MODE" \
+            --scale "$SCALE" --trees-dir "$home/trees" \
+            --results-dir "$RUNNER_TEMP/save-results") || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [[ -n $file && -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.save.outputs.file != '' }}
+        with:
+          name: bench-linux-save
+          path: ${{ steps.save.outputs.file }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Fail when the main path measurements did
+        if: ${{ !cancelled() && steps.save.outputs.status != '' && steps.save.outputs.status != '0' }}
+        run: |
+          echo "::error title=nightly-bench::bench/run.sh save exited $STATUS; the job log and the result file say why"
+          exit 1
+        env:
+          STATUS: ${{ steps.save.outputs.status }}
+      # P5-BENCH-04: the rescan by phase at 0, 0.1%, 1% and 10% of the
+      # directories changed (bench/README.md, "The rescan by phase"), on T1 and T2
+      # where every rescan is a full one, Linux keeping no change history; each
+      # level's change is undone, the trees left as their stamps say.
+      - name: Rescan measurements
+        id: rescan
+        if: ${{ !cancelled() && env.SWEEP != 'true' }}
+        run: |
+          home=${BENCH_HOME:-$HOME/duscope-bench}
+          status=0
+          file=$(bench/run.sh rescan --duscope "$DUSCOPE_BIN" --trees T1,T2 --scale "$SCALE" \
+            --trees-dir "$home/trees" --results-dir "$RUNNER_TEMP/rescan-results") || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [[ -n $file && -f $file ]]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.rescan.outputs.file != '' }}
+        with:
+          name: bench-linux-rescan
+          path: ${{ steps.rescan.outputs.file }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Fail when the rescan measurements did
+        if: ${{ !cancelled() && steps.rescan.outputs.status != '' && steps.rescan.outputs.status != '0' }}
+        run: |
+          echo "::error title=nightly-bench::bench/run.sh rescan exited $STATUS; the job log and the result file say why"
+          exit 1
+        env:
+          STATUS: ${{ steps.rescan.outputs.status }}
       # P4-TEST-01: the viewer's redraw at 120x40 on T2, and in T3's folder of a
       # million files (bench/README.md, "The redraw budget"). The result goes to
       # bench-results beside the harness's; Gate 4 -> 5 reads its two lines, from
