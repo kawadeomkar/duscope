@@ -6,8 +6,10 @@ file created in each of a few directories spread over the tree), a pause for
 the change history to record it, and `rescan --incremental` paired with
 `rescan --full` of the same tree from the same saved scan, the incremental one
 first on even rounds and second on odd ones, as the harness pairs tools. The
-change is undone after each round and the directories' times put back, so the
-tree still matches its stamp. Each rescan writes a whole new index, so both
+change is removed after each round and the directories' times put back once,
+after the last round, so the tree still matches its stamp: put back after
+every round, they would add each changed directory's parent to the next
+round's replay, and the directories read again would be counted twice over. Each rescan writes a whole new index, so both
 times include the write.
 
 macOS reads what changed from FSEvents' history. Linux keeps no change
@@ -242,33 +244,42 @@ def measure_tree(
     times: Dict[str, List[measure.Run]] = {INCREMENTAL: [], FULL: []}
     writes: Dict[str, List[float]] = {INCREMENTAL: [], FULL: []}
     read_again: List[int] = []
-    for r in range(runs):
-        found["rounds"] = r + 1
-        saved = change(root, relatives)
-        try:
-            sleep(settle_s)
-            scans: Dict[str, Dict[str, object]] = {}
-            for which in measure.pair_order(INCREMENTAL, FULL, r):
-                try:
-                    run, scan, write = duscope.rescan(root, parent, which)
-                except Refused as e:
-                    return refused(e)
-                times[which].append(run)
-                if write is not None:
-                    writes[which].append(write)
-                scans[which] = scan
-            read_again.append(int(scans[INCREMENTAL].get("rescanned_dirs") or 0))
-            found["dir_count"] = scans[FULL].get("dir_count")
-            # The next round starts from the full rescan: it was read whole, and
-            # its history mark is older than this round's undo and the next change.
-            parent = str(scans[FULL]["id"])
-            duscope.keep(parent)
-            log(
-                f"{t.name} rescans, run {r + 1}/{runs}: incremental {times[INCREMENTAL][-1].wall:.3f} s "
-                f"({read_again[-1]} of {found['dir_count']} directories read), full {times[FULL][-1].wall:.3f} s"
-            )
-        finally:
-            undo(saved)
+    # The directories' times before the first change, put back after the last
+    # round (`measure_levels` does the same, for the same reason).
+    originals: Optional[Saved] = None
+    try:
+        for r in range(runs):
+            found["rounds"] = r + 1
+            saved = change(root, relatives)
+            if originals is None:
+                originals = saved
+            try:
+                sleep(settle_s)
+                scans: Dict[str, Dict[str, object]] = {}
+                for which in measure.pair_order(INCREMENTAL, FULL, r):
+                    try:
+                        run, scan, write = duscope.rescan(root, parent, which)
+                    except Refused as e:
+                        return refused(e)
+                    times[which].append(run)
+                    if write is not None:
+                        writes[which].append(write)
+                    scans[which] = scan
+                read_again.append(int(scans[INCREMENTAL].get("rescanned_dirs") or 0))
+                found["dir_count"] = scans[FULL].get("dir_count")
+                # The next round starts from the full rescan: it was read whole, and
+                # its history mark is older than this round's removal and the next change.
+                parent = str(scans[FULL]["id"])
+                duscope.keep(parent)
+                log(
+                    f"{t.name} rescans, run {r + 1}/{runs}: incremental {times[INCREMENTAL][-1].wall:.3f} s "
+                    f"({read_again[-1]} of {found['dir_count']} directories read), full {times[FULL][-1].wall:.3f} s"
+                )
+            finally:
+                clear(saved)
+    finally:
+        if originals is not None:
+            undo(originals)
     duscope.keep(None)
     rows = [
         measure.row(t.name, "warm", INCREMENTAL, COMMANDS[INCREMENTAL], times[INCREMENTAL]),
