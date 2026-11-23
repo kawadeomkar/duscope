@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "kind": "nfs-readdirplus",
+  "date": "2026-11-23",
+  "started_at": "2026-11-23T03:01:25Z",
+  "finished_at": "2026-11-23T03:02:47Z",
+  "client": {
+    "os": "Ubuntu 24.04.5 LTS",
+    "kernel": "Linux 6.8.0-149-generic",
+    "arch": "x86_64",
+    "cpu": "Intel(R) Core(TM) i9-10900K CPU @ 3.70GHz",
+    "logical_cpus": 6,
+    "memory_bytes": 8326213632
+  },
+  "server": {
+    "export": "duscope-nfs:/srv/nfs-bench/T1-x0.25",
+    "note": "duscope-nfs: a VM on pve (i9-10900K, shared with other projects' VMs at full load), 2 vCPUs, 2 GB, Ubuntu 24.04.5, kernel 6.8.0-147-generic, nfs-kernel-server; the client a second VM on the same host and bridge"
+  },
+  "mount": {
+    "vers": "4.2",
+    "fstype": "nfs4",
+    "opts": "ro,vers=4.2,rsize=262144,wsize=262144,namlen=255,acregmin=3,acregmax=60,acdirmin=30,acdirmax=60,hard,proto=tcp,timeo=600,retrans=2,sec=sys,local_lock=none"
+  },
+  "tree": {
+    "name": "T1",
+    "scale": 0.25,
+    "expected_entries": 125000,
+    "dirs": 25000,
+    "files": 100000,
+    "entries": 125000
+  },
+  "harness": {
+    "commit": "cc99b99782f462a8145a671bd6ec61d91633ba8f",
+    "python": "3.12.3",
+    "runs": 3,
+    "warmup": "one du run on its own mount, not recorded",
+    "fresh_mount_per_run": true
+  },
+  "commands": [
+    {
+      "name": "duscope",
+      "command": [
+        "/home/dev/w/bench07/target/release/duscope",
+        "scan",
+        "--json",
+        "--treemap",
+        "never",
+        "--include-network",
+        "/mnt/nfs-bench"
+      ],
+      "version": "duscope 0.3.0",
+      "runs": [
+        {
+          "time_s": 1.9,
+          "ops": {
+            "READDIR": 25001,
+            "READDIRPLUS": null,
+            "GETATTR": 25001,
+            "LOOKUP": 0,
+            "ACCESS": 25001
+          }
+        },
+        {
+          "time_s": 2.0665,
+          "ops": {
+            "READDIR": 25001,
+            "READDIRPLUS": null,
+            "GETATTR": 25001,
+            "LOOKUP": 0,
+            "ACCESS": 25001
+          }
+        },
+        {
+          "time_s": 1.7937,
+          "ops": {
+            "READDIR": 25001,
+            "READDIRPLUS": null,
+            "GETATTR": 25001,
+            "LOOKUP": 0,
+            "ACCESS": 25001
+          }
+        }
+      ],
+      "p50_s": 1.9,
+      "ops_p50": {
+        "READDIR": 25001,
+        "READDIRPLUS": null,
+        "GETATTR": 25001,
+        "LOOKUP": 0,
+        "ACCESS": 25001
+      }
+    },
+    {
+      "name": "du",
+      "command": [
+        "du",
+        "-sk",
+        "/mnt/nfs-bench"
+      ],
+      "version": "du (GNU coreutils) 9.4",
+      "runs": [
+        {
+          "time_s": 10.3796,
+          "ops": {
+            "READDIR": 25001,
+            "READDIRPLUS": null,
+            "GETATTR": 27566,
+            "LOOKUP": 0,
+            "ACCESS": 25001
+          }
+        },
+        {
+          "time_s": 9.8601,
+          "ops": {
+            "READDIR": 25001,
+            "READDIRPLUS": null,
+            "GETATTR": 27566,
+            "LOOKUP": 0,
+            "ACCESS": 25001
+          }
+        },
+        {
+          "time_s": 10.2787,
+          "ops": {
+            "READDIR": 25001,
+            "READDIRPLUS": null,
+            "GETATTR": 27566,
+            "LOOKUP": 0,
+            "ACCESS": 25001
+          }
+        }
+      ],
+      "p50_s": 10.2787,
+      "ops_p50": {
+        "READDIR": 25001,
+        "READDIRPLUS": null,
+        "GETATTR": 27566,
+        "LOOKUP": 0,
+        "ACCESS": 25001
+      }
+    },
+    {
+      "name": "duscope --threads 1",
+      "command": [
+        "/home/dev/w/bench07/target/release/duscope",
+        "scan",
+        "--json",
+        "--treemap",
+        "never",
+        "--include-network",
+        "--threads",
+        "1",
+        "/mnt/nfs-bench"
+      ],
+      "version": "duscope 0.3.0",
+      "runs": [
+        {
+          "time_s": 9.9167,
+          "ops": {
+            "READDIR": 25001,
+            "READDIRPLUS": null,
+            "GETATTR": 25001,
+            "LOOKUP": 0,
+            "ACCESS": 25001
+          }
+        },
+        {
+          "time_s": 9.7495,
+          "ops": {
+            "READDIR": 25001,
+            "READDIRPLUS": null,
+            "GETATTR": 25001,
+            "LOOKUP": 0,
+            "ACCESS": 25001
+          }
+        },
+        {
+          "time_s": 9.1843,
+          "ops": {
+            "READDIR": 25001,
+            "READDIRPLUS": null,
+            "GETATTR": 25001,
+            "LOOKUP": 0,
+            "ACCESS": 25001
+          }
+        }
+      ],
+      "p50_s": 9.7495,
+      "ops_p50": {
+        "READDIR": 25001,
+        "READDIRPLUS": null,
+        "GETATTR": 25001,
+        "LOOKUP": 0,
+        "ACCESS": 25001
+      }
+    }
+  ],
+  "decision": {
+    "gate": "stats on network filesystems",
+    "rule": "changed when the scan issues more than one GETATTR per ten entries where du issues none",
+    "scan_above": 0.1,
+    "none_at_or_below": 0.001,
+    "getattr_per_entry": {
+      "duscope": 0.200008,
+      "du": 0.220528,
+      "duscope --threads 1": 0.200008
+    },
+    "lookup_per_entry": {
+      "duscope": 0.0,
+      "du": 0.0,
+      "duscope --threads 1": 0.0
+    },
+    "answer": "kept"
+  }
+}

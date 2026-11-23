@@ -795,6 +795,14 @@ the worker that listed it, for the network class, when the scan issues more than
 ten entries where `du` issues none. `nfs.py` reads "none" as at most one per thousand entries,
 which leaves the mount's own few calls out. The fix, if the rule calls for it, is a row of its own.
 
+The committed run (2026-11-23, NFSv4.2 between two VMs on one Proxmox host) answers **kept**. Every
+command issued one READDIR and one GETATTR per directory (25,001 each, 0.2 per entry), and no
+GETATTR or LOOKUP for any file: the client asked for every listing's attributes, so the scan's
+stats were answered from its attribute cache. `du` issued the same READDIRs and 27,566 GETATTRs.
+A duscope scan took 1.90 s (p50), `du` 10.28 s and duscope with `--threads 1` 9.75 s, on a host
+shared with other projects' VMs at full load, so the times say little beyond their order. One
+round under `--vers 3` gave the same picture with READDIRPLUS in place of READDIR (25,001).
+
 ## The allocator
 
 P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
