@@ -608,6 +608,10 @@ def measure_levels(
                 if kind["status"] == "measured":
                     kind.update(status="not measured", reason="no round was recorded")
                 continue
+            if kind["status"] != "measured":
+                # Refused after some of the level's rounds: those stand.
+                rounds = f"{len(measured)} recorded round" + ("" if len(measured) == 1 else "s")  # type: ignore[arg-type]
+                kind.update(status="measured", reason=f"refused after {rounds}: {kind['reason']}")
             kind["wall_p50_s"] = _s(statistics.median(r["wall_s"] for r in measured))  # type: ignore[union-attr]
             kind["phases_p50_s"] = {p: _p50([r["phases"][p] for r in measured]) for p in PHASES}  # type: ignore[index]
             tool = f"{which} at {percent:g}%"

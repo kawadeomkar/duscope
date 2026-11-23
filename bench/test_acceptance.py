@@ -690,6 +690,13 @@ class RescanLevels(unittest.TestCase):
         self.assertEqual((zero[rescanbench.INCREMENTAL]["status"], zero[rescanbench.INCREMENTAL]["reason"]), ("not measured", too_many))
         self.assertEqual(ten[rescanbench.INCREMENTAL]["status"], "measured")
         self.assertEqual(found["incremental"], "measured")
+        # Refused after a recorded round: that round stands, unpaired, and the reason says when.
+        found, rows, _, _, _, _ = self.levels(FakePhased(refuse=too_many, refuse_at=[6]))
+        zero = found["levels"][0][rescanbench.INCREMENTAL]
+        self.assertEqual((zero["status"], len(zero["runs"]), zero["reason"]),
+                         ("measured", 1, f"refused after 1 recorded round: {too_many}"))
+        self.assertEqual([(r["tool"], r["paired_with"]) for r in rows[:2]],
+                         [(f"{rescanbench.INCREMENTAL} at 0%", None), (f"{rescanbench.FULL} at 0%", None)])
         # Refused everywhere: the tree says why.
         found, _, _, _, _, _ = self.levels(FakePhased(refuse=too_many))
         self.assertEqual((found["incremental"], found["reason"]), ("not measured", too_many))
