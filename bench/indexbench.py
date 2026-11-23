@@ -582,3 +582,201 @@ class Run:
         self.values[f"{name}_speedup_p50"] = speedup
         self.log(f"{self.t.name}: top --scan is {speedup:.1f}x faster than {name}")
         return speedup
+
+
+# --- The main path (P5-BENCH-04) ------------------------------------------------------
+
+# The trees `save` measures by default: the three on disk, whose `scan --save`
+# it times end to end, and T4, the generated scan that `import` carries to the
+# same writer, whose write it times alone.
+SAVE_TREES = "T1,T2,T3,T4"
+# The tools of `save`'s rows: what each one times.
+SAVE = "scan --save"
+IMPORT = "import"
+SAVE_COMMANDS = {
+    SAVE: "duscope scan --json --treemap never --save -v --index-dir {index} {tree}",
+    IMPORT: "duscope import {tree} --json -v --index-dir {index}",
+}
+
+
+def save_argv(duscope: str, t: trees.Tree, path: str, index_dir: str) -> List[str]:
+    """What `save` runs on `t` at `path`: the harness's own duscope command
+    with `--save` and `-v` for a tree on disk, `import -v` for T4's export."""
+    if t.export:
+        return [duscope, IMPORT, path, "--json", "-v", "--index-dir", index_dir]
+    return [duscope, "scan", "--json", "--treemap", "never", "--save", "-v", "--index-dir", index_dir, path]
+
+
+def parse_write(stderr: str, export: bool) -> Dict[str, Optional[float]]:
+    """What `-v` printed of one save: the write, and for a scan the walk and
+    the roll-up too (an import prints the write alone)."""
+    if not export:
+        return dict(parse_verbose(stderr))
+    write = WRITE_LINE.search(stderr)
+    if not write:
+        raise measure.MeasureError(f"`import -v` printed no write line: {stderr.strip()[-300:]}")
+    return {
+        "entries": int(write.group(1).replace(",", "")),
+        "write_s": float(write.group(2)),
+        "us_per_entry": float(write.group(3)),
+        "walk_s": None,
+        "rollup_s": None,
+    }
+
+
+def save_runs(
+    argv: Sequence[str], index_dir: str, export: bool, runs: int, warmup: int, cold_cmd: Optional[str], log, what: str,
+) -> Tuple[List[measure.Run], List[Dict[str, Optional[float]]]]:
+    """`runs` timed saves after `warmup` unrecorded ones, each timed around
+    the process and its saved index removed once it exits; the caches dropped
+    before each when `cold_cmd` is given. The runs, and what `-v` printed of
+    each."""
+    os.makedirs(index_dir, mode=0o700, exist_ok=True)
+    timed: List[measure.Run] = []
+    printed: List[Dict[str, Optional[float]]] = []
+    for r in range(warmup + runs):
+        if cold_cmd and subprocess.run(cold_cmd, shell=True, capture_output=True).returncode != 0:
+            raise measure.MeasureError(f"`{cold_cmd}` failed before a cold save")
+        status, run, stdout, stderr = measure.timed(argv)
+        for file in glob.glob(os.path.join(index_dir, "scans", "*")):
+            os.remove(file)
+        if status != 0:
+            tail = " / ".join((stderr or stdout).strip().splitlines()[-3:])
+            raise measure.MeasureError(f"{what}: `{shlex.join(argv)}` exited {status}: {tail}")
+        if r < warmup:
+            continue
+        got = parse_write(stderr, export)
+        timed.append(run)
+        printed.append(got)
+        log(f"{what}, run {r - warmup + 1}/{runs}: {run.wall:.3f} s, the write {got['us_per_entry']:.2f} µs/entry")
+    return timed, printed
+
+
+def save_row(t: trees.Tree, mode: str, timed: Sequence[measure.Run], printed: Sequence[Dict[str, Optional[float]]]) -> Dict[str, object]:
+    """One tree and mode's row: the save's runs end to end, as `results` holds
+    a tool's, and the medians of what `-v` printed."""
+    tool = IMPORT if t.export else SAVE
+    row = measure.row(t.name, mode, tool, SAVE_COMMANDS[tool], timed)
+
+    def p50(key: str) -> Optional[float]:
+        values = [p[key] for p in printed if p[key] is not None]
+        return round(statistics.median(values), 6) if values else None  # type: ignore[type-var]
+
+    row.update(
+        entries=int(printed[-1]["entries"] or 0),
+        write_us_per_entry_p50=p50("us_per_entry"),
+        write_s_p50=p50("write_s"),
+        walk_s_p50=p50("walk_s"),
+        rollup_s_p50=p50("rollup_s"),
+        verbose=list(printed),
+    )
+    return row
+
+
+def figures(rows: Sequence[Dict[str, object]]) -> Dict[str, Dict[str, Dict[str, Optional[float]]]]:
+    """The new figures by tree and mode: `scan --save` end to end (p50 of its
+    runs) on the trees on disk, and the write per entry on every tree."""
+    out: Dict[str, Dict[str, Dict[str, Optional[float]]]] = {}
+    for row in rows:
+        mine = out.setdefault(str(row["tree"]), {"save_p50_s": {}, "write_us_per_entry_p50": {}})
+        mine["save_p50_s"][str(row["mode"])] = row["p50_s"] if row["tool"] == SAVE else None  # type: ignore[assignment]
+        mine["write_us_per_entry_p50"][str(row["mode"])] = row["write_us_per_entry_p50"]  # type: ignore[assignment]
+    return out
+
+
+def cmd_save(args, harness) -> int:
+    """`bench/run.sh save`: `harness` is the harness module, for its helpers."""
+    if args.runs < 1 or args.warmup < 0:
+        raise harness.UsageError("--runs must be at least 1 and --warmup at least 0")
+    key = tools.platform_key()
+    plat = key.split("-")[0]
+    modes = ["warm", "cold"] if args.mode == "both" else [args.mode]
+    tree_list = harness._trees(args, exports=True)
+    if "cold" in modes and not args.cold_cmd.strip():
+        raise harness.UsageError("--cold-cmd is empty: a cold run needs the command that drops the caches before every run")
+    started = time.gmtime()
+    if "cold" in modes:
+        measure.check_cold(args.cold_cmd)
+    duscope = tools.resolve(tools.PINS["duscope"], key, "", False, args.duscope, harness.log)
+    if duscope.status != "ready" or duscope.path is None:
+        raise measure.MeasureError(f"duscope at {args.duscope} is unavailable: {duscope.reason}")
+    cold_cmd = args.cold_cmd if "cold" in modes else None
+    # The cold runs can read trees of their own, as in `run`; each mode's saved
+    # scans are written beside its trees, so a cold save writes where it reads.
+    tree_dirs = {"warm": args.trees_dir, "cold": args.cold_trees_dir or args.trees_dir}
+    dirs = list(dict.fromkeys(tree_dirs[m] for m in modes))
+    built = {d: [trees.build(t, d, args.jobs, log=harness.log) for t in tree_list] for d in dirs}
+    stamps = built[dirs[0]]
+    rows: List[Dict[str, object]] = []
+    failures: List[str] = []
+    work = {d: tempfile.mkdtemp(prefix=".duscope-save-", dir=d) for d in dirs}
+    try:
+        for t in tree_list:
+            for mode in modes:
+                path = trees.built_path(t, tree_dirs[mode])
+                index_dir = os.path.join(work[tree_dirs[mode]], f"{t.dirname}-{mode}")
+                what = f"{t.name} {mode} {IMPORT if t.export else SAVE}"
+                try:
+                    timed, printed = save_runs(
+                        save_argv(duscope.path, t, path, index_dir), index_dir, t.export, args.runs,
+                        args.warmup if mode == "warm" else 0, cold_cmd if mode == "cold" else None, harness.log, what,
+                    )
+                except (measure.MeasureError, OSError, KeyError, ValueError) as e:
+                    failures.append(f"{t.name} {mode}: {e}")
+                    harness.log(f"{what}: not measured: {e}")
+                    continue
+                rows.append(save_row(t, mode, timed, printed))
+    finally:
+        for d in work.values():
+            shutil.rmtree(d, ignore_errors=True)
+    finished = time.gmtime()
+    scaled = any(float(t.scale) != 1.0 for t in tree_list)
+    result = {
+        "schema_version": harness.SCHEMA_VERSION,
+        "kind": "save",
+        "date": time.strftime("%Y-%m-%d", started),
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", started),
+        "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", finished),
+        "platform": plat,
+        "subject": "duscope",
+        "host": harness.host(),
+        "harness": {
+            "commit": harness.git_commit(),
+            "runs": args.runs,
+            "warmup": args.warmup,
+            "cold_command": cold_cmd,
+        },
+        "duscope": {"path": duscope.path, "version": duscope.version},
+        "trees": [
+            {
+                "name": t.name,
+                "scale": float(t.scale),
+                "dirs": t.dirs,
+                "files": t.files,
+                "apparent_bytes": stamp["apparent_bytes"],
+                "digest": stamp["digest"],
+                "source": "ncdu export" if t.export else "disk",
+                "filesystem": harness.filesystem(trees.built_path(t, dirs[0])),
+                "cold_filesystem": harness.filesystem(trees.built_path(t, dirs[1])) if len(dirs) > 1 else None,
+            }
+            for t, stamp in zip(tree_list, stamps)
+        ],
+        "figures": figures(rows),
+        "failures": failures,
+        "results": rows,
+    }
+    name = f"{result['date']}-{plat}-save" + (f"-x{float(args.scale):g}" if scaled else "")
+    out = args.out or os.path.join(args.results_dir, f"{name}.json")
+    harness.write_result(result, out)
+    for tree, found in result["figures"].items():  # type: ignore[union-attr]
+        for mode in modes:
+            save = found["save_p50_s"].get(mode)
+            write = found["write_us_per_entry_p50"].get(mode)
+            harness.log(
+                f"{tree} {mode}: " + (f"scan --save p50 {save:.3f} s, " if save is not None else "")
+                + (f"the write {write:.2f} µs/entry" if write is not None else "the write not measured")
+            )
+    for failure in failures:
+        harness.log(f"not measured: {failure}")
+    print(out)
+    return 1 if failures else 0

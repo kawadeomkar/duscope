@@ -166,11 +166,13 @@ class Tree:
         return self.spec.name in EXPORTS
 
 
-def tree(name: str, scale: float = 1.0) -> Tree:
-    """The tree `name` (T1, T2, T3 or T4) at `scale` (0 < scale <= 1)."""
-    spec = SPECS.get(name) or EXPORTS.get(name)
+def tree(name: str, scale: float = 1.0, exports: bool = False) -> Tree:
+    """The tree `name` at `scale` (0 < scale <= 1): T1, T2 or T3, or with
+    `exports` also T4, which only the measurements of the write read."""
+    known = {**SPECS, **EXPORTS} if exports else SPECS
+    spec = known.get(name)
     if spec is None:
-        raise TreeError(f"unknown tree {name!r}: the trees are {', '.join([*SPECS, *EXPORTS])}")
+        raise TreeError(f"unknown tree {name!r}: the trees are {', '.join(known)}")
     if not 0 < scale <= 1:
         raise TreeError(f"scale must be in (0, 1], not {scale:g}")
     entries = max(1, round(spec.entries * scale))
@@ -315,7 +317,7 @@ _export_worker: Dict[str, object] = {}
 
 
 def _init_export_worker(name: str, scale: float, dirs: List[str]) -> None:
-    _export_worker["tree"] = tree(name, scale)
+    _export_worker["tree"] = tree(name, scale, exports=True)
     _export_worker["dirs"] = dirs
 
 
