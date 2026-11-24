@@ -1,0 +1,1889 @@
+{
+  "schema_version": 1,
+  "kind": "rescan",
+  "date": "2026-11-24",
+  "started_at": "2026-11-24T22:20:23Z",
+  "finished_at": "2026-11-24T22:25:30Z",
+  "platform": "linux",
+  "host": {
+    "os": "Ubuntu 24.04.5 LTS",
+    "kernel": "Linux 6.8.0-149-generic",
+    "arch": "x86_64",
+    "cpu": "Intel(R) Core(TM) i9-10900K CPU @ 3.70GHz",
+    "logical_cpus": 10,
+    "memory_bytes": 8324767744
+  },
+  "harness": {
+    "commit": "127b4087a23a7f1b22452dc429216e56130f1c41",
+    "runs": 10,
+    "warmup": 1,
+    "settle_s": 2.0,
+    "levels": [
+      0.0,
+      0.1,
+      1.0,
+      10.0
+    ],
+    "log_filter": "info,duscope_walk::platform::macos::fsevents=debug",
+    "change": "one 4096-byte file, .duscope-bench-rescan, in each changed directory"
+  },
+  "duscope": {
+    "path": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope",
+    "version": "duscope 0.3.0"
+  },
+  "trees": [
+    {
+      "scale": 1.0,
+      "dirs": 100000,
+      "files": 400000,
+      "digest": "9762826403df6c7f0d30b21ee1c3f240",
+      "filesystem": "ext4",
+      "name": "T1",
+      "dir_count": 100001,
+      "incremental": "not measured",
+      "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+      "levels": [
+        {
+          "percent": 0.0,
+          "changed_dirs": 0,
+          "rounds": 10,
+          "rescanned_dirs": [],
+          "volatile_count": [],
+          "short_runs": 0,
+          "rescan --incremental": {
+            "status": "not measured",
+            "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+            "wall_p50_s": null,
+            "phases_p50_s": {
+              "parent_s": null,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": null,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": null,
+              "write_s": null,
+              "rest_s": null
+            },
+            "notes": [],
+            "runs": []
+          },
+          "rescan --full": {
+            "status": "measured",
+            "reason": null,
+            "wall_p50_s": 1.284826,
+            "phases_p50_s": {
+              "parent_s": 0.00333,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": 0.2375,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": 0.0425,
+              "write_s": 0.9925,
+              "rest_s": 0.007536
+            },
+            "notes": [],
+            "runs": [
+              {
+                "wall_s": 1.269642,
+                "phases": {
+                  "parent_s": 0.002917,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.243,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.039,
+                  "write_s": 0.977,
+                  "rest_s": 0.007725
+                }
+              },
+              {
+                "wall_s": 1.278027,
+                "phases": {
+                  "parent_s": 0.004645,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.236,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.042,
+                  "write_s": 0.988,
+                  "rest_s": 0.007382
+                }
+              },
+              {
+                "wall_s": 1.316424,
+                "phases": {
+                  "parent_s": 0.002528,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.233,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.041,
+                  "write_s": 1.032,
+                  "rest_s": 0.007896
+                }
+              },
+              {
+                "wall_s": 1.30562,
+                "phases": {
+                  "parent_s": 0.003945,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.252,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.043,
+                  "write_s": 1.0,
+                  "rest_s": 0.006675
+                }
+              },
+              {
+                "wall_s": 1.262101,
+                "phases": {
+                  "parent_s": 0.003299,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.228,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.039,
+                  "write_s": 0.985,
+                  "rest_s": 0.006802
+                }
+              },
+              {
+                "wall_s": 1.343,
+                "phases": {
+                  "parent_s": 0.0032,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.238,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.055,
+                  "write_s": 1.04,
+                  "rest_s": 0.0068
+                }
+              },
+              {
+                "wall_s": 1.290817,
+                "phases": {
+                  "parent_s": 0.003834,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.238,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.058,
+                  "write_s": 0.983,
+                  "rest_s": 0.007983
+                }
+              },
+              {
+                "wall_s": 1.278835,
+                "phases": {
+                  "parent_s": 0.003361,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.234,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.038,
+                  "write_s": 0.997,
+                  "rest_s": 0.006474
+                }
+              },
+              {
+                "wall_s": 1.333142,
+                "phases": {
+                  "parent_s": 0.004506,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.24,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.053,
+                  "write_s": 1.025,
+                  "rest_s": 0.010636
+                }
+              },
+              {
+                "wall_s": 1.272906,
+                "phases": {
+                  "parent_s": 0.003215,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.237,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.044,
+                  "write_s": 0.981,
+                  "rest_s": 0.007691
+                }
+              }
+            ]
+          }
+        },
+        {
+          "percent": 0.1,
+          "changed_dirs": 100,
+          "rounds": 10,
+          "rescanned_dirs": [],
+          "volatile_count": [],
+          "short_runs": 0,
+          "rescan --incremental": {
+            "status": "not measured",
+            "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+            "wall_p50_s": null,
+            "phases_p50_s": {
+              "parent_s": null,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": null,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": null,
+              "write_s": null,
+              "rest_s": null
+            },
+            "notes": [],
+            "runs": []
+          },
+          "rescan --full": {
+            "status": "measured",
+            "reason": null,
+            "wall_p50_s": 1.229365,
+            "phases_p50_s": {
+              "parent_s": 0.003122,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": 0.2335,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": 0.0425,
+              "write_s": 0.935,
+              "rest_s": 0.007572
+            },
+            "notes": [],
+            "runs": [
+              {
+                "wall_s": 1.290883,
+                "phases": {
+                  "parent_s": 0.005229,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.237,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.062,
+                  "write_s": 0.977,
+                  "rest_s": 0.009654
+                }
+              },
+              {
+                "wall_s": 1.272636,
+                "phases": {
+                  "parent_s": 0.00245,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.227,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.041,
+                  "write_s": 0.995,
+                  "rest_s": 0.007186
+                }
+              },
+              {
+                "wall_s": 1.325727,
+                "phases": {
+                  "parent_s": 0.004276,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.226,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.038,
+                  "write_s": 1.051,
+                  "rest_s": 0.006451
+                }
+              },
+              {
+                "wall_s": 1.272018,
+                "phases": {
+                  "parent_s": 0.00393,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.22,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.038,
+                  "write_s": 1.003,
+                  "rest_s": 0.007088
+                }
+              },
+              {
+                "wall_s": 1.231895,
+                "phases": {
+                  "parent_s": 0.002334,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.236,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.062,
+                  "write_s": 0.924,
+                  "rest_s": 0.007561
+                }
+              },
+              {
+                "wall_s": 1.196731,
+                "phases": {
+                  "parent_s": 0.005149,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.239,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.037,
+                  "write_s": 0.908,
+                  "rest_s": 0.007582
+                }
+              },
+              {
+                "wall_s": 1.208923,
+                "phases": {
+                  "parent_s": 0.002767,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.242,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.049,
+                  "write_s": 0.907,
+                  "rest_s": 0.008156
+                }
+              },
+              {
+                "wall_s": 1.226835,
+                "phases": {
+                  "parent_s": 0.003083,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.23,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.04,
+                  "write_s": 0.946,
+                  "rest_s": 0.007752
+                }
+              },
+              {
+                "wall_s": 1.189179,
+                "phases": {
+                  "parent_s": 0.002587,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.236,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.044,
+                  "write_s": 0.899,
+                  "rest_s": 0.007592
+                }
+              },
+              {
+                "wall_s": 1.179371,
+                "phases": {
+                  "parent_s": 0.00316,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.231,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.045,
+                  "write_s": 0.893,
+                  "rest_s": 0.007211
+                }
+              }
+            ]
+          }
+        },
+        {
+          "percent": 1.0,
+          "changed_dirs": 1000,
+          "rounds": 10,
+          "rescanned_dirs": [],
+          "volatile_count": [],
+          "short_runs": 0,
+          "rescan --incremental": {
+            "status": "not measured",
+            "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+            "wall_p50_s": null,
+            "phases_p50_s": {
+              "parent_s": null,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": null,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": null,
+              "write_s": null,
+              "rest_s": null
+            },
+            "notes": [],
+            "runs": []
+          },
+          "rescan --full": {
+            "status": "measured",
+            "reason": null,
+            "wall_p50_s": 1.323603,
+            "phases_p50_s": {
+              "parent_s": 0.003992,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": 0.258,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": 0.062,
+              "write_s": 1.0045,
+              "rest_s": 0.009171
+            },
+            "notes": [],
+            "runs": [
+              {
+                "wall_s": 1.272822,
+                "phases": {
+                  "parent_s": 0.00297,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.263,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.071,
+                  "write_s": 0.927,
+                  "rest_s": 0.008852
+                }
+              },
+              {
+                "wall_s": 1.229657,
+                "phases": {
+                  "parent_s": 0.003954,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.245,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.044,
+                  "write_s": 0.929,
+                  "rest_s": 0.007703
+                }
+              },
+              {
+                "wall_s": 1.329167,
+                "phases": {
+                  "parent_s": 0.004238,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.234,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.063,
+                  "write_s": 1.019,
+                  "rest_s": 0.008929
+                }
+              },
+              {
+                "wall_s": 1.234842,
+                "phases": {
+                  "parent_s": 0.002762,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.253,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.048,
+                  "write_s": 0.921,
+                  "rest_s": 0.01008
+                }
+              },
+              {
+                "wall_s": 1.238263,
+                "phases": {
+                  "parent_s": 0.001647,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.234,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.043,
+                  "write_s": 0.952,
+                  "rest_s": 0.007616
+                }
+              },
+              {
+                "wall_s": 1.31804,
+                "phases": {
+                  "parent_s": 0.004626,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.242,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.061,
+                  "write_s": 1.001,
+                  "rest_s": 0.009414
+                }
+              },
+              {
+                "wall_s": 1.810995,
+                "phases": {
+                  "parent_s": 0.005569,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.377,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.067,
+                  "write_s": 1.35,
+                  "rest_s": 0.011426
+                }
+              },
+              {
+                "wall_s": 1.49601,
+                "phases": {
+                  "parent_s": 0.005437,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.307,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.069,
+                  "write_s": 1.104,
+                  "rest_s": 0.010573
+                }
+              },
+              {
+                "wall_s": 1.418572,
+                "phases": {
+                  "parent_s": 0.004029,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.31,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.054,
+                  "write_s": 1.042,
+                  "rest_s": 0.008543
+                }
+              },
+              {
+                "wall_s": 1.411863,
+                "phases": {
+                  "parent_s": 0.002438,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.323,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.068,
+                  "write_s": 1.008,
+                  "rest_s": 0.010425
+                }
+              }
+            ]
+          }
+        },
+        {
+          "percent": 10.0,
+          "changed_dirs": 10000,
+          "rounds": 10,
+          "rescanned_dirs": [],
+          "volatile_count": [],
+          "short_runs": 0,
+          "rescan --incremental": {
+            "status": "not measured",
+            "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+            "wall_p50_s": null,
+            "phases_p50_s": {
+              "parent_s": null,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": null,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": null,
+              "write_s": null,
+              "rest_s": null
+            },
+            "notes": [],
+            "runs": []
+          },
+          "rescan --full": {
+            "status": "measured",
+            "reason": null,
+            "wall_p50_s": 2.050894,
+            "phases_p50_s": {
+              "parent_s": 0.004399,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": 0.621,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": 0.058,
+              "write_s": 1.3365,
+              "rest_s": 0.009532
+            },
+            "notes": [],
+            "runs": [
+              {
+                "wall_s": 2.074388,
+                "phases": {
+                  "parent_s": 0.00529,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.636,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.064,
+                  "write_s": 1.358,
+                  "rest_s": 0.011098
+                }
+              },
+              {
+                "wall_s": 2.038453,
+                "phases": {
+                  "parent_s": 0.004665,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.612,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.061,
+                  "write_s": 1.351,
+                  "rest_s": 0.009788
+                }
+              },
+              {
+                "wall_s": 2.063335,
+                "phases": {
+                  "parent_s": 0.004133,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.678,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.07,
+                  "write_s": 1.303,
+                  "rest_s": 0.008202
+                }
+              },
+              {
+                "wall_s": 1.83289,
+                "phases": {
+                  "parent_s": 0.004017,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.6,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.088,
+                  "write_s": 1.13,
+                  "rest_s": 0.010873
+                }
+              },
+              {
+                "wall_s": 1.54071,
+                "phases": {
+                  "parent_s": 0.003353,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.35,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.05,
+                  "write_s": 1.128,
+                  "rest_s": 0.009357
+                }
+              },
+              {
+                "wall_s": 1.796053,
+                "phases": {
+                  "parent_s": 0.004123,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.406,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.056,
+                  "write_s": 1.322,
+                  "rest_s": 0.00793
+                }
+              },
+              {
+                "wall_s": 1.680113,
+                "phases": {
+                  "parent_s": 0.004041,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.452,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.06,
+                  "write_s": 1.153,
+                  "rest_s": 0.011072
+                }
+              },
+              {
+                "wall_s": 2.491965,
+                "phases": {
+                  "parent_s": 0.005257,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 1.005,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.05,
+                  "write_s": 1.422,
+                  "rest_s": 0.009708
+                }
+              },
+              {
+                "wall_s": 2.233697,
+                "phases": {
+                  "parent_s": 0.004695,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.63,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.051,
+                  "write_s": 1.54,
+                  "rest_s": 0.008002
+                }
+              },
+              {
+                "wall_s": 2.489306,
+                "phases": {
+                  "parent_s": 0.005018,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 1.02,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.042,
+                  "write_s": 1.413,
+                  "rest_s": 0.009288
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "scale": 1.0,
+      "dirs": 125000,
+      "files": 875000,
+      "digest": "c4842661c6a5141e1f3b668faf5d955e",
+      "filesystem": "ext4",
+      "name": "T2",
+      "dir_count": 125001,
+      "incremental": "not measured",
+      "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+      "levels": [
+        {
+          "percent": 0.0,
+          "changed_dirs": 0,
+          "rounds": 10,
+          "rescanned_dirs": [],
+          "volatile_count": [],
+          "short_runs": 0,
+          "rescan --incremental": {
+            "status": "not measured",
+            "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+            "wall_p50_s": null,
+            "phases_p50_s": {
+              "parent_s": null,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": null,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": null,
+              "write_s": null,
+              "rest_s": null
+            },
+            "notes": [],
+            "runs": []
+          },
+          "rescan --full": {
+            "status": "measured",
+            "reason": null,
+            "wall_p50_s": 2.852473,
+            "phases_p50_s": {
+              "parent_s": 0.003645,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": 0.404,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": 0.0835,
+              "write_s": 2.299,
+              "rest_s": 0.017771
+            },
+            "notes": [],
+            "runs": [
+              {
+                "wall_s": 3.398041,
+                "phases": {
+                  "parent_s": 0.003531,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.538,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.104,
+                  "write_s": 2.726,
+                  "rest_s": 0.02651
+                }
+              },
+              {
+                "wall_s": 2.882288,
+                "phases": {
+                  "parent_s": 0.004794,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.408,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.123,
+                  "write_s": 2.324,
+                  "rest_s": 0.022494
+                }
+              },
+              {
+                "wall_s": 2.964404,
+                "phases": {
+                  "parent_s": 0.00427,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.466,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.086,
+                  "write_s": 2.388,
+                  "rest_s": 0.020134
+                }
+              },
+              {
+                "wall_s": 2.928538,
+                "phases": {
+                  "parent_s": 0.003414,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.534,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.097,
+                  "write_s": 2.274,
+                  "rest_s": 0.020124
+                }
+              },
+              {
+                "wall_s": 2.822658,
+                "phases": {
+                  "parent_s": 0.003242,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.386,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.061,
+                  "write_s": 2.357,
+                  "rest_s": 0.015416
+                }
+              },
+              {
+                "wall_s": 2.916889,
+                "phases": {
+                  "parent_s": 0.004485,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.439,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.089,
+                  "write_s": 2.365,
+                  "rest_s": 0.019404
+                }
+              },
+              {
+                "wall_s": 2.588859,
+                "phases": {
+                  "parent_s": 0.004722,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.4,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.075,
+                  "write_s": 2.093,
+                  "rest_s": 0.016137
+                }
+              },
+              {
+                "wall_s": 2.312229,
+                "phases": {
+                  "parent_s": 0.002532,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.342,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.081,
+                  "write_s": 1.872,
+                  "rest_s": 0.014697
+                }
+              },
+              {
+                "wall_s": 2.189676,
+                "phases": {
+                  "parent_s": 0.003758,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.349,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.075,
+                  "write_s": 1.75,
+                  "rest_s": 0.011918
+                }
+              },
+              {
+                "wall_s": 2.200763,
+                "phases": {
+                  "parent_s": 0.003527,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.352,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.056,
+                  "write_s": 1.777,
+                  "rest_s": 0.012236
+                }
+              }
+            ]
+          }
+        },
+        {
+          "percent": 0.1,
+          "changed_dirs": 125,
+          "rounds": 10,
+          "rescanned_dirs": [],
+          "volatile_count": [],
+          "short_runs": 0,
+          "rescan --incremental": {
+            "status": "not measured",
+            "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+            "wall_p50_s": null,
+            "phases_p50_s": {
+              "parent_s": null,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": null,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": null,
+              "write_s": null,
+              "rest_s": null
+            },
+            "notes": [],
+            "runs": []
+          },
+          "rescan --full": {
+            "status": "measured",
+            "reason": null,
+            "wall_p50_s": 2.242919,
+            "phases_p50_s": {
+              "parent_s": 0.00357,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": 0.364,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": 0.07,
+              "write_s": 1.787,
+              "rest_s": 0.014084
+            },
+            "notes": [],
+            "runs": [
+              {
+                "wall_s": 2.25752,
+                "phases": {
+                  "parent_s": 0.003542,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.375,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.067,
+                  "write_s": 1.798,
+                  "rest_s": 0.013978
+                }
+              },
+              {
+                "wall_s": 2.230045,
+                "phases": {
+                  "parent_s": 0.002894,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.374,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.085,
+                  "write_s": 1.754,
+                  "rest_s": 0.014151
+                }
+              },
+              {
+                "wall_s": 2.157519,
+                "phases": {
+                  "parent_s": 0.002863,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.334,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.073,
+                  "write_s": 1.734,
+                  "rest_s": 0.013656
+                }
+              },
+              {
+                "wall_s": 2.183547,
+                "phases": {
+                  "parent_s": 0.003599,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.332,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.059,
+                  "write_s": 1.776,
+                  "rest_s": 0.012948
+                }
+              },
+              {
+                "wall_s": 2.20222,
+                "phases": {
+                  "parent_s": 0.003728,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.363,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.083,
+                  "write_s": 1.739,
+                  "rest_s": 0.013492
+                }
+              },
+              {
+                "wall_s": 2.255792,
+                "phases": {
+                  "parent_s": 0.003168,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.351,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.066,
+                  "write_s": 1.821,
+                  "rest_s": 0.014624
+                }
+              },
+              {
+                "wall_s": 2.213163,
+                "phases": {
+                  "parent_s": 0.003159,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.359,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.065,
+                  "write_s": 1.77,
+                  "rest_s": 0.016004
+                }
+              },
+              {
+                "wall_s": 2.306164,
+                "phases": {
+                  "parent_s": 0.004918,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.365,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.06,
+                  "write_s": 1.862,
+                  "rest_s": 0.014246
+                }
+              },
+              {
+                "wall_s": 2.603868,
+                "phases": {
+                  "parent_s": 0.003816,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.454,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.125,
+                  "write_s": 2.001,
+                  "rest_s": 0.020052
+                }
+              },
+              {
+                "wall_s": 2.43584,
+                "phases": {
+                  "parent_s": 0.003822,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.401,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.077,
+                  "write_s": 1.94,
+                  "rest_s": 0.014018
+                }
+              }
+            ]
+          }
+        },
+        {
+          "percent": 1.0,
+          "changed_dirs": 1250,
+          "rounds": 10,
+          "rescanned_dirs": [],
+          "volatile_count": [],
+          "short_runs": 0,
+          "rescan --incremental": {
+            "status": "not measured",
+            "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+            "wall_p50_s": null,
+            "phases_p50_s": {
+              "parent_s": null,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": null,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": null,
+              "write_s": null,
+              "rest_s": null
+            },
+            "notes": [],
+            "runs": []
+          },
+          "rescan --full": {
+            "status": "measured",
+            "reason": null,
+            "wall_p50_s": 2.203998,
+            "phases_p50_s": {
+              "parent_s": 0.003347,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": 0.3555,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": 0.06,
+              "write_s": 1.7695,
+              "rest_s": 0.01297
+            },
+            "notes": [],
+            "runs": [
+              {
+                "wall_s": 2.404872,
+                "phases": {
+                  "parent_s": 0.002288,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.416,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.082,
+                  "write_s": 1.887,
+                  "rest_s": 0.017584
+                }
+              },
+              {
+                "wall_s": 2.216447,
+                "phases": {
+                  "parent_s": 0.003048,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.389,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.062,
+                  "write_s": 1.75,
+                  "rest_s": 0.012399
+                }
+              },
+              {
+                "wall_s": 2.18774,
+                "phases": {
+                  "parent_s": 0.00341,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.358,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.056,
+                  "write_s": 1.758,
+                  "rest_s": 0.01233
+                }
+              },
+              {
+                "wall_s": 2.12345,
+                "phases": {
+                  "parent_s": 0.004878,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.318,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.058,
+                  "write_s": 1.731,
+                  "rest_s": 0.011572
+                }
+              },
+              {
+                "wall_s": 2.121828,
+                "phases": {
+                  "parent_s": 0.003738,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.329,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.052,
+                  "write_s": 1.725,
+                  "rest_s": 0.01209
+                }
+              },
+              {
+                "wall_s": 2.189415,
+                "phases": {
+                  "parent_s": 0.00244,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.346,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.063,
+                  "write_s": 1.765,
+                  "rest_s": 0.012975
+                }
+              },
+              {
+                "wall_s": 2.191549,
+                "phases": {
+                  "parent_s": 0.002585,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.324,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.065,
+                  "write_s": 1.787,
+                  "rest_s": 0.012964
+                }
+              },
+              {
+                "wall_s": 2.288485,
+                "phases": {
+                  "parent_s": 0.004093,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.381,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.057,
+                  "write_s": 1.83,
+                  "rest_s": 0.016392
+                }
+              },
+              {
+                "wall_s": 2.26399,
+                "phases": {
+                  "parent_s": 0.004901,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.353,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.058,
+                  "write_s": 1.835,
+                  "rest_s": 0.013089
+                }
+              },
+              {
+                "wall_s": 2.227198,
+                "phases": {
+                  "parent_s": 0.003285,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.371,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.065,
+                  "write_s": 1.774,
+                  "rest_s": 0.013913
+                }
+              }
+            ]
+          }
+        },
+        {
+          "percent": 10.0,
+          "changed_dirs": 12500,
+          "rounds": 10,
+          "rescanned_dirs": [],
+          "volatile_count": [],
+          "short_runs": 0,
+          "rescan --incremental": {
+            "status": "not measured",
+            "reason": "this platform keeps no change history to read only what changed: every rescan reads the whole tree",
+            "wall_p50_s": null,
+            "phases_p50_s": {
+              "parent_s": null,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": null,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": null,
+              "write_s": null,
+              "rest_s": null
+            },
+            "notes": [],
+            "runs": []
+          },
+          "rescan --full": {
+            "status": "measured",
+            "reason": null,
+            "wall_p50_s": 2.69701,
+            "phases_p50_s": {
+              "parent_s": 0.00302,
+              "replay_s": null,
+              "volatile_s": null,
+              "plan_s": null,
+              "walk_s": 0.569,
+              "read_back_s": null,
+              "post_check_s": null,
+              "rollup_s": 0.058,
+              "write_s": 2.0665,
+              "rest_s": 0.013899
+            },
+            "notes": [],
+            "runs": [
+              {
+                "wall_s": 2.687234,
+                "phases": {
+                  "parent_s": 0.003461,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.576,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.057,
+                  "write_s": 2.036,
+                  "rest_s": 0.014773
+                }
+              },
+              {
+                "wall_s": 2.636658,
+                "phases": {
+                  "parent_s": 0.00266,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.589,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.047,
+                  "write_s": 1.984,
+                  "rest_s": 0.013998
+                }
+              },
+              {
+                "wall_s": 2.706786,
+                "phases": {
+                  "parent_s": 0.002585,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.535,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.062,
+                  "write_s": 2.095,
+                  "rest_s": 0.012201
+                }
+              },
+              {
+                "wall_s": 2.681771,
+                "phases": {
+                  "parent_s": 0.002722,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.558,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.059,
+                  "write_s": 2.05,
+                  "rest_s": 0.012049
+                }
+              },
+              {
+                "wall_s": 2.710125,
+                "phases": {
+                  "parent_s": 0.003293,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.56,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.052,
+                  "write_s": 2.083,
+                  "rest_s": 0.011832
+                }
+              },
+              {
+                "wall_s": 2.715246,
+                "phases": {
+                  "parent_s": 0.002531,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.562,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.053,
+                  "write_s": 2.086,
+                  "rest_s": 0.011715
+                }
+              },
+              {
+                "wall_s": 2.485548,
+                "phases": {
+                  "parent_s": 0.002748,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.644,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.056,
+                  "write_s": 1.769,
+                  "rest_s": 0.0138
+                }
+              },
+              {
+                "wall_s": 2.380747,
+                "phases": {
+                  "parent_s": 0.004984,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.418,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.062,
+                  "write_s": 1.881,
+                  "rest_s": 0.014763
+                }
+              },
+              {
+                "wall_s": 2.80871,
+                "phases": {
+                  "parent_s": 0.003431,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.582,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.08,
+                  "write_s": 2.128,
+                  "rest_s": 0.015279
+                }
+              },
+              {
+                "wall_s": 3.018517,
+                "phases": {
+                  "parent_s": 0.003735,
+                  "replay_s": null,
+                  "volatile_s": null,
+                  "plan_s": null,
+                  "walk_s": 0.607,
+                  "read_back_s": null,
+                  "post_check_s": null,
+                  "rollup_s": 0.097,
+                  "write_s": 2.292,
+                  "rest_s": 0.018782
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "failures": [],
+  "results": [
+    {
+      "tree": "T1",
+      "mode": "warm",
+      "tool": "rescan --full at 0%",
+      "command": "duscope rescan {tree} --full --json -v",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        1.269641917,
+        1.278027279,
+        1.316424375,
+        1.305619924,
+        1.262100702,
+        1.342999573,
+        1.29081669,
+        1.278834676,
+        1.33314222,
+        1.272905577
+      ],
+      "p50_s": 1.284825683,
+      "p95_s": 1.338563764,
+      "mean_s": 1.295051293,
+      "stddev_s": 0.028108913,
+      "min_s": 1.262100702,
+      "max_s": 1.342999573,
+      "user_s": 1.3298403,
+      "system_s": 1.6170776,
+      "peak_rss_bytes": 60137472,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    },
+    {
+      "tree": "T1",
+      "mode": "warm",
+      "tool": "rescan --full at 0.1%",
+      "command": "duscope rescan {tree} --full --json -v",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        1.290882724,
+        1.272635732,
+        1.325726781,
+        1.272017759,
+        1.231894711,
+        1.196731102,
+        1.208922619,
+        1.226834692,
+        1.18917905,
+        1.179371335
+      ],
+      "p50_s": 1.229364702,
+      "p95_s": 1.310046955,
+      "mean_s": 1.239419651,
+      "stddev_s": 0.048717575,
+      "min_s": 1.179371335,
+      "max_s": 1.325726781,
+      "user_s": 1.3649083,
+      "system_s": 1.5539849,
+      "peak_rss_bytes": 60186624,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    },
+    {
+      "tree": "T1",
+      "mode": "warm",
+      "tool": "rescan --full at 1%",
+      "command": "duscope rescan {tree} --full --json -v",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        1.272821773,
+        1.229657445,
+        1.329167402,
+        1.23484152,
+        1.238263094,
+        1.318040156,
+        1.810994971,
+        1.496009751,
+        1.418572097,
+        1.411862552
+      ],
+      "p50_s": 1.323603779,
+      "p95_s": 1.669251622,
+      "mean_s": 1.376023076,
+      "stddev_s": 0.177398849,
+      "min_s": 1.229657445,
+      "max_s": 1.810994971,
+      "user_s": 1.5512213,
+      "system_s": 1.7615056,
+      "peak_rss_bytes": 60211200,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    },
+    {
+      "tree": "T1",
+      "mode": "warm",
+      "tool": "rescan --full at 10%",
+      "command": "duscope rescan {tree} --full --json -v",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.074387894,
+        2.038452984,
+        2.06333476,
+        1.832890017,
+        1.540710114,
+        1.796052575,
+        1.680113376,
+        2.491964589,
+        2.233696592,
+        2.489306447
+      ],
+      "p50_s": 2.050893872,
+      "p95_s": 2.490768425,
+      "mean_s": 2.024090935,
+      "stddev_s": 0.32043005,
+      "min_s": 1.540710114,
+      "max_s": 2.491964589,
+      "user_s": 1.8027857,
+      "system_s": 2.0903035,
+      "peak_rss_bytes": 61034496,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "rescan --full at 0%",
+      "command": "duscope rescan {tree} --full --json -v",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        3.398040681,
+        2.882287721,
+        2.964404405,
+        2.928538316,
+        2.822657885,
+        2.916889161,
+        2.588859166,
+        2.312228729,
+        2.189675731,
+        2.200762559
+      ],
+      "p50_s": 2.852472803,
+      "p95_s": 3.202904357,
+      "mean_s": 2.720434435,
+      "stddev_s": 0.390573223,
+      "min_s": 2.189675731,
+      "max_s": 3.398040681,
+      "user_s": 2.8260184,
+      "system_s": 2.7312965,
+      "peak_rss_bytes": 106233856,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "rescan --full at 0.1%",
+      "command": "duscope rescan {tree} --full --json -v",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.257519685,
+        2.23004548,
+        2.157519456,
+        2.183547314,
+        2.20222027,
+        2.255791689,
+        2.213162759,
+        2.306163822,
+        2.603867909,
+        2.435839952
+      ],
+      "p50_s": 2.242918585,
+      "p95_s": 2.528255328,
+      "mean_s": 2.284567834,
+      "stddev_s": 0.136650721,
+      "min_s": 2.157519456,
+      "max_s": 2.603867909,
+      "user_s": 2.5090103,
+      "system_s": 2.5954855,
+      "peak_rss_bytes": 105689088,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "rescan --full at 1%",
+      "command": "duscope rescan {tree} --full --json -v",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.404872102,
+        2.216447413,
+        2.187739629,
+        2.123450195,
+        2.121827867,
+        2.189415492,
+        2.191548912,
+        2.288485015,
+        2.263990313,
+        2.227198262
+      ],
+      "p50_s": 2.203998163,
+      "p95_s": 2.352497913,
+      "mean_s": 2.22149752,
+      "stddev_s": 0.083393505,
+      "min_s": 2.121827867,
+      "max_s": 2.404872102,
+      "user_s": 2.466087,
+      "system_s": 2.475819,
+      "peak_rss_bytes": 106577920,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "rescan --full at 10%",
+      "command": "duscope rescan {tree} --full --json -v",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.687234351,
+        2.636657856,
+        2.706786478,
+        2.681770588,
+        2.710125142,
+        2.715245975,
+        2.485548442,
+        2.380746535,
+        2.808710194,
+        3.018517473
+      ],
+      "p50_s": 2.697010415,
+      "p95_s": 2.924104197,
+      "mean_s": 2.683134303,
+      "stddev_s": 0.171019015,
+      "min_s": 2.380746535,
+      "max_s": 3.018517473,
+      "user_s": 2.4861087,
+      "system_s": 2.5801951,
+      "peak_rss_bytes": 108167168,
+      "subject_times_s": null,
+      "subject_ratio_p50": null
+    }
+  ]
+}
