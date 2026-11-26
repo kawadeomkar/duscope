@@ -1,0 +1,982 @@
+{
+  "schema_version": 1,
+  "kind": "save",
+  "date": "2026-11-26",
+  "started_at": "2026-11-26T21:18:24Z",
+  "finished_at": "2026-11-26T21:24:10Z",
+  "platform": "linux",
+  "subject": "duscope",
+  "host": {
+    "os": "Ubuntu 24.04.5 LTS",
+    "kernel": "Linux 6.8.0-149-generic",
+    "arch": "x86_64",
+    "cpu": "Intel(R) Core(TM) i9-10900K CPU @ 3.70GHz",
+    "logical_cpus": 10,
+    "memory_bytes": 8324767744
+  },
+  "harness": {
+    "commit": "127b4087a23a7f1b22452dc429216e56130f1c41",
+    "runs": 10,
+    "warmup": 2,
+    "cold_command": "/home/runner/actions-runner/_work/duscope/duscope/bench/drop-caches.sh"
+  },
+  "duscope": {
+    "path": "/home/runner/duscope-bench/target/x86_64-unknown-linux-musl/release/duscope",
+    "version": "duscope 0.3.0"
+  },
+  "trees": [
+    {
+      "name": "T1",
+      "scale": 1.0,
+      "dirs": 100000,
+      "files": 400000,
+      "apparent_bytes": 55836716489,
+      "digest": "9762826403df6c7f0d30b21ee1c3f240",
+      "source": "disk",
+      "filesystem": "ext4",
+      "cold_filesystem": null
+    },
+    {
+      "name": "T2",
+      "scale": 1.0,
+      "dirs": 125000,
+      "files": 875000,
+      "apparent_bytes": 793658448,
+      "digest": "c4842661c6a5141e1f3b668faf5d955e",
+      "source": "disk",
+      "filesystem": "ext4",
+      "cold_filesystem": null
+    },
+    {
+      "name": "T3",
+      "scale": 1.0,
+      "dirs": 0,
+      "files": 1000000,
+      "apparent_bytes": 0,
+      "digest": "0fd2d213a7e44c76112e76d2a9eaf68e",
+      "source": "disk",
+      "filesystem": "ext4",
+      "cold_filesystem": null
+    },
+    {
+      "name": "T4",
+      "scale": 1.0,
+      "dirs": 125000,
+      "files": 875000,
+      "apparent_bytes": 81287667704,
+      "digest": "c26ef33ecd25eee0cb5e0689e7520049",
+      "source": "ncdu export",
+      "filesystem": "ext4",
+      "cold_filesystem": null
+    }
+  ],
+  "figures": {
+    "T1": {
+      "save_p50_s": {
+        "warm": 1.210770657,
+        "cold": 2.492850009
+      },
+      "write_us_per_entry_p50": {
+        "warm": 1.91,
+        "cold": 1.74
+      }
+    },
+    "T2": {
+      "save_p50_s": {
+        "warm": 2.100979411,
+        "cold": 4.039506646
+      },
+      "write_us_per_entry_p50": {
+        "warm": 1.72,
+        "cold": 1.815
+      }
+    },
+    "T3": {
+      "save_p50_s": {
+        "warm": 1.983349794,
+        "cold": 3.127048811
+      },
+      "write_us_per_entry_p50": {
+        "warm": 1.68,
+        "cold": 1.69
+      }
+    },
+    "T4": {
+      "save_p50_s": {
+        "warm": null,
+        "cold": null
+      },
+      "write_us_per_entry_p50": {
+        "warm": 1.685,
+        "cold": 1.68
+      }
+    }
+  },
+  "failures": [],
+  "results": [
+    {
+      "tree": "T1",
+      "mode": "warm",
+      "tool": "scan --save",
+      "command": "duscope scan --json --treemap never --save -v --index-dir {index} {tree}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        1.226988712,
+        1.197357585,
+        1.234888063,
+        1.295054206,
+        1.19468286,
+        1.228864488,
+        1.224183728,
+        1.124130241,
+        1.163701486,
+        1.123490257
+      ],
+      "p50_s": 1.210770657,
+      "p95_s": 1.267979442,
+      "mean_s": 1.201334163,
+      "stddev_s": 0.05306587,
+      "min_s": 1.123490257,
+      "max_s": 1.295054206,
+      "user_s": 1.2718963,
+      "system_s": 1.4390665,
+      "peak_rss_bytes": 62091264,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "entries": 500001,
+      "write_us_per_entry_p50": 1.91,
+      "write_s_p50": 0.9555,
+      "walk_s_p50": 0.2155,
+      "rollup_s_p50": 0.034,
+      "verbose": [
+        {
+          "entries": 500001,
+          "write_s": 0.975,
+          "us_per_entry": 1.95,
+          "walk_s": 0.21,
+          "rollup_s": 0.033
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.939,
+          "us_per_entry": 1.88,
+          "walk_s": 0.22,
+          "rollup_s": 0.031
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.98,
+          "us_per_entry": 1.96,
+          "walk_s": 0.213,
+          "rollup_s": 0.033
+        },
+        {
+          "entries": 500001,
+          "write_s": 1.044,
+          "us_per_entry": 2.09,
+          "walk_s": 0.207,
+          "rollup_s": 0.036
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.95,
+          "us_per_entry": 1.9,
+          "walk_s": 0.203,
+          "rollup_s": 0.033
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.961,
+          "us_per_entry": 1.92,
+          "walk_s": 0.226,
+          "rollup_s": 0.033
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.967,
+          "us_per_entry": 1.93,
+          "walk_s": 0.214,
+          "rollup_s": 0.035
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.858,
+          "us_per_entry": 1.72,
+          "walk_s": 0.222,
+          "rollup_s": 0.035
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.887,
+          "us_per_entry": 1.77,
+          "walk_s": 0.217,
+          "rollup_s": 0.049
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.845,
+          "us_per_entry": 1.69,
+          "walk_s": 0.235,
+          "rollup_s": 0.035
+        }
+      ]
+    },
+    {
+      "tree": "T1",
+      "mode": "cold",
+      "tool": "scan --save",
+      "command": "duscope scan --json --treemap never --save -v --index-dir {index} {tree}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.568306639,
+        2.560344016,
+        2.445202291,
+        2.697522617,
+        2.511040582,
+        2.438750143,
+        2.752619195,
+        2.474659436,
+        2.445366662,
+        2.436989928
+      ],
+      "p50_s": 2.492850009,
+      "p95_s": 2.727825735,
+      "mean_s": 2.533080151,
+      "stddev_s": 0.112876195,
+      "min_s": 2.436989928,
+      "max_s": 2.752619195,
+      "user_s": 1.8247541,
+      "system_s": 5.1117239,
+      "peak_rss_bytes": 62029824,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "entries": 500001,
+      "write_us_per_entry_p50": 1.74,
+      "write_s_p50": 0.87,
+      "walk_s_p50": 1.531,
+      "rollup_s_p50": 0.0375,
+      "verbose": [
+        {
+          "entries": 500001,
+          "write_s": 0.907,
+          "us_per_entry": 1.81,
+          "walk_s": 1.567,
+          "rollup_s": 0.064
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.898,
+          "us_per_entry": 1.8,
+          "walk_s": 1.582,
+          "rollup_s": 0.049
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.858,
+          "us_per_entry": 1.72,
+          "walk_s": 1.524,
+          "rollup_s": 0.036
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.874,
+          "us_per_entry": 1.75,
+          "walk_s": 1.756,
+          "rollup_s": 0.038
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.92,
+          "us_per_entry": 1.84,
+          "walk_s": 1.517,
+          "rollup_s": 0.043
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.86,
+          "us_per_entry": 1.72,
+          "walk_s": 1.512,
+          "rollup_s": 0.038
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.852,
+          "us_per_entry": 1.7,
+          "walk_s": 1.689,
+          "rollup_s": 0.037
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.871,
+          "us_per_entry": 1.74,
+          "walk_s": 1.538,
+          "rollup_s": 0.036
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.869,
+          "us_per_entry": 1.74,
+          "walk_s": 1.513,
+          "rollup_s": 0.034
+        },
+        {
+          "entries": 500001,
+          "write_s": 0.866,
+          "us_per_entry": 1.73,
+          "walk_s": 1.506,
+          "rollup_s": 0.037
+        }
+      ]
+    },
+    {
+      "tree": "T2",
+      "mode": "warm",
+      "tool": "scan --save",
+      "command": "duscope scan --json --treemap never --save -v --index-dir {index} {tree}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.053845906,
+        2.049719488,
+        2.09479144,
+        2.084316857,
+        2.107167383,
+        2.087514779,
+        2.410988944,
+        2.411151029,
+        2.378258354,
+        2.407762643
+      ],
+      "p50_s": 2.100979411,
+      "p95_s": 2.411078091,
+      "mean_s": 2.208551682,
+      "stddev_s": 0.167656606,
+      "min_s": 2.049719488,
+      "max_s": 2.411151029,
+      "user_s": 2.2645894,
+      "system_s": 2.190917,
+      "peak_rss_bytes": 104677376,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "entries": 1000001,
+      "write_us_per_entry_p50": 1.72,
+      "write_s_p50": 1.7195,
+      "walk_s_p50": 0.31,
+      "rollup_s_p50": 0.05,
+      "verbose": [
+        {
+          "entries": 1000001,
+          "write_s": 1.684,
+          "us_per_entry": 1.68,
+          "walk_s": 0.309,
+          "rollup_s": 0.048
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.693,
+          "us_per_entry": 1.69,
+          "walk_s": 0.293,
+          "rollup_s": 0.05
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.721,
+          "us_per_entry": 1.72,
+          "walk_s": 0.311,
+          "rollup_s": 0.049
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.706,
+          "us_per_entry": 1.71,
+          "walk_s": 0.315,
+          "rollup_s": 0.05
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.714,
+          "us_per_entry": 1.71,
+          "walk_s": 0.33,
+          "rollup_s": 0.048
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.718,
+          "us_per_entry": 1.72,
+          "walk_s": 0.305,
+          "rollup_s": 0.051
+        },
+        {
+          "entries": 1000001,
+          "write_s": 2.035,
+          "us_per_entry": 2.04,
+          "walk_s": 0.307,
+          "rollup_s": 0.055
+        },
+        {
+          "entries": 1000001,
+          "write_s": 2.026,
+          "us_per_entry": 2.03,
+          "walk_s": 0.319,
+          "rollup_s": 0.053
+        },
+        {
+          "entries": 1000001,
+          "write_s": 2.028,
+          "us_per_entry": 2.03,
+          "walk_s": 0.29,
+          "rollup_s": 0.047
+        },
+        {
+          "entries": 1000001,
+          "write_s": 2.023,
+          "us_per_entry": 2.02,
+          "walk_s": 0.315,
+          "rollup_s": 0.055
+        }
+      ]
+    },
+    {
+      "tree": "T2",
+      "mode": "cold",
+      "tool": "scan --save",
+      "command": "duscope scan --json --treemap never --save -v --index-dir {index} {tree}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        4.25160751,
+        4.297819488,
+        4.420149708,
+        4.027527659,
+        4.051485634,
+        4.144533589,
+        3.890949771,
+        3.944790406,
+        3.905779654,
+        4.021322631
+      ],
+      "p50_s": 4.039506646,
+      "p95_s": 4.365101109,
+      "mean_s": 4.095596605,
+      "stddev_s": 0.178173491,
+      "min_s": 3.890949771,
+      "max_s": 4.420149708,
+      "user_s": 3.0570577,
+      "system_s": 8.0777064,
+      "peak_rss_bytes": 105914368,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "entries": 1000001,
+      "write_us_per_entry_p50": 1.815,
+      "write_s_p50": 1.811,
+      "walk_s_p50": 2.141,
+      "rollup_s_p50": 0.0535,
+      "verbose": [
+        {
+          "entries": 1000001,
+          "write_s": 2.034,
+          "us_per_entry": 2.03,
+          "walk_s": 2.124,
+          "rollup_s": 0.054
+        },
+        {
+          "entries": 1000001,
+          "write_s": 2.043,
+          "us_per_entry": 2.04,
+          "walk_s": 2.167,
+          "rollup_s": 0.053
+        },
+        {
+          "entries": 1000001,
+          "write_s": 2.18,
+          "us_per_entry": 2.18,
+          "walk_s": 2.149,
+          "rollup_s": 0.054
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.788,
+          "us_per_entry": 1.79,
+          "walk_s": 2.136,
+          "rollup_s": 0.063
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.816,
+          "us_per_entry": 1.82,
+          "walk_s": 2.146,
+          "rollup_s": 0.055
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.835,
+          "us_per_entry": 1.83,
+          "walk_s": 2.222,
+          "rollup_s": 0.054
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.727,
+          "us_per_entry": 1.73,
+          "walk_s": 2.079,
+          "rollup_s": 0.05
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.806,
+          "us_per_entry": 1.81,
+          "walk_s": 2.053,
+          "rollup_s": 0.052
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.744,
+          "us_per_entry": 1.74,
+          "walk_s": 2.077,
+          "rollup_s": 0.051
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.734,
+          "us_per_entry": 1.73,
+          "walk_s": 2.204,
+          "rollup_s": 0.05
+        }
+      ]
+    },
+    {
+      "tree": "T3",
+      "mode": "warm",
+      "tool": "scan --save",
+      "command": "duscope scan --json --treemap never --save -v --index-dir {index} {tree}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        1.982872153,
+        1.931270892,
+        1.955808649,
+        1.945111246,
+        2.040366077,
+        1.981592201,
+        2.010123839,
+        1.993074105,
+        1.983827435,
+        2.040934437
+      ],
+      "p50_s": 1.983349794,
+      "p95_s": 2.040678675,
+      "mean_s": 1.986498103,
+      "stddev_s": 0.036841401,
+      "min_s": 1.931270892,
+      "max_s": 2.040934437,
+      "user_s": 1.9074026,
+      "system_s": 1.3141793,
+      "peak_rss_bytes": 103546880,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "entries": 1000001,
+      "write_us_per_entry_p50": 1.68,
+      "write_s_p50": 1.683,
+      "walk_s_p50": 0.216,
+      "rollup_s_p50": 0.084,
+      "verbose": [
+        {
+          "entries": 1000001,
+          "write_s": 1.7,
+          "us_per_entry": 1.7,
+          "walk_s": 0.19,
+          "rollup_s": 0.081
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.636,
+          "us_per_entry": 1.64,
+          "walk_s": 0.201,
+          "rollup_s": 0.081
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.668,
+          "us_per_entry": 1.67,
+          "walk_s": 0.19,
+          "rollup_s": 0.085
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.627,
+          "us_per_entry": 1.63,
+          "walk_s": 0.225,
+          "rollup_s": 0.08
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.704,
+          "us_per_entry": 1.7,
+          "walk_s": 0.229,
+          "rollup_s": 0.094
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.651,
+          "us_per_entry": 1.65,
+          "walk_s": 0.218,
+          "rollup_s": 0.099
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.689,
+          "us_per_entry": 1.69,
+          "walk_s": 0.224,
+          "rollup_s": 0.082
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.684,
+          "us_per_entry": 1.68,
+          "walk_s": 0.214,
+          "rollup_s": 0.083
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.682,
+          "us_per_entry": 1.68,
+          "walk_s": 0.2,
+          "rollup_s": 0.088
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.693,
+          "us_per_entry": 1.69,
+          "walk_s": 0.248,
+          "rollup_s": 0.085
+        }
+      ]
+    },
+    {
+      "tree": "T3",
+      "mode": "cold",
+      "tool": "scan --save",
+      "command": "duscope scan --json --treemap never --save -v --index-dir {index} {tree}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        3.129861057,
+        3.158668065,
+        3.131263249,
+        3.141011872,
+        3.128277877,
+        3.111946198,
+        3.117324566,
+        3.125819745,
+        3.115209897,
+        3.099611327
+      ],
+      "p50_s": 3.127048811,
+      "p95_s": 3.150722778,
+      "mean_s": 3.125899385,
+      "stddev_s": 0.016417637,
+      "min_s": 3.099611327,
+      "max_s": 3.158668065,
+      "user_s": 2.066402,
+      "system_s": 6.460003,
+      "peak_rss_bytes": 94896128,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "entries": 1000001,
+      "write_us_per_entry_p50": 1.69,
+      "write_s_p50": 1.687,
+      "walk_s_p50": 1.322,
+      "rollup_s_p50": 0.086,
+      "verbose": [
+        {
+          "entries": 1000001,
+          "write_s": 1.698,
+          "us_per_entry": 1.7,
+          "walk_s": 1.312,
+          "rollup_s": 0.086
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.705,
+          "us_per_entry": 1.7,
+          "walk_s": 1.333,
+          "rollup_s": 0.086
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.687,
+          "us_per_entry": 1.69,
+          "walk_s": 1.324,
+          "rollup_s": 0.085
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.698,
+          "us_per_entry": 1.7,
+          "walk_s": 1.322,
+          "rollup_s": 0.088
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.675,
+          "us_per_entry": 1.67,
+          "walk_s": 1.329,
+          "rollup_s": 0.091
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.668,
+          "us_per_entry": 1.67,
+          "walk_s": 1.322,
+          "rollup_s": 0.088
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.669,
+          "us_per_entry": 1.67,
+          "walk_s": 1.33,
+          "rollup_s": 0.086
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.687,
+          "us_per_entry": 1.69,
+          "walk_s": 1.311,
+          "rollup_s": 0.094
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.692,
+          "us_per_entry": 1.69,
+          "walk_s": 1.304,
+          "rollup_s": 0.085
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.669,
+          "us_per_entry": 1.67,
+          "walk_s": 1.313,
+          "rollup_s": 0.084
+        }
+      ]
+    },
+    {
+      "tree": "T4",
+      "mode": "warm",
+      "tool": "import",
+      "command": "duscope import {tree} --json -v --index-dir {index}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.701733272,
+        2.798414109,
+        2.674966163,
+        2.727745183,
+        2.739787536,
+        2.673914723,
+        2.658995096,
+        2.664458878,
+        2.662003328,
+        2.74929492
+      ],
+      "p50_s": 2.688349717,
+      "p95_s": 2.776310474,
+      "mean_s": 2.705131321,
+      "stddev_s": 0.04702638,
+      "min_s": 2.658995096,
+      "max_s": 2.798414109,
+      "user_s": 2.4809961,
+      "system_s": 0.1706188,
+      "peak_rss_bytes": 104857600,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "entries": 1000001,
+      "write_us_per_entry_p50": 1.685,
+      "write_s_p50": 1.686,
+      "walk_s_p50": null,
+      "rollup_s_p50": null,
+      "verbose": [
+        {
+          "entries": 1000001,
+          "write_s": 1.676,
+          "us_per_entry": 1.68,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.808,
+          "us_per_entry": 1.81,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.683,
+          "us_per_entry": 1.68,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.725,
+          "us_per_entry": 1.72,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.71,
+          "us_per_entry": 1.71,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.689,
+          "us_per_entry": 1.69,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.675,
+          "us_per_entry": 1.68,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.671,
+          "us_per_entry": 1.67,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.669,
+          "us_per_entry": 1.67,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.714,
+          "us_per_entry": 1.71,
+          "walk_s": null,
+          "rollup_s": null
+        }
+      ]
+    },
+    {
+      "tree": "T4",
+      "mode": "cold",
+      "tool": "import",
+      "command": "duscope import {tree} --json -v --index-dir {index}",
+      "paired_with": null,
+      "run_count": 10,
+      "times_s": [
+        2.795492498,
+        2.811406999,
+        2.87861361,
+        2.960919727,
+        2.862750152,
+        2.743234127,
+        2.713955047,
+        3.226944109,
+        2.777189899,
+        3.125332737
+      ],
+      "p50_s": 2.837078576,
+      "p95_s": 3.181218992,
+      "mean_s": 2.889583891,
+      "stddev_s": 0.16838435,
+      "min_s": 2.713955047,
+      "max_s": 3.226944109,
+      "user_s": 2.5037021,
+      "system_s": 0.1853601,
+      "peak_rss_bytes": 104710144,
+      "subject_times_s": null,
+      "subject_ratio_p50": null,
+      "entries": 1000001,
+      "write_us_per_entry_p50": 1.68,
+      "write_s_p50": 1.6835,
+      "walk_s_p50": null,
+      "rollup_s_p50": null,
+      "verbose": [
+        {
+          "entries": 1000001,
+          "write_s": 1.69,
+          "us_per_entry": 1.69,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.695,
+          "us_per_entry": 1.69,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.675,
+          "us_per_entry": 1.68,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.79,
+          "us_per_entry": 1.79,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.683,
+          "us_per_entry": 1.68,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.675,
+          "us_per_entry": 1.68,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.684,
+          "us_per_entry": 1.68,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.689,
+          "us_per_entry": 1.69,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.668,
+          "us_per_entry": 1.67,
+          "walk_s": null,
+          "rollup_s": null
+        },
+        {
+          "entries": 1000001,
+          "write_s": 1.679,
+          "us_per_entry": 1.68,
+          "walk_s": null,
+          "rollup_s": null
+        }
+      ]
+    }
+  ]
+}
