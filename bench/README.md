@@ -760,6 +760,51 @@ also says whether the hosted runner's ratio meets the goal-1 target of that pair
 exits 0 when every ratio lies within the noise, 1 when one does not (in the job, a warning), and 2
 when nothing can be compared (the job fails); a run at a `scale` below 1 compares nothing.
 
+## NFS
+
+A scan fans one directory's `statx` calls across workers in batches, which the Linux NFS client's
+READDIRPLUS heuristic, watching for stats that follow a listing, may not recognise: a scan with
+`--include-network` could then pay a GETATTR round trip per entry. `bench/nfs.py` measures it
+once (P5-BENCH-07), on two Proxmox VMs: one exports T1 at scale 0.25 (25,000 directories and
+100,000 sparse files) over NFSv4.2, the other mounts it. It is not part of `run.sh`, since it
+needs two machines and root:
+
+```sh
+# the server, with nfs-kernel-server installed
+python3 bench/nfs.py tree /srv/nfs-bench
+echo '/srv/nfs-bench/T1-x0.25 CLIENT(ro,no_subtree_check)' | sudo tee /etc/exports.d/duscope-bench.exports
+sudo exportfs -ra
+# the client, with nfs-common installed and a release build of duscope
+sudo mkdir -p /mnt/nfs-bench
+sudo python3 bench/nfs.py run --export SERVER:/srv/nfs-bench/T1-x0.25 --mountpoint /mnt/nfs-bench \
+  --duscope target/release/duscope --server-note "the server VM" --out bench/results/nfs-readdirplus.json
+```
+
+`run` takes one unrecorded `du` run first, so that the server's cache holds the tree, then three
+rounds of a duscope scan (`scan --json --treemap never --include-network`), GNU `du -sk` and a
+duscope scan with `--threads 1`, each on a fresh mount, so that no attribute or dentry cache
+carries over. For each run it records the time and what the mount's per-operation counters in
+`/proc/self/mountstats` gained: READDIR, READDIRPLUS, GETATTR, and LOOKUP and ACCESS, which show
+where a stat's round trip went when it was no GETATTR. A command's row holds the medians. NFSv4
+has no READDIRPLUS operation (its READDIR carries what attributes the client asks for), so that
+count is null under `--vers 4.2`; `--vers 3` measures the protocol that has one. The result file,
+`results/nfs-readdirplus.json`, holds the client's host facts, the mount's options, the tree's
+counted entries and the decision; `duscope/tests/nfs_bench.rs` holds the committed file to the
+rule, and `nfs.py judge FILE` prints the answer from a file's counts.
+
+The decision gate **stats on network filesystems** has a fixed rule: a directory's stats move to
+the worker that listed it, for the network class, when the scan issues more than one GETATTR per
+ten entries where `du` issues none. `nfs.py` reads "none" as at most one per thousand entries,
+which leaves the mount's own few calls out. The fix, if the rule calls for it, is a row of its own.
+
+The committed run (2026-11-23, NFSv4.2 between two VMs on one Proxmox host) answers **kept**. Every
+command issued one READDIR and one GETATTR per directory (25,001 each, 0.2 per entry), and no
+GETATTR or LOOKUP for any file: the client asked for every listing's attributes, so the scan's
+stats were answered from its attribute cache. `du` issued the same READDIRs and 27,566 GETATTRs.
+A duscope scan took 1.90 s (p50), `du` 10.28 s and duscope with `--threads 1` 9.75 s, on a host
+shared with other projects' VMs at full load, so the times say little beyond their order. One
+round under `--vers 3` gave the same picture with READDIRPLUS in place of READDIR (25,001).
+
 ## The allocator
 
 P1-BENCH-03 timed a warm T2 scan with the platform's own allocator and with mimalloc, three
@@ -967,6 +1012,7 @@ the result file.
 | `testdata/` | a real hyperfine 2.0.0 export and the hyperfine stand-in the tests use |
 | `gab_bench.c` | the per-entry cost of `getattrlistbulk` attribute sets on macOS |
 | `sweep.py` | the thread sweep and the rule that sets a platform's default thread count |
+| `nfs.py` | what a scan of an NFS mount asks the server for, and the network-stats decision gate; `duscope/tests/nfs_bench.rs` tests it |
 | `results/clone-attributes-macos.json` | P1-BENCH-02's measurement and the `--clones` and `PRIVATESIZE` decisions |
 | `results/redraw-macos-arm64-provisional.json` | P4-TEST-01's provisional macOS-local redraw number, until the nightly measures it |
 | `results/allocator.json` | P1-BENCH-03's measurement: mimalloc on the musl builds, the system allocator on macOS |
