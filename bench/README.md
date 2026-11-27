@@ -662,8 +662,10 @@ It runs three parts, in this order, and writes `results/1.0/<platform>.json` (`-
   same tree from the same saved scan, the incremental one first on even rounds and second on odd
   ones, `--runs` rounds after one unrecorded incremental rescan. The next round starts from the
   full rescan's scan. Both write a whole new index, so both times include the write, which `-v`
-  splits out (`write_p50_s`). After each round the files are removed and the directories' times
-  put back, so the tree still matches its stamp, which the part checks at the end. The harness
+  splits out (`write_p50_s`). After each round the files are removed, and after the last one the
+  directories' times are put back, so the tree still matches its stamp, which the part checks at
+  the end; put back after every round, they would add each changed directory's parent to the next
+  round's replay ([The rescan by phase](#the-rescan-by-phase) does the same). The harness
   times each rescan around the process rather than through hyperfine, since each answer names the
   scan the next round reads. The rows are `results` rows, `rescan --full` paired with `rescan
   --incremental`, so its `subject_ratio_p50` is the incremental rescan's time over the full one's;

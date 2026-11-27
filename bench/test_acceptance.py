@@ -372,6 +372,17 @@ class Rescans(unittest.TestCase):
         self.assertEqual(rows[1]["subject_ratio_p50"], 0.25)
         self.assertEqual(trees.walk_digest(self.root), self.stamp["digest"])
 
+    def test_p5_bench_01_the_times_are_put_back_once_after_the_last_round(self):
+        # Put back after every round, a directory's times are a change to its parent in
+        # FSEvents' history, which the next round's replay would read again.
+        for refuse_at, cleared_rounds in ((None, 3), (3, 1)):
+            fake = FakeDuscope(read=3, refuse_at=refuse_at)
+            cleared, undone = mock.Mock(wraps=rescanbench.clear), mock.Mock(wraps=rescanbench.undo)
+            with mock.patch.object(rescanbench, "clear", cleared), mock.patch.object(rescanbench, "undo", undone):
+                rescanbench.measure_tree(fake, self.t, self.root, 3, 0, 100, lambda _: None, lambda _: None)
+            self.assertEqual((cleared.call_count, undone.call_count), (cleared_rounds, 1), refuse_at)
+            self.assertEqual(trees.walk_digest(self.root), self.stamp["digest"], refuse_at)
+
     def test_p5_bench_01_a_refused_incremental_rescan_is_recorded_with_the_binarys_reason(self):
         for refuse_at, rounds in ((1, 0), (3, 1)):
             fake = FakeDuscope(refuse_at=refuse_at)
